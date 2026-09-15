@@ -1,0 +1,7 @@
+# Local-only: agent notes, unsafe reference, and tool runtime
+reference material-NOT LICENSE SAFE DONT COPY-grok bot/
+AGENTS.md
+.opencode/node_modules/
+.opencode/goals/
+.opencode/package-lock.json
+.opencode/package.json
