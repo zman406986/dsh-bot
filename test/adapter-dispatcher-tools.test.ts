@@ -140,6 +140,36 @@ describe("adapter dispatcher tool registration", () => {
       { type: "text", text: "Started in the background." },
     ]);
   });
+
+  it("passes recentActivity through to check rows (ticket 29)", async () => {
+    const ctx = createToolsCaptureCtx();
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host);
+    registerDispatcherTools({
+      ctx,
+      multitask,
+      getSessionId: () => "session-1",
+      recentActivity: (workerId) =>
+        workerId.startsWith("fake-worker") ? "bash: npm test" : null,
+    });
+    const result = (await multitask.spawnWorker({
+      parentSessionId: "session-1",
+      streamKey: "t-1",
+      title: "Summarize RFCs",
+      prompt: "Go.",
+    })) as { ok: true; workerId: string };
+    assert.ok(result.ok);
+    const check = ctx.registered.find((tool) => tool.name === "check_workers");
+    assert.ok(check);
+    const value = (await check.execute({})) as {
+      ok: boolean;
+      rows: Array<{ worker_id: string; recent_activity: string | null }>;
+    };
+    assert.equal(value.ok, true);
+    assert.equal(value.rows.length, 1);
+    assert.equal(value.rows[0]?.worker_id, result.workerId);
+    assert.equal(value.rows[0]?.recent_activity, "bash: npm test");
+  });
 });
 
 describe("dispatcher tool activation gate (ticket 19)", () => {

@@ -315,6 +315,9 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       multitask,
       getSessionId: () => lifecycle.dispatcherSessionId(),
       resolveCallerSessionId: resolveExecSessionId,
+      // Ticket 29: live activity phrases for check rows, projected from the
+      // host session/event firehose (host-observed truth; no polling).
+      recentActivity: (workerId) => host.recentActivity(workerId),
     });
     // T13: worker-only request_access tool. Emits structured asks into the core.
     const disposeAccessTool = registerWorkerAccessTool({
