@@ -5,19 +5,31 @@
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "external": [
+        "react",
+        "react/jsx-runtime"
+      ]
+    }
+  },
   "exports": {
     ".": {
       "types": "./lib/index.d.ts",
       "import": "./lib/index.js"
-    }
+    },
+    "./client": "./client/index.js"
   },
   "files": [
     "lib",
+    "client",
     "README.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build:client": "node --import tsx scripts/build-client.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "test": "node --import tsx --test test/**/*.test.ts",
     "prepare": "npm run build"
   },
@@ -33,6 +45,9 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "@types/react": "^19.3.0",
+    "esbuild": "^0.28.2",
+    "react": "^19.3.0",
     "tsx": "^4.23.13",
     "typescript": "^5.9.0"
   }

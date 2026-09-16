@@ -15,3 +15,5 @@ opencode.json
 node_modules/
 lib/
 *.tsbuildinfo
+# Client bundle build output (npm run build:client)
+/client/
