@@ -24,11 +24,27 @@ import {
   type TodoItem,
   type TodoLedger,
 } from "./todo-reconciler.js";
+import {
+  toDurableMarker,
+  type DurabilityPort,
+  type RebuildReport,
+  type UnknownStateWorker,
+} from "./durability.js";
 
 /** A drained wake plus the reconcile report for that wake. */
 export interface DrainedWake {
   readonly wake: WakeEvent;
   readonly reconcile: ReconcileReport;
+}
+
+/** Optional ports the multitask core depends on beyond the host. */
+export interface MultitaskOptions {
+  /**
+   * Durable marker store (ADR-0006). Omit for pure in-memory operation
+   * (existing unit tests). When present, the core writes a minimum
+   * marker at spawn, updates it on settle, and can rebuild after a restart.
+   */
+  readonly durability?: DurabilityPort;
 }
 
 /**
@@ -103,6 +119,15 @@ export interface Multitask {
    */
   drainWake(sessionId: string): DrainedWake | undefined;
   /**
+   * Rebuild the live roster from durable markers only (ADR-0006).
+   * Call on a fresh core after a simulated or real restart — do not mix
+   * with an already-populated roster. Terminal markers are restored so an
+   * undelivered result can still finish delivery (S4). Live markers become
+   * unknown-state with a transcript pointer: never replayed, never resumed.
+   * Steer tickets are in-memory and are never restored.
+   */
+  rebuildFromDurability(parentSessionId: string): Promise<RebuildReport>;
+  /**
    * Wake bus this core enqueues settles through. Settles are batched per
    * parent session; a mid-turn dispatcher queues rather than receiving an
    * injected wake. Callers use it to note dispatcher turn bounds, drain
@@ -113,7 +138,11 @@ export interface Multitask {
   readonly todos: TodoLedger;
 }
 
-export function createMultitask(host: DshHost): Multitask {
+export function createMultitask(
+  host: DshHost,
+  options?: MultitaskOptions,
+): Multitask {
+  const durability = options?.durability;
   const workers = new Map<string, WorkerRecord>();
   /** streamKey → workerId for every live (non-terminal) worker. */
   const liveByStreamKey = new Map<string, string>();
@@ -190,8 +219,14 @@ export function createMultitask(host: DshHost): Multitask {
       record.transcriptRef = event.transcriptRef;
     }
     // Aborted via settle: close the todo here; the wake still informs the dispatcher.
+    // The marker obligation is closed too — nothing to reconstruct or deliver.
     if (event.status === "aborted") {
       cancelLinkedTodo(record);
+      void durability?.deleteWorkerMarker(record.workerId);
+    } else if (durability !== undefined) {
+      // Snapshot terminal status (+ transcript pointer) so a crash before
+      // user delivery still lets a restart notice the undelivered result.
+      void Promise.resolve(durability.writeWorkerMarker(toDurableMarker(record)));
     }
     // One enqueue per accepted settle; the bus batches and routes the wake.
     // The ledger is never included — workers and host never see todos (ADR-0007).
@@ -254,6 +289,12 @@ export function createMultitask(host: DshHost): Multitask {
           request.streamKey,
         );
       }
+      // Obligation marker (ADR-0006): minimum-to-reconstruct, written at
+      // spawn through the host storage seam. Awaited so the marker exists
+      // before the spawn resolves.
+      if (durability !== undefined) {
+        await Promise.resolve(durability.writeWorkerMarker(toDurableMarker(record)));
+      }
       return { ok: true, workerId };
     },
 
@@ -285,6 +326,8 @@ export function createMultitask(host: DshHost): Multitask {
       steerQueue.clear(workerId);
       // Aborted → cancelled on the ledger (and pruned; dsh has no cancelled).
       cancelLinkedTodo(record);
+      // Marker obligation closed: nothing to deliver after a restart.
+      void durability?.deleteWorkerMarker(workerId);
       // Mark first, then interrupt: a late host settle must not revive the worker.
       // The stop path never sends a user-facing message.
       await host.interruptWorker(workerId);
@@ -381,7 +424,16 @@ export function createMultitask(host: DshHost): Multitask {
     },
 
     markDelivered(todoId: string): boolean {
-      return todoLedger.markDelivered(todoId);
+      const ok = todoLedger.markDelivered(todoId);
+      if (!ok) return false;
+      // Delivery obligation closed — drop the durable marker for its worker.
+      if (durability !== undefined) {
+        const workerId = todoLedger.get(todoId)?.workerId;
+        if (workerId != null) {
+          void durability.deleteWorkerMarker(workerId);
+        }
+      }
+      return true;
     },
 
     reconcileTodos(sessionId: string, wake?: WakeEvent): ReconcileReport {
@@ -405,6 +457,77 @@ export function createMultitask(host: DshHost): Multitask {
       return { wake, reconcile };
     },
 
+    async rebuildFromDurability(
+      parentSessionId: string,
+    ): Promise<RebuildReport> {
+      const restored: WorkerRecord[] = [];
+      const unknownState: UnknownStateWorker[] = [];
+      if (durability === undefined) {
+        return { restored, unknownState };
+      }
+      const markers = await Promise.resolve(
+        durability.readWorkerMarkers(parentSessionId),
+      );
+      for (const marker of markers) {
+        // Fresh-core assumption: never overwrite an in-memory entry.
+        if (workers.has(marker.workerId)) continue;
+        if (!isTerminalStatus(marker.status)) {
+          // Live at crash time: honest unknown-state. Never replayed,
+          // never resumed, never invented. Stream key stays free so the
+          // dispatcher may re-dispatch. Transcript pointer falls back to
+          // the worker id (child session id) when no settle landed.
+          unknownState.push({
+            workerId: marker.workerId,
+            parentSessionId: marker.parentSessionId,
+            streamKey: marker.streamKey,
+            title: marker.title,
+            lastKnownStatus: marker.status,
+            transcriptRef: marker.transcriptRef ?? marker.workerId,
+            todoId: marker.todoId,
+          });
+          continue;
+        }
+        // Terminal marker: restore onto the roster. toolCallCount is live
+        // and deliberately not durable. Stream key stays free (terminal).
+        const record: WorkerRecord = {
+          workerId: marker.workerId,
+          parentSessionId: marker.parentSessionId,
+          streamKey: marker.streamKey,
+          title: marker.title,
+          status: marker.status,
+          startedAtMs: marker.startedAtMs,
+          toolCallCount: 0,
+          transcriptRef: marker.transcriptRef,
+          todoId: marker.todoId,
+        };
+        workers.set(record.workerId, record);
+        // Recreate the dispatcher ledger link so reconcile can notice an
+        // undelivered result and finish delivery (S4). Aborted workers
+        // owe nothing — skip.
+        if (
+          marker.status !== "aborted" &&
+          marker.todoId !== null &&
+          todoLedger.get(marker.todoId) === undefined
+        ) {
+          todoLedger.create({
+            sessionId: marker.parentSessionId,
+            id: marker.todoId,
+            title: marker.title,
+            status: "in_progress",
+            streamKey: marker.streamKey,
+            nowMs: marker.updatedAtMs,
+          });
+          todoLedger.linkWorker(
+            marker.todoId,
+            marker.workerId,
+            marker.streamKey,
+          );
+        }
+        restored.push(record);
+      }
+      return { restored, unknownState };
+    },
+
     wakeBus,
     todos: todoLedger,
   };
@@ -423,3 +546,4 @@ export type {
   WorkerStatus,
   WorkerSummary,
 };
+export type { DurabilityPort, RebuildReport };

@@ -4,7 +4,22 @@ export type { DshHost } from "./core/dsh-host.js";
 export { FakeDshHost } from "./core/fake-host.js";
 export type { SendMessageCall, SpawnCall } from "./core/fake-host.js";
 export { createMultitask } from "./core/multitask.js";
-export type { DrainedWake, Multitask } from "./core/multitask.js";
+export type {
+  DrainedWake,
+  Multitask,
+  MultitaskOptions,
+} from "./core/multitask.js";
+export {
+  createInMemoryDurability,
+  toDurableMarker,
+} from "./core/durability.js";
+export type {
+  DurableWorkerMarker,
+  DurabilityPort,
+  InMemoryDurability,
+  RebuildReport,
+  UnknownStateWorker,
+} from "./core/durability.js";
 export { createSteerQueue, wrapParentCorrection } from "./core/steer-queue.js";
 export type { SteerQueue } from "./core/steer-queue.js";
 export {
