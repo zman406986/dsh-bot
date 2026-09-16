@@ -379,7 +379,7 @@ describe("wake bus — accepted wake sources", () => {
     }
   });
 
-  it("user, worker-settled, and worker-access-request produce wakes today; peer/timer/external-event are reserved", () => {
+  it("user, worker-settled, worker-access-request, and peer produce wakes; timer/external-event stay reserved", () => {
     const delivered: string[] = [];
     const bus = createWakeBus({ onDeliver: (id) => delivered.push(id) });
 
@@ -402,8 +402,24 @@ describe("wake bus — accepted wake sources", () => {
     });
     assert.equal(bus.drain("session-1")?.source, "worker-access-request");
 
+    bus.enqueuePeer({
+      sessionId: "session-1",
+      notice: {
+        messageId: "p1",
+        fromAgentId: "peer-a",
+        fromName: "Peer A",
+        to: { kind: "agent", agentId: "session-1" },
+        conversationId: "c1",
+        text: "hi",
+        priority: false,
+        createdAtMs: 1,
+      },
+      effectivePriority: false,
+    });
+    assert.equal(bus.drain("session-1")?.source, "peer");
+
     // Reserved sources are part of the type surface but have no enqueue API yet.
-    const reserved: readonly WakeSource[] = ["peer", "timer", "external-event"];
+    const reserved: readonly WakeSource[] = ["timer", "external-event"];
     for (const source of reserved) {
       assert.ok(WAKE_SOURCES.includes(source));
     }

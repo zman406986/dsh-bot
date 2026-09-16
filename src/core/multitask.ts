@@ -22,6 +22,16 @@ import {
   wrapParentCorrection,
 } from "./steer-queue.js";
 import { createWakeBus, type WakeBus, type WakeEvent } from "./wake-bus.js";
+import {
+  createPeerInbox,
+  type PeerInbox,
+  type PeerInboxOptions,
+} from "./peer-inbox.js";
+import type { PeerEnvelope, PeerSendAck } from "./peer-types.js";
+import {
+  effectivePeerPriority,
+  toPeerNotice,
+} from "./peer-types.js";
 import { applyEvent, type WorkerEvent } from "./worker-fsm.js";
 import {
   createTodoLedger,
@@ -64,6 +74,8 @@ export interface MultitaskOptions {
   readonly durability?: DurabilityPort;
   /** Access-relay configuration (timeout, test seams). */
   readonly access?: MultitaskAccessOptions;
+  /** Peer inbox knobs (ticket 14). */
+  readonly peer?: PeerInboxOptions;
 }
 
 /**
@@ -153,6 +165,18 @@ export interface Multitask {
    * wakes, and enqueue user/peer/timer wakes.
    */
   readonly wakeBus: WakeBus;
+  /**
+   * Fire-and-forget peer accept (ticket 14). Returns a structural ack
+   * only — never a reply. Newly accepted envelopes join the priority or
+   * normal lane after the target check; delivery is wake-bus + host followup.
+   */
+  sendPeer(sessionId: string, envelope: PeerEnvelope): PeerSendAck;
+  /** Undelivered peer envelopes for a session (status tools / tests). */
+  listPendingPeers(sessionId: string): readonly PeerEnvelope[];
+  /**
+   * Plugin-owned peer inbox. Exposed for status/tests; prefer `sendPeer`.
+   */
+  readonly peerInbox: PeerInbox;
   /** Dispatcher-private todo ledger (ADR-0007). */
   readonly todos: TodoLedger;
   /**
@@ -177,9 +201,25 @@ export function createMultitask(
   const liveByStreamKey = new Map<string, string>();
   const steerQueue: SteerQueue = createSteerQueue();
   const todoLedger: TodoLedger = createTodoLedger();
+  const peerInbox: PeerInbox = createPeerInbox(options?.peer);
   const wakeBus: WakeBus = createWakeBus({
     onDeliver: (sessionId) => {
       void host.requestDispatcherWakeup(sessionId);
+    },
+    onInterrupt: (sessionId) => {
+      // Soft-fallback hosts may omit the seam — priority still becomes
+      // the ready wake and wins the next flush.
+      if (typeof host.requestDispatcherInterrupt === "function") {
+        void host.requestDispatcherInterrupt(sessionId);
+      }
+    },
+    onDrain: (event) => {
+      // One delivered turn per messageId: mark drained peer rows delivered
+      // so a later re-queue never re-delivers them.
+      if (event.source !== "peer" || event.peerMessages === undefined) return;
+      for (const notice of event.peerMessages) {
+        peerInbox.markDelivered(event.sessionId, notice.messageId);
+      }
     },
   });
   const accessPolicy: AccessPolicyTable = createAccessPolicyTable();
@@ -606,6 +646,26 @@ export function createMultitask(
 
     wakeBus,
     todos: todoLedger,
+    sendPeer(sessionId: string, envelope: PeerEnvelope): PeerSendAck {
+      const result = peerInbox.send(sessionId, envelope);
+      if (!result.ack.ok || !result.appended) {
+        // Refusal or idempotent re-accept: never enqueue a second row.
+        return result.ack;
+      }
+      // Lane placement uses effective priority (target-checked), not the
+      // wire flag alone — group/broadcast always land in the normal lane.
+      const priority = effectivePeerPriority(envelope);
+      wakeBus.enqueuePeer({
+        sessionId,
+        notice: toPeerNotice(envelope, priority),
+        effectivePriority: priority,
+      });
+      return result.ack;
+    },
+    listPendingPeers(sessionId: string): readonly PeerEnvelope[] {
+      return peerInbox.listPending(sessionId);
+    },
+    peerInbox,
     resolveAccess(workerId: string, decision: AccessDecision): boolean {
       return accessRelay.resolve(workerId, decision);
     },
@@ -620,6 +680,10 @@ export type {
   AccessDecision,
   AccessTicket,
   CreateTodoInput,
+  PeerEnvelope,
+  PeerInbox,
+  PeerInboxOptions,
+  PeerSendAck,
   ReconcileReport,
   SpawnRequest,
   SpawnResult,

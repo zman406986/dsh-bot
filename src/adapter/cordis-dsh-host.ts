@@ -425,6 +425,16 @@ export function createCordisDshHost(
       agent.followup(wakeUserMessage(text ?? undefined));
     },
 
+    /**
+     * Soft fallback (ticket 14): the local install has no public mid-turn
+     * cancel for a dispatcher Agent. Priority already became the ready
+     * wake on the bus; the running non-user turn ends and the next flush
+     * delivers it. Recorded as a no-op so the seam stays honest.
+     */
+    async requestDispatcherInterrupt(_sessionId: string): Promise<void> {
+      return;
+    },
+
     dispose(): void {
       offSubagentEnd();
       for (const controller of spawnControllers.values()) {

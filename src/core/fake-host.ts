@@ -24,6 +24,7 @@ export class FakeDshHost implements DshHost {
   readonly interruptCalls: string[] = [];
   readonly sendMessageCalls: SendMessageCall[] = [];
   readonly wakeCalls: string[] = [];
+  readonly interruptDispatcherCalls: string[] = [];
 
   #settledCallbacks: Array<(event: SettledEvent) => void> = [];
   #stepBoundaryCallbacks: Array<(workerId: string) => void | Promise<void>> = [];
@@ -58,6 +59,10 @@ export class FakeDshHost implements DshHost {
 
   async requestDispatcherWakeup(sessionId: string): Promise<void> {
     this.wakeCalls.push(sessionId);
+  }
+
+  async requestDispatcherInterrupt(sessionId: string): Promise<void> {
+    this.interruptDispatcherCalls.push(sessionId);
   }
 
   /** Test helper: deliver a settled event to every subscriber. */

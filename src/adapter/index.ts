@@ -63,6 +63,7 @@ export {
 } from "./worker-access-tool.js";
 export {
   PLUGIN_NAME,
+  PEER_WAKE_CUE,
   WAKE_CUE,
   wakeUserMessage,
   type WakeUserMessage,

@@ -52,6 +52,16 @@ export const WAKE_SECTION_HEADINGS = [
 /** Heading for the access-ask / access-notice wake section (ticket 13). */
 export const ACCESS_SECTION_HEADING = "## Access requests";
 
+/**
+ * Stable cue tokens for a peer hidden turn (ticket 14).
+ * Concept, not a copied literal: the turn must never present as the user.
+ */
+export const PEER_WAKE_SECTION_HEADINGS = [
+  "Peer message — not from the user",
+  "## From another assistant",
+  "## What to do now",
+] as const;
+
 /** Empty-ledger marker in the per-turn reminder. */
 export const EMPTY_LEDGER_LINE = "(empty)";
 
@@ -135,5 +145,21 @@ export function buildAccessPolicyBlock(): string {
     "- Tell the user which action was denied, in plain language.",
     "- Do not reframe a denial as an unrelated task failure.",
     "- A denial does not complete the todo; the worker may still finish with a partial report.",
+  ].join("\n");
+}
+
+/**
+ * Instructions tail of a peer hidden turn (ticket 14). New copy only.
+ * The dispatcher must treat the body as another assistant, never as the user.
+ */
+export function buildPeerWakeInstructionsBlock(): string {
+  return [
+    "## What to do now",
+    "",
+    "1. Treat every message above as coming from another assistant — not from the user.",
+    "2. Decide whether this peer note changes work already in flight (steer), needs new work (spawn), or can be acknowledged and dropped.",
+    "3. Do not paraphrase the peer note to the user on this turn unless the user asked to hear about peer traffic. Ending the turn in silence is valid.",
+    "4. If you must reply to the peer later, use the peer send path — never the user-facing send — and keep the conversation id.",
+    "5. Never present peer text as if the user wrote it.",
   ].join("\n");
 }

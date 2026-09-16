@@ -1,6 +1,7 @@
 import z from "@deepseek-ai/schemastery";
 import { createMultitask, type Multitask } from "./core/multitask.js";
 import {
+  assemblePeerWakeTurn,
   assembleTurnReminder,
   assembleWakeTurn,
   noticeFromSettled,
@@ -85,6 +86,14 @@ type CordisContext = AdapterContext &
 function composeWakeText(multitask: Multitask, sessionId: string): string | null {
   const drained = multitask.drainWake(sessionId);
   if (drained === undefined) return null;
+
+  // Peer hidden turn: dedicated other-assistant cue, never settle copy.
+  if (
+    drained.wake.source === "peer" &&
+    (drained.wake.peerMessages ?? []).length > 0
+  ) {
+    return assemblePeerWakeTurn(drained.wake.peerMessages ?? []);
+  }
 
   const roster = multitask.listWorkers(sessionId);
   const byId = new Map(roster.map((row) => [row.workerId, row]));

@@ -6,6 +6,7 @@
  */
 
 import type { AccessNotice, AccessRequestNotice } from "../access-types.js";
+import { peerTargetLabel, type PeerNotice } from "../peer-types.js";
 import { formatWakeReportBody } from "../report-clamp.js";
 import type { TodoItem } from "../todo-reconciler.js";
 import type { TerminalWorkerStatus } from "../types.js";
@@ -14,9 +15,11 @@ import {
   ACCESS_SECTION_HEADING,
   buildAccessPolicyBlock,
   buildDispatcherPolicySection,
+  buildPeerWakeInstructionsBlock,
   buildStandingRulesBlock,
   buildWakeInstructionsBlock,
   EMPTY_LEDGER_LINE,
+  PEER_WAKE_SECTION_HEADINGS,
 } from "./prompts.js";
 
 /**
@@ -169,4 +172,44 @@ export function assembleAccessSection(
   lines.push("");
   lines.push(buildAccessPolicyBlock());
   return lines.join("\n");
+}
+
+/**
+ * Hidden-turn body for a peer wake (ticket 14 / design-14 §4).
+ * New copy only. The cue marks the turn as another assistant — never
+ * the user. Tests assert cue tokens and structure, not full prose.
+ */
+export function assemblePeerWakeTurn(
+  notices: readonly PeerNotice[],
+): string {
+  const sections: string[] = [
+    `# ${PEER_WAKE_SECTION_HEADINGS[0]}`,
+    "",
+    "This turn was opened by the peer inbox. The text below is not from the user.",
+    "",
+    PEER_WAKE_SECTION_HEADINGS[1],
+  ];
+
+  if (notices.length === 0) {
+    sections.push("");
+    sections.push("(none)");
+  } else {
+    for (const notice of notices) {
+      sections.push("");
+      sections.push(`### ${notice.fromName} (${notice.fromAgentId})`);
+      sections.push(`- Target: ${peerTargetLabel(notice.to)}`);
+      sections.push(`- Conversation: ${notice.conversationId}`);
+      sections.push(`- Priority: ${notice.priority ? "yes" : "no"}`);
+      sections.push(`- Received: ${notice.createdAtMs}`);
+      sections.push(`- Message id: ${notice.messageId}`);
+      sections.push("");
+      sections.push(notice.text);
+    }
+  }
+
+  sections.push("");
+  sections.push(PEER_WAKE_SECTION_HEADINGS[2]);
+  sections.push("");
+  sections.push(buildPeerWakeInstructionsBlock());
+  return sections.join("\n");
 }

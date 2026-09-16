@@ -20,6 +20,7 @@ export {
   textBlocks,
   toRegisterableTool,
   wakeUserMessage,
+  PEER_WAKE_CUE,
   WAKE_CUE,
 } from "./adapter/index.js";
 export type {
@@ -109,6 +110,27 @@ export type {
 export { createSteerQueue, wrapParentCorrection } from "./core/steer-queue.js";
 export type { SteerQueue } from "./core/steer-queue.js";
 export {
+  createPeerInbox,
+  DEFAULT_PEER_INBOX_CAP,
+} from "./core/peer-inbox.js";
+export type {
+  PeerInbox,
+  PeerInboxOptions,
+  PeerSendResult,
+} from "./core/peer-inbox.js";
+export {
+  effectivePeerPriority,
+  peerTargetLabel,
+  samePeerPayload,
+  toPeerNotice,
+} from "./core/peer-types.js";
+export type {
+  PeerEnvelope,
+  PeerNotice,
+  PeerSendAck,
+  PeerTarget,
+} from "./core/peer-types.js";
+export {
   createTodoLedger,
   reconcileTodos,
 } from "./core/todo-reconciler.js";
@@ -125,8 +147,10 @@ export { createWakeBus, WAKE_SOURCES } from "./core/wake-bus.js";
 export type {
   EnqueueAccessNoticeInput,
   EnqueueAccessRequestInput,
+  EnqueuePeerInput,
   EnqueueSettledInput,
   SettledWorkerNotice,
+  TurnOwner,
   WakeBus,
   WakeBusOptions,
   WakeEvent,
@@ -179,6 +203,7 @@ export type {
 } from "./core/tool-results.js";
 export {
   assembleAccessSection,
+  assemblePeerWakeTurn,
   assembleSessionPolicy,
   assembleTurnReminder,
   assembleWakeTurn,
@@ -189,9 +214,11 @@ export {
   ACCESS_SECTION_HEADING,
   buildAccessPolicyBlock,
   buildDispatcherPolicySection,
+  buildPeerWakeInstructionsBlock,
   CHECK_WORKERS_TOOL,
   DELIVER_RESULT_TOOL,
   DISPATCHER_TOOL_NAMES,
+  PEER_WAKE_SECTION_HEADINGS,
   SPAWN_WORKER_TOOL,
   STEER_WORKER_TOOL,
   STOP_WORKER_TOOL,

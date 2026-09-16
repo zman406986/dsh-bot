@@ -26,6 +26,13 @@ export interface DshHost {
   /** Ask the host to open a dispatcher turn (wake), typically after a settle. */
   requestDispatcherWakeup(sessionId: string): Promise<void>;
   /**
+   * Optional: abandon the current non-user dispatcher turn so a priority
+   * peer can take the next one. No-op when the current turn is user-owned
+   * or none is live. Soft-fallback hosts may omit this — priority then
+   * waits for turn end and still jumps ahead of everything non-user.
+   */
+  requestDispatcherInterrupt?(sessionId: string): Promise<void>;
+  /**
    * Subscribe to structured access requests from workers.
    * Host invokes callbacks when a worker's request_access tool is used.
    */

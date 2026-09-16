@@ -11,6 +11,13 @@ import { textBlocks, type ContentBlock } from "./content-blocks.js";
 export const WAKE_CUE =
   "Background workers finished. Review their results and continue the conversation.";
 
+/**
+ * New copy only — short cue that a peer message opened this turn.
+ * Distinct from WAKE_CUE so a peer turn never looks like a settle wake.
+ */
+export const PEER_WAKE_CUE =
+  "A peer assistant sent a message. Treat it as another assistant, not the user.";
+
 export const PLUGIN_NAME = "multitask-dispatcher";
 
 /**
