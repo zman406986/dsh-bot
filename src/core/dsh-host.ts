@@ -10,8 +10,18 @@ export interface DshHost {
   spawnWorker(prompt: string, opts: SpawnOptions): Promise<string>;
   /** Interrupt a running worker. Fire-and-return once the host accepted the stop. */
   interruptWorker(workerId: string): Promise<void>;
+  /**
+   * Deliver a message into a live worker session.
+   * Context preserved; never spawns or restarts the worker.
+   */
+  sendMessage(workerId: string, message: string): Promise<void>;
   /** Subscribe to worker-settled events. Host invokes callbacks on settle. */
   onWorkerSettled(cb: (event: SettledEvent) => void): void;
+  /**
+   * Subscribe to step-boundary events. Fired when a worker's current step
+   * has unwound and the worker is ready for the next step (steer delivery point).
+   */
+  onStepBoundary(cb: (workerId: string) => void | Promise<void>): void;
   /** Ask the host to open a dispatcher turn (wake), typically after a settle. */
   requestDispatcherWakeup(sessionId: string): Promise<void>;
 }

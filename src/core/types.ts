@@ -49,3 +49,15 @@ export interface SpawnRequest {
   title: string;
   prompt: string;
 }
+
+/**
+ * Result of a steer request.
+ * A refusal never creates a replacement worker.
+ */
+export type SteerResult =
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      readonly reason: "unknown-worker" | "not-running";
+      readonly detail: string;
+    };

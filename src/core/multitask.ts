@@ -1,9 +1,15 @@
 import type { DshHost } from "./dsh-host.js";
 import {
   type SpawnRequest,
+  type SteerResult,
   type WorkerRecord,
   type WorkerStatus,
 } from "./types.js";
+import {
+  createSteerQueue,
+  type SteerQueue,
+  wrapParentCorrection,
+} from "./steer-queue.js";
 import { applyEvent, type WorkerEvent } from "./worker-fsm.js";
 
 /**
@@ -16,6 +22,12 @@ export interface Multitask {
   spawnWorker(request: SpawnRequest): Promise<string>;
   /** Interrupt a worker through the host and mark it aborted. Late settles are dropped. */
   abortWorker(workerId: string): Promise<void>;
+  /**
+   * Park a steer for a live worker and interrupt its current step.
+   * Single-slot last-wins: a newer steer replaces any undelivered one.
+   * Refused (and never recreates a worker) when the worker is not live mid-work.
+   */
+  steerWorker(workerId: string, message: string): Promise<SteerResult>;
   /** First turn started: spawned → running. No-op if illegal. */
   noteTurnStarted(workerId: string): void;
   /** Steer received for a running worker: running → steering. No-op if illegal. */
@@ -28,6 +40,7 @@ export interface Multitask {
 
 export function createMultitask(host: DshHost): Multitask {
   const workers = new Map<string, WorkerRecord>();
+  const steerQueue: SteerQueue = createSteerQueue();
 
   /** Apply a lifecycle event; returns the new status or undefined if ignored. */
   function transition(
@@ -52,6 +65,19 @@ export function createMultitask(host: DshHost): Multitask {
     const record = workers.get(event.workerId);
     if (record === undefined) return;
     void host.requestDispatcherWakeup(record.parentSessionId);
+  });
+
+  // Step boundary: pop the latest parked steer, wrap it as a parent correction,
+  // and deliver it into the same worker. Last-wins — earlier steers were already
+  // overwritten in the single slot and are never delivered.
+  host.onStepBoundary((workerId) => {
+    const record = workers.get(workerId);
+    if (record === undefined || record.status !== "steering") return;
+    const latest = steerQueue.pop(workerId);
+    if (latest === undefined) return;
+    return host.sendMessage(workerId, wrapParentCorrection(latest)).then(() => {
+      transition(workerId, { type: "steer-injected" });
+    });
   });
 
   return {
@@ -89,6 +115,41 @@ export function createMultitask(host: DshHost): Multitask {
       await host.interruptWorker(workerId);
     },
 
+    async steerWorker(workerId: string, message: string): Promise<SteerResult> {
+      const record = workers.get(workerId);
+      if (record === undefined) {
+        return {
+          ok: false,
+          reason: "unknown-worker",
+          detail: `unknown worker: ${workerId}`,
+        };
+      }
+      // Only a live mid-work worker can be steered. Spawned has not started;
+      // terminal states may already be done. Never silently recreate.
+      if (record.status !== "running" && record.status !== "steering") {
+        return {
+          ok: false,
+          reason: "not-running",
+          detail: `worker ${workerId} is not running; it may already be done`,
+        };
+      }
+
+      // Single-slot last-wins: replaces any undelivered steer for this worker.
+      steerQueue.park(workerId, message);
+
+      if (record.status === "running") {
+        transition(workerId, { type: "steer-received" });
+        await host.interruptWorker(workerId);
+        // A settle may have raced the interrupt — do not leave a steer parked
+        // for a worker that is no longer steering.
+        if (workers.get(workerId)?.status !== "steering") {
+          steerQueue.clear(workerId);
+        }
+      }
+      // Already steering: a delivery is pending; it will pick up this message.
+      return { ok: true };
+    },
+
     noteTurnStarted(workerId: string): void {
       transition(workerId, { type: "turn-started" });
     },
@@ -113,4 +174,4 @@ export function createMultitask(host: DshHost): Multitask {
   };
 }
 
-export type { SpawnRequest, WorkerRecord, WorkerStatus };
+export type { SpawnRequest, SteerResult, WorkerRecord, WorkerStatus };

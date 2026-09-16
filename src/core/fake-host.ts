@@ -7,17 +7,25 @@ export interface SpawnCall {
   workerId: string;
 }
 
+export interface SendMessageCall {
+  workerId: string;
+  message: string;
+}
+
 /**
  * Hand-written stand-in for `DshHost`.
- * Records spawn / interrupt / wake calls and lets a test fire a settled event.
- * No mocking framework — tests assert against the recorded lists.
+ * Records spawn / interrupt / send / wake calls and lets a test fire
+ * settled and step-boundary events. No mocking framework — tests assert
+ * against the recorded lists.
  */
 export class FakeDshHost implements DshHost {
   readonly spawnCalls: SpawnCall[] = [];
   readonly interruptCalls: string[] = [];
+  readonly sendMessageCalls: SendMessageCall[] = [];
   readonly wakeCalls: string[] = [];
 
   #settledCallbacks: Array<(event: SettledEvent) => void> = [];
+  #stepBoundaryCallbacks: Array<(workerId: string) => void | Promise<void>> = [];
   #nextId = 1;
 
   async spawnWorker(prompt: string, opts: SpawnOptions): Promise<string> {
@@ -30,8 +38,16 @@ export class FakeDshHost implements DshHost {
     this.interruptCalls.push(workerId);
   }
 
+  async sendMessage(workerId: string, message: string): Promise<void> {
+    this.sendMessageCalls.push({ workerId, message });
+  }
+
   onWorkerSettled(cb: (event: SettledEvent) => void): void {
     this.#settledCallbacks.push(cb);
+  }
+
+  onStepBoundary(cb: (workerId: string) => void | Promise<void>): void {
+    this.#stepBoundaryCallbacks.push(cb);
   }
 
   async requestDispatcherWakeup(sessionId: string): Promise<void> {
@@ -42,6 +58,13 @@ export class FakeDshHost implements DshHost {
   fireSettled(event: SettledEvent): void {
     for (const cb of [...this.#settledCallbacks]) {
       cb(event);
+    }
+  }
+
+  /** Test helper: fire a step-boundary event and await any delivery it triggers. */
+  async fireStepBoundary(workerId: string): Promise<void> {
+    for (const cb of [...this.#stepBoundaryCallbacks]) {
+      await cb(workerId);
     }
   }
 }
