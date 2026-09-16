@@ -33,6 +33,17 @@ function createAgent(sessionId: string, withInject = true): CaptureAgent {
   return agent;
 }
 
+function createChildAgent(sessionId: string): CaptureAgent {
+  const agent = createAgent(sessionId);
+  return {
+    ...agent,
+    session: {
+      id: sessionId,
+      header: { parentSession: "parent-x", delegationDepth: 1 },
+    },
+  };
+}
+
 function createCtx(): AdapterContext & {
   listeners: Map<string, Array<(payload: never) => void>>;
   emit(name: string, payload: unknown): void;
@@ -142,8 +153,8 @@ function textOf(message: unknown): string {
   return content.map((block) => block.text ?? "").join("");
 }
 
-describe("dispatcher policy inject (T11)", () => {
-  it("injects the session policy once at bind when enabled", () => {
+describe("dispatcher activation lifecycle (ticket 19)", () => {
+  it("dormant lifecycle captures nothing on simulated session-start", () => {
     const ctx = createCtx();
     const host = createHostStub();
     const multitask = createMultitask(host);
@@ -154,32 +165,152 @@ describe("dispatcher policy inject (T11)", () => {
 
     ctx.emit("agent/session-start", { agent });
 
+    // Stock dsh: no capture, no bind, no policy inject.
+    assert.equal(lifecycle.dispatcherSessionId(), null);
+    assert.equal(host.hasParent(), false);
+    assert.equal(agent.injected.length, 0);
+  });
+
+  it("activate binds the parent and injects policy exactly once", () => {
+    const ctx = createCtx();
+    const host = createHostStub();
+    const multitask = createMultitask(host);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask, {
+      policyEnabled: true,
+    });
+    const agent = createAgent("session-1");
+
+    const outcome = lifecycle.activate(agent);
+
+    assert.deepEqual(outcome, { ok: true });
     assert.equal(lifecycle.dispatcherSessionId(), "session-1");
+    assert.equal(host.hasParent(), true);
+    assert.deepEqual(host.bound, [{ agent, sessionId: "session-1" }]);
     assert.equal(agent.injected.length, 1);
     const text = textOf(agent.injected[0]);
     assert.ok(text.includes("# Multitask dispatcher"));
     assert.ok(text.includes("not the workhorse"));
   });
 
-  it("does not inject policy when the session flag is OFF", () => {
+  it("refuses activation for a non-top-level chat", () => {
     const ctx = createCtx();
     const host = createHostStub();
     const multitask = createMultitask(host);
-    bindDispatcherLifecycle(ctx, host, multitask, { policyEnabled: false });
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
+    const child = createChildAgent("child-1");
+
+    const outcome = lifecycle.activate(child);
+
+    assert.deepEqual(outcome, { ok: false, reason: "not-top-level" });
+    assert.equal(lifecycle.dispatcherSessionId(), null);
+    assert.equal(host.hasParent(), false);
+    assert.equal(child.injected.length, 0);
+  });
+
+  it("refuses a second activation in the same chat without re-binding", () => {
+    const ctx = createCtx();
+    const host = createHostStub();
+    const multitask = createMultitask(host);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
     const agent = createAgent("session-1");
 
-    ctx.emit("agent/session-start", { agent });
+    assert.deepEqual(lifecycle.activate(agent), { ok: true });
+    const outcome = lifecycle.activate(agent);
+
+    assert.deepEqual(outcome, { ok: false, reason: "already-active-here" });
+    assert.equal(host.bound.length, 1);
+    assert.equal(agent.injected.length, 1);
+  });
+
+  it("refuses activation while another chat holds the dispatcher slot", () => {
+    const ctx = createCtx();
+    const host = createHostStub();
+    const multitask = createMultitask(host);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
+    const first = createAgent("session-1");
+    const second = createAgent("session-2");
+
+    assert.deepEqual(lifecycle.activate(first), { ok: true });
+    const outcome = lifecycle.activate(second);
+
+    assert.deepEqual(outcome, { ok: false, reason: "already-active-elsewhere" });
+    assert.equal(lifecycle.dispatcherSessionId(), "session-1");
+    assert.equal(host.bound.length, 1);
+    assert.equal(second.injected.length, 0);
+  });
+
+  it("activation with policy disabled binds but does not inject", () => {
+    const ctx = createCtx();
+    const host = createHostStub();
+    const multitask = createMultitask(host);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask, {
+      policyEnabled: false,
+    });
+    const agent = createAgent("session-1");
+
+    assert.deepEqual(lifecycle.activate(agent), { ok: true });
+    assert.equal(host.hasParent(), true);
     assert.equal(agent.injected.length, 0);
   });
 
-  it("re-injects the per-turn reminder on dispatcher turn start", () => {
+  it("fires onActivated / onDeactivated around the activation", () => {
     const ctx = createCtx();
     const host = createHostStub();
     const multitask = createMultitask(host);
-    bindDispatcherLifecycle(ctx, host, multitask, { policyEnabled: true });
+    const events: string[] = [];
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask, {
+      onActivated: (sessionId) => events.push(`activated:${sessionId}`),
+      onDeactivated: () => events.push("deactivated"),
+    });
     const agent = createAgent("session-1");
 
-    ctx.emit("agent/session-start", { agent });
+    lifecycle.activate(agent);
+    ctx.emit("agent/disposed", { agent });
+
+    assert.deepEqual(events, ["activated:session-1", "deactivated"]);
+    assert.equal(lifecycle.dispatcherSessionId(), null);
+    assert.equal(host.hasParent(), false);
+  });
+
+  it("agent/disposed unbinds the parent and clears the session", () => {
+    const ctx = createCtx();
+    const host = createHostStub();
+    const multitask = createMultitask(host);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
+    const agent = createAgent("session-1");
+
+    lifecycle.activate(agent);
+    ctx.emit("agent/disposed", { agent });
+
+    assert.equal(lifecycle.dispatcherSessionId(), null);
+    assert.equal(host.hasParent(), false);
+    assert.deepEqual(host.bound, []);
+  });
+
+  it("agent/disposed for another agent leaves the activation intact", () => {
+    const ctx = createCtx();
+    const host = createHostStub();
+    const multitask = createMultitask(host);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
+    const agent = createAgent("session-1");
+
+    lifecycle.activate(agent);
+    ctx.emit("agent/disposed", { agent: createAgent("session-2") });
+
+    assert.equal(lifecycle.dispatcherSessionId(), "session-1");
+    assert.equal(host.hasParent(), true);
+  });
+
+  it("re-injects the per-turn reminder on dispatcher turn start after activation", () => {
+    const ctx = createCtx();
+    const host = createHostStub();
+    const multitask = createMultitask(host);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask, {
+      policyEnabled: true,
+    });
+    const agent = createAgent("session-1");
+
+    lifecycle.activate(agent);
     ctx.emit("agent/status", { agent, status: "running" });
 
     assert.equal(agent.injected.length, 2);
@@ -193,12 +324,38 @@ describe("dispatcher policy inject (T11)", () => {
     const ctx = createCtx();
     const host = createHostStub();
     const multitask = createMultitask(host);
-    bindDispatcherLifecycle(ctx, host, multitask, { policyEnabled: true });
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask, {
+      policyEnabled: true,
+    });
     const agent = createAgent("session-1", false);
 
     assert.doesNotThrow(() => {
-      ctx.emit("agent/session-start", { agent });
+      assert.deepEqual(lifecycle.activate(agent), { ok: true });
       ctx.emit("agent/status", { agent, status: "running" });
     });
+  });
+
+  it("unbind reverses the activation and detaches listeners (HMR)", () => {
+    const ctx = createCtx();
+    const host = createHostStub();
+    const multitask = createMultitask(host);
+    let deactivated = 0;
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask, {
+      onDeactivated: () => {
+        deactivated += 1;
+      },
+    });
+    const agent = createAgent("session-1");
+
+    lifecycle.activate(agent);
+    lifecycle.unbind();
+
+    assert.equal(lifecycle.dispatcherSessionId(), null);
+    assert.equal(host.hasParent(), false);
+    assert.equal(deactivated, 1);
+    // Listeners are gone: a later session-start captures nothing.
+    ctx.emit("agent/session-start", { agent });
+    ctx.emit("agent/status", { agent, status: "running" });
+    assert.equal(agent.injected.length, 1);
   });
 });

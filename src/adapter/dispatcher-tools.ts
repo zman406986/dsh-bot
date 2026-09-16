@@ -12,6 +12,7 @@ import {
   type RecentActivityFn,
 } from "../core/tools.js";
 import type { AdapterContext } from "./cordis-dsh-host.js";
+import { DISPATCHER_TOOL_GATE_REFUSAL } from "./activation-command.js";
 
 /** Structural tool registration shape (mirrors dsh ToolRuntime.register). */
 export interface RegisterableTool {
@@ -65,8 +66,30 @@ function renderStructured(_args: unknown, value: unknown): Array<{
   return [{ type: "text", text: JSON.stringify(value) }];
 }
 
+/**
+ * Resolve the calling session id from common tool-exec shapes (structural
+ * idiom, design-16 §3.8). Returns null when the exec carries no session.
+ */
+export function resolveExecSessionId(exec: unknown): string | null {
+  const record = exec as {
+    agent?: { session?: { id?: unknown } };
+    session?: { id?: unknown };
+    sessionId?: unknown;
+  } | null | undefined;
+  if (record == null || typeof record !== "object") return null;
+  const raw =
+    record.agent?.session?.id ??
+    record.session?.id ??
+    record.sessionId;
+  if (raw === undefined || raw === null) return null;
+  return String(raw);
+}
+
 /** Wrap a core tool def into a registry-ready structural definition. */
-export function toRegisterableTool(def: DispatcherToolDef): RegisterableTool {
+export function toRegisterableTool(
+  def: DispatcherToolDef,
+  executeOverride?: (args: Record<string, unknown>, exec?: unknown) => Promise<unknown>,
+): RegisterableTool {
   return {
     name: def.name,
     description: def.description,
@@ -76,13 +99,54 @@ export function toRegisterableTool(def: DispatcherToolDef): RegisterableTool {
       schema: { type: "object" },
       render: renderStructured,
     },
-    execute(args: unknown): Promise<unknown> {
+    execute(args: unknown, exec?: unknown): Promise<unknown> {
       const record =
         args !== null && typeof args === "object"
           ? (args as Record<string, unknown>)
           : {};
+      if (executeOverride !== undefined) {
+        return executeOverride(record, exec);
+      }
       return def.execute(record);
     },
+  };
+}
+
+/**
+ * Structured refusal for a session that is not the activated dispatcher
+ * (ticket 19). Renders as model-facing text via the shared formatter.
+ */
+function toolGateRefusal(): unknown {
+  return { ok: false, reason: "not-activated", detail: DISPATCHER_TOOL_GATE_REFUSAL };
+}
+
+/**
+ * Activation gate (design-16 §3.8, primary): resolve the calling session
+ * from the exec shape and refuse anything that is not the activated
+ * dispatcher chat. When the exec shape cannot be resolved, fall back to the
+ * weaker "an activation exists" gate and document it — a shaped but
+ * different session id still refuses, so the gate only opens for callers
+ * we cannot see at all.
+ */
+function gatedExecute(
+  def: DispatcherToolDef,
+  getSessionId: () => string | null,
+  resolveCallerSessionId: (exec: unknown) => string | null,
+): (args: unknown, exec?: unknown) => Promise<unknown> {
+  return async (args: unknown, exec?: unknown) => {
+    const record =
+      args !== null && typeof args === "object"
+        ? (args as Record<string, unknown>)
+        : {};
+    const active = getSessionId();
+    const caller = resolveCallerSessionId(exec);
+    if (caller !== null) {
+      if (caller === active) return def.execute(record);
+      return toolGateRefusal();
+    }
+    // Unresolvable exec → weaker documented guarantee (ticket 19).
+    if (active !== null) return def.execute(record);
+    return toolGateRefusal();
   };
 }
 
@@ -92,6 +156,12 @@ export interface RegisterDispatcherToolsOptions {
   readonly getSessionId: () => string | null;
   readonly deliverToUser?: DeliverToUserFn;
   readonly recentActivity?: RecentActivityFn;
+  /**
+   * Activation gate (ticket 19): resolve the calling session from the tool
+   * exec context. When provided, every handler refuses sessions other than
+   * the activated dispatcher chat with structured copy.
+   */
+  readonly resolveCallerSessionId?: (exec: unknown) => string | null;
 }
 
 /**
@@ -115,9 +185,16 @@ export function registerDispatcherTools(
       ? { recentActivity: options.recentActivity }
       : {}),
   });
+  const resolve = options.resolveCallerSessionId;
   const disposers: Array<() => void> = [];
   for (const def of defs) {
-    const dispose = tools.register(toRegisterableTool(def));
+    const registerable = toRegisterableTool(
+      def,
+      resolve !== undefined
+        ? gatedExecute(def, options.getSessionId, resolve)
+        : undefined,
+    );
+    const dispose = tools.register(registerable);
     disposers.push(dispose);
   }
   return disposers;

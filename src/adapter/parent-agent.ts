@@ -52,14 +52,36 @@ function tryInject(agent: AgentLike, text: string): void {
   try {
     agent.inject(pluginContextMessage(text));
   } catch {
-    // Injection is best-effort; never break session-start on it.
+    // Injection is best-effort; never break activation on it.
   }
 }
 
+/**
+ * Result of an activation attempt (ticket 19). Activation is explicit,
+ * once per session, and refused with a reason the command handler maps
+ * to user-facing copy.
+ */
+export type ActivationOutcome =
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      readonly reason:
+        | "not-top-level"
+        | "already-active-here"
+        | "already-active-elsewhere"
+        | "unbound";
+    };
+
 export interface BindDispatcherLifecycleResult {
-  /** Current dispatcher session id, once captured. */
+  /**
+   * Activate this chat as the dispatcher (ADR-0009): bind the parent,
+   * inject policy once. Idempotent-refusing — never re-binds while a
+   * dispatcher session is live.
+   */
+  activate(agent: AgentLike): ActivationOutcome;
+  /** Current dispatcher session id, once activated. */
   dispatcherSessionId(): string | null;
-  /** Tear down listeners. */
+  /** Tear down listeners and the activation, if any. */
   unbind(): void;
 }
 
@@ -69,15 +91,31 @@ export interface BindDispatcherLifecycleOptions {
    * OFF → no policy inject. Defaults to true.
    */
   readonly policyEnabled?: boolean;
+  /**
+   * Fired after a successful activation (parent bound + policy injected).
+   * The plugin registers the deferred dispatcher tool surface here.
+   */
+  readonly onActivated?: (sessionId: string) => void;
+  /**
+   * Fired when the activation ends: dispatcher session disposed, or the
+   * lifecycle itself is unbound (unload/HMR). The plugin unregisters the
+   * dispatcher tool surface here.
+   */
+  readonly onDeactivated?: () => void;
 }
 
 /**
- * Capture the live dispatcher Agent on `agent/session-start` and wire
- * child + dispatcher `agent/status` for:
- * - wakeBus session turn bounds (dispatcher running/idle) — T06 follow-up
+ * Activation lifecycle for the dispatcher parent agent (ticket 19, ADR-0009).
+ *
+ * Nothing is captured on load or on `agent/session-start` — the plugin boots
+ * dormant and stock. An explicit command handler calls {@link activate} in
+ * the chat the user chose; that binds the live Agent as the host's single
+ * parent and injects the session policy once. `agent/disposed` and `unbind`
+ * reverse the activation; the passive `agent/status` listener wires:
+ * - wakeBus session turn bounds (dispatcher running/idle)
  * - worker FSM first turn (child running → multitask.noteTurnStarted)
  * - step-boundary (child idle → host.emitStepBoundary)
- * - policy inject at bind + per-turn reminder on dispatcher turn start (T11)
+ * - per-turn reminder on dispatcher turn start (T11)
  *
  * Distinct id spaces — do not conflate:
  * | Call | Id |
@@ -92,36 +130,26 @@ export function bindDispatcherLifecycle(
   options?: BindDispatcherLifecycleOptions,
 ): BindDispatcherLifecycleResult {
   const policyEnabled = options?.policyEnabled ?? true;
+  const onActivated = options?.onActivated;
+  const onDeactivated = options?.onDeactivated;
   let dispatcherSessionId: string | null = null;
   let parentAgentRef: AgentLike | null = null;
+  let unbound = false;
   const disposers: Array<() => void> = [];
 
-  disposers.push(
-    ctx.on("agent/session-start", (payload: never) => {
-      const { agent } = payload as { agent: AgentLike };
-      if (!isTopLevel(agent)) return;
-      if (parentAgentRef !== null) {
-        // Multi-agent profile residual: first top-level wins; ignore later ones.
-        return;
-      }
-      const sessionId = String(agent.session.id);
-      parentAgentRef = agent;
-      dispatcherSessionId = sessionId;
-      host.bindParent(agent, sessionId);
-      // ADR-0005: policy is fixed for this session's lifetime.
-      if (policyEnabled) {
-        tryInject(agent, assembleSessionPolicy(true));
-      }
-    }),
-  );
+  function deactivate(): void {
+    if (parentAgentRef === null && dispatcherSessionId === null) return;
+    parentAgentRef = null;
+    dispatcherSessionId = null;
+    host.unbindParent();
+    onDeactivated?.();
+  }
 
   disposers.push(
     ctx.on("agent/disposed", (payload: never) => {
       const { agent } = payload as { agent: AgentLike };
       if (parentAgentRef === agent) {
-        parentAgentRef = null;
-        dispatcherSessionId = null;
-        host.unbindParent();
+        deactivate();
       }
     }),
   );
@@ -167,16 +195,44 @@ export function bindDispatcherLifecycle(
   );
 
   return {
+    activate(agent: AgentLike): ActivationOutcome {
+      // HMR/unload safety: a torn-down lifecycle never re-binds.
+      if (unbound) {
+        return { ok: false, reason: "unbound" };
+      }
+      // Fail-open preserved: an inaccessible session header still counts as
+      // top-level (documented isTopLevel behavior).
+      if (!isTopLevel(agent)) {
+        return { ok: false, reason: "not-top-level" };
+      }
+      const sessionId = String(agent.session.id);
+      if (parentAgentRef !== null) {
+        return dispatcherSessionId === sessionId
+          ? { ok: false, reason: "already-active-here" }
+          : { ok: false, reason: "already-active-elsewhere" };
+      }
+      parentAgentRef = agent;
+      dispatcherSessionId = sessionId;
+      host.bindParent(agent, sessionId);
+      // ADR-0005: policy is fixed for this session's lifetime.
+      if (policyEnabled) {
+        tryInject(agent, assembleSessionPolicy(true));
+      }
+      onActivated?.(sessionId);
+      return { ok: true };
+    },
+
     dispatcherSessionId(): string | null {
       return dispatcherSessionId;
     },
+
     unbind(): void {
+      deactivate();
+      unbound = true;
       for (const dispose of disposers) {
         dispose();
       }
       disposers.length = 0;
-      parentAgentRef = null;
-      dispatcherSessionId = null;
     },
   };
 }

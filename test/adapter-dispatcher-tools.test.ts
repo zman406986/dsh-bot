@@ -7,9 +7,11 @@ import {
 } from "../src/core/policy/prompts.js";
 import {
   registerDispatcherTools,
+  resolveExecSessionId,
   toRegisterableTool,
   type RegisterableTool,
 } from "../src/adapter/dispatcher-tools.js";
+import { DISPATCHER_TOOL_GATE_REFUSAL } from "../src/adapter/activation-command.js";
 import type { AdapterContext } from "../src/adapter/cordis-dsh-host.js";
 
 function createToolsCaptureCtx(): AdapterContext & {
@@ -137,5 +139,76 @@ describe("adapter dispatcher tool registration", () => {
     assert.deepEqual(rendered, [
       { type: "text", text: "Started in the background." },
     ]);
+  });
+});
+
+describe("dispatcher tool activation gate (ticket 19)", () => {
+  it("resolveExecSessionId reads common exec shapes", () => {
+    assert.equal(
+      resolveExecSessionId({ agent: { session: { id: "a1" } } }),
+      "a1",
+    );
+    assert.equal(resolveExecSessionId({ session: { id: "a2" } }), "a2");
+    assert.equal(resolveExecSessionId({ sessionId: "a3" }), "a3");
+    assert.equal(resolveExecSessionId(undefined), null);
+    assert.equal(resolveExecSessionId("string"), null);
+    assert.equal(resolveExecSessionId({ agent: { session: {} } }), null);
+  });
+
+  it("gated handlers refuse sessions other than the activated one", async () => {
+    const ctx = createToolsCaptureCtx();
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host);
+    registerDispatcherTools({
+      ctx,
+      multitask,
+      getSessionId: () => "disp-1",
+      resolveCallerSessionId: resolveExecSessionId,
+    });
+    const spawn = ctx.registered.find((tool) => tool.name === "spawn_worker");
+    assert.ok(spawn);
+
+    const refused = (await spawn.execute(
+      { stream_key: "s", title: "T", prompt: "P" },
+      { agent: { session: { id: "other" } } },
+    )) as { ok: boolean; reason: string; detail: string };
+    assert.equal(refused.ok, false);
+    assert.equal(refused.reason, "not-activated");
+    assert.equal(refused.detail, DISPATCHER_TOOL_GATE_REFUSAL);
+    assert.equal(host.spawnCalls.length, 0);
+
+    // Unresolvable exec + live activation → weaker documented gate opens.
+    const fallback = (await spawn.execute(
+      { stream_key: "s", title: "T", prompt: "P" },
+      undefined,
+    )) as { ok: boolean };
+    assert.equal(fallback.ok, true);
+
+    // Matching caller passes through.
+    const accepted = (await spawn.execute(
+      { stream_key: "s2", title: "T", prompt: "P" },
+      { agent: { session: { id: "disp-1" } } },
+    )) as { ok: boolean };
+    assert.equal(accepted.ok, true);
+    assert.equal(host.spawnCalls.length, 2);
+  });
+
+  it("gated handlers refuse everything while no dispatcher session is active", async () => {
+    const ctx = createToolsCaptureCtx();
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host);
+    registerDispatcherTools({
+      ctx,
+      multitask,
+      getSessionId: () => null,
+      resolveCallerSessionId: resolveExecSessionId,
+    });
+    const check = ctx.registered.find((tool) => tool.name === "check_workers");
+    assert.ok(check);
+    const refused = (await check.execute({}, {
+      agent: { session: { id: "whoever" } },
+    })) as { ok: boolean; detail: string };
+    assert.equal(refused.ok, false);
+    assert.equal(refused.detail, DISPATCHER_TOOL_GATE_REFUSAL);
   });
 });

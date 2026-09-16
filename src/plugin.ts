@@ -12,7 +12,9 @@ import {
   createCordisDshHost,
   createStorageDomainDurability,
   installMultitaskSettingsSection,
+  registerDispatcherStartCommand,
   registerDispatcherTools,
+  resolveExecSessionId,
   type AdapterContext,
   type CordisDshHost,
   type SettingsInjectContext,
@@ -53,7 +55,9 @@ export const name = "multitask-dispatcher";
  * - jobs: live job listing for the check surface
  * - storageDomain: durable worker markers (ADR-0006)
  * - tools: global tool names for the worker deny-list intersection (T10)
- *         + dispatcher tool registration (T11)
+ *         + dispatcher tool registration (T11, deferred to activation)
+ * - commands: host slash-command registry for the activation command
+ *         (ticket 19, ADR-0009)
  */
 export const inject: string[] = [
   "subagents",
@@ -61,6 +65,7 @@ export const inject: string[] = [
   "jobs",
   "storageDomain",
   "tools",
+  "commands",
 ];
 
 export interface PluginConfig {
@@ -140,12 +145,17 @@ function composeWakeText(multitask: Multitask, sessionId: string): string | null
  * Cordis plugin entry. Registers only through `ctx` so unload is reversible.
  * The multitask core itself is host-free and exercised in unit tests via FakeDshHost.
  *
- * Flag semantics (ADR-0005 / ticket 12):
+ * Flag semantics (ADR-0005 / ticket 12) with the activation model
+ * (ticket 19 / ADR-0009 / design-16 §3.7):
  * - `enabled` is copied once at apply entry and frozen for this session.
  * - Settings section is always installed so the user can flip the flag for
  *   the *next* session (no file hand-editing, no rebuild).
- * - Disabled path returns early: stock dsh — no core, no tools, no policy,
- *   no wake handling.
+ * - Disabled path returns early: stock dsh — no core, no command, no tools,
+ *   no policy, no wake handling.
+ * - Enabled path boots dormant: stock experience plus the passive core/host
+ *   plumbing and the `dispatcher-start` command. The five dispatcher tools
+ *   and request_access register only when a session activates, and the
+ *   primary chat is never captured on load.
  */
 export function apply(ctx: CordisContext, config: PluginConfig): void {
   // ADR-0005: read once at session start; freeze for this session's lifetime.
@@ -187,54 +197,73 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   });
   multitaskRef = multitask;
 
-  // Capture the live dispatcher Agent + bind session-id turn bounds to wakeBus.
-  // Policy flag is session-scoped (ADR-0005); the frozen `enabled` is the
-  // authority — policy is ON whenever we are here.
+  // Activation lifecycle (ticket 19, ADR-0009): boot dormant and stock.
+  // Nothing is captured on load or on agent/session-start — the dispatcher
+  // exists in a chat only after the explicit dispatcher-start command fires
+  // there (once per session, never toggled off while running).
+  //
+  // Deferred dispatcher tool surface: registered when a session activates,
+  // unregistered when the activation ends (session disposed / unload).
+  let activationTools: Array<() => void> = [];
+  const activateToolSurface = (): void => {
+    if (activationTools.length > 0) return;
+    // T11: five dispatcher tools on ctx.tools (core handlers; adapter wraps
+    // and gates execution on the activated session, design-16 §3.8).
+    const toolDisposers = registerDispatcherTools({
+      ctx,
+      multitask,
+      getSessionId: () => lifecycle.dispatcherSessionId(),
+      resolveCallerSessionId: resolveExecSessionId,
+    });
+    // T13: worker-only request_access tool. Emits structured asks into the core.
+    const disposeAccessTool = registerWorkerAccessTool({
+      ctx,
+      deps: {
+        resolveWorkerId: (exec) => {
+          // Structural: pull session id from common exec shapes.
+          const sessionId = resolveExecSessionId(exec);
+          if (sessionId === null) return null;
+          return host.owns(sessionId) ? sessionId : null;
+        },
+        hasPendingAsk: (workerId) =>
+          multitask.listPendingAccess().some((t) => t.workerId === workerId),
+        emit: (event) => {
+          host.emitAccessRequest(event);
+        },
+      },
+    });
+    activationTools = [...toolDisposers, disposeAccessTool];
+  };
+  const deactivateToolSurface = (): void => {
+    for (const dispose of activationTools) {
+      dispose();
+    }
+    activationTools = [];
+  };
+
+  // Passive status wiring (wake bounds, worker FSM, steer delivery) plus the
+  // activate/deactivate hooks. Policy flag is session-scoped (ADR-0005); the
+  // frozen `enabled` is the authority — policy is ON whenever we are here.
   const lifecycle = bindDispatcherLifecycle(ctx, host, multitask, {
     policyEnabled: enabled,
+    onActivated: () => activateToolSurface(),
+    onDeactivated: () => deactivateToolSurface(),
   });
 
-  // T11: five dispatcher tools on ctx.tools (core handlers; adapter wraps).
-  const toolDisposers = registerDispatcherTools({
+  // The dormant plugin's only visible affordance (design-16 §3.3).
+  const disposeCommand = registerDispatcherStartCommand({
     ctx,
-    multitask,
-    getSessionId: () => lifecycle.dispatcherSessionId(),
+    activeSessionId: () => lifecycle.dispatcherSessionId(),
+    activate: (agent) => lifecycle.activate(agent),
   });
-  for (const dispose of toolDisposers) {
-    ctx.effect(dispose);
-  }
+  ctx.effect(disposeCommand);
 
-  // T13: worker-only request_access tool. Emits structured asks into the core.
-  const disposeAccessTool = registerWorkerAccessTool({
-    ctx,
-    deps: {
-      resolveWorkerId: (exec) => {
-        // Structural: pull session id from common exec shapes.
-        const record = exec as {
-          agent?: { session?: { id?: unknown } };
-          session?: { id?: unknown };
-          sessionId?: unknown;
-        } | null | undefined;
-        if (record == null || typeof record !== "object") return null;
-        const raw =
-          record.agent?.session?.id ??
-          record.session?.id ??
-          record.sessionId;
-        if (raw === undefined || raw === null) return null;
-        const workerId = String(raw);
-        return host.owns(workerId) ? workerId : null;
-      },
-      hasPendingAsk: (workerId) =>
-        multitask.listPendingAccess().some((t) => t.workerId === workerId),
-      emit: (event) => {
-        host.emitAccessRequest(event);
-      },
-    },
-  });
-  ctx.effect(disposeAccessTool);
-
-  ctx.effect(() => () => {
+  // Register a direct dispose callback (CordisContext.effect contract) so
+  // unload/HMR truly reverses the activation: unbind, drop the tool surface,
+  // dispose the host, release the marker domain.
+  ctx.effect(() => {
     lifecycle.unbind();
+    deactivateToolSurface();
     host.dispose();
     void markers.dispose();
   });

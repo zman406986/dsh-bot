@@ -438,7 +438,7 @@ describe("listLiveJobs", () => {
 });
 
 describe("bindDispatcherLifecycle", () => {
-  it("captures top-level agent and wires wakeBus turn bounds by session id", async () => {
+  it("activation binds the parent and wires wakeBus turn bounds by session id", async () => {
     const ctx = createStubCtx();
     const host = createCordisDshHost(ctx);
     const multitask = createMultitask(host);
@@ -446,7 +446,8 @@ describe("bindDispatcherLifecycle", () => {
 
     const parent = createAgent("disp-1");
     ctx.bindAgent(parent);
-    ctx.fire("agent/session-start", { agent: parent, source: "startup" });
+    // Ticket 19: capture is explicit — no session-start listener fires.
+    assert.deepEqual(lifecycle.activate(parent), { ok: true });
 
     assert.equal(lifecycle.dispatcherSessionId(), "disp-1");
     assert.equal(host.hasParent(), true);
@@ -464,10 +465,10 @@ describe("bindDispatcherLifecycle", () => {
     const ctx = createStubCtx();
     const host = createCordisDshHost(ctx);
     const multitask = createMultitask(host);
-    bindDispatcherLifecycle(ctx, host, multitask);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
 
     const parent = createAgent("disp-1");
-    ctx.fire("agent/session-start", { agent: parent, source: "startup" });
+    assert.deepEqual(lifecycle.activate(parent), { ok: true });
 
     const spawn = await multitask.spawnWorker({
       parentSessionId: "disp-1",
@@ -500,10 +501,10 @@ describe("bindDispatcherLifecycle", () => {
     const ctx = createStubCtx();
     const host = createCordisDshHost(ctx);
     const multitask = createMultitask(host);
-    bindDispatcherLifecycle(ctx, host, multitask);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
 
     const parent = createAgent("disp-1");
-    ctx.fire("agent/session-start", { agent: parent, source: "startup" });
+    assert.deepEqual(lifecycle.activate(parent), { ok: true });
 
     const spawn = await multitask.spawnWorker({
       parentSessionId: "disp-1",
@@ -544,14 +545,20 @@ describe("bindDispatcherLifecycle", () => {
     assert.equal(wake.settledWorkers[0]?.resultText, "ok");
   });
 
-  it("unbind removes listeners", async () => {
+  it("unbind removes listeners and refuses later activation", async () => {
     const ctx = createStubCtx();
     const host = createCordisDshHost(ctx);
     const multitask = createMultitask(host);
     const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
     lifecycle.unbind();
     const parent = createAgent("disp-1");
+    // Ticket 19: no session-start capture exists; an unbound lifecycle
+    // refuses activation instead of re-binding.
     ctx.fire("agent/session-start", { agent: parent, source: "startup" });
+    assert.deepEqual(lifecycle.activate(parent), {
+      ok: false,
+      reason: "unbound",
+    });
     assert.equal(host.hasParent(), false);
   });
 });

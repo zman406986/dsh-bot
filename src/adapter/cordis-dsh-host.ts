@@ -73,6 +73,41 @@ export interface ToolsLike {
 }
 
 /**
+ * Structural host slash-command invocation (ticket 19). The handler runs
+ * instead of sending the line to the model; the result is user-visible copy.
+ */
+export interface CommandInvocationLike {
+  readonly commandId: string;
+  /** The live agent (chat) the command was invoked in. */
+  readonly agent: AgentLike;
+  readonly rawInput?: string;
+}
+
+/** User-visible command outcome. */
+export interface CommandResultLike {
+  readonly kind: "success" | "error";
+  readonly text?: string;
+}
+
+/** Structural command definition (mirrors dsh CommandRegistry.register). */
+export interface CommandDefinitionLike {
+  /** Globally unique, fail-loud on collision. */
+  readonly name: string;
+  readonly description: string;
+  readonly handler: (
+    invocation: CommandInvocationLike,
+  ) => CommandResultLike | Promise<CommandResultLike>;
+}
+
+/**
+ * Structural view of `ctx.commands` for plugin-owned human slash commands.
+ * `register` returns the exact disposer. Optional for stub contexts.
+ */
+export interface CommandsLike {
+  register(definition: CommandDefinitionLike): () => void;
+}
+
+/**
  * Structural Cordis context surface the adapter needs.
  * Narrow local interface — prefer this over importing full Cordis types.
  */
@@ -82,6 +117,11 @@ export interface AdapterContext {
    * plugin injects `tools` so the deny-list can intersect real names.
    */
   tools?: ToolsLike;
+  /**
+   * Host slash-command registry. Optional so stub contexts stay minimal;
+   * the live plugin injects `commands` so activation can register.
+   */
+  commands?: CommandsLike;
   subagents: {
     startContinuable(spec: ContinuableStartSpecLike): Promise<ContinuableStartLike>;
     interrupt(targetSessionId: unknown, authority: unknown): void;
@@ -120,7 +160,7 @@ export interface CordisDshHostOptions {
  * Core stays pure; this is the only place that knows subagents/agents/jobs.
  */
 export interface CordisDshHost extends DshHost {
-  /** Bind the exact live dispatcher Agent captured on session-start. */
+  /** Bind the exact live dispatcher Agent (explicit activation, ticket 19). */
   bindParent(agent: AgentLike, sessionId: string): void;
   /** Clear the parent Agent (dispose / replace). */
   unbindParent(): void;
@@ -335,7 +375,7 @@ export function createCordisDshHost(
     async spawnWorker(prompt: string, opts: SpawnOptions): Promise<string> {
       if (parent === null) {
         throw new Error(
-          "CordisDshHost: no parent agent bound; cannot spawn before agent/session-start",
+          "CordisDshHost: no parent agent bound; cannot spawn before dispatcher activation",
         );
       }
       const controller = new AbortController();

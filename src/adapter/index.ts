@@ -7,10 +7,25 @@ export {
 } from "./content-blocks.js";
 export {
   registerDispatcherTools,
+  resolveExecSessionId,
   toRegisterableTool,
   type RegisterDispatcherToolsOptions,
   type RegisterableTool,
 } from "./dispatcher-tools.js";
+export {
+  activationResultCopy,
+  createDispatcherStartCommand,
+  DISPATCHER_START_ALREADY_ELSEWHERE,
+  DISPATCHER_START_ALREADY_HERE,
+  DISPATCHER_START_COMMAND,
+  DISPATCHER_START_DESCRIPTION,
+  DISPATCHER_START_NOT_TOP_LEVEL,
+  DISPATCHER_START_SUCCESS,
+  DISPATCHER_START_UNRESOLVED,
+  DISPATCHER_TOOL_GATE_REFUSAL,
+  registerDispatcherStartCommand,
+  type RegisterDispatcherStartCommandOptions,
+} from "./activation-command.js";
 export {
   createStorageDomainDurability,
   markerDomainSpec,
@@ -30,6 +45,10 @@ export {
   SPAWN_PROVIDER,
   type AdapterContext,
   type AgentLike,
+  type CommandDefinitionLike,
+  type CommandInvocationLike,
+  type CommandResultLike,
+  type CommandsLike,
   type ContinuableStartLike,
   type ContinuableStartSpecLike,
   type CordisDshHost,
@@ -41,6 +60,7 @@ export {
 export {
   bindDispatcherLifecycle,
   isTopLevel,
+  type ActivationOutcome,
   type BindDispatcherLifecycleOptions,
   type BindDispatcherLifecycleResult,
 } from "./parent-agent.js";
