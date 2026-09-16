@@ -37,14 +37,14 @@ Suggested phasing (order, not scope commitment):
 - [x] Create the dedicated worktree + branch; document the workflow (what may live in the worktree vs main, merge/LQA procedure) so parallel agents don't cross wires.
 
 **Phase 1 — Reference behavior inventory (cited note per `docs/agents/research.md`; abstract concepts only)**
-- [ ] Walk the reference reconstruction and produce a concept-level behavior inventory of the always-on dispatcher: activation/lifecycle, roster presentation, worker output streaming, steer interaction, todo/milestone surfaces, permission/secret approval flows, stop/interrupt semantics, notification behavior, whatever else surfaces.
-- [ ] For each behavior, note: what the user sees/does, when it appears, how it composes with the host chat, and a PRD cross-reference (S1–S9) or PRD-gap flag.
-- [ ] Cross-reference with #16's verified dsh seams: for each reference behavior, which dsh seam can host it, and where dsh simply cannot reproduce it (record honestly rather than spec a fantasy).
+- [x] Walk the reference reconstruction and produce a concept-level behavior inventory of the always-on dispatcher: activation/lifecycle, roster presentation, worker output streaming, steer interaction, todo/milestone surfaces, permission/secret approval flows, stop/interrupt semantics, notification behavior, whatever else surfaces.
+- [x] For each behavior, note: what the user sees/does, when it appears, how it composes with the host chat, and a PRD cross-reference (S1–S9) or PRD-gap flag.
+- [x] Cross-reference with #16's verified dsh seams: for each reference behavior, which dsh seam can host it, and where dsh simply cannot reproduce it (record honestly rather than spec a fantasy).
 
 **Phase 2 — Design/spec**
-- [ ] Design doc (`.scratch/<slug>/design-17-*.md`, format of design-09…design-14): the always-on model mapped onto dsh via #16's activation/toggle decision, per-surface design answers, namespacing/coexistence rules, new copy only.
-- [ ] Think like an expert software engineer weighing real UX feedback: an always-on dispatcher that can be toggled has a "what does the user come back to" problem — design the dormant/active transitions, default state, and how the toggle composes with the ticket-12 feature flag/profile split.
-- [ ] Decide the ticket split; create follow-up tickets with blocking edges.
+- [x] Design doc (`.scratch/<slug>/design-17-*.md`, format of design-09…design-14): the always-on model mapped onto dsh via #16's activation/toggle decision, per-surface design answers, namespacing/coexistence rules, new copy only.
+- [x] Think like an expert software engineer weighing real UX feedback: an always-on dispatcher that can be toggled has a "what does the user come back to" problem — design the dormant/active transitions, default state, and how the toggle composes with the ticket-12 feature flag/profile split.
+- [x] Decide the ticket split; create follow-up tickets with blocking edges.
 
 **Phase 3 — Implementation** via the split tickets, on the worktree branch, merge-gated by clean-room QA (identifier grep + provenance diff review) and offline tests (S8: core unit tests run without network/LLM).
 
@@ -59,3 +59,17 @@ Suggested phasing (order, not scope commitment):
 ## Comments
 
 2026-09-17 — Phase 0 done (agent team). Dedicated worktree created off main @ `b00d355`: `C:\Users\TZhen\Desktop\dsh-bot-always-on` on branch `clone/always-on-dispatcher` (sibling directory, never inside the repo or the reference folder). Worktree verified self-sufficient offline: `npm ci` clean, `npm test` → 514 pass / 0 fail (146 suites), `npm run typecheck` clean. Workflow doc for parallel agent teams written at `.scratch/clone-always-on/worktree-workflow.md` (layout, what lives in worktree vs main, merge/LQA gates, hard legal rules, one-implementation-at-a-time etiquette). Doc + this ticket's Phase-0 tick delivered in one commit: `c571896`.
+
+2026-09-17 — Phase 1 done (agent team). Behavior inventory published at `docs/research/always-on-dispatcher-behavior.md` (commit `e389325`): concept-level walk of activation/lifecycle, roster presence, streaming surfaces, steer/send-journal, todo/milestone absences, approval flows, stop semantics, notifications, adjacent surfaces — each mapped to verified #16 seams with honest gaps, plus a 9-item PRD conflicts/gaps decision list. Verification PASS: the inventory note passed the case-insensitive clean-room grep over the reconstruction codenames (PRD §8/§17) before commit and a separate contamination-free audit confirmed no reference-tree artifacts (paths, identifiers, strings) appear in the note. The reference tree was read only during the dedicated observation pass; product code was not open in that session.
+
+2026-09-17 — Phase 2 done (agent team). Design doc committed on the clone branch: `.scratch/clone-always-on/design-17-always-on-dispatcher.md` (worktree `C:\Users\TZhen\Desktop\dsh-bot-always-on`, branch `clone/always-on-dispatcher`, commit `9c35bf8`). Contents: always-on model reconciled with #16's activation gate (ADR-0009 kept; activated experience carries the reference feel; presence layers collapsed deliberately), per-surface answers for all nine inventory behavior areas with seams + honest gaps, all 9 PRD conflicts/gaps resolved with PRD-first defaults + documented alternatives + `revisit-before-merge` markers, clean-room en/zh copy drafts, ADR plan (ADR-0010/0011/0012), risks/live-verification handovers. Notable evidence find: `Multitask.rebuildFromDurability` has no production caller — rebuild-on-activation + honest unknown-state notice is ticket 31's core item. Ticket split (filed on MAIN, all **Status:** open):
+
+- **#27 — Presence enrichment: snapshot v2, status dots/ring, blocked-with-reason, landed marker, activity lines** (blocked by: none)
+- **#28 — Running-tasks panel: Active / Needs-you / Finished sections** (blocked by 27)
+- **#29 — Streaming presentation: live-activity verification handover + toolview/wake polish** (blocked by: none to start)
+- **#30 — Approval prompt UX: location line, clamped detail, session always-allow, expired/secret copy** (blocked by: none)
+- **#31 — Conversational stop semantics + restart honesty (rebuild-on-activation, unknown-state notice)** (blocked by: none)
+- **#32 — Dormant/activated composition polish: copy, locale, surfaces README, prompt review** (blocked by 27, 28, 30, 31)
+- **#33 — Close-out: clean-room LQA gate + full-diff provenance review + merge to main** (blocked by 27–32)
+
+Phase 3 (implementation) proceeds via those tickets, one-at-a-time in the worktree, merge-gated per the workflow doc.
