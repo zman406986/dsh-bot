@@ -19,6 +19,13 @@ import {
   buildWorkerToolFilter,
   WORKER_DENIED_TOOL_CANDIDATES,
 } from "../src/worker/tool-barrier.js";
+import {
+  CHECK_WORKERS_TOOL,
+  DELIVER_RESULT_TOOL,
+  SPAWN_WORKER_TOOL,
+  STEER_WORKER_TOOL,
+  STOP_WORKER_TOOL,
+} from "../src/core/policy/prompts.js";
 
 const FORBIDDEN_VOCAB = [
   "sand",
@@ -62,7 +69,7 @@ describe("worker tool barrier", () => {
     assert.deepEqual(Object.keys(filter), ["deny"]);
   });
 
-  it("covers user, peer, spawn, job, and todo categories", () => {
+  it("covers user, peer, spawn, job, todo, and dispatcher categories", () => {
     const names = new Set(WORKER_DENIED_TOOL_CANDIDATES);
     for (const required of [
       "present",
@@ -75,9 +82,33 @@ describe("worker tool barrier", () => {
       "job_output",
       "job_kill",
       "todo_write",
+      "spawn_worker",
+      "check_workers",
+      "steer_worker",
+      "stop_worker",
+      "deliver_result",
     ]) {
       assert.ok(names.has(required), `missing deny candidate: ${required}`);
     }
+  });
+
+  it("denies the five registered dispatcher tools on the spawned worker filter", () => {
+    const dispatcherTools = [
+      SPAWN_WORKER_TOOL,
+      CHECK_WORKERS_TOOL,
+      STEER_WORKER_TOOL,
+      STOP_WORKER_TOOL,
+      DELIVER_RESULT_TOOL,
+    ];
+    const known = new Set([...dispatcherTools, "bash"]);
+    const filter = createWorkerAgentDef().resolveToolFilter(known);
+    for (const name of dispatcherTools) {
+      assert.ok(
+        filter.deny.includes(name),
+        `worker can still resolve dispatcher tool: ${name}`,
+      );
+    }
+    assert.ok(!filter.deny.includes("bash"));
   });
 });
 

@@ -9,7 +9,7 @@
 /**
  * Candidate names denied on every worker spawn.
  * Categories: user messaging, peer/agent messaging, spawn/nested agents,
- * worker-management/jobs, todo ledger.
+ * worker-management/jobs, todo ledger, dispatcher tool surface.
  */
 export const WORKER_DENIED_TOOL_CANDIDATES: readonly string[] = [
   // User messaging / delivery
@@ -27,6 +27,12 @@ export const WORKER_DENIED_TOOL_CANDIDATES: readonly string[] = [
   "job_kill",
   // Todo ledger
   "todo_write",
+  // Dispatcher tool surface
+  "spawn_worker",
+  "check_workers",
+  "steer_worker",
+  "stop_worker",
+  "deliver_result",
 ] as const;
 
 /** Host-agnostic restriction shape (mirrors dsh ToolRestriction.deny). */
