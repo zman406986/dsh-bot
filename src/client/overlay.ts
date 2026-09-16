@@ -75,10 +75,14 @@ export interface LocaleDictionary {
 }
 
 /**
- * Roster panel copy (clean-room, design-16 §6): title, empty state, and the
- * honest stale/unavailable state. Status labels are NOT localized — the core
- * FSM vocabulary (`spawned`/`running`/`steering`/`completed`/`error`/
- * `aborted`) renders verbatim, as-is.
+ * Roster panel copy (clean-room, design-16 §6 + design-17 §7): title, empty
+ * state, the loading and honest stale/unavailable states, and the ticket-27
+ * presence phrases — blocked-with-reason per access class (the panel
+ * composes the localized phrase from the structured wire fields; the target
+ * is a name, never a secret value), the landed-undelivered marker, and the
+ * derived activity-line tool-call count. Status labels are NOT localized —
+ * the core FSM vocabulary (`spawned`/`running`/`steering`/`completed`/
+ * `error`/`aborted`) renders verbatim, as-is.
  *
  * Ticket 24 adds the per-tool call view copy: field labels for the compact
  * detail rows and the degraded-row fallback. Outcome values and check-row
@@ -89,6 +93,17 @@ export const localeDictionary: LocaleDictionary = {
     "roster.title": "Workers",
     "roster.empty": "No workers yet. Ask the dispatcher to start some.",
     "roster.unavailable": "Worker status is unavailable right now.",
+    "roster.loading": "Loading worker status…",
+    "roster.blocked.tool": 'Waiting for your approval: use the tool "{target}"',
+    "roster.blocked.credential":
+      'Waiting for your approval: use the credential "{target}"',
+    "roster.blocked.network":
+      'Waiting for your approval: network access to "{target}"',
+    "roster.blocked.filesystem":
+      'Waiting for your approval: file access to "{target}"',
+    "roster.blocked.other": "Waiting for your approval: {target}",
+    "roster.landed": "Result ready — not delivered yet",
+    "roster.activity.toolcalls": "{count} tool calls",
     "toolview.degraded": "Tool call details are unavailable.",
     "toolview.field.worker": "Worker",
     "toolview.field.title": "Title",
@@ -103,6 +118,14 @@ export const localeDictionary: LocaleDictionary = {
     "roster.title": "工作者",
     "roster.empty": "还没有工作者。让调度器启动一些吧。",
     "roster.unavailable": "工作者状态暂时不可用。",
+    "roster.loading": "正在加载工作者状态…",
+    "roster.blocked.tool": "等待你的批准：使用工具“{target}”",
+    "roster.blocked.credential": "等待你的批准：使用凭据“{target}”",
+    "roster.blocked.network": "等待你的批准：访问网络“{target}”",
+    "roster.blocked.filesystem": "等待你的批准：访问文件“{target}”",
+    "roster.blocked.other": "等待你的批准：{target}",
+    "roster.landed": "结果已就绪，尚未送达",
+    "roster.activity.toolcalls": "{count} 次工具调用",
     "toolview.degraded": "工具调用详情不可用。",
     "toolview.field.worker": "工作者",
     "toolview.field.title": "标题",

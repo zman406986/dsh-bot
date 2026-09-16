@@ -244,20 +244,22 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   });
   multitaskRef = multitask;
 
-  // Roster snapshot projection (ticket 21). Pure projection of the core
-  // roster — never a second source of truth. The core observer fires on
-  // every roster-affecting transition, gated to the activated dispatcher
-  // session; before activation nothing is published (no dispatcher roster
-  // exists). On deactivation publishing simply stops: the snapshot ages past
-  // the stale window and the panel degrades to "unavailable" copy (design-16
-  // §3.6 — the panel shows state only while a live session exists).
+  // Roster snapshot projection (tickets 21 + 27). Pure projection of the
+  // core roster — never a second source of truth. The core observer fires on
+  // every roster-affecting transition (including access-ask park/resolve and
+  // todo delivery), gated to the activated dispatcher session; before
+  // activation nothing is published (no dispatcher roster exists). On
+  // deactivation publishing simply stops: the snapshot ages past the stale
+  // window and the panel degrades to "unavailable" copy (design-16 §3.6 —
+  // the panel shows state only while a live session exists). The v2
+  // presence fields join existing core truth at publish time: pending
+  // access asks (blocked, names only) and the ledger's delivered state.
   const publishRosterSnapshot = (sessionId: string): void => {
     rosterChannel.publish(
-      projectRosterSnapshot(
-        sessionId,
-        multitask.listWorkers(sessionId),
-        Date.now(),
-      ),
+      projectRosterSnapshot(sessionId, multitask.listWorkers(sessionId), Date.now(), {
+        pendingAccess: multitask.listPendingAccess(sessionId),
+        todos: multitask.listTodos(sessionId),
+      }),
     );
   };
 

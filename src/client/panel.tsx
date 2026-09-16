@@ -1,23 +1,36 @@
 /**
- * Roster/status panel (ticket 21), replacing ticket 20's hello placeholder.
+ * Roster/status panel (tickets 21 + 27), replacing ticket 20's hello
+ * placeholder.
  *
  * Presentation only: the panel never spawns, steers, or stops anything — all
  * authority stays with the bound parent agent via the core (design-16 §3.4).
- * It renders the store's view model: title, one row per worker (title, verbatim
- * core FSM status label, todo link when present), the design-16 §6 empty
- * state, or the honest "unavailable" state — never a spinner that hangs.
+ * It renders the store's view model: title, one row per worker carrying the
+ * design-17 §4.1 presence picture (status dot, animated ring only while
+ * running/steering, blocked-with-reason chip, landed marker, derived
+ * activity line, muted ledger linkage), the empty state, the loading state,
+ * or the honest "unavailable" state — never a spinner that hangs.
  *
  * The component is a zero-prop function component created through a factory so
  * the translate seat and the data store are captured at registration time;
  * slot entries may be handed renderer-controlled props, which this panel
  * deliberately ignores. Rendering itself is covered by build + typecheck only
  * (S8: no DOM harness); the view model is asserted purely in tests.
+ *
+ * Styles ship as a plain string rendered into a <style> element by the
+ * component itself: every class and keyframe name is `multitask-dispatcher-`
+ * prefixed (no shipped kit classes, no build-toolchain change), the only
+ * animation is the running ring, and it turns off under
+ * `prefers-reduced-motion`. The element mounts and unmounts with the panel,
+ * so an HMR fiber swap removes it with everything else.
  */
 import { useEffect, useSyncExternalStore } from "react";
 import type { JSX } from "react";
 import {
   ROSTER_STALE_RECHECK_MS,
   describeRosterPanel,
+  formatTemplate,
+  rosterBlockedKey,
+  type RosterRowView,
   type RosterStore,
 } from "./roster-store.js";
 
@@ -27,6 +40,61 @@ import type { TranslateFn } from "./overlay.js";
 
 /** Class prefix — ours, namespaced, no shipped kit classes. */
 const PANEL_CLASS = "multitask-dispatcher-roster-panel";
+
+/**
+ * Panel styles (ticket 27). Presentation only — no layout promises beyond
+ * this panel's own subtree; colors are self-contained so no theme contract
+ * is assumed.
+ */
+export const ROSTER_PANEL_CSS = `
+.multitask-dispatcher-roster-panel{font-size:12px;line-height:1.5;min-width:0}
+.multitask-dispatcher-roster-panel__title{font-weight:600;margin-bottom:6px}
+.multitask-dispatcher-roster-panel__unavailable,
+.multitask-dispatcher-roster-panel__empty,
+.multitask-dispatcher-roster-panel__loading{opacity:.7}
+.multitask-dispatcher-roster-panel__list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
+.multitask-dispatcher-roster-panel__row{display:flex;align-items:flex-start;gap:8px;min-width:0}
+.multitask-dispatcher-roster-panel__row[data-finished="true"] .multitask-dispatcher-roster-panel__row-title,
+.multitask-dispatcher-roster-panel__row[data-finished="true"] .multitask-dispatcher-roster-panel__row-status{opacity:.6}
+.multitask-dispatcher-roster-panel__dot{flex:none;position:relative;width:8px;height:8px;margin-top:4px;border-radius:50%;background:#8b949e}
+.multitask-dispatcher-roster-panel__dot[data-visual="working"]{background:#2f81f7}
+.multitask-dispatcher-roster-panel__dot[data-visual="starting"]{background:#d29922}
+.multitask-dispatcher-roster-panel__dot[data-visual="done"]{background:#2ea043}
+.multitask-dispatcher-roster-panel__dot[data-visual="failed"]{background:#f85149}
+.multitask-dispatcher-roster-panel__dot[data-visual="stopped"]{background:#8b949e}
+.multitask-dispatcher-roster-panel__dot[data-visual="working"]::after{content:"";position:absolute;inset:-3px;border-radius:50%;border:2px solid rgba(47,129,247,.55);animation:multitask-dispatcher-roster-ring 1.6s ease-out infinite}
+@keyframes multitask-dispatcher-roster-ring{0%{transform:scale(.6);opacity:.9}100%{transform:scale(1.5);opacity:0}}
+@media (prefers-reduced-motion: reduce){.multitask-dispatcher-roster-panel__dot[data-visual="working"]::after{animation:none;transform:none;opacity:.35}}
+.multitask-dispatcher-roster-panel__row-body{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+.multitask-dispatcher-roster-panel__row-title{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.multitask-dispatcher-roster-panel__row-status{opacity:.75}
+.multitask-dispatcher-roster-panel__row-activity{opacity:.55}
+.multitask-dispatcher-roster-panel__row-todo{opacity:.45;font-size:11px;max-width:16ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.multitask-dispatcher-roster-panel__row-marker{align-self:flex-start;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 6px;border-radius:8px;border:1px solid currentColor}
+.multitask-dispatcher-roster-panel__row-marker--blocked{color:#d29922}
+.multitask-dispatcher-roster-panel__row-marker--landed{color:#2ea043}
+`;
+
+/** Localize the blocked waiting phrase from the structured class+target. */
+function blockedPhrase(t: TranslateFn, row: RosterRowView): string {
+  const blocked = row.blocked;
+  if (blocked === null) return "";
+  const template = t(rosterBlockedKey(blocked.class));
+  // Unknown template (copy drift) falls back to the generic class phrase.
+  const safe =
+    template === rosterBlockedKey(blocked.class)
+      ? t("roster.blocked.other")
+      : template;
+  return formatTemplate(safe, { target: blocked.target });
+}
+
+/** The activity line: `{status} · {elapsed} · {n} tool calls`. */
+function activityLine(t: TranslateFn, row: RosterRowView): string {
+  const toolCalls = formatTemplate(t("roster.activity.toolcalls"), {
+    count: String(row.toolCallCount),
+  });
+  return `${row.statusLabel} · ${row.elapsedText} · ${toolCalls}`;
+}
 
 /** Create the roster panel component bound to a translate seat and store. */
 export function createRosterPanel(
@@ -47,11 +115,14 @@ export function createRosterPanel(
 
     return (
       <div className={PANEL_CLASS}>
+        <style>{ROSTER_PANEL_CSS}</style>
         <div className={`${PANEL_CLASS}__title`}>{t("roster.title")}</div>
         {view.kind === "unavailable" ? (
           <div className={`${PANEL_CLASS}__unavailable`}>
             {t("roster.unavailable")}
           </div>
+        ) : view.kind === "loading" ? (
+          <div className={`${PANEL_CLASS}__loading`}>{t("roster.loading")}</div>
         ) : view.kind === "empty" ? (
           <div className={`${PANEL_CLASS}__empty`}>{t("roster.empty")}</div>
         ) : (
@@ -61,16 +132,45 @@ export function createRosterPanel(
                 key={row.workerId}
                 className={`${PANEL_CLASS}__row`}
                 data-status={row.statusLabel}
+                data-visual={row.visual}
+                data-marker={row.marker?.kind ?? ""}
+                data-finished={row.finished ? "true" : "false"}
               >
-                <span className={`${PANEL_CLASS}__row-title`}>{row.title}</span>
-                <span className={`${PANEL_CLASS}__row-status`}>
-                  {row.statusLabel}
-                </span>
-                {row.todoId !== null ? (
-                  <span className={`${PANEL_CLASS}__row-todo`}>
-                    {row.todoId}
+                {/* Status dot / running ring: `data-status` keys the verbatim
+                    core vocabulary; the ring animates only for working rows. */}
+                <span
+                  className={`${PANEL_CLASS}__dot`}
+                  data-status={row.statusLabel}
+                  data-visual={row.visual}
+                  aria-hidden="true"
+                />
+                <span className={`${PANEL_CLASS}__row-body`}>
+                  <span className={`${PANEL_CLASS}__row-title`}>{row.title}</span>
+                  {row.marker?.kind === "blocked" ? (
+                    <span
+                      className={`${PANEL_CLASS}__row-marker ${PANEL_CLASS}__row-marker--blocked`}
+                    >
+                      {blockedPhrase(t, row)}
+                    </span>
+                  ) : row.marker?.kind === "landed" ? (
+                    <span
+                      className={`${PANEL_CLASS}__row-marker ${PANEL_CLASS}__row-marker--landed`}
+                    >
+                      {t("roster.landed")}
+                    </span>
+                  ) : null}
+                  <span className={`${PANEL_CLASS}__row-status`}>
+                    {row.statusLabel}
                   </span>
-                ) : null}
+                  <span className={`${PANEL_CLASS}__row-activity`}>
+                    {activityLine(t, row)}
+                  </span>
+                  {row.todoId !== null ? (
+                    <span className={`${PANEL_CLASS}__row-todo`}>
+                      {row.todoId}
+                    </span>
+                  ) : null}
+                </span>
               </li>
             ))}
           </ul>
