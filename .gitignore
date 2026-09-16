@@ -5,6 +5,11 @@ AGENTS.md
 .opencode/goals/
 .opencode/package-lock.json
 .opencode/package.json
+opencode.json
+
+# Local launch logs and ad-hoc skill seeds
+.scratch/*.log
+.scratch/matt-skills-seed/
 
 # Build and dependencies
 node_modules/

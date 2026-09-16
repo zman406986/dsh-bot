@@ -5,6 +5,10 @@ import type { AdapterContext } from "../src/adapter/cordis-dsh-host.js";
 
 function createStubCtx(): AdapterContext & {
   effect: (dispose: () => void) => void;
+  inject: (
+    services: readonly string[],
+    callback: (child: Record<string, never>) => void,
+  ) => void;
   disposers: Array<() => void>;
   listeners: Map<string, Array<(payload: never) => void>>;
 } {
@@ -18,6 +22,8 @@ function createStubCtx(): AdapterContext & {
     effect(dispose: () => void) {
       disposers.push(dispose);
     },
+    // No settings service in this stub — Cordis-style optional inject no-ops.
+    inject() {},
     on(name: string, cb: (payload: never) => void) {
       const list = listeners.get(name) ?? [];
       list.push(cb);

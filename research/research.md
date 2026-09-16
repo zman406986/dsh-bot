@@ -2,11 +2,13 @@
 
 Where cited research findings live, so `/research` doesn't invent a new location on every run.
 
+This convention file itself lives at `research/research.md`. The findings stay under `docs/research/` (widely cited by ADRs, PRD, and design notes).
+
 ## Location
 
 `docs/research/<slug>.md` — one file per **question or topic**, not per run or per feature.
 
-The directory is created **lazily** by the first `/research` run. Don't pre-create it.
+The findings directory already exists. New notes go there; this `research/` folder holds the convention doc only.
 
 ## Naming
 

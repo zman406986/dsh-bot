@@ -35,6 +35,7 @@ export type {
   RegisterDispatcherToolsOptions,
   RegisterableTool,
   SettingsAwareContext,
+  SettingsInjectContext,
   SettingsProviderLike,
   SettingsSectionHooksLike,
   StorageDomainDurability,

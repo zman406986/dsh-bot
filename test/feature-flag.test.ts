@@ -34,6 +34,10 @@ function createStubCtx(options?: {
   withSettings?: boolean;
 }): AdapterContext & {
   effect: (dispose: () => void) => void;
+  inject: (
+    services: readonly string[],
+    callback: (child: { settings?: SettingsProviderLike }) => void,
+  ) => void;
   disposers: Array<() => void>;
   listeners: Map<string, Array<(payload: never) => void>>;
   settingsCalls: StubSettingsCall[];
@@ -53,6 +57,11 @@ function createStubCtx(options?: {
     registeredTools,
     effect(dispose: () => void) {
       disposers.push(dispose);
+    },
+    inject(services, callback) {
+      if (services.includes("settings") && ctx.settings !== undefined) {
+        callback(ctx);
+      }
     },
     on(name: string, cb: (payload: never) => void) {
       const list = listeners.get(name) ?? [];
@@ -261,6 +270,12 @@ describe("feature flag — settings section always installed", () => {
   it("installMultitaskSettingsSection uses the multitask-dispatcher namespace", () => {
     const calls: StubSettingsCall[] = [];
     const ctx = {
+      inject(
+        services: readonly string[],
+        callback: (child: { settings?: SettingsProviderLike }) => void,
+      ) {
+        if (services.includes("settings")) callback(ctx);
+      },
       settings: {
         installSection(
           _owner: unknown,

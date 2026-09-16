@@ -48,6 +48,7 @@ export {
   installMultitaskSettingsSection,
   SETTINGS_NAMESPACE,
   type SettingsAwareContext,
+  type SettingsInjectContext,
   type SettingsProviderLike,
   type SettingsSectionHooksLike,
 } from "./settings-section.js";

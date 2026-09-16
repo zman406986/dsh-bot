@@ -1,0 +1,233 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Reference Agent Runtime — Dispatcher & Worker Machinery",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "viewBox": [1200, 470],
+    "repository": {
+      "url": "https://github.com/b-nnett/grok-bot-0.18-reconstructed.git",
+      "revision": "a9f633e09d49a85829b8236331b9e21f7e612634"
+    },
+    "views": [
+      {
+        "id": "dispatchloop",
+        "label": "Dispatch loop",
+        "focus": ["transcriptmanager", "runscheduler", "subagentruntime", "completionrevivals"],
+        "note": "A turn enters the scheduler, a worker runs off-host, and its settle returns as a queued wake."
+      },
+      {
+        "id": "durablestate",
+        "label": "Durable state",
+        "focus": ["transcriptmanager", "sessionstore", "subagentruntime"],
+        "note": "The transcript and todo list persist; the worker registry and parked steers do not."
+      },
+      {
+        "id": "peersandbox",
+        "label": "Peers and sandbox",
+        "focus": ["agentmessaging", "sandboxbox", "subagentruntime"],
+        "note": "Peer traffic joins on its own lane; worker tool calls leave the host entirely."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "transcriptmanager",
+      "type": "backend",
+      "label": "Transcript Manager",
+      "sublabel": "session, routing, wakes",
+      "tag": "composition root",
+      "pos": [60, 110],
+      "size": [200, 68],
+      "sources": [{ "path": "source/host/extensions/transcript/transcript-manager.ts" }]
+    },
+    {
+      "id": "runscheduler",
+      "type": "backend",
+      "label": "Run Scheduler",
+      "sublabel": "one run per agent",
+      "tag": "user > peer > background",
+      "pos": [360, 110],
+      "size": [200, 68],
+      "sources": [{ "path": "source/host/extensions/transcript/run-scheduler.ts" }]
+    },
+    {
+      "id": "subagentruntime",
+      "type": "backend",
+      "label": "Subagent Runtime",
+      "sublabel": "spawn, steer, stop, settle",
+      "tag": "registry in memory",
+      "pos": [660, 110],
+      "size": [200, 68],
+      "sources": [
+        { "path": "source/host/runner/subagent-runtime.ts" },
+        { "path": "source/host/runner/background-work.ts" }
+      ]
+    },
+    {
+      "id": "completionrevivals",
+      "type": "backend",
+      "label": "Completion Revivals",
+      "sublabel": "settle becomes a wake",
+      "tag": "batched, silence allowed",
+      "pos": [960, 110],
+      "size": [200, 68],
+      "sources": [{ "path": "source/host/extensions/transcript/completion-revivals.ts" }]
+    },
+    {
+      "id": "sessionstore",
+      "type": "database",
+      "label": "Per-agent Session Store",
+      "sublabel": "transcript, todos, state",
+      "tag": "durable",
+      "pos": [60, 340],
+      "size": [200, 68],
+      "sources": [
+        { "path": "source/host/extensions/session/agent-db.ts" },
+        { "path": "source/packages/agent-kv/agent-store.ts" }
+      ]
+    },
+    {
+      "id": "agentmessaging",
+      "type": "backend",
+      "label": "Agent Messaging",
+      "sublabel": "peer directory, groups",
+      "tag": "dispatcher level",
+      "pos": [360, 340],
+      "size": [200, 68],
+      "sources": [
+        { "path": "source/host/agents/agent-messaging.ts" },
+        { "path": "source/host/extensions/transcript/agent-to-agent-messaging.ts" }
+      ]
+    },
+    {
+      "id": "sandboxbox",
+      "type": "cloud",
+      "label": "Execution Sandbox",
+      "sublabel": "remote box or local VM",
+      "tag": "off-host tools",
+      "pos": [660, 340],
+      "size": [200, 68],
+      "sources": [
+        { "path": "source/box-exec-daemon/main.ts" },
+        { "path": "source/local-exec-daemon/main.ts" }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Dispatch pipeline — one local host process",
+      "wraps": ["transcriptmanager", "runscheduler", "subagentruntime", "completionrevivals"]
+    },
+    {
+      "kind": "region",
+      "label": "Durable state and peer surfaces",
+      "wraps": ["sessionstore", "agentmessaging"]
+    },
+    {
+      "kind": "region",
+      "label": "Off-host execution",
+      "wraps": ["sandboxbox"]
+    }
+  ],
+  "connections": [
+    {
+      "id": "manager-to-scheduler",
+      "from": "transcriptmanager",
+      "to": "runscheduler",
+      "label": "lane priority",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "scheduler-to-subagent",
+      "from": "runscheduler",
+      "to": "subagentruntime",
+      "label": "start run",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "subagent-to-revivals",
+      "from": "subagentruntime",
+      "to": "completionrevivals",
+      "label": "settle result",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "revivals-to-manager",
+      "from": "completionrevivals",
+      "to": "transcriptmanager",
+      "label": "delivery wake",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "top",
+      "via": [[1060, 64], [160, 64]]
+    },
+    {
+      "id": "manager-to-sessionstore",
+      "from": "transcriptmanager",
+      "to": "sessionstore",
+      "label": "persists",
+      "labelAt": [104, 246],
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "manager-to-messaging",
+      "from": "transcriptmanager",
+      "to": "agentmessaging",
+      "label": "peer lane",
+      "labelAt": [404, 290],
+      "fromSide": "bottom",
+      "toSide": "left",
+      "via": [[160, 290], [310, 290], [310, 374]]
+    },
+    {
+      "id": "subagent-to-sandbox",
+      "from": "subagentruntime",
+      "to": "sandboxbox",
+      "label": "worker tool calls",
+      "labelAt": [830, 246],
+      "fromSide": "bottom",
+      "toSide": "top"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Dispatch loop",
+      "items": [
+        "One run per agent, ordered user > peer > background with FIFO inside a lane.",
+        "A settle queues a hidden, silence-allowed wake rather than interrupting mid-turn."
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Worker contract",
+      "items": [
+        "Only the dispatcher spawns; workers get work tools and cannot address the user.",
+        "Steer is single-slot and latest-wins; stop is silent and drops a late result."
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Durable vs in-memory",
+      "items": [
+        "Durable: the transcript, the todo list, and outstanding-work markers.",
+        "In-memory: worker registry, parked steers, queues. Nothing replays a restart."
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Peers and other wakes",
+      "items": [
+        "Peers exist only between top-level agents; a reply wakes the sender later.",
+        "Priority preempts non-user work only. Automations and listeners also wake."
+      ]
+    }
+  ]
+}

@@ -15,7 +15,7 @@ import {
   registerDispatcherTools,
   type AdapterContext,
   type CordisDshHost,
-  type SettingsAwareContext,
+  type SettingsInjectContext,
   type StorageDomainDurability,
 } from "./adapter/index.js";
 import { registerWorkerAccessTool } from "./adapter/worker-access-tool.js";
@@ -74,7 +74,7 @@ export interface PluginConfig {
  * contexts stay minimal; the live host injects it for the UI control.
  */
 type CordisContext = AdapterContext &
-  SettingsAwareContext & {
+  SettingsInjectContext & {
     effect: (dispose: () => void) => void;
   };
 
