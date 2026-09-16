@@ -83,7 +83,13 @@ function createStubCtx(): AdapterContext & {
 describe("plugin scaffold", () => {
   it("exports the Cordis plugin contract", () => {
     assert.equal(name, "multitask-dispatcher");
-    assert.deepEqual(inject, ["subagents", "agents", "jobs", "storageDomain"]);
+    assert.deepEqual(inject, [
+      "subagents",
+      "agents",
+      "jobs",
+      "storageDomain",
+      "tools",
+    ]);
     assert.ok(Config);
   });
 

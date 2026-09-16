@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   createCordisDshHost,
+  listGlobalToolNames,
   mapStopReason,
+  normalizeSettleReport,
   normalizeWorkerReport,
   SPAWN_PROVIDER,
   type AdapterContext,
@@ -12,6 +14,8 @@ import {
 import { bindDispatcherLifecycle, isTopLevel } from "../src/adapter/parent-agent.js";
 import { createMultitask } from "../src/core/multitask.js";
 import type { SettledEvent } from "../src/core/types.js";
+import { createWorkerAgentDef } from "../src/worker/agent-def.js";
+import { EMPTY_WORKER_REPORT_PLACEHOLDER } from "../src/worker/report.js";
 
 interface RecordedCall {
   [key: string]: unknown;
@@ -145,8 +149,9 @@ describe("stop reason and report mapping", () => {
       normalizeWorkerReport([{ type: "text", text: "Done." }]),
       "Done.",
     );
-    assert.equal(normalizeWorkerReport(undefined), "(worker finished without a closing message)");
-    assert.equal(normalizeWorkerReport([]), "(worker finished without a closing message)");
+    assert.equal(normalizeWorkerReport(undefined), EMPTY_WORKER_REPORT_PLACEHOLDER);
+    assert.equal(normalizeWorkerReport([]), EMPTY_WORKER_REPORT_PLACEHOLDER);
+    assert.equal(normalizeSettleReport("completed", undefined), EMPTY_WORKER_REPORT_PLACEHOLDER);
   });
 });
 
@@ -184,8 +189,70 @@ describe("CordisDshHost spawn / interrupt / send", () => {
     assert.equal(spec.request.prompt[0]?.type, "text");
     assert.equal((spec.request.prompt[0] as { text: string }).text, "Do the thing.");
     assert.equal(spec.request.maxDepth, 0);
-    // T09 omits toolFilter.
+    // T09 without a def omits toolFilter.
     assert.equal("toolFilter" in spec.request && spec.request.toolFilter, false);
+  });
+
+  it("spawn with WorkerAgentDef assembles system prompt and injects toolFilter", async () => {
+    const ctx = createStubCtx();
+    (ctx as { tools?: { schemas(): Array<{ name: string }> } }).tools = {
+      schemas() {
+        return [
+          { name: "bash" },
+          { name: "present" },
+          { name: "todo_write" },
+          { name: "subagent" },
+          { name: "web_search" },
+        ];
+      },
+    };
+    const host = createCordisDshHost(ctx, { workerAgentDef: createWorkerAgentDef() });
+    const parent = createAgent("disp-1");
+    host.bindParent(parent, "disp-1");
+
+    const workerId = await host.spawnWorker("Do the thing.", {
+      parentSessionId: "disp-1",
+      streamKey: "s1",
+      title: "Thing",
+    });
+
+    assert.equal(workerId, "child-1");
+    const spec = ctx.startContinuableCalls[0] as unknown as ContinuableStartSpecLike;
+    const text = (spec.request.prompt[0] as { text: string }).text;
+    assert.ok(text.includes("## Role"));
+    assert.ok(text.includes("Task:\nDo the thing."));
+    assert.equal(spec.request.maxDepth, 0);
+    const filter = spec.request.toolFilter as { deny: readonly string[] };
+    assert.ok(filter);
+    assert.deepEqual(
+      [...filter.deny].sort(),
+      ["present", "subagent", "todo_write"],
+    );
+  });
+
+  it("spawn omits toolFilter when intersection is empty (host rejects empty filters)", async () => {
+    const ctx = createStubCtx();
+    (ctx as { tools?: { schemas(): Array<{ name: string }> } }).tools = {
+      schemas() {
+        return [{ name: "bash" }, { name: "read" }];
+      },
+    };
+    const host = createCordisDshHost(ctx, { workerAgentDef: createWorkerAgentDef() });
+    const parent = createAgent("disp-1");
+    host.bindParent(parent, "disp-1");
+
+    await host.spawnWorker("x", {
+      parentSessionId: "disp-1",
+      streamKey: "s1",
+      title: "t",
+    });
+    const spec = ctx.startContinuableCalls[0] as unknown as ContinuableStartSpecLike;
+    assert.equal("toolFilter" in spec.request, false);
+  });
+
+  it("listGlobalToolNames is empty when tools service is absent", () => {
+    const ctx = createStubCtx();
+    assert.equal(listGlobalToolNames(ctx).size, 0);
   });
 
   it("spawn rejects when no parent is bound", async () => {
@@ -287,6 +354,36 @@ describe("CordisDshHost settle and step boundary", () => {
     assert.equal(events.length, 2);
     assert.equal(events[0]?.status, "error");
     assert.equal(events[1]?.status, "error");
+  });
+
+  it("empty completed settle uses the placeholder; error keeps message; abort invents nothing", async () => {
+    const { ctx, host } = await spawnOne();
+    const events: SettledEvent[] = [];
+    host.onWorkerSettled((e) => events.push(e));
+
+    ctx.fire("subagent/end", {
+      id: "child-1",
+      stopReason: "completed",
+      lastAssistantMessage: [],
+    });
+    assert.equal(events[0]?.report, EMPTY_WORKER_REPORT_PLACEHOLDER);
+
+    // Core drops late settles after abort; adapter still must not invent a report.
+    const abortHost = createCordisDshHost(ctx);
+    abortHost.bindParent(createAgent("disp-2"), "disp-2");
+    await abortHost.spawnWorker("x", {
+      parentSessionId: "disp-2",
+      streamKey: "s2",
+      title: "t2",
+    });
+    const abortEvents: SettledEvent[] = [];
+    abortHost.onWorkerSettled((e) => abortEvents.push(e));
+    ctx.fire("subagent/end", {
+      id: "child-2",
+      stopReason: "aborted",
+      lastAssistantMessage: undefined,
+    });
+    assert.equal(abortEvents[0]?.report, "");
   });
 
   it("ignores settle for unknown children", async () => {

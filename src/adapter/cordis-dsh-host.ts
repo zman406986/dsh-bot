@@ -1,9 +1,17 @@
 import type { DshHost } from "../core/dsh-host.js";
 import type { DurabilityPort } from "../core/durability.js";
 import type { SettledEvent, SpawnOptions, TerminalWorkerStatus } from "../core/types.js";
+import { assembleWorkerPrompt } from "../worker/prompt.js";
+import {
+  normalizeWorkerErrorReport,
+  normalizeWorkerReport as normalizeWorkerTextReport,
+} from "../worker/report.js";
+import type { WorkerAgentDef } from "../worker/agent-def.js";
 import { blocksToText, textBlocks, type ContentBlock } from "./content-blocks.js";
 import type { StorageDomainLike } from "./durable-marker.js";
 import { wakeUserMessage } from "./wake-copy.js";
+
+export type { WorkerAgentDef };
 
 /**
  * Structural Agent view — the live parent object dsh spawn/interrupt/send need.
@@ -51,10 +59,23 @@ export interface JobSnapshotLike {
 }
 
 /**
+ * Structural view of `ctx.tools` for listing global tool names at spawn.
+ * `schemas()` with no scope is the global registry view (name per tool).
+ */
+export interface ToolsLike {
+  schemas(scope?: unknown): ReadonlyArray<{ readonly name: string }>;
+}
+
+/**
  * Structural Cordis context surface the adapter needs.
  * Narrow local interface — prefer this over importing full Cordis types.
  */
 export interface AdapterContext {
+  /**
+   * Global tool registry. Optional so stub contexts stay minimal; live
+   * plugin injects `tools` so the deny-list can intersect real names.
+   */
+  tools?: ToolsLike;
   subagents: {
     startContinuable(spec: ContinuableStartSpecLike): Promise<ContinuableStartLike>;
     interrupt(targetSessionId: unknown, authority: unknown): void;
@@ -73,14 +94,6 @@ export interface AdapterContext {
   };
   storageDomain: StorageDomainLike;
   on(name: string, cb: (payload: never) => void): () => void;
-}
-
-/** Optional worker prompt/tool seam; T10 owns the real definition. */
-export interface WorkerAgentDef {
-  /** Assemble the worker prompt (system section + task). Identity by default. */
-  buildPrompt(prompt: string): string;
-  /** Tool filter for spawn. Omitted in T09; T10 injects the barrier. */
-  resolveToolFilter?(): unknown;
 }
 
 export interface CordisDshHostOptions {
@@ -136,13 +149,46 @@ export function mapStopReason(stopReason: string): TerminalWorkerStatus {
   }
 }
 
-/** Settle report: join text blocks; empty → short adapter-owned placeholder. */
+/**
+ * Settle report from host ContentBlocks: join text, then apply worker
+ * normalization (empty → placeholder; error passes message).
+ * Abort delivers no invented report — empty text stays empty.
+ */
+export function normalizeSettleReport(
+  status: TerminalWorkerStatus,
+  lastAssistantMessage: readonly ContentBlock[] | undefined,
+): string {
+  const text = blocksToText(lastAssistantMessage);
+  if (status === "aborted") {
+    // Abort must not invent a report; keep any real text, else empty.
+    return text.trim();
+  }
+  if (status === "error") {
+    return normalizeWorkerErrorReport(text);
+  }
+  return normalizeWorkerTextReport(text);
+}
+
+/**
+ * Back-compat ContentBlock wrapper: completed-style empty → placeholder.
+ * Prefer {@link normalizeSettleReport} when status is known.
+ */
 export function normalizeWorkerReport(
   lastAssistantMessage: readonly ContentBlock[] | undefined,
 ): string {
-  const text = blocksToText(lastAssistantMessage).trim();
-  if (text.length > 0) return text;
-  return "(worker finished without a closing message)";
+  return normalizeSettleReport("completed", lastAssistantMessage);
+}
+
+/** Live global tool names visible to the registry (empty when tools absent). */
+export function listGlobalToolNames(ctx: AdapterContext): ReadonlySet<string> {
+  const tools = ctx.tools;
+  if (tools === undefined) return new Set();
+  try {
+    const schemas = tools.schemas();
+    return new Set(schemas.map((schema) => schema.name));
+  } catch {
+    return new Set();
+  }
 }
 
 interface WorkerEntry {
@@ -177,10 +223,11 @@ export function createCordisDshHost(
     };
     const workerId = String(end.id);
     if (!workers.has(workerId)) return;
+    const status = mapStopReason(end.stopReason);
     const event: SettledEvent = {
       workerId,
-      status: mapStopReason(end.stopReason),
-      report: normalizeWorkerReport(end.lastAssistantMessage),
+      status,
+      report: normalizeSettleReport(status, end.lastAssistantMessage),
       transcriptRef: workerId,
     };
     for (const cb of [...settledCallbacks]) {
@@ -240,18 +287,28 @@ export function createCordisDshHost(
         );
       }
       const controller = new AbortController();
-      const assembled = workerAgentDef?.buildPrompt(prompt) ?? prompt;
-      const toolFilter = workerAgentDef?.resolveToolFilter?.();
+      // Blank context is free with the in-process spawn provider.
+      // Assemble self-contained worker prompt when a def is injected.
+      const assembled =
+        workerAgentDef === undefined
+          ? prompt
+          : assembleWorkerPrompt(workerAgentDef.systemPrompt, prompt);
+      // Re-resolve against live global names every spawn (no cache across HMR).
+      const toolFilter =
+        workerAgentDef === undefined
+          ? undefined
+          : workerAgentDef.resolveToolFilter(listGlobalToolNames(ctx));
+      const maxDepth = workerAgentDef?.maxDepth ?? 0;
       const request: ContinuableStartSpecLike["request"] = {
         prompt: textBlocks(assembled),
         parent,
         signal: controller.signal,
         // Leaf: never spawn descendants.
-        maxDepth: 0,
+        maxDepth,
       };
-      // T09 omits toolFilter entirely — T10 owns the barrier intersection rule.
-      if (toolFilter !== undefined) {
-        (request as { toolFilter?: unknown }).toolFilter = toolFilter;
+      // Host rejects empty filters and unknown names — omit when deny is empty.
+      if (toolFilter !== undefined && toolFilter.deny.length > 0) {
+        (request as { toolFilter?: unknown }).toolFilter = { deny: toolFilter.deny };
       }
       const started = await ctx.subagents.startContinuable({
         provider: SPAWN_PROVIDER,

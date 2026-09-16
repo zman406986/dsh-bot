@@ -17,7 +17,9 @@ export {
 } from "./durable-marker.js";
 export {
   createCordisDshHost,
+  listGlobalToolNames,
   mapStopReason,
+  normalizeSettleReport,
   normalizeWorkerReport,
   SPAWN_PROVIDER,
   type AdapterContext,
@@ -27,6 +29,7 @@ export {
   type CordisDshHost,
   type CordisDshHostOptions,
   type JobSnapshotLike,
+  type ToolsLike,
   type WorkerAgentDef,
 } from "./cordis-dsh-host.js";
 export {

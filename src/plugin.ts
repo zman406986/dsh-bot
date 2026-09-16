@@ -8,6 +8,7 @@ import {
   type CordisDshHost,
   type StorageDomainDurability,
 } from "./adapter/index.js";
+import { createWorkerAgentDef } from "./worker/agent-def.js";
 
 /**
  * Plugin config. Scaffold-level only — later tickets add real knobs.
@@ -24,12 +25,14 @@ export const name = "multitask-dispatcher";
  * - agents: live Agent registry (wake via followup)
  * - jobs: live job listing for the check surface
  * - storageDomain: durable worker markers (ADR-0006)
+ * - tools: global tool names for the worker deny-list intersection (T10)
  */
 export const inject: string[] = [
   "subagents",
   "agents",
   "jobs",
   "storageDomain",
+  "tools",
 ];
 
 export interface PluginConfig {
@@ -56,7 +59,11 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   const markers: StorageDomainDurability = createStorageDomainDurability(
     ctx.storageDomain,
   );
-  const host: CordisDshHost = createCordisDshHost(ctx, { markers });
+  // T10: real worker agent type — self-contained prompt + tool barrier + leaf depth.
+  const host: CordisDshHost = createCordisDshHost(ctx, {
+    markers,
+    workerAgentDef: createWorkerAgentDef(),
+  });
   const multitask: Multitask = createMultitask(host, { durability: markers });
 
   // Capture the live dispatcher Agent + bind session-id turn bounds to wakeBus.

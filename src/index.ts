@@ -6,8 +6,9 @@ export {
   createCordisDshHost,
   createStorageDomainDurability,
   isTopLevel,
+  listGlobalToolNames,
   mapStopReason,
-  normalizeWorkerReport,
+  normalizeSettleReport,
   SPAWN_PROVIDER,
   textBlock,
   textBlocks,
@@ -26,9 +27,23 @@ export type {
   StorageDomainDurability,
   StorageDomainLike,
   TextBlock,
+  ToolsLike,
   WakeUserMessage,
   WorkerAgentDef,
 } from "./adapter/index.js";
+export {
+  assembleWorkerPrompt,
+  buildWorkerSystemPrompt,
+  buildWorkerToolFilter,
+  createWorkerAgentDef,
+  EMPTY_WORKER_ERROR_REPORT,
+  EMPTY_WORKER_REPORT_PLACEHOLDER,
+  normalizeWorkerErrorReport,
+  normalizeWorkerReport,
+  WORKER_DENIED_TOOL_CANDIDATES,
+  WORKER_MAX_DEPTH,
+} from "./worker/index.js";
+export type { WorkerToolFilter } from "./worker/index.js";
 export type { DshHost } from "./core/dsh-host.js";
 export { FakeDshHost } from "./core/fake-host.js";
 export type { SendMessageCall, SpawnCall } from "./core/fake-host.js";
