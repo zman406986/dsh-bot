@@ -1,5 +1,5 @@
 /**
- * dsh client module entry (ticket 20).
+ * dsh client module entry (tickets 20 + 21).
  *
  * The host half of `@deepseek-ai/dsh-client-modules` scans this package's
  * `dsh.client` record, composes it into the boot graph, and serves
@@ -11,30 +11,46 @@
  * registers only through `ctx` services, so unload/HMR reverses everything
  * (Findings 1/2/5 lifecycle). `inject` names the client services the module
  * binds — the shipped idiom (e.g. dsh-client-ui-agent-preset exports
- * `inject: ["slots", "locale", ...]`).
+ * `inject: ["slots", "locale", ...]`). The settings service is deliberately
+ * NOT listed: it is optional, reached through the runtime `ctx.inject` idiom.
  *
- * The scaffold registers exactly two things, both benign (design-16 §5):
+ * What registers (design-16 §4.2/§5):
  * 1. the `multitask-dispatcher` locale namespace ({en, zh});
- * 2. one hello-world entry into the shipped `shell.overlay` list slot.
+ * 2. the data path: a watch on our settings namespace, where the host half
+ *    mirrors the roster snapshot under the `roster` key (the documented
+ *    config-channel fallback — no invented push channel);
+ * 3. the roster panel entry into the shipped `shell.overlay` list slot.
  */
 
 import type { ClientContext } from "./context.js";
 import {
-  helloOverlayRegistration,
   LOCALE_NAMESPACE,
   localeDictionary,
   SHELL_OVERLAY_SLOT,
+  rosterOverlayRegistration,
 } from "./overlay.js";
-import { createHelloPanel } from "./panel.js";
+import { createRosterPanel } from "./panel.js";
+import { createRosterStore, type RosterStore } from "./roster-store.js";
 
 /** Client services this module binds (vendored Cordis inject list). */
 export const inject: readonly string[] = ["slots", "locale"];
 
 /**
  * Browser plugin entry. Every registration is an effect on this module's
- * fiber, so an unload/HMR swap reverses the namespace and the slot entry.
+ * fiber, so an unload/HMR swap reverses the namespace, the settings watch,
+ * and the slot entry.
  */
 export function apply(ctx: ClientContext): void {
+  applyClientModule(ctx, createRosterStore());
+}
+
+/**
+ * The module body, factored over an explicit store so offline tests can
+ * drive the data path end to end (watch payload → store → view model)
+ * without a DOM harness. Not a second entry point: `apply` is the only
+ * thing the loader registers.
+ */
+export function applyClientModule(ctx: ClientContext, store: RosterStore): void {
   // Locale namespace (Finding 6 idiom): labeled effect; executes immediately,
   // the returned disposer is collected for unload.
   ctx.effect(
@@ -42,13 +58,38 @@ export function apply(ctx: ClientContext): void {
     "multitask-dispatcher: locale dictionaries",
   );
 
-  // Hello-world overlay entry (Finding 5 universal idiom): inject waits for
-  // the shipped `shell.overlay` declaration, then registers on OUR fiber —
+  // Roster data path (ticket 21, design-16 §4.2 honest gap): watch the
+  // plugin's settings namespace for the host-mirrored snapshot. The panel
+  // degrades to "unavailable" copy when the service is missing or the feed
+  // is stale — never against an unverified live push channel.
+  ctx.effect(() => {
+    let disposeWatch: (() => void) | undefined;
+    if (typeof ctx.inject !== "function") {
+      store.set({ kind: "channel-missing" });
+      return () => {};
+    }
+    ctx.inject(["settings"], (child) => {
+      const settings = child.settings;
+      if (settings === undefined) {
+        store.set({ kind: "channel-missing" });
+        return;
+      }
+      disposeWatch = settings.watch(LOCALE_NAMESPACE, (value) => {
+        store.applyChannelValue(value);
+      });
+    });
+    return () => {
+      if (disposeWatch !== undefined) disposeWatch();
+    };
+  }, "multitask-dispatcher: roster settings watch");
+
+  // Roster overlay entry (Finding 5 universal idiom): inject waits for the
+  // shipped `shell.overlay` declaration, then registers on OUR fiber —
   // the entry never outlives the module.
   ctx.slots.inject(SHELL_OVERLAY_SLOT, () => {
     ctx.slots.register(
-      helloOverlayRegistration(),
-      createHelloPanel(ctx.locale.bind(LOCALE_NAMESPACE)),
+      rosterOverlayRegistration(),
+      createRosterPanel(ctx.locale.bind(LOCALE_NAMESPACE), store),
     );
   });
 }

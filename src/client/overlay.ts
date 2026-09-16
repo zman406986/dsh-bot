@@ -1,5 +1,6 @@
 /**
- * Hello-world `shell.overlay` entry + locale namespace (ticket 20).
+ * Roster `shell.overlay` entry + locale namespace (ticket 21; scaffold from
+ * ticket 20).
  *
  * Pure registration data — no DOM, no React, no Cordis. Tests assert this
  * module directly (offline, S8).
@@ -8,27 +9,33 @@
  * - Slot `name`s are ONLY dsh-owned shipped slots; never invented, never
  *   `root`, and never the rejected-for-v1 surfaces `main`,
  *   `sidebar.right.pane.tab`, or `conversation.approval.detail`.
- * - Slot entry `id`s are `multitask-dispatcher-` prefixed.
+ * - Slot entry `id`s are `multitask-dispatcher-` prefixed and unique;
+ *   `shell.overlay` is an additive list slot (order-sorted, click-through
+ *   by default — Finding 5, `registry.d.ts:16-38`), so coexistence is by
+ *   unique id, not shadowing.
  * - The locale namespace is the plugin id, matching the settings namespace
  *   (`src/adapter/settings-section.ts`).
  *
- * All copy is original clean-room text (en drafts + zh translations written
- * for this repo; no reference material was consulted).
+ * All copy is original clean-room text (design-16 §6 drafts + zh
+ * translations written for this repo; no reference material was consulted).
  */
 
-/** dsh's documented home for free-floating plugin surfaces (list slot:
- * additive, order-sorted, click-through by default — Finding 5,
- * `registry.d.ts:16-38`). */
+/** dsh's documented home for free-floating plugin surfaces (list slot). */
 export const SHELL_OVERLAY_SLOT = "shell.overlay";
 
-/** Overlay entry id for the scaffold panel (`multitask-dispatcher-` prefix). */
-export const HELLO_ENTRY_ID = "multitask-dispatcher-hello";
+/**
+ * Overlay entry id for the roster panel (`multitask-dispatcher-` prefix).
+ * Replaces ticket 20's retired `multitask-dispatcher-hello` placeholder.
+ */
+export const ROSTER_ENTRY_ID = "multitask-dispatcher-roster";
 
 /**
- * Sort position within the additive overlay list. Low priority on purpose:
- * the scaffold is inert and the roster ticket (21) owns real ordering.
+ * Sort position within the additive overlay list. Low on purpose (design-16
+ * §4.2 "low order"): the roster is a quiet status surface, sorted early in
+ * the list ahead of higher-order entries, mirroring the shipped `-10`
+ * convention from dsh-client-ui-agent-preset's header action.
  */
-export const HELLO_OVERLAY_ORDER = 100;
+export const ROSTER_OVERLAY_ORDER = -10;
 
 /** Locale namespace = plugin id (Finding 6 / design-16 §5). */
 export const LOCALE_NAMESPACE = "multitask-dispatcher";
@@ -45,12 +52,12 @@ export interface SlotRegistrationOptions {
   readonly locale: string;
 }
 
-/** Build the hello-world `shell.overlay` registration options. */
-export function helloOverlayRegistration(): SlotRegistrationOptions {
+/** Build the roster panel's `shell.overlay` registration options. */
+export function rosterOverlayRegistration(): SlotRegistrationOptions {
   return {
     name: SHELL_OVERLAY_SLOT,
-    id: HELLO_ENTRY_ID,
-    order: HELLO_OVERLAY_ORDER,
+    id: ROSTER_ENTRY_ID,
+    order: ROSTER_OVERLAY_ORDER,
     locale: LOCALE_NAMESPACE,
   };
 }
@@ -58,21 +65,31 @@ export function helloOverlayRegistration(): SlotRegistrationOptions {
 /** One locale face: dotted copy keys mapped to strings. */
 export type LocaleFace = Readonly<Record<string, string>>;
 
+/** Bound translate seat (`ctx.locale.bind(namespace)`). */
+export type TranslateFn = (key: string) => string;
+
 /** `{en, zh}` dictionary shape accepted by `ctx.locale.register` (Finding 6). */
 export interface LocaleDictionary {
   readonly en: LocaleFace;
   readonly zh: LocaleFace;
 }
 
-/** Scaffold panel copy (clean-room; design-16 §6 style, v1 placeholder). */
+/**
+ * Roster panel copy (clean-room, design-16 §6): title, empty state, and the
+ * honest stale/unavailable state. Status labels are NOT localized — the core
+ * FSM vocabulary (`spawned`/`running`/`steering`/`completed`/`error`/
+ * `aborted`) renders verbatim, as-is.
+ */
 export const localeDictionary: LocaleDictionary = {
   en: {
-    "panel.title": "Dispatcher",
-    "panel.placeholder": "Panel scaffold — no live worker status yet.",
+    "roster.title": "Workers",
+    "roster.empty": "No workers yet. Ask the dispatcher to start some.",
+    "roster.unavailable": "Worker status is unavailable right now.",
   },
   zh: {
-    "panel.title": "调度器",
-    "panel.placeholder": "面板脚手架 — 暂无实时 worker 状态。",
+    "roster.title": "工作者",
+    "roster.empty": "还没有工作者。让调度器启动一些吧。",
+    "roster.unavailable": "工作者状态暂时不可用。",
   },
 };
 

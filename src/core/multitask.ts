@@ -76,6 +76,15 @@ export interface MultitaskOptions {
   readonly access?: MultitaskAccessOptions;
   /** Peer inbox knobs (ticket 14). */
   readonly peer?: PeerInboxOptions;
+  /**
+   * Roster-change observer (ticket 21). Fired after every roster-affecting
+   * mutation — spawn, accepted FSM transition (turn/steer/abort/settle),
+   * durability restore, and todo reconcile — with the affected parent
+   * session id. Fire-and-forget: observer errors are swallowed so telemetry
+   * can never break core flow. The observer only READS the core back to
+   * project a snapshot; the core keeps no snapshot state (no second store).
+   */
+  readonly onRosterChanged?: (parentSessionId: string) => void;
 }
 
 /**
@@ -253,6 +262,17 @@ export function createMultitask(
     },
   });
 
+  /** Fire the roster observer (ticket 21); never lets it break core flow. */
+  function notifyRosterChanged(parentSessionId: string): void {
+    const observer = options?.onRosterChanged;
+    if (observer === undefined) return;
+    try {
+      observer(parentSessionId);
+    } catch {
+      // Telemetry must never break the core.
+    }
+  }
+
   /** Apply a lifecycle event; returns the new status or undefined if ignored. */
   function transition(
     workerId: string,
@@ -269,6 +289,7 @@ export function createMultitask(
         liveByStreamKey.delete(record.streamKey);
       }
     }
+    notifyRosterChanged(record.parentSessionId);
     return next;
   }
 
@@ -407,6 +428,7 @@ export function createMultitask(
       if (durability !== undefined) {
         await Promise.resolve(durability.writeWorkerMarker(toDurableMarker(record)));
       }
+      notifyRosterChanged(request.parentSessionId);
       return { ok: true, workerId };
     },
 
@@ -562,6 +584,9 @@ export function createMultitask(
         };
       const report = runReconcile(sessionId, effectiveWake);
       todoLedger.apply(report.mutations);
+      // Ledger shape feeds the panel's todo links (ticket 21): reconcile is
+      // a roster-affecting transition per the ticket, so observe it too.
+      notifyRosterChanged(sessionId);
       return report;
     },
 
@@ -570,6 +595,7 @@ export function createMultitask(
       if (wake === undefined) return undefined;
       const reconcile = runReconcile(sessionId, wake);
       todoLedger.apply(reconcile.mutations);
+      notifyRosterChanged(sessionId);
       return { wake, reconcile };
     },
 
@@ -640,6 +666,11 @@ export function createMultitask(
           );
         }
         restored.push(record);
+      }
+      // Restored entries re-join the visible roster (ticket 21 observer);
+      // unknown-state rows never land on the roster, so no notification.
+      if (restored.length > 0) {
+        notifyRosterChanged(parentSessionId);
       }
       return { restored, unknownState };
     },

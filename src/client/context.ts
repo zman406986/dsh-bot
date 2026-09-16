@@ -37,6 +37,32 @@ export interface LocaleServiceLike {
   bind(namespace: string): (key: string) => string;
 }
 
+/**
+ * Client-side settings scope (ticket 21 data path). The browser exposes a
+ * settings service that can watch a plugin namespace — the same namespace
+ * the host half mirrors the roster snapshot into (design-16 §4.2 fallback;
+ * Finding 7 worked example 3 injects the settings scope this way).
+ */
+export interface ClientSettingsScopeLike {
+  /** Watch a namespace document; returns the unsubscribe disposer. */
+  watch(namespace: string, onChange: (value: unknown) => void): () => void;
+}
+
+/** Services handed to an `inject` callback child context. */
+export interface ClientInjectedServices {
+  settings?: ClientSettingsScopeLike;
+}
+
+/**
+ * Cordis-level `inject` used to wait for the optional settings service.
+ * Optional on the context: a client runtime without it leaves the roster
+ * channel missing and the panel degrades to unavailable copy.
+ */
+export type ClientInjectFn = (
+  services: readonly string[],
+  callback: (child: ClientInjectedServices) => void,
+) => unknown;
+
 /** Cordis effect seat shared by host and client fibers. */
 export interface ClientEffectContext {
   effect(execute: () => unknown, label?: string): unknown;
@@ -46,4 +72,5 @@ export interface ClientEffectContext {
 export interface ClientContext extends ClientEffectContext {
   slots: SlotsServiceLike;
   locale: LocaleServiceLike;
+  inject?: ClientInjectFn;
 }

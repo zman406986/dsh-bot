@@ -25,6 +25,30 @@ export interface SettingsSectionHooksLike<T> {
   validate?: (value: T) => void;
 }
 
+/**
+ * Structural view of the owner scope `settings.installSection` returns
+ * (research Finding 1: `{ get, watch, update, replace }`). All methods
+ * optional so stub providers that return nothing stay assignable. Ticket 21
+ * uses `update` to mirror the roster snapshot into the plugin's own
+ * namespace; the client watches the same namespace from the browser side.
+ */
+export interface SettingsOwnerScopeLike {
+  get?(): unknown;
+  watch?(onChange: (value: unknown) => void): () => void;
+  update?(value: unknown): unknown;
+  replace?(value: unknown): unknown;
+}
+
+/** Optional extras for {@link installMultitaskSettingsSection}. */
+export interface SettingsSectionInstallOptions {
+  /**
+   * Called when the settings service appeared and the section installed,
+   * handing over the owner scope. Ticket 21's roster mirror uses this to
+   * attach its write path (and catch up any snapshot already projected).
+   */
+  readonly onScope?: (scope: SettingsOwnerScopeLike) => void;
+}
+
 /** Structural view of `ctx.settings` — only the method we call. */
 export interface SettingsProviderLike {
   installSection(
@@ -33,7 +57,7 @@ export interface SettingsProviderLike {
     schema: unknown,
     entry: unknown,
     hooks: SettingsSectionHooksLike<unknown>,
-  ): void;
+  ): SettingsOwnerScopeLike | void;
 }
 
 /** Contexts that may carry a settings provider (child of inject). */
@@ -68,11 +92,12 @@ export function installMultitaskSettingsSection(
   ctx: SettingsInjectContext,
   schema: unknown,
   config: unknown,
+  options?: SettingsSectionInstallOptions,
 ): void {
   ctx.inject(["settings"], (settingsCtx) => {
     const settings = settingsCtx.settings;
     if (settings === undefined) return;
-    settings.installSection(ctx, SETTINGS_NAMESPACE, schema, config, {
+    const scope = settings.installSection(ctx, SETTINGS_NAMESPACE, schema, config, {
       setSource: () => {
         // ADR-0005: frozen flag — never re-read config.
       },
@@ -80,5 +105,8 @@ export function installMultitaskSettingsSection(
         // ADR-0005: next-session-only. No runtime teardown or rebuild.
       },
     });
+    if (scope !== undefined && options?.onScope !== undefined) {
+      options.onScope(scope);
+    }
   });
 }

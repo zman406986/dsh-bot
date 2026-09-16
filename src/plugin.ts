@@ -1,5 +1,6 @@
 import z from "@deepseek-ai/schemastery";
 import { createMultitask, type Multitask } from "./core/multitask.js";
+import { projectRosterSnapshot } from "./core/roster-snapshot.js";
 import {
   assemblePeerWakeTurn,
   assembleTurnReminder,
@@ -10,6 +11,7 @@ import {
 import {
   bindDispatcherLifecycle,
   createCordisDshHost,
+  createSettingsRosterChannel,
   createStorageDomainDurability,
   installMultitaskSettingsSection,
   registerDispatcherStartCommand,
@@ -164,7 +166,16 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
 
   // Always install the settings section (design-12 §5.2 option A). Present
   // on both paths so OFF can be flipped back ON from the UI for next session.
-  installMultitaskSettingsSection(ctx, Config, config);
+  //
+  // Roster mirror channel (ticket 21, design-16 §4.2): attaches to the
+  // section's owner scope when the settings service appears; the activated
+  // dispatcher's roster snapshot is mirrored into our namespace under the
+  // `roster` key for the client panel to watch. Inert on the OFF path (no
+  // core exists to project from).
+  const rosterChannel = createSettingsRosterChannel();
+  installMultitaskSettingsSection(ctx, Config, config, {
+    onScope: (scope) => rosterChannel.attach(scope),
+  });
 
   if (!enabled) {
     // Stock dsh behavior: no Multitask core, no dispatcher tools,
@@ -194,8 +205,33 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     ...(accessTimeoutMs !== undefined
       ? { access: { timeoutMs: accessTimeoutMs } }
       : {}),
+    // Ticket 21: mirror roster-affecting transitions into the settings
+    // namespace. `lifecycle` is assigned below — the closure only runs once
+    // activation exists, never during apply.
+    onRosterChanged: (sessionId) => {
+      if (lifecycle.dispatcherSessionId() === sessionId) {
+        publishRosterSnapshot(sessionId);
+      }
+    },
   });
   multitaskRef = multitask;
+
+  // Roster snapshot projection (ticket 21). Pure projection of the core
+  // roster — never a second source of truth. The core observer fires on
+  // every roster-affecting transition, gated to the activated dispatcher
+  // session; before activation nothing is published (no dispatcher roster
+  // exists). On deactivation publishing simply stops: the snapshot ages past
+  // the stale window and the panel degrades to "unavailable" copy (design-16
+  // §3.6 — the panel shows state only while a live session exists).
+  const publishRosterSnapshot = (sessionId: string): void => {
+    rosterChannel.publish(
+      projectRosterSnapshot(
+        sessionId,
+        multitask.listWorkers(sessionId),
+        Date.now(),
+      ),
+    );
+  };
 
   // Activation lifecycle (ticket 19, ADR-0009): boot dormant and stock.
   // Nothing is captured on load or on agent/session-start — the dispatcher
@@ -246,7 +282,12 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   // frozen `enabled` is the authority — policy is ON whenever we are here.
   const lifecycle = bindDispatcherLifecycle(ctx, host, multitask, {
     policyEnabled: enabled,
-    onActivated: () => activateToolSurface(),
+    onActivated: (sessionId) => {
+      activateToolSurface();
+      // Ticket 21: publish immediately on activation so the panel has a
+      // fresh (possibly empty) snapshot without waiting for a transition.
+      publishRosterSnapshot(sessionId);
+    },
     onDeactivated: () => deactivateToolSurface(),
   });
 

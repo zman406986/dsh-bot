@@ -16,10 +16,10 @@ import { readFileSync } from "node:fs";
 import { apply, inject as clientInject } from "../src/client/index.js";
 import type { ClientContext } from "../src/client/context.js";
 import {
-  HELLO_ENTRY_ID,
-  helloOverlayRegistration,
   LOCALE_NAMESPACE,
+  ROSTER_ENTRY_ID,
   localeDictionary,
+  rosterOverlayRegistration,
   SHELL_OVERLAY_SLOT,
   validateLocaleDictionary,
   type SlotRegistrationOptions,
@@ -144,18 +144,18 @@ describe("client face scaffold — package declaration (Finding 4)", () => {
 });
 
 describe("client face scaffold — shell.overlay entry builder (Finding 5, design-16 §5)", () => {
-  it("builds the hello-world options for the documented list slot", () => {
-    assert.deepEqual(helloOverlayRegistration(), {
+  it("builds the roster options for the documented list slot (ticket 21)", () => {
+    assert.deepEqual(rosterOverlayRegistration(), {
       name: "shell.overlay",
-      id: "multitask-dispatcher-hello",
-      order: 100,
+      id: "multitask-dispatcher-roster",
+      order: -10,
       locale: "multitask-dispatcher",
     });
   });
 
   it("uses only a dsh-owned shipped slot and a prefixed id — never a forbidden surface", () => {
     assert.equal(SHELL_OVERLAY_SLOT, "shell.overlay");
-    assert.match(HELLO_ENTRY_ID, /^multitask-dispatcher-/);
+    assert.match(ROSTER_ENTRY_ID, /^multitask-dispatcher-/);
     assert.equal(LOCALE_NAMESPACE, "multitask-dispatcher");
     for (const forbidden of [
       "root",
@@ -164,7 +164,7 @@ describe("client face scaffold — shell.overlay entry builder (Finding 5, desig
       "conversation.approval.detail",
     ]) {
       assert.notEqual(SHELL_OVERLAY_SLOT, forbidden);
-      assert.notEqual(helloOverlayRegistration().id, forbidden);
+      assert.notEqual(rosterOverlayRegistration().id, forbidden);
     }
   });
 
@@ -177,10 +177,14 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
   it("ships en and zh faces with identical key sets and string values", () => {
     assert.deepEqual(validateLocaleDictionary(localeDictionary), []);
     const keys = Object.keys(localeDictionary.en).sort();
-    assert.deepEqual(keys, ["panel.placeholder", "panel.title"]);
+    assert.deepEqual(keys, [
+      "roster.empty",
+      "roster.title",
+      "roster.unavailable",
+    ]);
     assert.deepEqual(Object.keys(localeDictionary.zh).sort(), keys);
-    assert.ok(localeDictionary.en["panel.title"].length > 0);
-    assert.ok(localeDictionary.zh["panel.title"].length > 0);
+    assert.ok(localeDictionary.en["roster.title"]?.length > 0);
+    assert.ok(localeDictionary.zh["roster.title"]?.length > 0);
   });
 
   it("rejects broken dictionaries with named problems", () => {
@@ -217,7 +221,7 @@ describe("client face scaffold — apply over fake client seams", () => {
     assert.equal(ctx.injects[0]?.entries.length, 1);
     const entry = ctx.injects[0]?.entries[0];
     assert.ok(entry);
-    assert.deepEqual(entry.options, helloOverlayRegistration());
+    assert.deepEqual(entry.options, rosterOverlayRegistration());
     assert.equal(typeof entry.component, "function");
   });
 
@@ -226,8 +230,9 @@ describe("client face scaffold — apply over fake client seams", () => {
     apply(ctx);
 
     const t = ctx.locale.bind(LOCALE_NAMESPACE);
-    assert.equal(t("panel.title"), localeDictionary.en["panel.title"]);
-    assert.equal(t("panel.placeholder"), localeDictionary.en["panel.placeholder"]);
+    assert.equal(t("roster.title"), localeDictionary.en["roster.title"]);
+    assert.equal(t("roster.empty"), localeDictionary.en["roster.empty"]);
+    assert.equal(t("roster.unavailable"), localeDictionary.en["roster.unavailable"]);
     assert.equal(t("unknown.key"), "unknown.key");
   });
 

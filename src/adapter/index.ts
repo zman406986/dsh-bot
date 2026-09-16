@@ -69,9 +69,16 @@ export {
   SETTINGS_NAMESPACE,
   type SettingsAwareContext,
   type SettingsInjectContext,
+  type SettingsOwnerScopeLike,
   type SettingsProviderLike,
   type SettingsSectionHooksLike,
+  type SettingsSectionInstallOptions,
 } from "./settings-section.js";
+export {
+  createSettingsRosterChannel,
+  type RosterChannelStats,
+  type SettingsRosterChannel,
+} from "./roster-channel.js";
 export {
   createRequestAccessHandler,
   registerWorkerAccessTool,
