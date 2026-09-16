@@ -11,13 +11,13 @@ The reference surfaces running work ambiently (activity lines, per-tool collapsi
 
 Implementation lands in the worktree checkout `C:\Users\TZhen\Desktop\dsh-bot-always-on`, branch `clone/always-on-dispatcher`, one ticket at a time per `.scratch/clone-always-on/worktree-workflow.md`.
 
-- [ ] **Live-verification handover first (read-only on dsh, never the reference tree):** survey the installed `@deepseek-ai/*` packages (WinGet install path recorded in `docs/research/dsh-plugin-ui-patterns.md` Finding 0) for a child-session/worker event surface a plugin can subscribe to (agents/subagents services, session events, job progress). Write findings as a dated comment on THIS ticket: seam found (with file/line) or verified-absent.
-- [ ] If a seam is verified: implement a `recentActivity` resolver in `src/adapter/cordis-dsh-host.ts` (per-worker latest activity phrase, clamped with `CHECK_ACTIVITY_CHARS`), wire it into the dispatcher-tool deps, and mirror it into snapshot v3-or-later ONLY via the design-17 conflict-8 rule (projection of host-observed truth; raise on the ticket before any schema bump).
-- [ ] If no seam: record the honest gap (derived activity lines from ticket 27 remain the answer; live text stays impossible) — do not fake liveness from polling or timers.
-- [ ] Toolview polish (`src/client/toolviews.ts` / `toolview-panel.tsx`): render `recent_activity` on `check_workers` rows when present; keep the 160-char clamp and verbatim-vocabulary contracts unchanged.
-- [ ] Wake-turn delivery polish (`src/adapter/wake-copy.ts` / `src/core/policy/assembler.ts`): confirm settle notices read as ordinary narration (no "worker console" jargon, no machinery leakage per PRD §6.1); tighten only with new copy — no behavioral change to the wake path.
-- [ ] Explicit non-goals, asserted by a comment on this ticket (not code): no worker-transcript streaming surface, no timeline housekeeping cards (new chat node types are impossible — closed keyed domain, seams Finding 5), no result cards (results are the dispatcher speaking, S4/S5).
-- [ ] Offline tests (S8): resolver clamp/null behavior (if implemented), toolview activity-row parsing, wake-copy snapshot tests for the polished strings; full suite green, typecheck clean.
+- [x] **Live-verification handover first (read-only on dsh, never the reference tree):** survey the installed `@deepseek-ai/*` packages (WinGet install path recorded in `docs/research/dsh-plugin-ui-patterns.md` Finding 0) for a child-session/worker event surface a plugin can subscribe to (agents/subagents services, session events, job progress). Write findings as a dated comment on THIS ticket: seam found (with file/line) or verified-absent.
+- [x] If a seam is verified: implement a `recentActivity` resolver in `src/adapter/cordis-dsh-host.ts` (per-worker latest activity phrase, clamped with `CHECK_ACTIVITY_CHARS`), wire it into the dispatcher-tool deps, and mirror it into snapshot v3-or-later ONLY via the design-17 conflict-8 rule (projection of host-observed truth; raise on the ticket before any schema bump).
+- [ ] If no seam: record the honest gap (derived activity lines from ticket 27 remain the answer; live text stays impossible) — do not fake liveness from polling or timers. *(conditional — not triggered: a seam was verified, see comment)*
+- [x] Toolview polish (`src/client/toolviews.ts` / `toolview-panel.tsx`): render `recent_activity` on `check_workers` rows when present; keep the 160-char clamp and verbatim-vocabulary contracts unchanged.
+- [x] Wake-turn delivery polish (`src/adapter/wake-copy.ts` / `src/core/policy/assembler.ts`): confirm settle notices read as ordinary narration (no "worker console" jargon, no machinery leakage per PRD §6.1); tighten only with new copy — no behavioral change to the wake path.
+- [x] Explicit non-goals, asserted by a comment on this ticket (not code): no worker-transcript streaming surface, no timeline housekeeping cards (new chat node types are impossible — closed keyed domain, seams Finding 5), no result cards (results are the dispatcher speaking, S4/S5).
+- [x] Offline tests (S8): resolver clamp/null behavior (if implemented), toolview activity-row parsing, wake-copy snapshot tests for the polished strings; full suite green, typecheck clean.
 
 ## Constraints
 
@@ -25,3 +25,81 @@ Implementation lands in the worktree checkout `C:\Users\TZhen\Desktop\dsh-bot-al
 - Clean-room copy only; no polling/fake-liveness fallbacks.
 - The wake path's semantics (drain, reconcile, dedupe) are frozen — presentation-only changes; anything else goes back to design.
 - Implementation one-at-a-time in the worktree; the verification handover comment lands on MAIN.
+
+## Comments
+
+### 2026-09-17 — agent team (verification + implementation, worktree `clone/always-on-dispatcher` @ `2054db2`)
+
+All checkboxes done except the conditional "if no seam" branch (not triggered — a seam WAS
+verified). `npm test` 551 pass / 0 fail (baseline 534 / 0; +17 new), `npm run typecheck` clean on
+both configs, offline only (S8). Worktree commit: `2054db2` ("Stream live worker activity into
+check rows (ticket 29)"), 8 files. Read-only survey of the INSTALLED `@deepseek-ai/*` packages
+only (WinGet path per seams Finding 0); the reference tree was never opened.
+
+**Verification result: seam FOUND — a plugin-subscribable live child-session event surface exists.**
+
+- `session/event` is a declared global Cordis event `(session, event)`:
+  `@deepseek-ai/dsh-session` `lib/types/index.d.ts:62`. It is emitted synchronously per committed
+  session event from the sessions registry's app-level ctx (`dsh-session`
+  `lib/index.js:1202` via `invokeContainedSessionObservers`; `emitCtx: this.ctx` at
+  `lib/index.js:1437`).
+- Scope routing admits untagged (plugin-level) listeners and enclosing scopes:
+  `@deepseek-ai/dsh-scope` `lib/index.js:327-347` (`scopeTarget`) — "a listener owned by an
+  enclosing scope receives every descendant scope's events … events flow up the chain, never
+  down". In-process worker child sessions (`dsh-subagent-spawn-in-process` spawn provider) are
+  therefore visible to our plugin ctx.
+- The child-session stream carries tool-level events. `tool/call` =
+  `{turn, step, callId, name, arguments}` (`dsh-session` `lib/types/types.d.ts:333-339`;
+  `arguments` is the raw model-produced JSON string); `tool/result` and `step/start|end` also
+  exist.
+- Corroboration: dsh's own `dsh-session-projection` service subscribes exactly this way at app
+  level (`lib/index.js:64` `ctx.on("session/event", …)`) and drives projections for every session.
+- Ruled out / not used: `subagent/start|end|provider-added` (`dsh-subagent`
+  `lib/index.js:301-352`; only `end` carries content and is already wired); `agent/status`
+  carries only `{status: "idle"|"running"}` on the loop scope (`dsh-agent-loop`
+  `lib/index.js:781`); `agent/assistant-stream` frames (`lib/index.js:1032`) are
+  worker-transcript-shaped and deliberately unused (no worker-transcript streaming, by design).
+
+**What landed (implementation, worktree):**
+
+- **`recentActivity` resolver** (`src/adapter/cordis-dsh-host.ts`): the host subscribes to
+  `session/event`, and for owned workers records a latest-wins phrase per `tool/call` — tool
+  name + first string argument hint (generic, no host tool vocabulary; hint capped at 60 chars),
+  whitespace-collapsed and clamped via `clampActivity` / `CHECK_ACTIVITY_CHARS` (120). Null-safe
+  on hostile payloads; cleared when the worker settles (`subagent/end`); subscription disposed
+  with the host. No polling, no timers — pure event-driven projection of host-observed truth.
+- **Wiring** (`src/plugin.ts`): the resolver is passed into `registerDispatcherTools` →
+  `createDispatcherTools({recentActivity})` → `toCheckRow`, so `check_workers` rows carry
+  `recent_activity` (core clamp contract unchanged).
+- **Toolview polish** (`src/client/toolviews.ts` + `toolview-panel.tsx`): check-row view models
+  gain `activity`; parsed with whitespace-collapse + the unchanged 160-char compact clamp
+  (`TOOLVIEW_TEXT_CLAMP_CHARS`); rendered as an `__row-activity` line, omitted entirely when null.
+  Verbatim FSM-vocabulary status labels untouched. No new locale keys needed (unlabeled ambient
+  line, matching design-17 §4.1).
+- **Wake-copy narration guard** (`test/policy-assembler.test.ts`): settle copy (wake turn, cue,
+  spawn/steer/stop notes, wake instructions, standing rules) asserted free of machinery tokens
+  ("console", "subagent", "toolview", "overlay", "timeline", "progress bar", "streaming") and
+  reconstruction identifiers. Copy reviewed: already reads as ordinary narration — tightened
+  nothing, zero behavioral change to the wake path.
+- **Tests (+17)**: resolver derivation/clamp/nulls/fallback/dispose (host tests, fake `ctx.on`
+  firehose idiom); adapter pass-through of `recentActivity` into registered check rows; toolview
+  activity-row parsing (present/null/whitespace/oversized/junk-typed); narration guard suite.
+
+**Raised per the schema-bump rule: NO snapshot bump.** Roster snapshot stays at v2. The panel
+keeps ticket 27's derived activity lines; live text now reaches the model via `check_workers`
+(and its toolview), which needs no wire change. If the panel ever wants live text, a v3 field
+projected from this same host-observed truth is the conflict-8-legal path — left to a future
+ticket, not done here.
+
+**Non-goals asserted (per ticket, recorded here, not code):** no worker-transcript streaming
+surface (assistant-stream frames exist in the host but are deliberately unused — ambient presence
+only, matching the reference); no timeline housekeeping cards (new chat node types are
+impossible — closed keyed domain, seams Finding 5); no result cards (results are the dispatcher
+speaking, S4/S5); no fake-liveness fallbacks (polling/timers) anywhere.
+
+**Residual handover:** verification is static read-only against installed 0.1.5-rc.1 (offline
+mandate S8 forbids a live-host run). The subscription mirrors dsh's own session-projection
+consumer pattern exactly, which is the strongest offline-verifiable evidence; first live
+integration should confirm the firehose end-to-end and note actual child-session ids appear as
+expected. Activity phrasing is best-effort (first string argument hint) — presentation only,
+never authority.
