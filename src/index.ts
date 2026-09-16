@@ -7,6 +7,15 @@ export { createMultitask } from "./core/multitask.js";
 export type { Multitask } from "./core/multitask.js";
 export { createSteerQueue, wrapParentCorrection } from "./core/steer-queue.js";
 export type { SteerQueue } from "./core/steer-queue.js";
+export { createWakeBus, WAKE_SOURCES } from "./core/wake-bus.js";
+export type {
+  EnqueueSettledInput,
+  SettledWorkerNotice,
+  WakeBus,
+  WakeBusOptions,
+  WakeEvent,
+  WakeSource,
+} from "./core/wake-bus.js";
 export { applyEvent, canTransition } from "./core/worker-fsm.js";
 export type { WorkerEvent } from "./core/worker-fsm.js";
 export { isTerminalStatus } from "./core/types.js";

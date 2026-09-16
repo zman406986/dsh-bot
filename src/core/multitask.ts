@@ -14,6 +14,7 @@ import {
   type SteerQueue,
   wrapParentCorrection,
 } from "./steer-queue.js";
+import { createWakeBus, type WakeBus } from "./wake-bus.js";
 import { applyEvent, type WorkerEvent } from "./worker-fsm.js";
 
 /**
@@ -58,6 +59,13 @@ export interface Multitask {
    */
   listWorkers(parentSessionId: string): WorkerSummary[];
   getWorker(workerId: string): WorkerRecord | undefined;
+  /**
+   * Wake bus this core enqueues settles through. Settles are batched per
+   * parent session; a mid-turn dispatcher queues rather than receiving an
+   * injected wake. Callers use it to note dispatcher turn bounds, drain
+   * wakes, and enqueue user/peer/timer wakes.
+   */
+  readonly wakeBus: WakeBus;
 }
 
 export function createMultitask(host: DshHost): Multitask {
@@ -65,6 +73,11 @@ export function createMultitask(host: DshHost): Multitask {
   /** streamKey → workerId for every live (non-terminal) worker. */
   const liveByStreamKey = new Map<string, string>();
   const steerQueue: SteerQueue = createSteerQueue();
+  const wakeBus: WakeBus = createWakeBus({
+    onDeliver: (sessionId) => {
+      void host.requestDispatcherWakeup(sessionId);
+    },
+  });
 
   /** Apply a lifecycle event; returns the new status or undefined if ignored. */
   function transition(
@@ -97,7 +110,14 @@ export function createMultitask(host: DshHost): Multitask {
     if (event.transcriptRef !== undefined) {
       record.transcriptRef = event.transcriptRef;
     }
-    void host.requestDispatcherWakeup(record.parentSessionId);
+    // One enqueue per accepted settle; the bus batches and routes the wake.
+    wakeBus.enqueueWorkerSettled({
+      parentSessionId: record.parentSessionId,
+      workerId: event.workerId,
+      status: event.status,
+      title: record.title,
+      resultText: event.report,
+    });
   });
 
   // Step boundary: pop the latest parked steer, wrap it as a parent correction,
@@ -250,6 +270,8 @@ export function createMultitask(host: DshHost): Multitask {
     getWorker(workerId: string): WorkerRecord | undefined {
       return workers.get(workerId);
     },
+
+    wakeBus,
   };
 }
 
