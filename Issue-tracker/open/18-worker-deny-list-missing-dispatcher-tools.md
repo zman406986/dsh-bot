@@ -9,8 +9,8 @@
 
 ## What to do
 
-- Add the five dispatcher tool names to `WORKER_DENIED_TOOL_CANDIDATES`.
-- Add an offline `node:test` proving a spawned worker's resolved tool filter cannot resolve any dispatcher tool name (FakeDshHost).
+- [x] Add the five dispatcher tool names to `WORKER_DENIED_TOOL_CANDIDATES`.
+- [x] Add an offline `node:test` proving a spawned worker's resolved tool filter cannot resolve any dispatcher tool name (FakeDshHost).
 
 ## Constraints
 
@@ -18,3 +18,7 @@
 - Clean-room: new copy only; never open the `reference material-NOT LICENSE SAFE DONT COPY-grok bot/` tree.
 
 Found during ticket 16 phase 1 (`.scratch/multitask-dispatcher/research-16-hijack.md` §1.5).
+
+## Comments
+
+- 2026-09-17 (agent team): Implemented — dispatcher tool names added to worker deny-list (src/worker/tool-barrier.ts:31-36); offline test test/worker-agent-type.test.ts proves workers cannot resolve them. typecheck clean; 302 tests passing. Commit 6477ed7.
