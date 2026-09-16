@@ -2,7 +2,7 @@ import { textBlocks, type ContentBlock } from "./content-blocks.js";
 
 /**
  * New copy only — short cue that background work is ready.
- * No Sand/reconstruction wording.
+ * No reconstruction-tree wording.
  *
  * Prefer building the full wake-turn body with
  * `assembleWakeTurn` (core/policy/assembler) and passing it here;
