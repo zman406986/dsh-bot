@@ -1,4 +1,13 @@
 import z from "@deepseek-ai/schemastery";
+import { createMultitask, type Multitask } from "./core/multitask.js";
+import {
+  bindDispatcherLifecycle,
+  createCordisDshHost,
+  createStorageDomainDurability,
+  type AdapterContext,
+  type CordisDshHost,
+  type StorageDomainDurability,
+} from "./adapter/index.js";
 
 /**
  * Plugin config. Scaffold-level only — later tickets add real knobs.
@@ -10,16 +19,28 @@ export const Config = z.object({
 
 export const name = "multitask-dispatcher";
 /**
- * Host services this plugin needs. Empty at scaffold time — the adapter
- * (ticket 09) will declare jobs / subagents / tools as it wires them.
+ * Host services the adapter wires (ticket 09):
+ * - subagents: spawn / interrupt / sendMessage / listChildren
+ * - agents: live Agent registry (wake via followup)
+ * - jobs: live job listing for the check surface
+ * - storageDomain: durable worker markers (ADR-0006)
  */
-export const inject: string[] = [];
+export const inject: string[] = [
+  "subagents",
+  "agents",
+  "jobs",
+  "storageDomain",
+];
 
 export interface PluginConfig {
   enabled: boolean;
 }
 
-type CordisContext = {
+/**
+ * Narrow Cordis context surface. Prefer a local interface over importing
+ * full Cordis types until peerDeps grow.
+ */
+type CordisContext = AdapterContext & {
   effect: (dispose: () => void) => void;
 };
 
@@ -32,9 +53,18 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     return;
   }
 
-  // Scaffold: prove the plugin shape and reversible registration.
-  // The live DshHost adapter + Multitask instance land with ticket 09.
-  ctx.effect(() => {
-    // Disposer: Cordis invokes this on plugin unload / HMR reload.
+  const markers: StorageDomainDurability = createStorageDomainDurability(
+    ctx.storageDomain,
+  );
+  const host: CordisDshHost = createCordisDshHost(ctx, { markers });
+  const multitask: Multitask = createMultitask(host, { durability: markers });
+
+  // Capture the live dispatcher Agent + bind session-id turn bounds to wakeBus.
+  const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
+
+  ctx.effect(() => () => {
+    lifecycle.unbind();
+    host.dispose();
+    void markers.dispose();
   });
 }

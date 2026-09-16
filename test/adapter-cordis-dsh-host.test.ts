@@ -1,0 +1,460 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import {
+  createCordisDshHost,
+  mapStopReason,
+  normalizeWorkerReport,
+  SPAWN_PROVIDER,
+  type AdapterContext,
+  type AgentLike,
+  type ContinuableStartSpecLike,
+} from "../src/adapter/cordis-dsh-host.js";
+import { bindDispatcherLifecycle, isTopLevel } from "../src/adapter/parent-agent.js";
+import { createMultitask } from "../src/core/multitask.js";
+import type { SettledEvent } from "../src/core/types.js";
+
+interface RecordedCall {
+  [key: string]: unknown;
+}
+
+function createAgent(id: string, topLevel = true): AgentLike {
+  return {
+    session: {
+      id,
+      header: topLevel
+        ? { parentSession: undefined, delegationDepth: 0 }
+        : { parentSession: "parent-x", delegationDepth: 1 },
+    },
+    followup() {},
+  };
+}
+
+function createStubCtx() {
+  const startContinuableCalls: RecordedCall[] = [];
+  const interruptCalls: RecordedCall[] = [];
+  const sendMessageCalls: RecordedCall[] = [];
+  const followupCalls: unknown[] = [];
+  const listeners = new Map<string, Array<(payload: never) => void>>();
+  let nextChild = 1;
+
+  const agents = new Map<string, AgentLike>();
+
+  const ctx: AdapterContext & {
+    fire(name: string, payload: unknown): void;
+    startContinuableCalls: RecordedCall[];
+    interruptCalls: RecordedCall[];
+    sendMessageCalls: RecordedCall[];
+    followupCalls: unknown[];
+    bindAgent(agent: AgentLike): void;
+  } = {
+    startContinuableCalls,
+    interruptCalls,
+    sendMessageCalls,
+    followupCalls,
+    fire(name: string, payload: unknown) {
+      for (const cb of listeners.get(name) ?? []) {
+        (cb as (p: unknown) => void)(payload);
+      }
+    },
+    bindAgent(agent: AgentLike) {
+      agents.set(String(agent.session.id), agent);
+    },
+    on(name: string, cb: (payload: never) => void) {
+      const list = listeners.get(name) ?? [];
+      list.push(cb);
+      listeners.set(name, list);
+      return () => {
+        listeners.set(
+          name,
+          (listeners.get(name) ?? []).filter((c) => c !== cb),
+        );
+      };
+    },
+    subagents: {
+      async startContinuable(spec: ContinuableStartSpecLike) {
+        startContinuableCalls.push(spec as unknown as RecordedCall);
+        const childId = `child-${nextChild++}`;
+        return { childId, messageId: `msg-${childId}` };
+      },
+      interrupt(targetSessionId: unknown, authority: unknown) {
+        interruptCalls.push({ targetSessionId, authority });
+      },
+      async sendMessage(
+        sender: AgentLike,
+        targetId: unknown,
+        content: unknown,
+        options: { signal: AbortSignal },
+      ) {
+        sendMessageCalls.push({ sender, targetId, content, options });
+        return `mid-${sendMessageCalls.length}`;
+      },
+    },
+    agents: {
+      get(id: unknown) {
+        const agent = agents.get(String(id));
+        if (agent === undefined) return undefined;
+        return {
+          ...agent,
+          followup(message: unknown) {
+            followupCalls.push(message);
+            agent.followup(message);
+          },
+        };
+      },
+    },
+    jobs: {
+      list() {
+        return [];
+      },
+    },
+    storageDomain: {
+      async open() {
+        const table = new Map<string, unknown>();
+        return {
+          table() {
+            return {
+              get: (k: string) => table.get(k),
+              entries: () => table.entries() as never,
+              put: async (k: string, v: unknown) => {
+                table.set(k, v);
+              },
+              delete: async (k: string) => table.delete(k),
+            };
+          },
+          close: async () => {},
+        };
+      },
+    },
+  };
+
+  return ctx;
+}
+
+describe("stop reason and report mapping", () => {
+  it("maps completed/aborted/error and max-tokens/refusal → error", () => {
+    assert.equal(mapStopReason("completed"), "completed");
+    assert.equal(mapStopReason("aborted"), "aborted");
+    assert.equal(mapStopReason("error"), "error");
+    assert.equal(mapStopReason("max-tokens"), "error");
+    assert.equal(mapStopReason("refusal"), "error");
+    assert.equal(mapStopReason("unknown-future"), "error");
+  });
+
+  it("normalizes reports and placeholders empty output", () => {
+    assert.equal(
+      normalizeWorkerReport([{ type: "text", text: "Done." }]),
+      "Done.",
+    );
+    assert.equal(normalizeWorkerReport(undefined), "(worker finished without a closing message)");
+    assert.equal(normalizeWorkerReport([]), "(worker finished without a closing message)");
+  });
+});
+
+describe("isTopLevel", () => {
+  it("accepts depth-0 sessions without a parent", () => {
+    assert.equal(isTopLevel(createAgent("a", true)), true);
+  });
+
+  it("rejects child sessions", () => {
+    assert.equal(isTopLevel(createAgent("c", false)), false);
+  });
+});
+
+describe("CordisDshHost spawn / interrupt / send", () => {
+  it("spawn calls startContinuable with provider spawn and returns workerId string", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const parent = createAgent("disp-1");
+    host.bindParent(parent, "disp-1");
+
+    const workerId = await host.spawnWorker("Do the thing.", {
+      parentSessionId: "disp-1",
+      streamKey: "s1",
+      title: "Thing",
+    });
+
+    assert.equal(workerId, "child-1");
+    assert.equal(host.owns("child-1"), true);
+    assert.equal(host.workerIdOf("child-1"), "child-1");
+    assert.equal(ctx.startContinuableCalls.length, 1);
+    const spec = ctx.startContinuableCalls[0] as unknown as ContinuableStartSpecLike;
+    assert.equal(spec.provider, SPAWN_PROVIDER);
+    assert.equal(spec.label, "Thing");
+    assert.equal(spec.request.prompt.length, 1);
+    assert.equal(spec.request.prompt[0]?.type, "text");
+    assert.equal((spec.request.prompt[0] as { text: string }).text, "Do the thing.");
+    assert.equal(spec.request.maxDepth, 0);
+    // T09 omits toolFilter.
+    assert.equal("toolFilter" in spec.request && spec.request.toolFilter, false);
+  });
+
+  it("spawn rejects when no parent is bound", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    await assert.rejects(
+      () =>
+        host.spawnWorker("x", {
+          parentSessionId: "p",
+          streamKey: "s",
+          title: "t",
+        }),
+      /no parent agent bound/,
+    );
+  });
+
+  it("interrupt uses ancestor authority with the parent agent", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const parent = createAgent("disp-1");
+    host.bindParent(parent, "disp-1");
+    await host.spawnWorker("x", {
+      parentSessionId: "disp-1",
+      streamKey: "s",
+      title: "t",
+    });
+    await host.interruptWorker("child-1");
+    assert.equal(ctx.interruptCalls.length, 1);
+    const call = ctx.interruptCalls[0] as {
+      targetSessionId: string;
+      authority: { kind: string; agent: AgentLike };
+    };
+    assert.equal(call.targetSessionId, "child-1");
+    assert.equal(call.authority.kind, "ancestor");
+    assert.equal(call.authority.agent, parent);
+  });
+
+  it("sendMessage delivers one text block to the same worker", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const parent = createAgent("disp-1");
+    host.bindParent(parent, "disp-1");
+    await host.spawnWorker("x", {
+      parentSessionId: "disp-1",
+      streamKey: "s",
+      title: "t",
+    });
+    await host.sendMessage("child-1", "steer this");
+    assert.equal(ctx.sendMessageCalls.length, 1);
+    const call = ctx.sendMessageCalls[0] as {
+      targetId: string;
+      content: Array<{ type: string; text: string }>;
+    };
+    assert.equal(call.targetId, "child-1");
+    assert.equal(call.content.length, 1);
+    assert.equal(call.content[0]?.text, "steer this");
+  });
+});
+
+describe("CordisDshHost settle and step boundary", () => {
+  async function spawnOne() {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const parent = createAgent("disp-1");
+    host.bindParent(parent, "disp-1");
+    await host.spawnWorker("x", {
+      parentSessionId: "disp-1",
+      streamKey: "s",
+      title: "t",
+    });
+    return { ctx, host, parent };
+  }
+
+  it("subagent/end completed → SettledEvent completed with joined report", async () => {
+    const { ctx, host } = await spawnOne();
+    const events: SettledEvent[] = [];
+    host.onWorkerSettled((e) => events.push(e));
+
+    ctx.fire("subagent/end", {
+      id: "child-1",
+      stopReason: "completed",
+      lastAssistantMessage: [{ type: "text", text: "All done." }],
+    });
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0]?.workerId, "child-1");
+    assert.equal(events[0]?.status, "completed");
+    assert.equal(events[0]?.report, "All done.");
+    assert.equal(events[0]?.transcriptRef, "child-1");
+  });
+
+  it("maps max-tokens and refusal to error", async () => {
+    const { ctx, host } = await spawnOne();
+    const events: SettledEvent[] = [];
+    host.onWorkerSettled((e) => events.push(e));
+
+    ctx.fire("subagent/end", { id: "child-1", stopReason: "max-tokens" });
+    ctx.fire("subagent/end", { id: "child-1", stopReason: "refusal" });
+    assert.equal(events.length, 2);
+    assert.equal(events[0]?.status, "error");
+    assert.equal(events[1]?.status, "error");
+  });
+
+  it("ignores settle for unknown children", async () => {
+    const { ctx, host } = await spawnOne();
+    const events: SettledEvent[] = [];
+    host.onWorkerSettled((e) => events.push(e));
+
+    ctx.fire("subagent/end", { id: "not-ours", stopReason: "completed" });
+    assert.equal(events.length, 0);
+  });
+
+  it("emitStepBoundary notifies subscribers", async () => {
+    const { host } = await spawnOne();
+    const seen: string[] = [];
+    host.onStepBoundary((id) => {
+      seen.push(id);
+    });
+    host.emitStepBoundary("child-1");
+    assert.deepEqual(seen, ["child-1"]);
+  });
+});
+
+describe("dispatcher wake", () => {
+  it("followup is called on the dispatcher agent", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const parent = createAgent("disp-1");
+    ctx.bindAgent(parent);
+    host.bindParent(parent, "disp-1");
+
+    await host.requestDispatcherWakeup("disp-1");
+    assert.equal(ctx.followupCalls.length, 1);
+    const msg = ctx.followupCalls[0] as { role: string; content: Array<{ text: string }> };
+    assert.equal(msg.role, "user");
+    assert.ok(msg.content[0]?.text.includes("Background"));
+  });
+
+  it("unknown session id is a no-op", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    await host.requestDispatcherWakeup("missing");
+    assert.equal(ctx.followupCalls.length, 0);
+  });
+});
+
+describe("listLiveJobs", () => {
+  it("reads ctx.jobs.list and is non-durable", () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    assert.deepEqual(host.listLiveJobs(), []);
+  });
+});
+
+describe("bindDispatcherLifecycle", () => {
+  it("captures top-level agent and wires wakeBus turn bounds by session id", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const multitask = createMultitask(host);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
+
+    const parent = createAgent("disp-1");
+    ctx.bindAgent(parent);
+    ctx.fire("agent/session-start", { agent: parent, source: "startup" });
+
+    assert.equal(lifecycle.dispatcherSessionId(), "disp-1");
+    assert.equal(host.hasParent(), true);
+
+    ctx.fire("agent/status", { agent: parent, status: "running" });
+    assert.equal(multitask.wakeBus.isBusy("disp-1"), true);
+
+    ctx.fire("agent/status", { agent: parent, status: "idle" });
+    assert.equal(multitask.wakeBus.isBusy("disp-1"), false);
+
+    lifecycle.unbind();
+  });
+
+  it("child running promotes spawned → running; child idle fires step boundary", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const multitask = createMultitask(host);
+    bindDispatcherLifecycle(ctx, host, multitask);
+
+    const parent = createAgent("disp-1");
+    ctx.fire("agent/session-start", { agent: parent, source: "startup" });
+
+    const spawn = await multitask.spawnWorker({
+      parentSessionId: "disp-1",
+      streamKey: "s1",
+      title: "T",
+      prompt: "go",
+    });
+    assert.ok(spawn.ok);
+    if (!spawn.ok) return;
+    const workerId = spawn.workerId;
+
+    assert.equal(multitask.getWorker(workerId)?.status, "spawned");
+
+    const child = {
+      session: { id: workerId, header: { parentSession: "disp-1", delegationDepth: 1 } },
+      followup() {},
+    };
+    ctx.fire("agent/status", { agent: child, status: "running" });
+    assert.equal(multitask.getWorker(workerId)?.status, "running");
+
+    const boundaries: string[] = [];
+    host.onStepBoundary((id) => {
+      boundaries.push(id);
+    });
+    ctx.fire("agent/status", { agent: child, status: "idle" });
+    assert.deepEqual(boundaries, [workerId]);
+  });
+
+  it("settle through subagent/end reaches the wake bus exactly once", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const multitask = createMultitask(host);
+    bindDispatcherLifecycle(ctx, host, multitask);
+
+    const parent = createAgent("disp-1");
+    ctx.fire("agent/session-start", { agent: parent, source: "startup" });
+
+    const spawn = await multitask.spawnWorker({
+      parentSessionId: "disp-1",
+      streamKey: "s1",
+      title: "T",
+      prompt: "go",
+    });
+    assert.ok(spawn.ok);
+    if (!spawn.ok) return;
+    const workerId = spawn.workerId;
+
+    ctx.fire("agent/status", {
+      agent: { session: { id: workerId }, followup() {} },
+      status: "running",
+    });
+    ctx.fire("agent/status", { agent: parent, status: "running" });
+
+    ctx.fire("subagent/end", {
+      id: workerId,
+      stopReason: "completed",
+      lastAssistantMessage: [{ type: "text", text: "ok" }],
+    });
+    // Double settle is ignored by core FSM.
+    ctx.fire("subagent/end", {
+      id: workerId,
+      stopReason: "completed",
+      lastAssistantMessage: [{ type: "text", text: "ok again" }],
+    });
+
+    assert.equal(multitask.getWorker(workerId)?.status, "completed");
+    // Mid-turn: wake is queued, not flushed.
+    assert.equal(multitask.wakeBus.peek("disp-1"), undefined);
+    ctx.fire("agent/status", { agent: parent, status: "idle" });
+    const wake = multitask.wakeBus.drain("disp-1");
+    assert.ok(wake);
+    assert.equal(wake.settledWorkers.length, 1);
+    assert.equal(wake.settledWorkers[0]?.workerId, workerId);
+    assert.equal(wake.settledWorkers[0]?.resultText, "ok");
+  });
+
+  it("unbind removes listeners", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const multitask = createMultitask(host);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
+    lifecycle.unbind();
+    const parent = createAgent("disp-1");
+    ctx.fire("agent/session-start", { agent: parent, source: "startup" });
+    assert.equal(host.hasParent(), false);
+  });
+});

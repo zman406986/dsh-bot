@@ -1,5 +1,34 @@
 export { Config, apply, inject, name } from "./plugin.js";
 export type { PluginConfig } from "./plugin.js";
+export {
+  bindDispatcherLifecycle,
+  blocksToText,
+  createCordisDshHost,
+  createStorageDomainDurability,
+  isTopLevel,
+  mapStopReason,
+  normalizeWorkerReport,
+  SPAWN_PROVIDER,
+  textBlock,
+  textBlocks,
+  wakeUserMessage,
+  WAKE_CUE,
+} from "./adapter/index.js";
+export type {
+  AdapterContext,
+  AgentLike,
+  ContentBlock,
+  CordisDshHost,
+  CordisDshHostOptions,
+  DomainLike,
+  JobSnapshotLike,
+  KvTableLike,
+  StorageDomainDurability,
+  StorageDomainLike,
+  TextBlock,
+  WakeUserMessage,
+  WorkerAgentDef,
+} from "./adapter/index.js";
 export type { DshHost } from "./core/dsh-host.js";
 export { FakeDshHost } from "./core/fake-host.js";
 export type { SendMessageCall, SpawnCall } from "./core/fake-host.js";
