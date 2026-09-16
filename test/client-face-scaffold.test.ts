@@ -177,10 +177,20 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
   it("ships en and zh faces with identical key sets and string values", () => {
     assert.deepEqual(validateLocaleDictionary(localeDictionary), []);
     const keys = Object.keys(localeDictionary.en).sort();
+    // Roster copy plus the ticket-24 toolview copy.
     assert.deepEqual(keys, [
       "roster.empty",
       "roster.title",
       "roster.unavailable",
+      "toolview.degraded",
+      "toolview.field.attachments",
+      "toolview.field.delivered",
+      "toolview.field.outcome",
+      "toolview.field.steer",
+      "toolview.field.stream",
+      "toolview.field.title",
+      "toolview.field.todo",
+      "toolview.field.worker",
     ]);
     assert.deepEqual(Object.keys(localeDictionary.zh).sort(), keys);
     assert.ok(localeDictionary.en["roster.title"]?.length > 0);
@@ -203,6 +213,15 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
 });
 
 describe("client face scaffold — apply over fake client seams", () => {
+  /** The shell.overlay inject record, whatever the module also registers. */
+  function overlayInject(ctx: ReturnType<typeof createClientCtx>) {
+    const record = ctx.injects.find(
+      (candidate) => candidate.parent === SHELL_OVERLAY_SLOT,
+    );
+    assert.ok(record, "shell.overlay inject missing");
+    return record;
+  }
+
   it("registers the locale namespace and exactly one shell.overlay entry", () => {
     const ctx = createClientCtx();
     apply(ctx);
@@ -214,12 +233,11 @@ describe("client face scaffold — apply over fake client seams", () => {
       [],
     );
 
-    // One inject controller, parented at shell.overlay, registering exactly
-    // one entry with the builder's options and a function component.
-    assert.equal(ctx.injects.length, 1);
-    assert.equal(ctx.injects[0]?.parent, SHELL_OVERLAY_SLOT);
-    assert.equal(ctx.injects[0]?.entries.length, 1);
-    const entry = ctx.injects[0]?.entries[0];
+    // Ticket 24 adds a second inject (tool.call.toolview); this scaffold
+    // contract stays: exactly one shell.overlay entry, parented here.
+    const overlay = overlayInject(ctx);
+    assert.equal(overlay.entries.length, 1);
+    const entry = overlay.entries[0];
     assert.ok(entry);
     assert.deepEqual(entry.options, rosterOverlayRegistration());
     assert.equal(typeof entry.component, "function");
@@ -239,7 +257,8 @@ describe("client face scaffold — apply over fake client seams", () => {
   it("fiber teardown (HMR/unload) reverses the namespace and the entry; re-apply restores", () => {
     const ctx = createClientCtx();
     apply(ctx);
-    assert.equal(ctx.injects.length, 1);
+    assert.equal(ctx.injects.length, 2);
+    assert.equal(overlayInject(ctx).entries.length, 1);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
 
     ctx.runFiberTeardown();
@@ -249,8 +268,8 @@ describe("client face scaffold — apply over fake client seams", () => {
 
     // A fresh fiber (post-HMR apply) registers everything again.
     apply(ctx);
-    assert.equal(ctx.injects.length, 1);
-    assert.equal(ctx.injects[0]?.entries.length, 1);
+    assert.equal(ctx.injects.length, 2);
+    assert.equal(overlayInject(ctx).entries.length, 1);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
   });
 });

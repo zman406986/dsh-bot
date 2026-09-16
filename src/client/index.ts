@@ -1,5 +1,5 @@
 /**
- * dsh client module entry (tickets 20 + 21).
+ * dsh client module entry (tickets 20 + 21 + 24).
  *
  * The host half of `@deepseek-ai/dsh-client-modules` scans this package's
  * `dsh.client` record, composes it into the boot graph, and serves
@@ -19,7 +19,10 @@
  * 2. the data path: a watch on our settings namespace, where the host half
  *    mirrors the roster snapshot under the `roster` key (the documented
  *    config-channel fallback — no invented push channel);
- * 3. the roster panel entry into the shipped `shell.overlay` list slot.
+ * 3. the roster panel entry into the shipped `shell.overlay` list slot;
+ * 4. the per-tool call views (ticket 24): keyed `tool.call.toolview` entries
+ *    for the five dispatcher wire tool names — unclaimed keys, so additive-
+ *    safe against the shipped composition (research Finding 5).
  */
 
 import type { ClientContext } from "./context.js";
@@ -31,6 +34,12 @@ import {
 } from "./overlay.js";
 import { createRosterPanel } from "./panel.js";
 import { createRosterStore, type RosterStore } from "./roster-store.js";
+import { createToolviewComponent } from "./toolview-panel.js";
+import {
+  TOOLVIEW_TOOL_NAMES,
+  TOOL_CALL_TOOLVIEW_SLOT,
+  toolviewRegistration,
+} from "./toolviews.js";
 
 /** Client services this module binds (vendored Cordis inject list). */
 export const inject: readonly string[] = ["slots", "locale"];
@@ -91,5 +100,21 @@ export function applyClientModule(ctx: ClientContext, store: RosterStore): void 
       rosterOverlayRegistration(),
       createRosterPanel(ctx.locale.bind(LOCALE_NAMESPACE), store),
     );
+  });
+
+  // Per-tool call views (ticket 24): one inject at the shipped keyed slot,
+  // one entry per dispatcher wire tool name. Keys are the plugin-owned core
+  // tool names (ticket 11) — unclaimed by the shipped composition, so each
+  // cell is ours by default and the generic row remains the fallback shape.
+  // All five registrations ride the same inject controller: fiber unload
+  // disposes the controller and every entry with it (HMR-safe).
+  ctx.slots.inject(TOOL_CALL_TOOLVIEW_SLOT, () => {
+    const t = ctx.locale.bind(LOCALE_NAMESPACE);
+    for (const toolName of TOOLVIEW_TOOL_NAMES) {
+      ctx.slots.register(
+        toolviewRegistration(toolName),
+        createToolviewComponent(toolName, t),
+      );
+    }
   });
 }

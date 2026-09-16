@@ -16,6 +16,11 @@
  */
 
 import type { LocaleDictionary, SlotRegistrationOptions } from "./overlay.js";
+import type { ToolviewRegistrationOptions } from "./toolviews.js";
+
+/** Any slot entry this module registers: list entries (id/order) or keyed
+ * entries such as the `tool.call.toolview` toolviews (key). */
+export type SlotEntryOptions = SlotRegistrationOptions | ToolviewRegistrationOptions;
 
 /** `ctx.slots` surface used by this scaffold. */
 export interface SlotsServiceLike {
@@ -26,7 +31,7 @@ export interface SlotsServiceLike {
    */
   inject(parent: string, callback: () => unknown): unknown;
   /** Register a component into a slot; returns the exact disposer. */
-  register(options: SlotRegistrationOptions, component: unknown): unknown;
+  register(options: SlotEntryOptions, component: unknown): unknown;
 }
 
 /** `ctx.locale` surface used by this scaffold. */

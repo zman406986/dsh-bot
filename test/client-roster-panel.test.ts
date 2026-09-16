@@ -274,15 +274,25 @@ describe("roster panel — store applies the settings-watch feed", () => {
 });
 
 describe("roster panel — apply() wires the fallback data path and the overlay entry", () => {
+  /** The shell.overlay inject record, whatever the module also registers. */
+  function overlayInject(ctx: ReturnType<typeof createClientCtx>) {
+    const record = ctx.injects.find(
+      (candidate) => candidate.parent === SHELL_OVERLAY_SLOT,
+    );
+    assert.ok(record, "shell.overlay inject missing");
+    return record;
+  }
+
   it("registers locale, one roster overlay entry, and the settings watch", () => {
     const ctx = createClientCtx();
     apply(ctx);
 
-    assert.equal(ctx.injects.length, 1);
-    assert.equal(ctx.injects[0]?.parent, SHELL_OVERLAY_SLOT);
-    assert.equal(ctx.injects[0]?.entries.length, 1);
-    assert.deepEqual(ctx.injects[0]?.entries[0]?.options, rosterOverlayRegistration());
-    assert.equal(typeof ctx.injects[0]?.entries[0]?.component, "function");
+    // Ticket 24 adds a second inject (tool.call.toolview); the roster
+    // contract stays: one overlay entry with the builder's options.
+    const overlay = overlayInject(ctx);
+    assert.equal(overlay.entries.length, 1);
+    assert.deepEqual(overlay.entries[0]?.options, rosterOverlayRegistration());
+    assert.equal(typeof overlay.entries[0]?.component, "function");
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
   });
 
@@ -359,7 +369,7 @@ describe("roster panel — apply() wires the fallback data path and the overlay 
   it("fiber teardown (HMR) disposes the settings watch; re-apply registers one fresh", () => {
     const ctx = createClientCtx();
     apply(ctx);
-    assert.equal(ctx.injects.length, 1);
+    assert.equal(ctx.injects.length, 2);
     assert.equal(ctx.watchDisposedCount(), 0);
 
     ctx.runFiberTeardown();
@@ -369,8 +379,8 @@ describe("roster panel — apply() wires the fallback data path and the overlay 
 
     // Post-HMR fiber: no duplicate accumulation.
     apply(ctx);
-    assert.equal(ctx.injects.length, 1);
-    assert.equal(ctx.injects[0]?.entries.length, 1);
+    assert.equal(ctx.injects.length, 2);
+    assert.equal(ctx.watchDisposedCount(), 1);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
   });
 });

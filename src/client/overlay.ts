@@ -79,17 +79,39 @@ export interface LocaleDictionary {
  * honest stale/unavailable state. Status labels are NOT localized — the core
  * FSM vocabulary (`spawned`/`running`/`steering`/`completed`/`error`/
  * `aborted`) renders verbatim, as-is.
+ *
+ * Ticket 24 adds the per-tool call view copy: field labels for the compact
+ * detail rows and the degraded-row fallback. Outcome values and check-row
+ * status labels stay verbatim payload/core vocabulary, never localized.
  */
 export const localeDictionary: LocaleDictionary = {
   en: {
     "roster.title": "Workers",
     "roster.empty": "No workers yet. Ask the dispatcher to start some.",
     "roster.unavailable": "Worker status is unavailable right now.",
+    "toolview.degraded": "Tool call details are unavailable.",
+    "toolview.field.worker": "Worker",
+    "toolview.field.title": "Title",
+    "toolview.field.stream": "Stream",
+    "toolview.field.todo": "Todo",
+    "toolview.field.outcome": "Outcome",
+    "toolview.field.steer": "Steer",
+    "toolview.field.delivered": "Delivered",
+    "toolview.field.attachments": "Attachments",
   },
   zh: {
     "roster.title": "工作者",
     "roster.empty": "还没有工作者。让调度器启动一些吧。",
     "roster.unavailable": "工作者状态暂时不可用。",
+    "toolview.degraded": "工具调用详情不可用。",
+    "toolview.field.worker": "工作者",
+    "toolview.field.title": "标题",
+    "toolview.field.stream": "流",
+    "toolview.field.todo": "待办",
+    "toolview.field.outcome": "结果",
+    "toolview.field.steer": "纠偏",
+    "toolview.field.delivered": "已送达",
+    "toolview.field.attachments": "附件",
   },
 };
 
