@@ -24,6 +24,24 @@ export interface WorkerRecord {
   title: string;
   status: WorkerStatus;
   startedAtMs: number;
+  toolCallCount: number;
+  transcriptRef: string | null;
+  todoId: string | null;
+}
+
+/**
+ * Listing view of a roster entry: the record fields plus elapsed time
+ * computed at list time. Terminal entries stay listed but are not running.
+ */
+export interface WorkerSummary {
+  workerId: string;
+  parentSessionId: string;
+  streamKey: string;
+  title: string;
+  status: WorkerStatus;
+  startedAtMs: number;
+  elapsedMs: number;
+  toolCallCount: number;
   transcriptRef: string | null;
   todoId: string | null;
 }
@@ -40,6 +58,8 @@ export interface SettledEvent {
   workerId: string;
   status: TerminalWorkerStatus;
   report: string;
+  /** Transcript pointer the host knows at settle time, when available. */
+  transcriptRef?: string;
 }
 
 /** Public spawn request on the multitask core surface. */
@@ -48,7 +68,21 @@ export interface SpawnRequest {
   streamKey: string;
   title: string;
   prompt: string;
+  /** Linked todo id, when the spawn is driven by a todo. */
+  todoId?: string;
 }
+
+/**
+ * Result of a spawn request.
+ * A refusal never creates a worker and never talks to the host.
+ */
+export type SpawnResult =
+  | { readonly ok: true; readonly workerId: string }
+  | {
+      readonly ok: false;
+      readonly reason: "duplicate-stream-key";
+      readonly detail: string;
+    };
 
 /**
  * Result of a steer request.

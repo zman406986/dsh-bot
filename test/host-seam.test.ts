@@ -2,18 +2,26 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createMultitask } from "../src/core/multitask.js";
 import { FakeDshHost } from "../src/core/fake-host.js";
+import type { SpawnResult } from "../src/core/types.js";
+
+function unwrapSpawn(result: SpawnResult): string {
+  assert.ok(result.ok, result.ok ? "" : result.detail);
+  return result.workerId;
+}
 
 describe("multitask core ↔ DshHost seam", () => {
   it("spawnWorker is non-blocking, returns a host worker id, and records the spawn", async () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
 
-    const workerId = await multitask.spawnWorker({
-      parentSessionId: "session-1",
-      streamKey: "todo-1",
-      title: "Research dsh profiles",
-      prompt: "Look up how dsh profiles compose.",
-    });
+    const workerId = unwrapSpawn(
+      await multitask.spawnWorker({
+        parentSessionId: "session-1",
+        streamKey: "todo-1",
+        title: "Research dsh profiles",
+        prompt: "Look up how dsh profiles compose.",
+      }),
+    );
 
     assert.equal(workerId, "fake-worker-1");
     assert.equal(host.spawnCalls.length, 1);
@@ -34,12 +42,14 @@ describe("multitask core ↔ DshHost seam", () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
 
-    const workerId = await multitask.spawnWorker({
-      parentSessionId: "session-1",
-      streamKey: "todo-1",
-      title: "Build scaffold",
-      prompt: "Build it.",
-    });
+    const workerId = unwrapSpawn(
+      await multitask.spawnWorker({
+        parentSessionId: "session-1",
+        streamKey: "todo-1",
+        title: "Build scaffold",
+        prompt: "Build it.",
+      }),
+    );
 
     host.fireSettled({
       workerId,
@@ -57,12 +67,14 @@ describe("multitask core ↔ DshHost seam", () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
 
-    const workerId = await multitask.spawnWorker({
-      parentSessionId: "session-1",
-      streamKey: "todo-1",
-      title: "Once",
-      prompt: "Do it once.",
-    });
+    const workerId = unwrapSpawn(
+      await multitask.spawnWorker({
+        parentSessionId: "session-1",
+        streamKey: "todo-1",
+        title: "Once",
+        prompt: "Do it once.",
+      }),
+    );
 
     host.fireSettled({ workerId, status: "completed", report: "first" });
     host.fireSettled({ workerId, status: "error", report: "second" });
@@ -77,12 +89,14 @@ describe("multitask core ↔ DshHost seam", () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
 
-    const workerId = await multitask.spawnWorker({
-      parentSessionId: "session-1",
-      streamKey: "todo-1",
-      title: "Long job",
-      prompt: "Take a while.",
-    });
+    const workerId = unwrapSpawn(
+      await multitask.spawnWorker({
+        parentSessionId: "session-1",
+        streamKey: "todo-1",
+        title: "Long job",
+        prompt: "Take a while.",
+      }),
+    );
 
     await multitask.abortWorker(workerId);
 
@@ -101,18 +115,22 @@ describe("multitask core ↔ DshHost seam", () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
 
-    await multitask.spawnWorker({
-      parentSessionId: "session-a",
-      streamKey: "todo-a",
-      title: "A",
-      prompt: "A",
-    });
-    await multitask.spawnWorker({
-      parentSessionId: "session-b",
-      streamKey: "todo-b",
-      title: "B",
-      prompt: "B",
-    });
+    unwrapSpawn(
+      await multitask.spawnWorker({
+        parentSessionId: "session-a",
+        streamKey: "todo-a",
+        title: "A",
+        prompt: "A",
+      }),
+    );
+    unwrapSpawn(
+      await multitask.spawnWorker({
+        parentSessionId: "session-b",
+        streamKey: "todo-b",
+        title: "B",
+        prompt: "B",
+      }),
+    );
 
     assert.equal(multitask.listWorkers("session-a").length, 1);
     assert.equal(multitask.listWorkers("session-a")[0]?.title, "A");

@@ -14,9 +14,11 @@ export type {
   SettledEvent,
   SpawnOptions,
   SpawnRequest,
+  SpawnResult,
   SteerResult,
   StopResult,
   TerminalWorkerStatus,
   WorkerRecord,
   WorkerStatus,
+  WorkerSummary,
 } from "./core/types.js";

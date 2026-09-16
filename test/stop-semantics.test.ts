@@ -2,18 +2,27 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { FakeDshHost } from "../src/core/fake-host.js";
 import { createMultitask, type Multitask } from "../src/core/multitask.js";
+import type { SpawnResult } from "../src/core/types.js";
+
+function unwrapSpawn(result: SpawnResult): string {
+  assert.ok(result.ok, result.ok ? "" : result.detail);
+  return result.workerId;
+}
 
 async function spawnRunning(
   _host: FakeDshHost,
   multitask: Multitask,
   parentSessionId = "session-1",
+  streamKey = "todo-1",
 ): Promise<string> {
-  const workerId = await multitask.spawnWorker({
-    parentSessionId,
-    streamKey: "todo-1",
-    title: "Stop subject",
-    prompt: "Do the work.",
-  });
+  const workerId = unwrapSpawn(
+    await multitask.spawnWorker({
+      parentSessionId,
+      streamKey,
+      title: "Stop subject",
+      prompt: "Do the work.",
+    }),
+  );
   multitask.noteTurnStarted(workerId);
   return workerId;
 }
@@ -191,12 +200,14 @@ describe("stop semantics", () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
 
-    const workerId = await multitask.spawnWorker({
-      parentSessionId: "session-1",
-      streamKey: "todo-2",
-      title: "Never started",
-      prompt: "Wait.",
-    });
+    const workerId = unwrapSpawn(
+      await multitask.spawnWorker({
+        parentSessionId: "session-1",
+        streamKey: "todo-2",
+        title: "Never started",
+        prompt: "Wait.",
+      }),
+    );
 
     const result = await multitask.abortWorker(workerId);
     assert.deepEqual(result, { ok: true });

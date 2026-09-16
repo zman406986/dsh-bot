@@ -3,18 +3,27 @@ import { describe, it } from "node:test";
 import { FakeDshHost } from "../src/core/fake-host.js";
 import { createMultitask, type Multitask } from "../src/core/multitask.js";
 import { createSteerQueue } from "../src/core/steer-queue.js";
+import type { SpawnResult } from "../src/core/types.js";
+
+function unwrapSpawn(result: SpawnResult): string {
+  assert.ok(result.ok, result.ok ? "" : result.detail);
+  return result.workerId;
+}
 
 async function spawnRunning(
   host: FakeDshHost,
   multitask: Multitask,
   parentSessionId = "session-1",
+  streamKey = "todo-1",
 ): Promise<string> {
-  const workerId = await multitask.spawnWorker({
-    parentSessionId,
-    streamKey: "todo-1",
-    title: "Steer subject",
-    prompt: "Do the work.",
-  });
+  const workerId = unwrapSpawn(
+    await multitask.spawnWorker({
+      parentSessionId,
+      streamKey,
+      title: "Steer subject",
+      prompt: "Do the work.",
+    }),
+  );
   multitask.noteTurnStarted(workerId);
   return workerId;
 }
@@ -134,12 +143,14 @@ describe("multitask steer delivery (observable via fake host)", () => {
     assert.equal(unknown.ok === false && unknown.reason, "unknown-worker");
 
     // Spawned but first turn has not started.
-    const spawnedId = await multitask.spawnWorker({
-      parentSessionId: "session-1",
-      streamKey: "todo-2",
-      title: "Not started",
-      prompt: "Wait.",
-    });
+    const spawnedId = unwrapSpawn(
+      await multitask.spawnWorker({
+        parentSessionId: "session-1",
+        streamKey: "todo-2",
+        title: "Not started",
+        prompt: "Wait.",
+      }),
+    );
     const beforeTurn = await multitask.steerWorker(spawnedId, "hurry up");
     assert.equal(beforeTurn.ok, false);
     assert.equal(beforeTurn.ok === false && beforeTurn.reason, "not-running");

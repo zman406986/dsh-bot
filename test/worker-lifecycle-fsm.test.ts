@@ -2,14 +2,22 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { FakeDshHost } from "../src/core/fake-host.js";
 import { createMultitask, type Multitask } from "../src/core/multitask.js";
+import type { SpawnResult } from "../src/core/types.js";
+
+function unwrapSpawn(result: SpawnResult): string {
+  assert.ok(result.ok, result.ok ? "" : result.detail);
+  return result.workerId;
+}
 
 async function spawn(host: FakeDshHost, multitask: Multitask): Promise<string> {
-  return multitask.spawnWorker({
-    parentSessionId: "session-1",
-    streamKey: "todo-1",
-    title: "Lifecycle subject",
-    prompt: "Do the work.",
-  });
+  return unwrapSpawn(
+    await multitask.spawnWorker({
+      parentSessionId: "session-1",
+      streamKey: "todo-1",
+      title: "Lifecycle subject",
+      prompt: "Do the work.",
+    }),
+  );
 }
 
 describe("worker lifecycle FSM (observable via multitask + fake host)", () => {

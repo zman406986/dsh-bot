@@ -2,10 +2,12 @@ import type { DshHost } from "./dsh-host.js";
 import {
   isTerminalStatus,
   type SpawnRequest,
+  type SpawnResult,
   type SteerResult,
   type StopResult,
   type WorkerRecord,
   type WorkerStatus,
+  type WorkerSummary,
 } from "./types.js";
 import {
   createSteerQueue,
@@ -20,8 +22,12 @@ import { applyEvent, type WorkerEvent } from "./worker-fsm.js";
  * illegal transitions are ignored rather than thrown.
  */
 export interface Multitask {
-  /** Spawn a worker through the host and put it on the live roster. */
-  spawnWorker(request: SpawnRequest): Promise<string>;
+  /**
+   * Spawn a worker through the host and put it on the live roster.
+   * Refused when the stream key already has a live (non-terminal) worker —
+   * one stream has one worker. A terminal worker frees the stream key.
+   */
+  spawnWorker(request: SpawnRequest): Promise<SpawnResult>;
   /**
    * Stop a worker for good. Interrupts through the host, clears any parked
    * steer, and leaves the worker aborted so a later settle is dropped (no
@@ -44,12 +50,20 @@ export interface Multitask {
   noteSteerReceived(workerId: string): void;
   /** Steer injected and work continues: steering → running. No-op if illegal. */
   noteSteerInjected(workerId: string): void;
-  listWorkers(parentSessionId: string): WorkerRecord[];
+  /** Increment the worker's tool-call count. No-op for unknown workers. */
+  noteToolCall(workerId: string): void;
+  /**
+   * Roster for a parent session, including terminal entries.
+   * Each entry carries elapsed time, tool-call count, and transcript reference.
+   */
+  listWorkers(parentSessionId: string): WorkerSummary[];
   getWorker(workerId: string): WorkerRecord | undefined;
 }
 
 export function createMultitask(host: DshHost): Multitask {
   const workers = new Map<string, WorkerRecord>();
+  /** streamKey → workerId for every live (non-terminal) worker. */
+  const liveByStreamKey = new Map<string, string>();
   const steerQueue: SteerQueue = createSteerQueue();
 
   /** Apply a lifecycle event; returns the new status or undefined if ignored. */
@@ -62,6 +76,12 @@ export function createMultitask(host: DshHost): Multitask {
     const next = applyEvent(record.status, event);
     if (next === null) return undefined;
     record.status = next;
+    if (isTerminalStatus(next)) {
+      // Terminal frees the stream key for reuse.
+      if (liveByStreamKey.get(record.streamKey) === workerId) {
+        liveByStreamKey.delete(record.streamKey);
+      }
+    }
     return next;
   }
 
@@ -74,6 +94,9 @@ export function createMultitask(host: DshHost): Multitask {
     if (next === undefined) return;
     const record = workers.get(event.workerId);
     if (record === undefined) return;
+    if (event.transcriptRef !== undefined) {
+      record.transcriptRef = event.transcriptRef;
+    }
     void host.requestDispatcherWakeup(record.parentSessionId);
   });
 
@@ -91,7 +114,15 @@ export function createMultitask(host: DshHost): Multitask {
   });
 
   return {
-    async spawnWorker(request: SpawnRequest): Promise<string> {
+    async spawnWorker(request: SpawnRequest): Promise<SpawnResult> {
+      const existingId = liveByStreamKey.get(request.streamKey);
+      if (existingId !== undefined) {
+        return {
+          ok: false,
+          reason: "duplicate-stream-key",
+          detail: `stream key "${request.streamKey}" already has a running worker (${existingId})`,
+        };
+      }
       const workerId = await host.spawnWorker(request.prompt, {
         parentSessionId: request.parentSessionId,
         streamKey: request.streamKey,
@@ -104,11 +135,13 @@ export function createMultitask(host: DshHost): Multitask {
         title: request.title,
         status: "spawned",
         startedAtMs: Date.now(),
+        toolCallCount: 0,
         transcriptRef: null,
-        todoId: null,
+        todoId: request.todoId ?? null,
       };
       workers.set(workerId, record);
-      return workerId;
+      liveByStreamKey.set(request.streamKey, workerId);
+      return { ok: true, workerId };
     },
 
     async abortWorker(workerId: string): Promise<StopResult> {
@@ -190,10 +223,28 @@ export function createMultitask(host: DshHost): Multitask {
       transition(workerId, { type: "steer-injected" });
     },
 
-    listWorkers(parentSessionId: string): WorkerRecord[] {
-      return [...workers.values()].filter(
-        (worker) => worker.parentSessionId === parentSessionId,
-      );
+    noteToolCall(workerId: string): void {
+      const record = workers.get(workerId);
+      if (record === undefined) return;
+      record.toolCallCount += 1;
+    },
+
+    listWorkers(parentSessionId: string): WorkerSummary[] {
+      const now = Date.now();
+      return [...workers.values()]
+        .filter((worker) => worker.parentSessionId === parentSessionId)
+        .map((worker) => ({
+          workerId: worker.workerId,
+          parentSessionId: worker.parentSessionId,
+          streamKey: worker.streamKey,
+          title: worker.title,
+          status: worker.status,
+          startedAtMs: worker.startedAtMs,
+          elapsedMs: Math.max(0, now - worker.startedAtMs),
+          toolCallCount: worker.toolCallCount,
+          transcriptRef: worker.transcriptRef,
+          todoId: worker.todoId,
+        }));
     },
 
     getWorker(workerId: string): WorkerRecord | undefined {
@@ -204,8 +255,10 @@ export function createMultitask(host: DshHost): Multitask {
 
 export type {
   SpawnRequest,
+  SpawnResult,
   SteerResult,
   StopResult,
   WorkerRecord,
   WorkerStatus,
+  WorkerSummary,
 };
