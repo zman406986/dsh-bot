@@ -15,6 +15,7 @@ export type {
   SpawnOptions,
   SpawnRequest,
   SteerResult,
+  StopResult,
   TerminalWorkerStatus,
   WorkerRecord,
   WorkerStatus,

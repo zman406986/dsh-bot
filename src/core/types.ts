@@ -61,3 +61,15 @@ export type SteerResult =
       readonly reason: "unknown-worker" | "not-running";
       readonly detail: string;
     };
+
+/**
+ * Result of a stop request.
+ * A refusal never interrupts and never undoes an already-delivered completion.
+ */
+export type StopResult =
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      readonly reason: "already-settled";
+      readonly detail: string;
+    };

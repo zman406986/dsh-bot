@@ -1,7 +1,9 @@
 import type { DshHost } from "./dsh-host.js";
 import {
+  isTerminalStatus,
   type SpawnRequest,
   type SteerResult,
+  type StopResult,
   type WorkerRecord,
   type WorkerStatus,
 } from "./types.js";
@@ -20,8 +22,16 @@ import { applyEvent, type WorkerEvent } from "./worker-fsm.js";
 export interface Multitask {
   /** Spawn a worker through the host and put it on the live roster. */
   spawnWorker(request: SpawnRequest): Promise<string>;
-  /** Interrupt a worker through the host and mark it aborted. Late settles are dropped. */
-  abortWorker(workerId: string): Promise<void>;
+  /**
+   * Stop a worker for good. Interrupts through the host, clears any parked
+   * steer, and leaves the worker aborted so a later settle is dropped (no
+   * delivery, no wake, no revival). The stop path never sends a user-facing
+   * message; the caller receives a plain confirmation result.
+   * Refused without interrupting when the worker has already settled — the
+   * refusal notes the worker may already be done, and any completion already
+   * delivered through the normal settle path stays delivered.
+   */
+  abortWorker(workerId: string): Promise<StopResult>;
   /**
    * Park a steer for a live worker and interrupt its current step.
    * Single-slot last-wins: a newer steer replaces any undelivered one.
@@ -101,18 +111,36 @@ export function createMultitask(host: DshHost): Multitask {
       return workerId;
     },
 
-    async abortWorker(workerId: string): Promise<void> {
+    async abortWorker(workerId: string): Promise<StopResult> {
       const record = workers.get(workerId);
       if (record === undefined) {
         throw new Error(`unknown worker: ${workerId}`);
       }
+      if (isTerminalStatus(record.status)) {
+        // Already settled (or previously stopped) — refuse without interrupting.
+        // The completion that already arrived was delivered through the normal
+        // settle path; this refusal does not undo it.
+        return {
+          ok: false,
+          reason: "already-settled",
+          detail: `worker ${workerId} is not running; it may already be done`,
+        };
+      }
       const next = transition(workerId, { type: "aborted" });
       if (next === undefined) {
-        // Already terminal — do not interrupt again.
-        return;
+        // Race: the worker became terminal between the check and the transition.
+        return {
+          ok: false,
+          reason: "already-settled",
+          detail: `worker ${workerId} is not running; it may already be done`,
+        };
       }
+      // Drop any parked steer — nothing is kept for a later revival.
+      steerQueue.clear(workerId);
       // Mark first, then interrupt: a late host settle must not revive the worker.
+      // The stop path never sends a user-facing message.
       await host.interruptWorker(workerId);
+      return { ok: true };
     },
 
     async steerWorker(workerId: string, message: string): Promise<SteerResult> {
@@ -174,4 +202,10 @@ export function createMultitask(host: DshHost): Multitask {
   };
 }
 
-export type { SpawnRequest, SteerResult, WorkerRecord, WorkerStatus };
+export type {
+  SpawnRequest,
+  SteerResult,
+  StopResult,
+  WorkerRecord,
+  WorkerStatus,
+};
