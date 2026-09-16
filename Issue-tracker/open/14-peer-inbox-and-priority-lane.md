@@ -1,10 +1,10 @@
-# 14 — Peer inbox + priority lane
+﻿# 14 鈥?Peer inbox + priority lane
 
 **What to build:** Other assistants can reach this dispatcher asynchronously, and the user can never be interrupted by them. A peer message arrives later as its own turn, identified as another assistant rather than the user.
 
-**Blocked by:** 12 — Feature flag + profile split.
+**Blocked by:** 12 鈥?Feature flag + profile split.
 
-**Status:** ready-for-human
+**Status:** open
 
 - [x] A peer agent can send a message to the dispatcher without waiting for a reply; the send returns a delivery acknowledgement only.
 - [x] A peer message arrives as a fresh hidden turn with a cue that it comes from another assistant, never as the user.
@@ -21,12 +21,12 @@
 
 Shipped as pure core modules + wake-bus integration (design-14):
 
-- `src/core/peer-types.ts` — `PeerEnvelope`, discriminated `PeerTarget` (agent|group|broadcast), structural `PeerSendAck`, `PeerNotice`, `effectivePeerPriority`.
-- `src/core/peer-inbox.ts` — sender-scoped messageId index, idempotent re-accept, `message-id-reuse` / `inbox-full` / `invalid-envelope`, delivered flags, default cap 64.
-- `src/core/wake-bus.ts` — priority/normal peer deques, turn ownership (`user`|`peer`|`worker-settled`, fail closed to user), flush rank user → priority peer → normal peer → background, interrupt of non-user turns only, user preemption also reclaims peer wakes.
-- `src/core/multitask.ts` — `sendPeer` / `listPendingPeers` / `peerInbox`; drain marks peer rows delivered; wires optional `requestDispatcherInterrupt`.
-- `src/core/dsh-host.ts` — optional `requestDispatcherInterrupt` seam. Live adapter soft-fallback is a no-op (no public mid-turn cancel on the local install); FakeDshHost records calls.
+- `src/core/peer-types.ts` 鈥?`PeerEnvelope`, discriminated `PeerTarget` (agent|group|broadcast), structural `PeerSendAck`, `PeerNotice`, `effectivePeerPriority`.
+- `src/core/peer-inbox.ts` 鈥?sender-scoped messageId index, idempotent re-accept, `message-id-reuse` / `inbox-full` / `invalid-envelope`, delivered flags, default cap 64.
+- `src/core/wake-bus.ts` 鈥?priority/normal peer deques, turn ownership (`user`|`peer`|`worker-settled`, fail closed to user), flush rank user 鈫?priority peer 鈫?normal peer 鈫?background, interrupt of non-user turns only, user preemption also reclaims peer wakes.
+- `src/core/multitask.ts` 鈥?`sendPeer` / `listPendingPeers` / `peerInbox`; drain marks peer rows delivered; wires optional `requestDispatcherInterrupt`.
+- `src/core/dsh-host.ts` 鈥?optional `requestDispatcherInterrupt` seam. Live adapter soft-fallback is a no-op (no public mid-turn cancel on the local install); FakeDshHost records calls.
 - Hidden-turn copy: `assemblePeerWakeTurn` + `PEER_WAKE_SECTION_HEADINGS` + `buildPeerWakeInstructionsBlock` (new copy only). Plugin `composeWakeText` routes `source === "peer"` to that formatter.
-- Tests: `test/peer-inbox.test.ts`, `test/wake-bus-peer.test.ts`, `test/multitask-peer.test.ts` (52 new). Suite 249 → 301 pass.
+- Tests: `test/peer-inbox.test.ts`, `test/wake-bus-peer.test.ts`, `test/multitask-peer.test.ts` (52 new). Suite 249 鈫?301 pass.
 
 **Out of MVP (as designed):** messaging hub, fan-out directory, images, restart durability, out-of-process transport, dispatcher `send_peer` tool.
