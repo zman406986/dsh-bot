@@ -118,4 +118,33 @@ describe("plugin scaffold", () => {
     assert.ok(ctx.listeners.get("agent/disposed"));
     assert.ok(ctx.listeners.get("subagent/end"));
   });
+
+  it("apply registers the five dispatcher tools when ctx.tools.register exists", () => {
+    const ctx = createStubCtx();
+    const registered: Array<{ name: string }> = [];
+    (ctx as { tools?: unknown }).tools = {
+      schemas: () => registered,
+      register(definition: { name: string }) {
+        registered.push(definition);
+        return () => {
+          const at = registered.findIndex((t) => t.name === definition.name);
+          if (at >= 0) registered.splice(at, 1);
+        };
+      },
+    };
+
+    apply(ctx, { enabled: true });
+    // 5 tool disposers + 1 lifecycle cleanup.
+    assert.equal(ctx.disposers.length, 6);
+    assert.deepEqual(
+      registered.map((t) => t.name),
+      [
+        "spawn_worker",
+        "check_workers",
+        "steer_worker",
+        "stop_worker",
+        "deliver_result",
+      ],
+    );
+  });
 });

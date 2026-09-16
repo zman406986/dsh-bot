@@ -1,5 +1,11 @@
 import type { Multitask } from "../core/multitask.js";
+import {
+  assembleSessionPolicy,
+  assembleTurnReminder,
+} from "../core/policy/assembler.js";
+import { textBlocks } from "./content-blocks.js";
 import type { AdapterContext, AgentLike, CordisDshHost } from "./cordis-dsh-host.js";
+import { PLUGIN_NAME } from "./wake-copy.js";
 
 /**
  * Top-level dispatcher: no parent lineage, delegation depth 0.
@@ -13,11 +19,56 @@ export function isTopLevel(agent: AgentLike): boolean {
   return (parent === null || parent === undefined) && depth === 0;
 }
 
+/** Structural system/plugin context message for `Agent.inject`. */
+export interface PluginContextMessage {
+  readonly id: string;
+  readonly role: "user";
+  readonly content: ReturnType<typeof textBlocks>;
+  readonly source: {
+    readonly kind: "plugin";
+    readonly plugin: string;
+  };
+}
+
+let injectSeq = 0;
+
+function pluginContextMessage(text: string): PluginContextMessage {
+  injectSeq += 1;
+  return {
+    id: `multitask-policy-${Date.now()}-${injectSeq}`,
+    role: "user",
+    content: textBlocks(text),
+    source: {
+      kind: "plugin",
+      plugin: PLUGIN_NAME,
+    },
+  };
+}
+
+/** Best-effort context inject; no-op when the agent has no inject. */
+function tryInject(agent: AgentLike, text: string): void {
+  if (typeof agent.inject !== "function") return;
+  if (text.length === 0) return;
+  try {
+    agent.inject(pluginContextMessage(text));
+  } catch {
+    // Injection is best-effort; never break session-start on it.
+  }
+}
+
 export interface BindDispatcherLifecycleResult {
   /** Current dispatcher session id, once captured. */
   dispatcherSessionId(): string | null;
   /** Tear down listeners. */
   unbind(): void;
+}
+
+export interface BindDispatcherLifecycleOptions {
+  /**
+   * Session-start flag (ADR-0005). Read once when the dispatcher binds.
+   * OFF → no policy inject. Defaults to true.
+   */
+  readonly policyEnabled?: boolean;
 }
 
 /**
@@ -26,6 +77,7 @@ export interface BindDispatcherLifecycleResult {
  * - wakeBus session turn bounds (dispatcher running/idle) — T06 follow-up
  * - worker FSM first turn (child running → multitask.noteTurnStarted)
  * - step-boundary (child idle → host.emitStepBoundary)
+ * - policy inject at bind + per-turn reminder on dispatcher turn start (T11)
  *
  * Distinct id spaces — do not conflate:
  * | Call | Id |
@@ -37,7 +89,9 @@ export function bindDispatcherLifecycle(
   ctx: AdapterContext,
   host: CordisDshHost,
   multitask: Multitask,
+  options?: BindDispatcherLifecycleOptions,
 ): BindDispatcherLifecycleResult {
+  const policyEnabled = options?.policyEnabled ?? true;
   let dispatcherSessionId: string | null = null;
   let parentAgentRef: AgentLike | null = null;
   const disposers: Array<() => void> = [];
@@ -54,6 +108,10 @@ export function bindDispatcherLifecycle(
       parentAgentRef = agent;
       dispatcherSessionId = sessionId;
       host.bindParent(agent, sessionId);
+      // ADR-0005: policy is fixed for this session's lifetime.
+      if (policyEnabled) {
+        tryInject(agent, assembleSessionPolicy(true));
+      }
     }),
   );
 
@@ -80,6 +138,13 @@ export function bindDispatcherLifecycle(
       if (dispatcherSessionId !== null && agentSessionId === dispatcherSessionId) {
         if (status === "running") {
           multitask.wakeBus.noteTurnStarted(dispatcherSessionId);
+          // Per-turn reminder: re-inject ledger + standing rules (T11).
+          if (policyEnabled && parentAgentRef !== null) {
+            tryInject(
+              parentAgentRef,
+              assembleTurnReminder(multitask.listTodos(dispatcherSessionId)),
+            );
+          }
         }
         if (status === "idle") {
           multitask.wakeBus.noteTurnEnded(dispatcherSessionId);

@@ -9,9 +9,11 @@ export {
   listGlobalToolNames,
   mapStopReason,
   normalizeSettleReport,
+  registerDispatcherTools,
   SPAWN_PROVIDER,
   textBlock,
   textBlocks,
+  toRegisterableTool,
   wakeUserMessage,
   WAKE_CUE,
 } from "./adapter/index.js";
@@ -24,6 +26,8 @@ export type {
   DomainLike,
   JobSnapshotLike,
   KvTableLike,
+  RegisterDispatcherToolsOptions,
+  RegisterableTool,
   StorageDomainDurability,
   StorageDomainLike,
   TextBlock,
@@ -103,3 +107,61 @@ export type {
   WorkerStatus,
   WorkerSummary,
 } from "./core/types.js";
+export {
+  abortedReportBody,
+  clampActivity,
+  clampError,
+  clampReport,
+  CHECK_ACTIVITY_CHARS,
+  emptyReportPlaceholder,
+  ERROR_CLAMP_CHARS,
+  formatWakeReportBody,
+  REPORT_CLAMP_CHARS,
+  TOOL_RESULT_SUMMARY_MAX_ROWS,
+  truncationMarker,
+} from "./core/report-clamp.js";
+export {
+  formatCheckRowLine,
+  formatCheckSummary,
+  formatElapsedMs,
+  formatSpawnAck,
+  formatSteerNote,
+  formatStopNote,
+  toCheckRow,
+} from "./core/tool-results.js";
+export type {
+  CheckWorkersToolResult,
+  DeliverResultToolResult,
+  SpawnWorkerToolResult,
+  SteerWorkerToolResult,
+  StopWorkerToolResult,
+  WorkerCheckRow,
+} from "./core/tool-results.js";
+export {
+  assembleSessionPolicy,
+  assembleTurnReminder,
+  assembleWakeTurn,
+  noticeFromSettled,
+} from "./core/policy/assembler.js";
+export type { WakeNotice } from "./core/policy/assembler.js";
+export {
+  buildDispatcherPolicySection,
+  CHECK_WORKERS_TOOL,
+  DELIVER_RESULT_TOOL,
+  DISPATCHER_TOOL_NAMES,
+  SPAWN_WORKER_TOOL,
+  STEER_WORKER_TOOL,
+  STOP_WORKER_TOOL,
+  TOOL_DESCRIPTIONS,
+} from "./core/policy/prompts.js";
+export {
+  buildTurnReminderForSession,
+  createDispatcherTools,
+} from "./core/tools.js";
+export type {
+  DeliverToUserFn,
+  DispatcherToolDef,
+  DispatcherToolDeps,
+  RecentActivityFn,
+} from "./core/tools.js";
+

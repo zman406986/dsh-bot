@@ -3,6 +3,10 @@ import { textBlocks, type ContentBlock } from "./content-blocks.js";
 /**
  * New copy only — short cue that background work is ready.
  * No Sand/reconstruction wording.
+ *
+ * Prefer building the full wake-turn body with
+ * `assembleWakeTurn` (core/policy/assembler) and passing it here;
+ * this constant remains as a minimal fallback when no notices are available.
  */
 export const WAKE_CUE =
   "Background workers finished. Review their results and continue the conversation.";
@@ -28,12 +32,12 @@ export interface WakeUserMessage {
 let wakeMessageSeq = 0;
 
 /** Build the wake follow-up message. Fresh id per call. */
-export function wakeUserMessage(): WakeUserMessage {
+export function wakeUserMessage(text: string = WAKE_CUE): WakeUserMessage {
   wakeMessageSeq += 1;
   return {
     id: `multitask-wake-${Date.now()}-${wakeMessageSeq}`,
     role: "user",
-    content: textBlocks(WAKE_CUE),
+    content: textBlocks(text),
     source: {
       kind: "plugin",
       plugin: PLUGIN_NAME,

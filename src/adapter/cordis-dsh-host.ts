@@ -26,6 +26,8 @@ export interface AgentLike {
     };
   };
   followup(message: unknown): void;
+  /** Queue context without opening a turn (optional; policy inject). */
+  inject?(message: unknown): void;
 }
 
 export interface ContinuableStartLike {
@@ -59,11 +61,14 @@ export interface JobSnapshotLike {
 }
 
 /**
- * Structural view of `ctx.tools` for listing global tool names at spawn.
+ * Structural view of `ctx.tools` for listing global tool names at spawn
+ * and registering dispatcher tools.
  * `schemas()` with no scope is the global registry view (name per tool).
  */
 export interface ToolsLike {
   schemas(scope?: unknown): ReadonlyArray<{ readonly name: string }>;
+  /** Register a tool; returns the exact disposer. Optional for stub contexts. */
+  register?(definition: unknown): () => void;
 }
 
 /**
@@ -101,6 +106,12 @@ export interface CordisDshHostOptions {
   markers?: DurabilityPort;
   /** Worker agent definition; T10 supplies the real one. */
   workerAgentDef?: WorkerAgentDef;
+  /**
+   * Compose the user-visible wake follow-up text for a background settle.
+   * Return null to fall back to the short cue. The plugin supplies this so
+   * drainWake + assembleWakeTurn land the notices in model context.
+   */
+  composeWakeText?: (sessionId: string) => string | null;
 }
 
 /**
@@ -202,6 +213,7 @@ export function createCordisDshHost(
 ): CordisDshHost {
   const workerAgentDef = options?.workerAgentDef;
   const markers = options?.markers;
+  const composeWakeText = options?.composeWakeText;
 
   let parent: AgentLike | null = null;
   let parentSessionId: string | null = null;
@@ -362,7 +374,15 @@ export function createCordisDshHost(
         }
         return;
       }
-      agent.followup(wakeUserMessage());
+      let text: string | null = null;
+      if (composeWakeText !== undefined) {
+        try {
+          text = composeWakeText(sessionId);
+        } catch {
+          text = null;
+        }
+      }
+      agent.followup(wakeUserMessage(text ?? undefined));
     },
 
     dispose(): void {

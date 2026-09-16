@@ -6,6 +6,12 @@ export {
   type TextBlock,
 } from "./content-blocks.js";
 export {
+  registerDispatcherTools,
+  toRegisterableTool,
+  type RegisterDispatcherToolsOptions,
+  type RegisterableTool,
+} from "./dispatcher-tools.js";
+export {
   createStorageDomainDurability,
   markerDomainSpec,
   MARKER_DOMAIN_NAME,
@@ -35,6 +41,7 @@ export {
 export {
   bindDispatcherLifecycle,
   isTopLevel,
+  type BindDispatcherLifecycleOptions,
   type BindDispatcherLifecycleResult,
 } from "./parent-agent.js";
 export {
@@ -43,3 +50,4 @@ export {
   wakeUserMessage,
   type WakeUserMessage,
 } from "./wake-copy.js";
+
