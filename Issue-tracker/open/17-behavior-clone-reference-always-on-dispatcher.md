@@ -34,7 +34,7 @@ This ticket is an **umbrella**. Per the scribe's instruction: **do not pre-decid
 Suggested phasing (order, not scope commitment):
 
 **Phase 0 — Setup**
-- [ ] Create the dedicated worktree + branch; document the workflow (what may live in the worktree vs main, merge/LQA procedure) so parallel agents don't cross wires.
+- [x] Create the dedicated worktree + branch; document the workflow (what may live in the worktree vs main, merge/LQA procedure) so parallel agents don't cross wires.
 
 **Phase 1 — Reference behavior inventory (cited note per `docs/agents/research.md`; abstract concepts only)**
 - [ ] Walk the reference reconstruction and produce a concept-level behavior inventory of the always-on dispatcher: activation/lifecycle, roster presentation, worker output streaming, steer interaction, todo/milestone surfaces, permission/secret approval flows, stop/interrupt semantics, notification behavior, whatever else surfaces.
@@ -55,3 +55,7 @@ Suggested phasing (order, not scope commitment):
 - Todos: `completed` means delivered to user, multiple `in_progress` allowed — do not clone any contrary semantics the reference might appear to have.
 - Tests stay offline: no network, no LLM, no running dsh (S8).
 - Never commit into the reference folder; never treat it as the product repo.
+
+## Comments
+
+2026-09-17 — Phase 0 done (agent team). Dedicated worktree created off main @ `b00d355`: `C:\Users\TZhen\Desktop\dsh-bot-always-on` on branch `clone/always-on-dispatcher` (sibling directory, never inside the repo or the reference folder). Worktree verified self-sufficient offline: `npm ci` clean, `npm test` → 514 pass / 0 fail (146 suites), `npm run typecheck` clean. Workflow doc for parallel agent teams written at `.scratch/clone-always-on/worktree-workflow.md` (layout, what lives in worktree vs main, merge/LQA gates, hard legal rules, one-implementation-at-a-time etiquette). Doc + this ticket's Phase-0 tick delivered in one commit: `COMMIT_HASH_PLACEHOLDER`.
