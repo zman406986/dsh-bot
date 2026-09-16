@@ -106,6 +106,9 @@ function createHostStub(): CordisDshHost & {
     onStepBoundary(cb: (workerId: string) => void | Promise<void>): void {
       stepCallbacks.push(cb);
     },
+    onAccessRequest(): void {
+      // Stub: T13 access-relay wiring is not under test here.
+    },
     async requestDispatcherWakeup(): Promise<void> {},
     bindParent(agent: AgentLike, sessionId: string): void {
       bound.push({ agent, sessionId });

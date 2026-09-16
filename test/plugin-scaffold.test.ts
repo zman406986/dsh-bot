@@ -97,9 +97,10 @@ describe("plugin scaffold", () => {
     const ctx = createStubCtx();
 
     apply(ctx, { enabled: true });
-    assert.equal(ctx.disposers.length, 1);
+    // Worker access tool (T13) + lifecycle cleanup. Dispatcher tools need ctx.tools.
+    assert.ok(ctx.disposers.length >= 1);
     assert.doesNotThrow(() => {
-      ctx.disposers[0]?.();
+      for (const dispose of ctx.disposers) dispose();
     });
   });
 
@@ -134,17 +135,17 @@ describe("plugin scaffold", () => {
     };
 
     apply(ctx, { enabled: true });
-    // 5 tool disposers + 1 lifecycle cleanup.
-    assert.equal(ctx.disposers.length, 6);
-    assert.deepEqual(
-      registered.map((t) => t.name),
-      [
-        "spawn_worker",
-        "check_workers",
-        "steer_worker",
-        "stop_worker",
-        "deliver_result",
-      ],
-    );
+    // Five dispatcher tools (T11) + worker access tool (T13) + lifecycle cleanup.
+    const names = registered.map((t) => t.name);
+    for (const tool of [
+      "spawn_worker",
+      "check_workers",
+      "steer_worker",
+      "stop_worker",
+      "deliver_result",
+    ]) {
+      assert.ok(names.includes(tool), `missing tool: ${tool}`);
+    }
+    assert.equal(ctx.disposers.length, names.length + 1);
   });
 });

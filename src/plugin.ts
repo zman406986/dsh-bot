@@ -10,18 +10,31 @@ import {
   bindDispatcherLifecycle,
   createCordisDshHost,
   createStorageDomainDurability,
+  installMultitaskSettingsSection,
   registerDispatcherTools,
   type AdapterContext,
   type CordisDshHost,
+  type SettingsAwareContext,
   type StorageDomainDurability,
 } from "./adapter/index.js";
 import { createWorkerAgentDef } from "./worker/agent-def.js";
 
 /**
- * Plugin config. Scaffold-level only — later tickets add real knobs.
- * Feature flag `multitask_dispatcher` is read once at dispatcher-session start (ADR-0005).
+ * Plugin config (ADR-0005 / ticket 12).
+ * Conceptual feature name `multitask_dispatcher`; on-disk key is `enabled`
+ * inside the `multitask-dispatcher` plugin namespace. Default true because
+ * stock isolation is the installation gate, not the flag default — the
+ * multitask profile's insert row sets `enabled: true` explicitly.
+ *
+ * Read once at dispatcher-session start and frozen for that session's
+ * lifetime. A settings change persists for the *next* session only.
  */
 export const Config = z.object({
+  /**
+   * Feature flag `multitask_dispatcher` (ADR-0005).
+   * Read once at dispatcher-session start and fixed for that session's lifetime.
+   * A settings change persists for the *next* session; it is not live-applied.
+   */
   enabled: z.boolean().default(true),
 });
 
@@ -49,11 +62,13 @@ export interface PluginConfig {
 
 /**
  * Narrow Cordis context surface. Prefer a local interface over importing
- * full Cordis types until peerDeps grow.
+ * full Cordis types until peerDeps grow. `settings` is optional so stub
+ * contexts stay minimal; the live host injects it for the UI control.
  */
-type CordisContext = AdapterContext & {
-  effect: (dispose: () => void) => void;
-};
+type CordisContext = AdapterContext &
+  SettingsAwareContext & {
+    effect: (dispose: () => void) => void;
+  };
 
 /**
  * Compose the wake follow-up body: drain the ready wake (reconcile runs),
@@ -103,9 +118,26 @@ function composeWakeText(multitask: Multitask, sessionId: string): string | null
 /**
  * Cordis plugin entry. Registers only through `ctx` so unload is reversible.
  * The multitask core itself is host-free and exercised in unit tests via FakeDshHost.
+ *
+ * Flag semantics (ADR-0005 / ticket 12):
+ * - `enabled` is copied once at apply entry and frozen for this session.
+ * - Settings section is always installed so the user can flip the flag for
+ *   the *next* session (no file hand-editing, no rebuild).
+ * - Disabled path returns early: stock dsh — no core, no tools, no policy,
+ *   no wake handling.
  */
 export function apply(ctx: CordisContext, config: PluginConfig): void {
-  if (!config.enabled) {
+  // ADR-0005: read once at session start; freeze for this session's lifetime.
+  // Copy the primitive — do not hold a live reference into `config`.
+  const enabled: boolean = Boolean(config.enabled);
+
+  // Always install the settings section (design-12 §5.2 option A). Present
+  // on both paths so OFF can be flipped back ON from the UI for next session.
+  installMultitaskSettingsSection(ctx, Config, config);
+
+  if (!enabled) {
+    // Stock dsh behavior: no Multitask core, no dispatcher tools,
+    // no policy, no wake handling, no worker agent type.
     return;
   }
 
@@ -126,10 +158,10 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   multitaskRef = multitask;
 
   // Capture the live dispatcher Agent + bind session-id turn bounds to wakeBus.
-  // Policy flag is session-scoped (ADR-0005); plugin config.enabled already
-  // gates apply, so the session flag is ON whenever we are here.
+  // Policy flag is session-scoped (ADR-0005); the frozen `enabled` is the
+  // authority — policy is ON whenever we are here.
   const lifecycle = bindDispatcherLifecycle(ctx, host, multitask, {
-    policyEnabled: true,
+    policyEnabled: enabled,
   });
 
   // T11: five dispatcher tools on ctx.tools (core handlers; adapter wraps).

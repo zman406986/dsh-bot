@@ -45,9 +45,15 @@ export {
   type BindDispatcherLifecycleResult,
 } from "./parent-agent.js";
 export {
+  installMultitaskSettingsSection,
+  SETTINGS_NAMESPACE,
+  type SettingsAwareContext,
+  type SettingsProviderLike,
+  type SettingsSectionHooksLike,
+} from "./settings-section.js";
+export {
   PLUGIN_NAME,
   WAKE_CUE,
   wakeUserMessage,
   type WakeUserMessage,
 } from "./wake-copy.js";
-
