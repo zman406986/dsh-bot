@@ -1,6 +1,7 @@
 import type { DshHost } from "../core/dsh-host.js";
 import type { DurabilityPort } from "../core/durability.js";
 import type { AccessRequestEvent } from "../core/access-types.js";
+import type { UserQuestionsLike } from "./access-prompt.js";
 import type { SettledEvent, SpawnOptions, TerminalWorkerStatus } from "../core/types.js";
 import { assembleWorkerPrompt } from "../worker/prompt.js";
 import {
@@ -130,6 +131,13 @@ export interface AdapterContext {
    * the live plugin injects `commands` so activation can register.
    */
   commands?: CommandsLike;
+  /**
+   * Structured user-question seam (ticket 23; dsh-user-questions service).
+   * Optional so stub contexts stay minimal; when absent the access-prompt
+   * pump is inert and the shipped conversational access relay stays the
+   * ask surface (ticket 23 fallback clause).
+   */
+  userQuestions?: UserQuestionsLike;
   subagents: {
     startContinuable(spec: ContinuableStartSpecLike): Promise<ContinuableStartLike>;
     interrupt(targetSessionId: unknown, authority: unknown): void;

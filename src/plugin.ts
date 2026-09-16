@@ -10,6 +10,7 @@ import {
 } from "./core/policy/assembler.js";
 import {
   bindDispatcherLifecycle,
+  createAccessPromptPump,
   createCordisDshHost,
   createSettingsRosterChannel,
   createStorageDomainDurability,
@@ -61,6 +62,8 @@ export const name = "multitask-dispatcher";
  *         + dispatcher tool registration (T11, deferred to activation)
  * - commands: host slash-command registry for the activation command
  *         (ticket 19, ADR-0009)
+ * - userQuestions: structured user-question seam for access-ask prompts
+ *         (ticket 23, design-16 §4.4)
  */
 export const inject: string[] = [
   "subagents",
@@ -69,6 +72,7 @@ export const inject: string[] = [
   "storageDomain",
   "tools",
   "commands",
+  "userQuestions",
 ];
 
 export interface PluginConfig {
@@ -90,8 +94,16 @@ type CordisContext = AdapterContext &
  * Compose the wake follow-up body: drain the ready wake (reconcile runs),
  * map settle notices, and include undelivered landed items whose report
  * text is only in the child transcript (T10 follow-up).
+ *
+ * `suppressPromptedAccessAsk` (ticket 23) filters asks that are currently
+ * presented through the host prompt seam so an ask is never rendered both
+ * ways at once (design-16 §4.4 dedupe; one presentation per ask at a time).
  */
-function composeWakeText(multitask: Multitask, sessionId: string): string | null {
+function composeWakeText(
+  multitask: Multitask,
+  sessionId: string,
+  suppressPromptedAccessAsk?: (requestId: string) => boolean,
+): string | null {
   const drained = multitask.drainWake(sessionId);
   if (drained === undefined) return null;
 
@@ -132,13 +144,24 @@ function composeWakeText(multitask: Multitask, sessionId: string): string | null
     seen.add(todo.workerId);
   }
 
-  if (notices.length === 0 && (drained.wake.accessRequests ?? []).length === 0 && (drained.wake.accessNotices ?? []).length === 0) {
+  // Ticket 23 dedupe: an ask owned by the prompt seam is not re-rendered
+  // conversationally mid-wait. Resolved-access notices are never filtered —
+  // denials must reach the user through the shipped honest-reporting path.
+  const accessRequests = (drained.wake.accessRequests ?? []).filter(
+    (request) => suppressPromptedAccessAsk?.(request.requestId) !== true,
+  );
+
+  if (
+    notices.length === 0 &&
+    accessRequests.length === 0 &&
+    (drained.wake.accessNotices ?? []).length === 0
+  ) {
     return null;
   }
 
   const reminder = assembleTurnReminder(multitask.listTodos(sessionId));
   const wake = assembleWakeTurn(notices, {
-    requests: drained.wake.accessRequests ?? [],
+    requests: accessRequests,
     resolved: drained.wake.accessNotices ?? [],
   });
   return `${reminder}\n\n${wake}`;
@@ -194,7 +217,11 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     workerAgentDef: createWorkerAgentDef(),
     composeWakeText: (sessionId) => {
       if (multitaskRef === null) return null;
-      return composeWakeText(multitaskRef, sessionId);
+      // Ticket 23: `accessPrompts` is declared below — this closure only
+      // runs once wakes are delivered, never during apply.
+      return composeWakeText(multitaskRef, sessionId, (requestId) =>
+        accessPrompts.suppressesConversational(requestId),
+      );
     },
   });
   const accessTimeoutMs =
@@ -233,6 +260,41 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       ),
     );
   };
+
+  // Access-request prompt pump (ticket 23, design-16 §4.4): surfaces the
+  // core relay's pending asks through the host's EXISTING prompt seam
+  // (`ctx.userQuestions.ask`) while a dispatcher session is activated, and
+  // routes each explicit Allow/Deny answer into the UNCHANGED relay via
+  // `Multitask.resolveAccess` — the same entry point a conversational
+  // answer uses. The seam is optional: absent (or failed) prompts leave
+  // the shipped conversational relay as the ask surface, and the relay's
+  // deny-by-default timeout (ADR-0008) bounds every ask either way.
+  // `lifecycle` is assigned below — the closures only run after apply,
+  // never during it.
+  const accessPrompts = createAccessPromptPump({
+    ...(ctx.userQuestions !== undefined
+      ? { userQuestions: ctx.userQuestions }
+      : {}),
+    isActive: () => lifecycle.dispatcherSessionId() !== null,
+    getAgent: () => host.parentAgent ?? undefined,
+    listPending: () => {
+      const sessionId = lifecycle.dispatcherSessionId();
+      if (sessionId === null) return [];
+      return multitask.listPendingAccess(sessionId);
+    },
+    resolve: (workerId, decision) => multitask.resolveAccess(workerId, decision),
+    requeueConversational: (ticket) => {
+      // Fallback presentation after a seam failure: the same wake-bus
+      // enqueue the core relay uses for conversational asks.
+      multitask.wakeBus.enqueueAccessRequest({
+        parentSessionId: ticket.parentSessionId,
+        workerId: ticket.workerId,
+        requestId: ticket.requestId,
+        title: multitask.getWorker(ticket.workerId)?.title ?? ticket.workerId,
+        body: ticket.body,
+      });
+    },
+  });
 
   // Activation lifecycle (ticket 19, ADR-0009): boot dormant and stock.
   // Nothing is captured on load or on agent/session-start — the dispatcher
@@ -288,8 +350,17 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       // Ticket 21: publish immediately on activation so the panel has a
       // fresh (possibly empty) snapshot without waiting for a transition.
       publishRosterSnapshot(sessionId);
+      // Ticket 23: surface any asks that parked while dormant (workers
+      // keep running across deactivations) as prompts now.
+      accessPrompts.sync();
     },
-    onDeactivated: () => deactivateToolSurface(),
+    onDeactivated: () => {
+      deactivateToolSurface();
+      // Ticket 23: prompts belong to the activated session — abandon the
+      // outstanding ones. Their tickets keep the armed relay timeouts
+      // (ADR-0008 deny-by-default); nothing waits indefinitely.
+      accessPrompts.reset();
+    },
   });
 
   // The dormant plugin's only visible affordance (design-16 §3.3).
@@ -311,12 +382,24 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   });
   ctx.effect(disposeSteerCommand);
 
+  // Ticket 23: when the core parks a pending access ask, present it through
+  // the prompt seam. The core's own onAccessRequest handler was registered
+  // during createMultitask, so by the time this callback runs the relay has
+  // already parked the ticket (or auto-answered it from stored policy, in
+  // which case sync() is a no-op — no prompt for policy-answered asks).
+  host.onAccessRequest(() => {
+    accessPrompts.sync();
+  });
+
   // Register a direct dispose callback (CordisContext.effect contract) so
   // unload/HMR truly reverses the activation: unbind, drop the tool surface,
   // dispose the host, release the marker domain.
   ctx.effect(() => {
     lifecycle.unbind();
     deactivateToolSurface();
+    // Ticket 23: abandon outstanding prompts on unload/HMR; the relay
+    // timeouts still deny their asks (ADR-0008).
+    accessPrompts.reset();
     host.dispose();
     void markers.dispose();
   });

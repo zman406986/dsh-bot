@@ -163,6 +163,7 @@ describe("plugin scaffold", () => {
       "storageDomain",
       "tools",
       "commands",
+      "userQuestions",
     ]);
     assert.ok(Config);
   });

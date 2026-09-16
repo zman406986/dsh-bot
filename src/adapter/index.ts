@@ -1,4 +1,22 @@
 export {
+  ACCESS_PROMPT_ALLOW,
+  ACCESS_PROMPT_DENY,
+  ACCESS_PROMPT_DENY_DETAIL,
+  accessPromptQuestion,
+  accessPromptQuestionId,
+  createAccessPromptPump,
+  describeAccessAction,
+  parseAccessPromptAnswer,
+  type AccessPromptAnswerItemLike,
+  type AccessPromptAnswerLike,
+  type AccessPromptOptionLike,
+  type AccessPromptPump,
+  type AccessPromptPumpOptions,
+  type AccessPromptQuestionLike,
+  type AccessPromptRequestLike,
+  type UserQuestionsLike,
+} from "./access-prompt.js";
+export {
   blocksToText,
   textBlock,
   textBlocks,
