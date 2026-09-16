@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { FakeDshHost } from "../src/core/fake-host.js";
 import { createMultitask, type Multitask } from "../src/core/multitask.js";
 import {
+  DEFAULT_ACCESS_TIMEOUT_MS,
   createAccessPolicyTable,
   createAccessRelay,
   matchTargetPattern,
@@ -103,11 +104,17 @@ function accessEvent(
 describe("access relay — T1 ask wakes dispatcher", () => {
   it("fireAccessRequest on a live worker wakes the parent and parks one ticket", async () => {
     const host = new FakeDshHost();
-    const multitask = createMultitask(host);
+    // Explicit short timeout + manual scheduler: this test parks the ticket
+    // forever, so no real 120 s default timer may stay armed past the test.
+    const scheduler = createManualScheduler();
+    const multitask = createMultitask(host, {
+      access: { timeoutMs: 50, schedule: scheduler.schedule },
+    });
     const workerId = await spawnRunning(multitask, "session-1", "todo-1", "Write docs");
 
     host.fireAccessRequest(accessEvent(workerId));
 
+    assert.equal(scheduler.scheduled.length, 1);
     assert.deepEqual(host.wakeCalls, ["session-1"]);
     const pending = multitask.listPendingAccess("session-1");
     assert.equal(pending.length, 1);
@@ -198,6 +205,41 @@ describe("access relay — T4 unanswered timeout", () => {
   });
 });
 
+describe("access relay — deny delivery to an unbound parent never rejects", () => {
+  it("timeout deny with a throwing sendMessage produces no unhandled rejection", async () => {
+    const host = new FakeDshHost();
+    // Parent unbound: the real adapter throws from sendMessage
+    // (cordis-dsh-host: "no parent agent bound; cannot send").
+    host.sendMessage = async () => {
+      throw new Error("CordisDshHost: no parent agent bound; cannot send");
+    };
+    const scheduler = createManualScheduler();
+    const multitask = createMultitask(host, {
+      access: { timeoutMs: 50, schedule: scheduler.schedule },
+    });
+    const workerId = await spawnRunning(multitask, "session-1", "todo-1", "Unbound ask");
+
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      rejections.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      host.fireAccessRequest(accessEvent(workerId));
+      // Never resolve — the timeout deny fires into the unbound parent.
+      scheduler.runAll();
+      // Let the discarded delivery promise settle before judging.
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+
+    assert.equal(rejections.length, 0);
+    assert.equal(multitask.listPendingAccess("session-1").length, 0);
+  });
+});
+
 describe("access relay — T5 timeout cancelled on early answer", () => {
   it("resolve before the timer runs cancels the schedule; late timer is a no-op", async () => {
     const host = new FakeDshHost();
@@ -246,7 +288,11 @@ describe("access relay — T6 abort clears pending", () => {
 describe("access relay — T7 one outstanding ask per worker", () => {
   it("a second fireAccessRequest while pending is ignored; still one ticket", async () => {
     const host = new FakeDshHost();
-    const multitask = createMultitask(host);
+    // Same hygiene as T1: parked ticket, manual scheduler — no real 120 s timer.
+    const scheduler = createManualScheduler();
+    const multitask = createMultitask(host, {
+      access: { timeoutMs: 50, schedule: scheduler.schedule },
+    });
     const workerId = await spawnRunning(multitask, "session-1", "todo-1", "Double ask");
 
     host.fireAccessRequest(accessEvent(workerId, { requestId: "req-1" }));
@@ -438,7 +484,11 @@ describe("access relay — T13 settle drops late resolve", () => {
 describe("access relay — T14 wake batching", () => {
   it("two asks from different workers on the same parent flush as one WakeEvent", async () => {
     const host = new FakeDshHost();
-    const multitask = createMultitask(host);
+    // Same hygiene as T1: two parked tickets, manual scheduler — no real 120 s timers.
+    const scheduler = createManualScheduler();
+    const multitask = createMultitask(host, {
+      access: { timeoutMs: 50, schedule: scheduler.schedule },
+    });
     const w1 = await spawnRunning(multitask, "session-1", "todo-1", "Worker A");
     const w2 = await spawnRunning(multitask, "session-1", "todo-2", "Worker B");
 
@@ -455,6 +505,22 @@ describe("access relay — T14 wake batching", () => {
     assert.ok(wake);
     assert.equal(wake.accessRequests?.length, 2);
     assert.equal(multitask.listPendingAccess("session-1").length, 2);
+  });
+});
+
+describe("access relay — default timeout arms the shipped 120 s", () => {
+  it("createMultitask without timeoutMs arms DEFAULT_ACCESS_TIMEOUT_MS — asserted, never waited", async () => {
+    const host = new FakeDshHost();
+    const scheduler = createManualScheduler();
+    const multitask = createMultitask(host, {
+      access: { schedule: scheduler.schedule },
+    });
+    const workerId = await spawnRunning(multitask, "session-1", "todo-1", "Default ask");
+
+    host.fireAccessRequest(accessEvent(workerId));
+
+    assert.equal(scheduler.scheduled.length, 1);
+    assert.equal(scheduler.scheduled[0]?.ms, DEFAULT_ACCESS_TIMEOUT_MS);
   });
 });
 

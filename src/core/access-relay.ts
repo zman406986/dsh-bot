@@ -204,7 +204,15 @@ export function createAccessRelay(options: AccessRelayOptions): AccessRelay {
     decision: AccessDecision,
     body: AccessRequestBody,
   ): Promise<void> {
-    await options.deliver(workerId, wrapAccessDecision(decision, body));
+    try {
+      await options.deliver(workerId, wrapAccessDecision(decision, body));
+    } catch {
+      // Delivery is best-effort: the host may legitimately throw here — e.g.
+      // the parent session unbound while a timeout deny was still armed — and
+      // these calls are fire-and-forget (`void`). The decision is already
+      // recorded and deny notices still reach the user through onResolved, so
+      // a failed delivery must never surface as an unhandled rejection.
+    }
   }
 
   function finish(
