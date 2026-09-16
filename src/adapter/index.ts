@@ -90,6 +90,23 @@ export {
   type WorkerAccessToolDeps,
 } from "./worker-access-tool.js";
 export {
+  createDispatcherSteerCommand,
+  DISPATCHER_STEER_COMMAND,
+  DISPATCHER_STEER_DESCRIPTION,
+  DISPATCHER_STEER_INPUT_HINT,
+  DISPATCHER_STEER_NOT_ACTIVE,
+  DISPATCHER_STEER_NOT_DISPATCHER,
+  DISPATCHER_STEER_USAGE,
+  dispatcherSteerNotRunning,
+  dispatcherSteerSuccess,
+  dispatcherSteerUnknownWorker,
+  parseSteerInput,
+  registerDispatcherSteerCommand,
+  steerRefusalCopy,
+  type ParsedSteerInput,
+  type RegisterDispatcherSteerCommandOptions,
+} from "./steer-command.js";
+export {
   PLUGIN_NAME,
   PEER_WAKE_CUE,
   WAKE_CUE,

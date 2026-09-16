@@ -17,6 +17,7 @@ import {
   DISPATCHER_START_SUCCESS,
   DISPATCHER_START_UNRESOLVED,
   DISPATCHER_TOOL_GATE_REFUSAL,
+  DISPATCHER_STEER_COMMAND,
   type AdapterContext,
   type AgentLike,
   type CommandDefinitionLike,
@@ -193,8 +194,12 @@ describe("activation lifecycle — flag matrix (design-16 §3.7)", () => {
     ctx.fire("agent/session-start", { agent });
     assert.equal(agent.injected.length, 0);
 
-    // The only visible affordance is the activation command.
-    assert.deepEqual(ctx.commandNames(), [DISPATCHER_START_COMMAND]);
+    // The visible affordances are the host commands (ticket 22 added the
+    // steer command; its handler gates on activation).
+    assert.deepEqual(ctx.commandNames(), [
+      DISPATCHER_START_COMMAND,
+      DISPATCHER_STEER_COMMAND,
+    ]);
     assert.deepEqual(ctx.toolNames(), []);
   });
 });
@@ -297,10 +302,13 @@ describe("activation lifecycle — command behavior", () => {
     assert.deepEqual(ctx.toolNames(), []);
   });
 
-  it("the command is namespaced and advertises its description", () => {
+  it("the commands are namespaced and advertise their descriptions", () => {
     const ctx = createFullCtx();
     apply(ctx, { enabled: true });
-    assert.deepEqual(ctx.commandNames(), ["dispatcher-start"]);
+    assert.deepEqual(ctx.commandNames(), [
+      "dispatcher-start",
+      "dispatcher-steer",
+    ]);
     assert.equal(
       DISPATCHER_START_DESCRIPTION,
       "Turn this chat into the multitask dispatcher for this session.",

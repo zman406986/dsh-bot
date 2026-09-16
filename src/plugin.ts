@@ -15,6 +15,7 @@ import {
   createStorageDomainDurability,
   installMultitaskSettingsSection,
   registerDispatcherStartCommand,
+  registerDispatcherSteerCommand,
   registerDispatcherTools,
   resolveExecSessionId,
   type AdapterContext,
@@ -298,6 +299,17 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     activate: (agent) => lifecycle.activate(agent),
   });
   ctx.effect(disposeCommand);
+
+  // Steer input command (ticket 22, design-16 §4.3): same lifecycle pattern
+  // as dispatcher-start — registered dormant, the handler gates on the
+  // activated dispatcher session and routes into the existing core steer
+  // queue path (`Multitask.steerWorker`, shared with the steer_worker tool).
+  const disposeSteerCommand = registerDispatcherSteerCommand({
+    ctx,
+    activeSessionId: () => lifecycle.dispatcherSessionId(),
+    steer: (workerId, message) => multitask.steerWorker(workerId, message),
+  });
+  ctx.effect(disposeSteerCommand);
 
   // Register a direct dispose callback (CordisContext.effect contract) so
   // unload/HMR truly reverses the activation: unbind, drop the tool surface,

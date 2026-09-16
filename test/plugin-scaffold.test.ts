@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { Config, apply, inject, name } from "../src/plugin.js";
 import {
   DISPATCHER_START_COMMAND,
+  DISPATCHER_STEER_COMMAND,
 } from "../src/adapter/index.js";
 import type {
   AdapterContext,
@@ -194,13 +195,13 @@ describe("plugin scaffold", () => {
     assert.ok(ctx.listeners.get("subagent/end"));
   });
 
-  it("dormant apply registers only the dispatcher-start command, no tools", () => {
+  it("dormant apply registers the host commands, no tools", () => {
     const ctx = createStubCtx();
     apply(ctx, { enabled: true });
-    assert.deepEqual(
-      ctx.registeredCommands.map((c) => c.name),
-      [DISPATCHER_START_COMMAND],
-    );
+    assert.deepEqual(ctx.registeredCommands.map((c) => c.name), [
+      DISPATCHER_START_COMMAND,
+      DISPATCHER_STEER_COMMAND,
+    ]);
     // Deferred to activation (ticket 19): the tool surface stays stock.
     assert.equal(ctx.registeredTools.length, 0);
   });

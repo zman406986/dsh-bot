@@ -1,0 +1,176 @@
+/**
+ * Host slash-command registration for mid-run steer input (ticket 22,
+ * design-16 §4.3). The transport does not change: the handler routes into
+ * the same core last-wins steer queue the `steer_worker` tool uses — the
+ * command is an input path, not new steer semantics (no restart, context
+ * preserved, last-wins).
+ *
+ * Registered at apply (flag ON) with an in-handler activation gate, per the
+ * dispatcher-start lifecycle pattern (ticket 19): the dormant plugin shows
+ * the command, but the handler refuses anything that is not the activated
+ * dispatcher chat. The v2 `conversation.input.dock` affordance is deferred
+ * (see ticket 22 comments) — offline, the dock's submit wiring cannot be
+ * verified against the shipped command/core path.
+ *
+ * All copy below is original clean-room text (design-16 §6).
+ * Structural only — no import of `@deepseek-ai/dsh-commands` (peer surface).
+ */
+
+import type { SteerResult } from "../core/types.js";
+import type {
+  AdapterContext,
+  AgentLike,
+  CommandDefinitionLike,
+  CommandResultLike,
+} from "./cordis-dsh-host.js";
+
+/** Globally unique host command name (`dispatcher-` prefix, design-16 §5). */
+export const DISPATCHER_STEER_COMMAND = "dispatcher-steer";
+
+/** Command menu description. */
+export const DISPATCHER_STEER_DESCRIPTION =
+  "Send a mid-run instruction to a running worker. The most recent " +
+  "instruction wins.";
+
+/** Input hint advertised with the command (design-16 §6). */
+export const DISPATCHER_STEER_INPUT_HINT = "worker id, then your instruction";
+
+/** Success copy (design-16 §6 template, worker id substituted). */
+export function dispatcherSteerSuccess(workerId: string): string {
+  return `Steer queued for ${workerId}.`;
+}
+
+/** No dispatcher is active — nothing to steer through. */
+export const DISPATCHER_STEER_NOT_ACTIVE =
+  "No dispatcher is active yet. Run /dispatcher-start in a top-level chat " +
+  "first.";
+
+/**
+ * A dispatcher is active, but not in the chat that invoked the command.
+ * A non-top-level chat can never hold the activation (activation refuses
+ * it), so this refusal covers child/delegated chats too.
+ */
+export const DISPATCHER_STEER_NOT_DISPATCHER =
+  "Steering runs in the dispatcher chat. Send /dispatcher-steer from the " +
+  "chat where you ran /dispatcher-start.";
+
+/** Missing or empty input. */
+export const DISPATCHER_STEER_USAGE =
+  "Provide a worker id and an instruction. Example: /dispatcher-steer " +
+  "worker-1 focus on the failing test first.";
+
+/** Unknown worker id (core refusal vocabulary: `unknown-worker`). */
+export function dispatcherSteerUnknownWorker(workerId: string): string {
+  return `Unknown worker: ${workerId}. Check the worker roster for live ids.`;
+}
+
+/** Worker exists but is not steerable (core refusal vocabulary: `not-running`). */
+export function dispatcherSteerNotRunning(workerId: string): string {
+  return `Worker ${workerId} is not running; it may already be done.`;
+}
+
+/**
+ * Map a core steer refusal to user-visible command copy. The worker id comes
+ * from the parsed invocation, not the core detail string.
+ */
+export function steerRefusalCopy(
+  result: SteerResult,
+  workerId: string,
+): CommandResultLike {
+  if (result.ok) {
+    // Not a refusal — the caller handles success; never invent copy here.
+    return { kind: "error", text: DISPATCHER_STEER_USAGE };
+  }
+  switch (result.reason) {
+    case "unknown-worker":
+      return { kind: "error", text: dispatcherSteerUnknownWorker(workerId) };
+    case "not-running":
+      return { kind: "error", text: dispatcherSteerNotRunning(workerId) };
+  }
+}
+
+/** Parsed steer payload: first token is the worker id, rest is the instruction. */
+export interface ParsedSteerInput {
+  readonly workerId: string;
+  readonly instruction: string;
+}
+
+/**
+ * Parse "<worker id> <instruction>" raw command input. Returns null when
+ * either part is missing or blank — the caller refuses with usage copy.
+ */
+export function parseSteerInput(
+  rawInput: string | undefined,
+): ParsedSteerInput | null {
+  const text = (rawInput ?? "").trim();
+  const match = /^(\S+)\s+([\s\S]+)$/.exec(text);
+  if (match === null) return null;
+  const workerId = match[1];
+  if (workerId === undefined) return null;
+  const instruction = (match[2] ?? "").trim();
+  if (instruction.length === 0) return null;
+  return { workerId, instruction };
+}
+
+export interface RegisterDispatcherSteerCommandOptions {
+  readonly ctx: AdapterContext;
+  /** Current dispatcher session id, or null while dormant. */
+  readonly activeSessionId: () => string | null;
+  /**
+   * Enqueue a steer through the core's existing last-wins queue path —
+   * the same `Multitask.steerWorker` call the `steer_worker` tool makes.
+   */
+  readonly steer: (workerId: string, message: string) => Promise<SteerResult>;
+}
+
+/**
+ * Build the `dispatcher-steer` command definition. The handler gates on the
+ * activated dispatcher session, parses the payload, validates worker and
+ * steerability through the core's own refusals, and never re-implements
+ * steer semantics.
+ */
+export function createDispatcherSteerCommand(
+  options: RegisterDispatcherSteerCommandOptions,
+): CommandDefinitionLike {
+  return {
+    name: DISPATCHER_STEER_COMMAND,
+    description: DISPATCHER_STEER_DESCRIPTION,
+    input: { hint: DISPATCHER_STEER_INPUT_HINT },
+    handler(invocation) {
+      const agent: AgentLike | undefined = invocation?.agent;
+      const active = options.activeSessionId();
+      const sessionId =
+        agent?.session == null ? undefined : String(agent.session.id);
+      if (active === null || sessionId === undefined) {
+        return { kind: "error", text: DISPATCHER_STEER_NOT_ACTIVE };
+      }
+      if (sessionId !== active) {
+        return { kind: "error", text: DISPATCHER_STEER_NOT_DISPATCHER };
+      }
+      const parsed = parseSteerInput(invocation.rawInput);
+      if (parsed === null) {
+        return { kind: "error", text: DISPATCHER_STEER_USAGE };
+      }
+      return options.steer(parsed.workerId, parsed.instruction).then(
+        (result): CommandResultLike =>
+          result.ok
+            ? { kind: "success", text: dispatcherSteerSuccess(parsed.workerId) }
+            : steerRefusalCopy(result, parsed.workerId),
+      );
+    },
+  };
+}
+
+/**
+ * Register the steer command on ctx.commands. Returns the disposer, or a
+ * no-op when the registry is unavailable (stub contexts).
+ */
+export function registerDispatcherSteerCommand(
+  options: RegisterDispatcherSteerCommandOptions,
+): () => void {
+  const commands = options.ctx.commands;
+  if (commands === undefined || typeof commands.register !== "function") {
+    return () => {};
+  }
+  return commands.register(createDispatcherSteerCommand(options));
+}

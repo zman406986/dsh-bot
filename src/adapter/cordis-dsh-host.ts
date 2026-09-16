@@ -94,6 +94,14 @@ export interface CommandDefinitionLike {
   /** Globally unique, fail-loud on collision. */
   readonly name: string;
   readonly description: string;
+  /**
+   * Optional advertised input (Finding 2: `input?: { hint, attachments? }`).
+   * The hint text is shown in the command menu; never enforced by the host.
+   */
+  readonly input?: {
+    readonly hint: string;
+    readonly attachments?: boolean;
+  };
   readonly handler: (
     invocation: CommandInvocationLike,
   ) => CommandResultLike | Promise<CommandResultLike>;
