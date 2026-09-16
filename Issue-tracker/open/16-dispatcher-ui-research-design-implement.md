@@ -27,3 +27,7 @@ This ticket is the **umbrella** for the whole effort. Work it in phases — rese
 - Research sources: official dsh docs, npm/GitHub metadata, MIT-licensed dsh plugin source only. **Never open the `reference material-NOT LICENSE SAFE DONT COPY-grok bot/` tree.**
 - Clean-room QA before shipping: grep the shipped tree for reconstruction identifiers (S7 / PRD §12); all UI copy is new.
 - Tests stay offline: no network, no LLM, no running dsh (S8).
+
+## Comments
+
+- 2026-09-17 (agent team): Phase 1 research complete. Seam inventory + recommendations: `docs/research/dsh-plugin-ui-patterns.md` (commits 8088ff9 and this commit). Hijack diagnosis: `.scratch/multitask-dispatcher/research-16-hijack.md` (commit cbb61a9). Side finding filed as #18. Phase 2 design next.

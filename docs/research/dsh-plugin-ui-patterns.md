@@ -117,3 +117,39 @@ Done: parts 1–2 of ticket 16 Phase 1 — seam inventory (Findings 1–6) and p
 3. **Official-docs cross-check**: deepseek-harness.github.io pages (e.g. reference/client-ui or similar) were not fetched this pass; all citations here are from shipped source, which the docs themselves say is their generation source.
 4. **Environment restoration** (Finding 0): the `~/.dsh` profile and `dsh-web-search-exa` are gone; the multitask profile of ADR-0005 must be re-created before any live verification, and `dsh-local-install.md`'s install-path facts should be corrected in place.
 5. **Version fragility**: dsh is developer preview; re-verify slot names/kinds and service faces at integration time (registry.d.ts itself documents the shadowing-priority behavior as load-bearing, so it is unlikely to change silently, but line numbers here are pinned to 0.1.5-rc.1).
+
+## Recommendations (ticket 16 phase 1, part 4)
+
+Cross-reference of the hijack diagnosis (`.scratch/multitask-dispatcher/research-16-hijack.md`, commit cbb61a9; cited as "diagnosis §n") against Findings 1–7. Two forced constraints bind every choice: **(1) spawn/interrupt authority** — some live Agent must stay bound as the host parent (`cordis-dsh-host.ts:336-339, 381-398`); UI affordances drive that path, they never replace it. **(2) delivery** — `deliverToUser` is unwired (`src/core/tools.ts:67-71`), so the only delivery path today is the dispatcher speaking as a chat agent (`dsh-adapter-api-notes.md:213`); no pure-UI dispatcher (diagnosis (d)) is recommended because it breaks (2).
+
+### (a) Activation control (ending the hijack)
+
+- **Recommended: slash-command opt-in.** `ctx.commands.register({name: "dispatcher-activate", …})` (Finding 2; dsh-commands lib/index.js:142-173). The `agent/session-start` capture (diagnosis §1.1) stays registered but defers bind+policy-inject until the command fires in a session. The handler runs *instead of* sending the line to the model and logs `command/run`/`command/done` (lib/index.js:303-318), so consent is explicit and auditable. Duplicate names throw (lib/index.js:82) — use `dispatcher`-prefixed names.
+- **Runner-up: session-scoped flag marker** read at `agent/session-start` (diagnosis (b)), building on the existing settings section (Finding 1). Consistent with ADR-0005's read-once semantics, but the settings seam is plugin-namespace-scoped; a session-scoped config source is unverified.
+- **NOT possible / unverified:** a settings flip cannot end a *running* hijack — the flag is read once in `apply` and `onChange` is a deliberate no-op (`plugin.ts:153`, `settings-section.ts:67-84`; ADR-0005), it only shapes the next session. Whether `Agent.inject` mid-session composes identically to session-start injection is unverified (diagnosis (a)). Full per-chat activation (diagnosis (c)) hinges on per-session tool scoping, which is unverified — `ctx.tools.register` is process-global (`dispatcher-tools.ts:120`), so non-activated chats would still see the five tools.
+- **ADR forced:** is command activation a forbidden live-toggle under ADR-0005? Recommended answer: no — activation happens once per session and is never flipped off while running (diagnosis §3, row (a)).
+
+### (b) Worker roster/status visibility
+
+- **Recommended: `shell.overlay` list slot** — dsh's own documented additive surface for a free-floating plugin panel (registry.d.ts:16-38, Finding 5): additive, `order`-sorted, click-through until opted in; no shadowing election against shipped UI.
+- **Runner-up: `sidebar.right.pane.tab` + `.tab.title` keyed entries** with an unclaimed key `dispatcher` (Finding 5 catalog) — ours by default, but the slot kind is shadowing and the surface is confined to the right panel. Complement, not alternative: per-tool rows for `check_workers`/`spawn_worker` via `tool.call.toolview` keyed by wire tool name (dsh-client-ui-tool contract/slots.d.ts:9-23; worked example dsh-client-ui-cordis lib/client.js:1374-1387).
+- **NOT possible / unverified:** a `main` keyed page exists (dsh-client-ui-layout lib/client.js:515-518) but how a third-party key gets *opened* is unverified (Status item 2) — do not spec against it. No new chat node types (key domain closed, Finding 5). Overlay/tab buttons must route spawn/interrupt through the bound parent agent (constraint 1).
+
+### (c) Steer input
+
+- **Recommended: `conversation.input.dock` (or `.left`/`.right`) list entry** as a steer affordance (Finding 5 catalog) — additive and order-deconflicted with the shipped command popup (entry id `command-popup`, order 1; lib/client.js:1102-1127). The transport stays `ctx.subagents.sendMessage` (dsh-extension-surface.md Finding 3); the UI is an affordance only — last-wins queueing and context preservation are core-side (PRD steer rules).
+- **Runner-up: `conversation.session.header.actions` list entry** (worked example 3; dsh-client-ui-agent-preset lib/client.js:1474-1526) opening a steer composer.
+- **NOT possible / unverified:** steering rendered as a new chat node type; per-chat steer-tool visibility has the same unverified scoping gap as (a).
+
+### (d) Access-request prompts (ticket-13 relay)
+
+- **Recommended: the existing host prompt seams.** `ctx.userQuestions.ask` (dsh-user-questions lib/index.js:52) for structured asks and `ctx.approval` for one-shot permission decisions (Finding 3) — the web answering composers are themselves plugins, so the relay answers through the existing waterfall instead of inventing a new prompt pathway.
+- **Runner-up: conversational relay** — the dispatcher surfaces the request in its own turn (status quo; works only while the dispatcher is an activated chat, constraint 2). Custom detail rendering, if ever needed, is `conversation.approval.detail` (Finding 5 catalog) — a **single (shadowing) slot owned by the shipped approval UI**; claiming it is an election against shipped UI.
+- **NOT possible:** a new host prompt pathway; an unanswered request must fall to ticket 13's deny-by-default timeout (ADR-0008), not hang.
+
+### Hard limits (all four)
+
+- Console output is not a seam — plugins log through `ctx.logger` (dsh-settings lib/index.js:493, Finding 3). No notifications/toast seam exists in 0.1.5-rc.1, so status changes are visible only in surfaces the user opens (overlay/tab/tool rows/chat), never pushed.
+- Official docs were not fetched (Status item 3). The two unverified seams Phase 2 must not assume: `main`-page key navigation, and per-session tool scoping.
+
+This resolves Status/handover item 1.
