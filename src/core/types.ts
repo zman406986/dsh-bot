@@ -51,6 +51,11 @@ export interface SpawnOptions {
   parentSessionId: string;
   streamKey: string;
   title: string;
+  /**
+   * Env/credential *names* this worker may later resolve (scoped injection).
+   * Values never appear here, in the prompt, or in any core log.
+   */
+  credentialNames?: readonly string[];
 }
 
 /** Host → core notification that a worker reached a terminal state. */
@@ -70,6 +75,8 @@ export interface SpawnRequest {
   prompt: string;
   /** Linked todo id, when the spawn is driven by a todo. */
   todoId?: string;
+  /** Env/credential names this worker may resolve. Values never appear here. */
+  credentialNames?: readonly string[];
 }
 
 /**

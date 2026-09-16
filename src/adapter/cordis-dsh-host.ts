@@ -1,5 +1,6 @@
 import type { DshHost } from "../core/dsh-host.js";
 import type { DurabilityPort } from "../core/durability.js";
+import type { AccessRequestEvent } from "../core/access-types.js";
 import type { SettledEvent, SpawnOptions, TerminalWorkerStatus } from "../core/types.js";
 import { assembleWorkerPrompt } from "../worker/prompt.js";
 import {
@@ -139,6 +140,11 @@ export interface CordisDshHost extends DshHost {
   emitStepBoundary(workerId: string): void;
   /** Notify core that a worker's first turn started (spawned → running). */
   onWorkerTurnStarted?: (workerId: string) => void;
+  /**
+   * Emit a structured access request from a worker tool into core
+   * subscribers. Adapter-only helper for the request_access tool.
+   */
+  emitAccessRequest(event: AccessRequestEvent): void;
   dispose(): void;
 }
 
@@ -221,6 +227,7 @@ export function createCordisDshHost(
   const spawnControllers = new Map<string, AbortController>();
   const settledCallbacks: Array<(event: SettledEvent) => void> = [];
   const stepBoundaryCallbacks: Array<(workerId: string) => void | Promise<void>> = [];
+  const accessRequestCallbacks: Array<(event: AccessRequestEvent) => void> = [];
   let wakeMissingLogged = false;
 
   function ownsSession(agentSessionId: string): string | undefined {
@@ -289,6 +296,39 @@ export function createCordisDshHost(
     emitStepBoundary(workerId: string): void {
       for (const cb of [...stepBoundaryCallbacks]) {
         void cb(workerId);
+      }
+    },
+
+    emitAccessRequest(event: AccessRequestEvent): void {
+      for (const cb of [...accessRequestCallbacks]) {
+        cb(event);
+      }
+    },
+
+    onAccessRequest(cb: (event: AccessRequestEvent) => void): void {
+      accessRequestCallbacks.push(cb);
+    },
+
+    async resolveCredential(
+      credentialName: string,
+    ): Promise<{ value: string; source: string } | undefined> {
+      // Adapter-only: resolve a credential *name* for scoped injection.
+      // Core never sees the string. Missing credentials service → undefined.
+      const credentials = (ctx as { credentials?: {
+        resolve?: (ref: unknown) => Promise<{ value: string; source: string } | undefined>;
+        credentialRef?: (name: string) => unknown;
+      } }).credentials;
+      if (credentials === undefined || typeof credentials.resolve !== "function") {
+        return undefined;
+      }
+      try {
+        const ref =
+          typeof credentials.credentialRef === "function"
+            ? credentials.credentialRef(credentialName)
+            : credentialName;
+        return await credentials.resolve(ref);
+      } catch {
+        return undefined;
       }
     },
 
@@ -394,6 +434,7 @@ export function createCordisDshHost(
       workers.clear();
       settledCallbacks.length = 0;
       stepBoundaryCallbacks.length = 0;
+      accessRequestCallbacks.length = 0;
       parent = null;
       parentSessionId = null;
     },

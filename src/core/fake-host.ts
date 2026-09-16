@@ -1,4 +1,5 @@
 import type { DshHost } from "./dsh-host.js";
+import type { AccessRequestEvent } from "./access-types.js";
 import type { SettledEvent, SpawnOptions } from "./types.js";
 
 export interface SpawnCall {
@@ -26,6 +27,7 @@ export class FakeDshHost implements DshHost {
 
   #settledCallbacks: Array<(event: SettledEvent) => void> = [];
   #stepBoundaryCallbacks: Array<(workerId: string) => void | Promise<void>> = [];
+  #accessRequestCallbacks: Array<(event: AccessRequestEvent) => void> = [];
   #nextId = 1;
 
   async spawnWorker(prompt: string, opts: SpawnOptions): Promise<string> {
@@ -50,6 +52,10 @@ export class FakeDshHost implements DshHost {
     this.#stepBoundaryCallbacks.push(cb);
   }
 
+  onAccessRequest(cb: (event: AccessRequestEvent) => void): void {
+    this.#accessRequestCallbacks.push(cb);
+  }
+
   async requestDispatcherWakeup(sessionId: string): Promise<void> {
     this.wakeCalls.push(sessionId);
   }
@@ -67,4 +73,12 @@ export class FakeDshHost implements DshHost {
       await cb(workerId);
     }
   }
+
+  /** Test helper: deliver an access request to every subscriber. */
+  fireAccessRequest(event: AccessRequestEvent): void {
+    for (const cb of [...this.#accessRequestCallbacks]) {
+      cb(event);
+    }
+  }
 }
+

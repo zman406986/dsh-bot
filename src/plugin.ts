@@ -17,6 +17,7 @@ import {
   type SettingsAwareContext,
   type StorageDomainDurability,
 } from "./adapter/index.js";
+import { registerWorkerAccessTool } from "./adapter/worker-access-tool.js";
 import { createWorkerAgentDef } from "./worker/agent-def.js";
 
 /**
@@ -36,6 +37,11 @@ export const Config = z.object({
    * A settings change persists for the *next* session; it is not live-applied.
    */
   enabled: z.boolean().default(true),
+  /**
+   * Unanswered access-ask timeout in ms (ticket 13).
+   * Default deny after this wait. Tests inject a tiny value.
+   */
+  accessRequestTimeoutMs: z.number().default(120_000),
 });
 
 export const name = "multitask-dispatcher";
@@ -58,6 +64,7 @@ export const inject: string[] = [
 
 export interface PluginConfig {
   enabled: boolean;
+  accessRequestTimeoutMs?: number;
 }
 
 /**
@@ -108,10 +115,15 @@ function composeWakeText(multitask: Multitask, sessionId: string): string | null
     seen.add(todo.workerId);
   }
 
-  if (notices.length === 0) return null;
+  if (notices.length === 0 && (drained.wake.accessRequests ?? []).length === 0 && (drained.wake.accessNotices ?? []).length === 0) {
+    return null;
+  }
 
   const reminder = assembleTurnReminder(multitask.listTodos(sessionId));
-  const wake = assembleWakeTurn(notices);
+  const wake = assembleWakeTurn(notices, {
+    requests: drained.wake.accessRequests ?? [],
+    resolved: drained.wake.accessNotices ?? [],
+  });
   return `${reminder}\n\n${wake}`;
 }
 
@@ -154,7 +166,16 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       return composeWakeText(multitaskRef, sessionId);
     },
   });
-  const multitask: Multitask = createMultitask(host, { durability: markers });
+  const accessTimeoutMs =
+    typeof config.accessRequestTimeoutMs === "number"
+      ? config.accessRequestTimeoutMs
+      : undefined;
+  const multitask: Multitask = createMultitask(host, {
+    durability: markers,
+    ...(accessTimeoutMs !== undefined
+      ? { access: { timeoutMs: accessTimeoutMs } }
+      : {}),
+  });
   multitaskRef = multitask;
 
   // Capture the live dispatcher Agent + bind session-id turn bounds to wakeBus.
@@ -173,6 +194,35 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   for (const dispose of toolDisposers) {
     ctx.effect(dispose);
   }
+
+  // T13: worker-only request_access tool. Emits structured asks into the core.
+  const disposeAccessTool = registerWorkerAccessTool({
+    ctx,
+    deps: {
+      resolveWorkerId: (exec) => {
+        // Structural: pull session id from common exec shapes.
+        const record = exec as {
+          agent?: { session?: { id?: unknown } };
+          session?: { id?: unknown };
+          sessionId?: unknown;
+        } | null | undefined;
+        if (record == null || typeof record !== "object") return null;
+        const raw =
+          record.agent?.session?.id ??
+          record.session?.id ??
+          record.sessionId;
+        if (raw === undefined || raw === null) return null;
+        const workerId = String(raw);
+        return host.owns(workerId) ? workerId : null;
+      },
+      hasPendingAsk: (workerId) =>
+        multitask.listPendingAccess().some((t) => t.workerId === workerId),
+      emit: (event) => {
+        host.emitAccessRequest(event);
+      },
+    },
+  });
+  ctx.effect(disposeAccessTool);
 
   ctx.effect(() => () => {
     lifecycle.unbind();

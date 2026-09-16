@@ -49,6 +49,9 @@ export const WAKE_SECTION_HEADINGS = [
   "## What to do now",
 ] as const;
 
+/** Heading for the access-ask / access-notice wake section (ticket 13). */
+export const ACCESS_SECTION_HEADING = "## Access requests";
+
 /** Empty-ledger marker in the per-turn reminder. */
 export const EMPTY_LEDGER_LINE = "(empty)";
 
@@ -112,5 +115,25 @@ export function buildWakeInstructionsBlock(): string {
     "6. If nothing is worth saying, end the turn without messaging the user. Silence is a valid outcome.",
     "",
     "Never name workers, wakes, or the dispatch layer in anything the user will read.",
+  ].join("\n");
+}
+
+/**
+ * Wake-turn rules for pending access asks and resolved denials (ticket 13).
+ * New copy only.
+ */
+export function buildAccessPolicyBlock(): string {
+  return [
+    "When a wake includes access requests, a worker is waiting on a decision only you can make.",
+    "",
+    "For each pending ask:",
+    "- Ask the user in plain language when the action is not pre-approved (name the action and why the worker needs it).",
+    "- Apply a stored policy answer when one exists; do not re-ask.",
+    "- Answer with resolve_access (allow or deny). Never leave an ask unanswered — timeout denies by default.",
+    "",
+    "For each denial (user, policy, or timeout):",
+    "- Tell the user which action was denied, in plain language.",
+    "- Do not reframe a denial as an unrelated task failure.",
+    "- A denial does not complete the todo; the worker may still finish with a partial report.",
   ].join("\n");
 }

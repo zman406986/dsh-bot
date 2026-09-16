@@ -5,11 +5,14 @@
  * Tests assert structure/order, not prose quality.
  */
 
+import type { AccessNotice, AccessRequestNotice } from "../access-types.js";
 import { formatWakeReportBody } from "../report-clamp.js";
 import type { TodoItem } from "../todo-reconciler.js";
 import type { TerminalWorkerStatus } from "../types.js";
 import type { SettledWorkerNotice } from "../wake-bus.js";
 import {
+  ACCESS_SECTION_HEADING,
+  buildAccessPolicyBlock,
   buildDispatcherPolicySection,
   buildStandingRulesBlock,
   buildWakeInstructionsBlock,
@@ -74,7 +77,13 @@ export function noticeFromSettled(
  * Wake-turn instructions for worker-settled hidden turns.
  * Silence is a valid outcome (stale / duplicate / irrelevant).
  */
-export function assembleWakeTurn(notices: readonly WakeNotice[]): string {
+export function assembleWakeTurn(
+  notices: readonly WakeNotice[],
+  access?: {
+    readonly requests?: readonly AccessRequestNotice[];
+    readonly resolved?: readonly AccessNotice[];
+  },
+): string {
   const sections: string[] = [
     "# Background work landed",
     "",
@@ -102,7 +111,62 @@ export function assembleWakeTurn(notices: readonly WakeNotice[]): string {
     }
   }
 
+  const accessText = assembleAccessSection(
+    access?.requests ?? [],
+    access?.resolved ?? [],
+  );
+  if (accessText.length > 0) {
+    sections.push("");
+    sections.push(accessText);
+  }
+
   sections.push("");
   sections.push(buildWakeInstructionsBlock());
   return sections.join("\n");
+}
+
+/**
+ * Access section for a wake: pending asks + honest denial notices.
+ * Empty when there is nothing access-related. New copy only.
+ */
+export function assembleAccessSection(
+  requests: readonly AccessRequestNotice[],
+  resolved: readonly AccessNotice[],
+): string {
+  if (requests.length === 0 && resolved.length === 0) return "";
+  const lines: string[] = [ACCESS_SECTION_HEADING, ""];
+  if (requests.length > 0) {
+    lines.push("### Pending asks");
+    for (const req of requests) {
+      lines.push("");
+      lines.push(`- Worker: ${req.workerId} · ${req.title}`);
+      lines.push(`  Class: ${req.body.class} · Target: ${req.body.target}`);
+      if (req.body.credentialName !== undefined) {
+        lines.push(`  Credential name: ${req.body.credentialName}`);
+      }
+      lines.push(`  Reason: ${req.body.reason}`);
+      lines.push(`  Request id: ${req.requestId}`);
+    }
+  }
+  if (resolved.length > 0) {
+    if (requests.length > 0) lines.push("");
+    lines.push("### Resolved");
+    for (const notice of resolved) {
+      lines.push("");
+      const decision = notice.decision;
+      const label =
+        decision.kind === "allow"
+          ? "allowed"
+          : `denied (${decision.reason})`;
+      lines.push(
+        `- ${notice.title}: ${notice.body.class} "${notice.body.target}" ${label}`,
+      );
+      if (decision.kind === "deny" && decision.detail.length > 0) {
+        lines.push(`  ${decision.detail}`);
+      }
+    }
+  }
+  lines.push("");
+  lines.push(buildAccessPolicyBlock());
+  return lines.join("\n");
 }

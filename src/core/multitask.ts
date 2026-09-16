@@ -9,6 +9,13 @@ import {
   type WorkerStatus,
   type WorkerSummary,
 } from "./types.js";
+import type { AccessDecision, AccessTicket } from "./access-types.js";
+import {
+  createAccessRelay,
+  createAccessPolicyTable,
+  type AccessPolicyTable,
+  type AccessRelay,
+} from "./access-relay.js";
 import {
   createSteerQueue,
   type SteerQueue,
@@ -37,6 +44,16 @@ export interface DrainedWake {
   readonly reconcile: ReconcileReport;
 }
 
+/** Access-relay knobs (ticket 13). */
+export interface MultitaskAccessOptions {
+  /** Unanswered-ask timeout. Default 120_000. */
+  readonly timeoutMs?: number;
+  /** Injectable clock for tests. */
+  readonly now?: () => number;
+  /** Injectable one-shot scheduler for tests. Returns a cancel function. */
+  readonly schedule?: (fn: () => void, ms: number) => () => void;
+}
+
 /** Optional ports the multitask core depends on beyond the host. */
 export interface MultitaskOptions {
   /**
@@ -45,6 +62,8 @@ export interface MultitaskOptions {
    * marker at spawn, updates it on settle, and can rebuild after a restart.
    */
   readonly durability?: DurabilityPort;
+  /** Access-relay configuration (timeout, test seams). */
+  readonly access?: MultitaskAccessOptions;
 }
 
 /**
@@ -136,6 +155,16 @@ export interface Multitask {
   readonly wakeBus: WakeBus;
   /** Dispatcher-private todo ledger (ADR-0007). */
   readonly todos: TodoLedger;
+  /**
+   * Answer a pending access ask. Delivers the decision into the same
+   * worker via sendMessage (no restart). Idempotent; false when unknown
+   * or already resolved.
+   */
+  resolveAccess(workerId: string, decision: AccessDecision): boolean;
+  /** Pending access tickets, optionally filtered by parent session. */
+  listPendingAccess(parentSessionId?: string): readonly AccessTicket[];
+  /** Stored policy table (session/profile). No hit → ask. */
+  readonly accessPolicy: AccessPolicyTable;
 }
 
 export function createMultitask(
@@ -151,6 +180,36 @@ export function createMultitask(
   const wakeBus: WakeBus = createWakeBus({
     onDeliver: (sessionId) => {
       void host.requestDispatcherWakeup(sessionId);
+    },
+  });
+  const accessPolicy: AccessPolicyTable = createAccessPolicyTable();
+  const accessRelay: AccessRelay = createAccessRelay({
+    ...(options?.access?.timeoutMs !== undefined
+      ? { timeoutMs: options.access.timeoutMs }
+      : {}),
+    ...(options?.access?.now !== undefined ? { now: options.access.now } : {}),
+    ...(options?.access?.schedule !== undefined
+      ? { schedule: options.access.schedule }
+      : {}),
+    lookupPolicy: (req, ctx) => accessPolicy.lookup(req, ctx),
+    deliver: (workerId, message) => host.sendMessage(workerId, message),
+    wakeForAsk: (notice) => {
+      wakeBus.enqueueAccessRequest({
+        parentSessionId: notice.parentSessionId,
+        workerId: notice.workerId,
+        requestId: notice.requestId,
+        title: notice.title,
+        body: notice.body,
+      });
+    },
+    onResolved: (notice, parentSessionId) => {
+      // Honest deny reporting: surface the denial on the next wake.
+      wakeBus.enqueueAccessNotice({ parentSessionId, notice });
+    },
+    getWorkerTitle: (workerId) => workers.get(workerId)?.title ?? workerId,
+    isWorkerLive: (workerId) => {
+      const record = workers.get(workerId);
+      return record !== undefined && !isTerminalStatus(record.status);
     },
   });
 
@@ -207,6 +266,8 @@ export function createMultitask(
   }
 
   host.onWorkerSettled((event) => {
+    // Settle wins over a pending access ask — drop the ticket first.
+    accessRelay.clear(event.workerId);
     const next = transition(event.workerId, {
       type: "settled",
       status: event.status,
@@ -252,6 +313,14 @@ export function createMultitask(
     });
   });
 
+  // Structured access ask from a worker (ticket 13). Policy may auto-answer;
+  // otherwise the relay parks a ticket, arms the timeout, and wakes us.
+  host.onAccessRequest((event) => {
+    const record = workers.get(event.workerId);
+    if (record === undefined || isTerminalStatus(record.status)) return;
+    accessRelay.noteRequest(event, record.parentSessionId);
+  });
+
   return {
     async spawnWorker(request: SpawnRequest): Promise<SpawnResult> {
       const existingId = liveByStreamKey.get(request.streamKey);
@@ -266,6 +335,9 @@ export function createMultitask(
         parentSessionId: request.parentSessionId,
         streamKey: request.streamKey,
         title: request.title,
+        ...(request.credentialNames !== undefined
+          ? { credentialNames: request.credentialNames }
+          : {}),
       });
       const record: WorkerRecord = {
         workerId,
@@ -324,6 +396,8 @@ export function createMultitask(
       }
       // Drop any parked steer — nothing is kept for a later revival.
       steerQueue.clear(workerId);
+      // Drop any pending access ask — stop wins; late resolve is a no-op.
+      accessRelay.clear(workerId);
       // Aborted → cancelled on the ledger (and pruned; dsh has no cancelled).
       cancelLinkedTodo(record);
       // Marker obligation closed: nothing to deliver after a restart.
@@ -443,6 +517,8 @@ export function createMultitask(
           sessionId,
           source: "user",
           settledWorkers: [],
+          accessRequests: [],
+          accessNotices: [],
         };
       const report = runReconcile(sessionId, effectiveWake);
       todoLedger.apply(report.mutations);
@@ -530,10 +606,19 @@ export function createMultitask(
 
     wakeBus,
     todos: todoLedger,
+    resolveAccess(workerId: string, decision: AccessDecision): boolean {
+      return accessRelay.resolve(workerId, decision);
+    },
+    listPendingAccess(parentSessionId?: string): readonly AccessTicket[] {
+      return accessRelay.listPending(parentSessionId);
+    },
+    accessPolicy,
   };
 }
 
 export type {
+  AccessDecision,
+  AccessTicket,
   CreateTodoInput,
   ReconcileReport,
   SpawnRequest,

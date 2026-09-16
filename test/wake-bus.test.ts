@@ -360,10 +360,17 @@ describe("wake bus — wake payload", () => {
 });
 
 describe("wake bus — accepted wake sources", () => {
-  it("the vocabulary accepts user, worker-settled, peer, timer, and external-event", () => {
+  it("the vocabulary accepts user, worker-settled, worker-access-request, peer, timer, and external-event", () => {
     assert.deepEqual(
       [...WAKE_SOURCES],
-      ["user", "worker-settled", "peer", "timer", "external-event"],
+      [
+        "user",
+        "worker-settled",
+        "worker-access-request",
+        "peer",
+        "timer",
+        "external-event",
+      ],
     );
     // Every listed source is a legal WakeSource; later tickets enqueue the rest.
     for (const source of WAKE_SOURCES) {
@@ -372,7 +379,7 @@ describe("wake bus — accepted wake sources", () => {
     }
   });
 
-  it("user and worker-settled produce wakes today; peer/timer/external-event are reserved", () => {
+  it("user, worker-settled, and worker-access-request produce wakes today; peer/timer/external-event are reserved", () => {
     const delivered: string[] = [];
     const bus = createWakeBus({ onDeliver: (id) => delivered.push(id) });
 
@@ -381,6 +388,19 @@ describe("wake bus — accepted wake sources", () => {
 
     bus.enqueueUserWake("session-1");
     assert.equal(bus.drain("session-1")?.source, "user");
+
+    bus.enqueueAccessRequest({
+      parentSessionId: "session-1",
+      workerId: "w2",
+      requestId: "r1",
+      title: "Ask",
+      body: {
+        class: "tool",
+        target: "write_file",
+        reason: "need write",
+      },
+    });
+    assert.equal(bus.drain("session-1")?.source, "worker-access-request");
 
     // Reserved sources are part of the type surface but have no enqueue API yet.
     const reserved: readonly WakeSource[] = ["peer", "timer", "external-event"];

@@ -4,6 +4,7 @@ export {
   bindDispatcherLifecycle,
   blocksToText,
   createCordisDshHost,
+  createRequestAccessHandler,
   createStorageDomainDurability,
   installMultitaskSettingsSection,
   isTopLevel,
@@ -11,6 +12,8 @@ export {
   mapStopReason,
   normalizeSettleReport,
   registerDispatcherTools,
+  registerWorkerAccessTool,
+  REQUEST_ACCESS_TOOL,
   SETTINGS_NAMESPACE,
   SPAWN_PROVIDER,
   textBlock,
@@ -60,8 +63,38 @@ export { createMultitask } from "./core/multitask.js";
 export type {
   DrainedWake,
   Multitask,
+  MultitaskAccessOptions,
   MultitaskOptions,
 } from "./core/multitask.js";
+export {
+  createAccessPolicyTable,
+  createAccessRelay,
+  defaultProfileAskSeed,
+  DEFAULT_ACCESS_TIMEOUT_MS,
+  matchTargetPattern,
+  wrapAccessDecision,
+} from "./core/access-relay.js";
+export type {
+  AccessPolicyTable,
+  AccessRelay,
+  AccessRelayOptions,
+} from "./core/access-relay.js";
+export {
+  ACCESS_CLASSES,
+  isDenyDecision,
+  toAccessClass,
+} from "./core/access-types.js";
+export type {
+  AccessClass,
+  AccessDecision,
+  AccessNotice,
+  AccessRequestBody,
+  AccessRequestEvent,
+  AccessRequestNotice,
+  AccessTicket,
+  PolicyEntry,
+  PolicyLookupCtx,
+} from "./core/access-types.js";
 export {
   createInMemoryDurability,
   toDurableMarker,
@@ -90,6 +123,8 @@ export type {
 } from "./core/todo-reconciler.js";
 export { createWakeBus, WAKE_SOURCES } from "./core/wake-bus.js";
 export type {
+  EnqueueAccessNoticeInput,
+  EnqueueAccessRequestInput,
   EnqueueSettledInput,
   SettledWorkerNotice,
   WakeBus,
@@ -143,6 +178,7 @@ export type {
   WorkerCheckRow,
 } from "./core/tool-results.js";
 export {
+  assembleAccessSection,
   assembleSessionPolicy,
   assembleTurnReminder,
   assembleWakeTurn,
@@ -150,6 +186,8 @@ export {
 } from "./core/policy/assembler.js";
 export type { WakeNotice } from "./core/policy/assembler.js";
 export {
+  ACCESS_SECTION_HEADING,
+  buildAccessPolicyBlock,
   buildDispatcherPolicySection,
   CHECK_WORKERS_TOOL,
   DELIVER_RESULT_TOOL,

@@ -52,6 +52,16 @@ export {
   type SettingsSectionHooksLike,
 } from "./settings-section.js";
 export {
+  createRequestAccessHandler,
+  registerWorkerAccessTool,
+  REQUEST_ACCESS_DESCRIPTION,
+  REQUEST_ACCESS_TOOL,
+  toAccessRequestBody,
+  type RegisterWorkerAccessToolOptions,
+  type RequestAccessResult,
+  type WorkerAccessToolDeps,
+} from "./worker-access-tool.js";
+export {
   PLUGIN_NAME,
   WAKE_CUE,
   wakeUserMessage,
