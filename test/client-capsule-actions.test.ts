@@ -88,7 +88,7 @@ function fakeTransport(overrides: Partial<CommandTransport> = {}): {
   return { transport, commands, prompts };
 }
 
-/** A v2 snapshot with one running worker, for the no-mutation guard. */
+/** A v3 snapshot with one running worker, for the no-mutation guard. */
 function runningSnapshot(): RosterSnapshot {
   const worker: RosterSnapshotWorker = {
     kind: "worker",
@@ -102,10 +102,11 @@ function runningSnapshot(): RosterSnapshot {
     blocked: null,
   };
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     dispatcherSessionId: "s-1",
     publishedAtMs: 1_000,
     workers: [worker],
+    recentResult: null,
   };
 }
 

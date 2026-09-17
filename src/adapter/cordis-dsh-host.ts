@@ -1,9 +1,10 @@
 import type { DshHost } from "../core/dsh-host.js";
 import type { DurabilityPort } from "../core/durability.js";
 import type { AccessRequestEvent } from "../core/access-types.js";
-import { clampActivity } from "../core/report-clamp.js";
+import { clampActivity, clampRecentResultExcerpt } from "../core/report-clamp.js";
 import type { UserQuestionsLike } from "./access-prompt.js";
 import type { SettledEvent, SpawnOptions, TerminalWorkerStatus } from "../core/types.js";
+import type { RosterRecentResultSource } from "../core/roster-snapshot.js";
 import { assembleWorkerPrompt } from "../worker/prompt.js";
 import {
   normalizeWorkerErrorReport,
@@ -201,6 +202,15 @@ export interface CordisDshHost extends DshHost {
    * never guessed.
    */
   recentActivity(workerId: string): string | null;
+  /**
+   * Ticket 41: the bounded settle-report excerpt observed for an owned
+   * worker when it settled (adapter-side projection of the same
+   * `subagent/end` event the core receives), or `null` when nothing honest
+   * was observed (never settled, empty report). The core stores no report
+   * text — this seam is how the roster projection sources the deliverables
+   * line's excerpt at publish time without new core state.
+   */
+  recentResult(workerId: string): RosterRecentResultSource | null;
   /** Fire step-boundary callbacks (called from parent-agent status wiring). */
   emitStepBoundary(workerId: string): void;
   /** Notify core that a worker's first turn started (spawned → running). */
@@ -359,6 +369,11 @@ export function createCordisDshHost(
   // Ticket 29: latest activity phrase per owned worker, projected from the
   // host `session/event` firehose. Pure subscription — no polling, no timers.
   const workerActivity = new Map<string, string>();
+  // Ticket 41: latest bounded settle-report excerpt per settled worker,
+  // clamped once at observation. Same subscription discipline as
+  // `workerActivity`: adapter-side projection of host-observed truth —
+  // the core stores no report text and no second transcript exists.
+  const workerResults = new Map<string, RosterRecentResultSource>();
   let wakeMissingLogged = false;
 
   function ownsSession(agentSessionId: string): string | undefined {
@@ -383,6 +398,16 @@ export function createCordisDshHost(
       report: normalizeSettleReport(status, end.lastAssistantMessage),
       transcriptRef: workerId,
     };
+    // Ticket 41: hold the bounded excerpt for the roster's deliverables
+    // line BEFORE the core observers run, so the publish the settle
+    // transition triggers already sees it. Empty report (an aborted worker
+    // with no text) → no excerpt rather than an invented one.
+    const excerpt = clampRecentResultExcerpt(event.report);
+    if (excerpt !== null) {
+      workerResults.set(workerId, { text: excerpt, settledAtMs: Date.now() });
+    } else {
+      workerResults.delete(workerId);
+    }
     for (const cb of [...settledCallbacks]) {
       cb(event);
     }
@@ -442,6 +467,10 @@ export function createCordisDshHost(
 
     recentActivity(workerId: string): string | null {
       return workerActivity.get(workerId) ?? null;
+    },
+
+    recentResult(workerId: string): RosterRecentResultSource | null {
+      return workerResults.get(workerId) ?? null;
     },
 
     emitStepBoundary(workerId: string): void {
@@ -595,6 +624,7 @@ export function createCordisDshHost(
       spawnControllers.clear();
       workers.clear();
       workerActivity.clear();
+      workerResults.clear();
       settledCallbacks.length = 0;
       stepBoundaryCallbacks.length = 0;
       accessRequestCallbacks.length = 0;

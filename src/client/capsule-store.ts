@@ -63,11 +63,21 @@
  * snapshot carries only `publishedAtMs`, which must never be presented as
  * activation time, and the adapter offers no honest `activatedAtMs` — the
  * timestamp is omitted entirely rather than faked.
+ *
+ * Ticket 41 adds the expanded panel's deliverables line on the same
+ * discipline: a pure view model over the snapshot's existing truth — the
+ * count of settled-undelivered workers (the chip's wake math, shared) plus
+ * the v3 snapshot's bounded `recentResult` excerpt. Count 0 or any degraded
+ * state hides the line entirely; a landed row without an honest excerpt
+ * (a post-restart restore — markers carry no report text) renders the line
+ * count-only, never an invented text. The excerpt's expand/collapse is the
+ * entry's OWN state too: `deliverablesOpen` rides the capsule store's box.
  */
 import {
   ROSTER_STALE_WINDOW_MS,
   isRosterSnapshotStale,
   type RosterSnapshot,
+  type RosterSnapshotRecentResult,
 } from "../core/roster-snapshot.js";
 import { isTerminalStatus } from "../core/types.js";
 import type { RosterPanelState } from "./roster-store.js";
@@ -136,6 +146,8 @@ function countSettledUndelivered(snapshot: RosterSnapshot): number {
 /** Box handed to React's `useSyncExternalStore` for the expansion state. */
 export interface CapsuleStoreBox {
   readonly expanded: boolean;
+  /** Ticket 41: whether the deliverables line's excerpt is expanded. */
+  readonly deliverablesOpen: boolean;
   readonly version: number;
 }
 
@@ -148,6 +160,8 @@ export interface CapsuleStore {
   collapse(): void;
   /** Flip the expansion state. */
   toggle(): void;
+  /** Flip the deliverables excerpt's expand/collapse state (ticket 41). */
+  toggleDeliverables(): void;
   /** Subscribe; returns the unsubscribe disposer. */
   subscribe(listener: () => void): () => void;
 }
@@ -159,18 +173,23 @@ export interface CapsuleStore {
  */
 export function createCapsuleStore(): CapsuleStore {
   let expanded = false;
+  let deliverablesOpen = false;
   let version = 0;
-  let box: CapsuleStoreBox = { expanded, version };
+  let box: CapsuleStoreBox = { expanded, deliverablesOpen, version };
   const listeners = new Set<() => void>();
+
+  function notify(): void {
+    version += 1;
+    box = { expanded, deliverablesOpen, version };
+    for (const listener of [...listeners]) {
+      listener();
+    }
+  }
 
   function set(next: boolean): void {
     if (next === expanded) return;
     expanded = next;
-    version += 1;
-    box = { expanded, version };
-    for (const listener of [...listeners]) {
-      listener();
-    }
+    notify();
   }
 
   return {
@@ -185,6 +204,10 @@ export function createCapsuleStore(): CapsuleStore {
     },
     toggle() {
       set(!expanded);
+    },
+    toggleDeliverables() {
+      deliverablesOpen = !deliverablesOpen;
+      notify();
     },
     subscribe(listener: () => void) {
       listeners.add(listener);
@@ -331,3 +354,59 @@ export const CAPSULE_ACTIVATION_STOP_KEY = "capsule.activation.stop";
 
 /** Locale key for the dormant composition's activation-pitch body line. */
 export const CAPSULE_ACTIVATION_PITCH_KEY = "capsule.activation.pitch";
+
+/** Locale key for the deliverables line's label (ticket 41). */
+export const CAPSULE_DELIVERABLES_LABEL_KEY = "capsule.deliverables.label";
+
+/** Locale key for the deliverables count phrasing (`{count}` substituted). */
+export const CAPSULE_DELIVERABLES_COUNT_KEY = "capsule.deliverables.count";
+
+/** Locale key for the excerpt's expand affordance (ticket 41). */
+export const CAPSULE_DELIVERABLES_EXPAND_KEY = "capsule.deliverables.expand";
+
+/** Locale key for the excerpt's collapse affordance (ticket 41). */
+export const CAPSULE_DELIVERABLES_COLLAPSE_KEY = "capsule.deliverables.collapse";
+
+/**
+ * The expanded panel's deliverables line view model (ticket 41): the count
+ * of settled-but-undelivered workers — exactly the chip's wake math, never
+ * a second tally — plus the snapshot's bounded most-recent excerpt. The
+ * chip's truth rules apply whole: only a FRESH snapshot vouches, so a
+ * degraded or stale feed yields `visible: false` and `count: null` (never a
+ * count the feed can no longer back). `visible` is false at count 0 — the
+ * line hides entirely when nothing is owed — and the excerpt rides along
+ * only while the line is visible; a landed row with no honest text (a
+ * post-restart restore) renders count-only with `excerpt: null`.
+ */
+export interface CapsuleDeliverablesView {
+  /** Whether the line renders at all (fresh snapshot and count > 0). */
+  readonly visible: boolean;
+  /** Settled-undelivered count; `null` when no fresh snapshot vouches. */
+  readonly count: number | null;
+  /** The snapshot's most-recent excerpt, or `null` when none is owed/held. */
+  readonly excerpt: RosterSnapshotRecentResult | null;
+}
+
+/**
+ * Pure deliverables-line view model over the panel state (ticket 41).
+ * `windowMs` defaults to the shared stale window; exactly-at-window counts
+ * as fresh, mirroring `isRosterSnapshotStale`.
+ */
+export function describeCapsuleDeliverables(
+  state: RosterPanelState,
+  nowMs: number,
+  windowMs: number = ROSTER_STALE_WINDOW_MS,
+): CapsuleDeliverablesView {
+  if (
+    state.kind !== "snapshot" ||
+    isRosterSnapshotStale(state.snapshot, nowMs, windowMs)
+  ) {
+    return { visible: false, count: null, excerpt: null };
+  }
+  const count = countSettledUndelivered(state.snapshot);
+  return {
+    visible: count > 0,
+    count,
+    excerpt: count > 0 ? state.snapshot.recentResult ?? null : null,
+  };
+}

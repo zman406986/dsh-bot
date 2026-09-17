@@ -61,16 +61,17 @@ function row(
   };
 }
 
-/** A v2 snapshot builder for activation-row view-model tests. */
+/** A v3 snapshot builder for activation-row view-model tests. */
 function snapshot(
   workers: RosterSnapshotWorker[],
   publishedAtMs = 1_000,
 ): RosterSnapshot {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     dispatcherSessionId: "s-1",
     publishedAtMs,
     workers,
+    recentResult: null,
   };
 }
 

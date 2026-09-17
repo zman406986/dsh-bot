@@ -76,16 +76,17 @@ function row(
   };
 }
 
-/** A v2 snapshot builder for feed tests. */
+/** A v3 snapshot builder for feed tests. */
 function snapshot(
   workers: RosterSnapshotWorker[],
   publishedAtMs = 1_000,
 ): RosterSnapshot {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     dispatcherSessionId: "s-1",
     publishedAtMs,
     workers,
+    recentResult: null,
   };
 }
 
@@ -768,7 +769,7 @@ describe("roster panel — store applies the settings-watch feed", () => {
     });
     assert.equal(store.getBox().state.kind, "invalid");
 
-    // A v1 payload is equally invalid under the v2 contract (ticket 27).
+    // A v1 payload is equally invalid under the v3 contract (ticket 27/41).
     store.applyChannelValue({
       [ROSTER_SETTINGS_KEY]: {
         schemaVersion: 1,

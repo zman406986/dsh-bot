@@ -1,6 +1,8 @@
 import type { WorkerStatus, WorkerSummary } from "./types.js";
+import { isTerminalStatus } from "./types.js";
 import { ACCESS_CLASSES, type AccessClass, type AccessTicket } from "./access-types.js";
 import type { TodoItem } from "./todo-reconciler.js";
+import { RECENT_RESULT_EXCERPT_CHARS, clampRecentResultExcerpt } from "./report-clamp.js";
 
 /**
  * Compact roster snapshot — the wire contract for the dispatcher's status
@@ -11,8 +13,9 @@ import type { TodoItem } from "./todo-reconciler.js";
  * mirrored value it receives through the settings-watch channel. It is a
  * projection of core state — never a second source of truth (PRD persistence
  * rule; design-17 §5 conflict 8). Runtime imports are limited to the access
- * class vocabulary (a pure contract list shared with the relay); everything
- * else crosses as types only.
+ * class vocabulary (a pure contract list shared with the relay) and the pure
+ * report-clamp helpers (the shared excerpt bound + clamp, ticket 41);
+ * everything else crosses as types only.
  *
  * The channel itself is the documented honest gap (design-16 §4.2): the
  * settings namespace is a config channel doing telemetry duty. Every read
@@ -24,10 +27,13 @@ import type { TodoItem } from "./todo-reconciler.js";
 /**
  * Wire schema version. A mismatch fails parse → panel shows unavailable.
  * v2 (ticket 27) adds the presence fields: `kind`, `startedAtMs`,
- * `toolCallCount`, `delivered`, and structured `blocked`. v1 payloads fail
- * parse cleanly — the panel never renders a half-roster (design-17 §6).
+ * `toolCallCount`, `delivered`, and structured `blocked`. v3 (ticket 41)
+ * adds the bounded envelope field `recentResult` — the deliverables line's
+ * most-recent settled-undelivered excerpt. v1 AND v2 payloads fail parse
+ * cleanly — the panel never renders a half-roster (design-17 §6; the
+ * fail-closed rule design-17 §4.1 accepted for v1→v2 applies unchanged).
  */
-export const ROSTER_SNAPSHOT_SCHEMA_VERSION = 2;
+export const ROSTER_SNAPSHOT_SCHEMA_VERSION = 3;
 
 /**
  * A snapshot older than this (host clock vs client clock at render time)
@@ -66,6 +72,19 @@ export interface RosterSnapshotBlocked {
 }
 
 /**
+ * The deliverables line's excerpt (ticket 41, schema v3): the most recent
+ * settled-undelivered worker's result text. Bounded by
+ * {@link RECENT_RESULT_EXCERPT_CHARS} at projection AND at parse (a longer
+ * string is wire corruption and fails the whole snapshot). Attribution only:
+ * `workerId`/`title` are the same row vocabulary already on the wire.
+ */
+export interface RosterSnapshotRecentResult {
+  readonly workerId: string;
+  readonly title: string;
+  readonly text: string;
+}
+
+/**
  * One roster row on the wire (v2). `kind` types the producer for forward
  * compatibility (design-17 §5 conflict 6: workers are the only implemented
  * kind; the schema admits others without a second migration).
@@ -101,19 +120,75 @@ export interface RosterSnapshot {
   /** Host clock at projection time; the client checks this for staleness. */
   readonly publishedAtMs: number;
   readonly workers: readonly RosterSnapshotWorker[];
+  /**
+   * Ticket 41 (v3): the most recent completed-but-not-delivered result
+   * excerpt, or `null` when nothing is owed or no honest text exists (e.g.
+   * a post-restart restore — markers deliberately carry no report text).
+   * Cleared by projection the moment every owed row is delivered.
+   */
+  readonly recentResult: RosterSnapshotRecentResult | null;
+}
+
+/**
+ * One settled report excerpt the adapter observed at settle time (ticket
+ * 41). Adapter-side projection of the same `SettledEvent` the core receives
+ * — the core stores no report text, so this stays existing-truth-only
+ * (design-17 §5 conflict 8: no new core state).
+ */
+export interface RosterRecentResultSource {
+  /** The (unclamped) report text observed at settle. */
+  readonly text: string;
+  /** Host clock at settle; the projection picks the most recent row. */
+  readonly settledAtMs: number;
 }
 
 /**
  * Core state the host hands to the projection (ticket 27). All optional so
  * a caller without the seam projects honest defaults (not blocked, nothing
- * owed). Both inputs are existing core truth read at publish time — the
- * projection never stores them.
+ * owed, no excerpt). Every input is existing core truth read at publish
+ * time — the projection never stores them.
  */
 export interface RosterProjectionSources {
   /** Pending access tickets for the session (`Multitask.listPendingAccess`). */
   readonly pendingAccess?: readonly AccessTicket[];
   /** Ledger items for the session (`Multitask.listTodos`). */
   readonly todos?: readonly TodoItem[];
+  /**
+   * Ticket 41: settled report excerpts by workerId, observed adapter-side
+   * at settle time. A caller without the seam projects `recentResult: null`
+   * and the deliverables line degrades to count-only.
+   */
+  readonly recentResultOf?: (workerId: string) => RosterRecentResultSource | null;
+}
+
+/**
+ * Pick the deliverables line's excerpt (ticket 41): among terminal,
+ * undelivered rows, the most recently settled one with an honest (non-empty)
+ * observed report. Ties resolve to the later roster position so the pick is
+ * deterministic. The text is clamped to the shared excerpt bound here — the
+ * wire is bounded by construction, and the parse enforces the same bound.
+ */
+function pickRecentResult(
+  workers: readonly RosterSnapshotWorker[],
+  recentResultOf: ((workerId: string) => RosterRecentResultSource | null) | undefined,
+): RosterSnapshotRecentResult | null {
+  if (recentResultOf === undefined) return null;
+  let best: RosterSnapshotRecentResult | null = null;
+  let bestSettledAtMs = Number.NEGATIVE_INFINITY;
+  for (const row of workers) {
+    // Landed-undelivered only: the line never speaks for delivered rows or
+    // workers still running (S6: completed means delivered).
+    if (!isTerminalStatus(row.status) || row.delivered) continue;
+    const source = recentResultOf(row.workerId);
+    if (source === null || source === undefined) continue;
+    const text = clampRecentResultExcerpt(source.text);
+    if (text === null) continue;
+    if (source.settledAtMs >= bestSettledAtMs) {
+      best = { workerId: row.workerId, title: row.title, text };
+      bestSettledAtMs = source.settledAtMs;
+    }
+  }
+  return best;
 }
 
 /**
@@ -129,11 +204,7 @@ export function projectRosterSnapshot(
 ): RosterSnapshot {
   const pendingAccess = sources.pendingAccess ?? [];
   const todos = sources.todos ?? [];
-  return {
-    schemaVersion: ROSTER_SNAPSHOT_SCHEMA_VERSION,
-    dispatcherSessionId,
-    publishedAtMs,
-    workers: roster.map((worker) => {
+  const projected: RosterSnapshotWorker[] = roster.map((worker) => {
       // First pending ask wins: the relay parks at most one per worker.
       const ask = pendingAccess.find((ticket) => ticket.workerId === worker.workerId);
       const linkedTodo =
@@ -157,16 +228,23 @@ export function projectRosterSnapshot(
               // credential value (access-types hard rule).
               { class: ask.body.class, target: ask.body.target },
       };
-    }),
-  };
-}
+    });
+    return {
+      schemaVersion: ROSTER_SNAPSHOT_SCHEMA_VERSION,
+      dispatcherSessionId,
+      publishedAtMs,
+      workers: projected,
+      recentResult: pickRecentResult(projected, sources.recentResultOf),
+    };
+  }
 
 /**
  * Defensive parse of a value received over the settings channel. Returns
- * `null` for anything that is not exactly a v2 snapshot: wrong shape, v1
+ * `null` for anything that is not exactly a v3 snapshot: wrong shape, v1/v2
  * payloads or other version skew, a non-finite clock, an unknown status or
- * producer kind, a malformed `blocked` reason, or a bad count — the honest
- * answer is "unavailable", not a partially hidden roster.
+ * producer kind, a malformed `blocked` reason, a missing or malformed
+ * `recentResult`, or an unbounded excerpt — the honest answer is
+ * "unavailable", not a partially hidden roster.
  */
 export function parseRosterSnapshot(value: unknown): RosterSnapshot | null {
   if (typeof value !== "object" || value === null) return null;
@@ -221,12 +299,43 @@ export function parseRosterSnapshot(value: unknown): RosterSnapshot | null {
       blocked,
     });
   }
+  const recentResult = parseRecentResult(record.recentResult);
+  if (recentResult === undefined) return null;
   return {
     schemaVersion: ROSTER_SNAPSHOT_SCHEMA_VERSION,
     dispatcherSessionId: record.dispatcherSessionId,
     publishedAtMs: record.publishedAtMs,
     workers,
+    recentResult,
   };
+}
+
+/**
+ * Validate one `recentResult` wire value (ticket 41). `undefined` means
+ * malformed — a missing key or wrong shape fails the WHOLE snapshot
+ * (fail-closed; the projection always writes the field). `null` is the
+ * valid "nothing owed / no honest text". An excerpt must carry a non-empty
+ * workerId, a string title, and bounded non-empty text — an over-limit
+ * string is version skew or corruption, never clamped silently here.
+ */
+function parseRecentResult(
+  value: unknown,
+): RosterSnapshotRecentResult | null | undefined {
+  if (value === null) return null;
+  if (typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.workerId !== "string" ||
+    record.workerId.length === 0 ||
+    typeof record.title !== "string"
+  ) {
+    return undefined;
+  }
+  if (typeof record.text !== "string" || record.text.length === 0) {
+    return undefined;
+  }
+  if (record.text.length > RECENT_RESULT_EXCERPT_CHARS) return undefined;
+  return { workerId: record.workerId, title: record.title, text: record.text };
 }
 
 /**

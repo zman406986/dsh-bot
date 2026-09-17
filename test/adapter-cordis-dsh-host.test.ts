@@ -14,7 +14,7 @@ import {
 } from "../src/adapter/cordis-dsh-host.js";
 import { bindDispatcherLifecycle, isTopLevel } from "../src/adapter/parent-agent.js";
 import { createMultitask } from "../src/core/multitask.js";
-import { CHECK_ACTIVITY_CHARS } from "../src/core/report-clamp.js";
+import { CHECK_ACTIVITY_CHARS, RECENT_RESULT_EXCERPT_CHARS } from "../src/core/report-clamp.js";
 import type { SettledEvent } from "../src/core/types.js";
 import { createWorkerAgentDef } from "../src/worker/agent-def.js";
 import { EMPTY_WORKER_REPORT_PLACEHOLDER } from "../src/worker/report.js";
@@ -405,6 +405,90 @@ describe("CordisDshHost settle and step boundary", () => {
     });
     host.emitStepBoundary("child-1");
     assert.deepEqual(seen, ["child-1"]);
+  });
+});
+
+describe("CordisDshHost recentResult — deliverables excerpt source (ticket 41)", () => {
+  async function settleOne() {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    host.bindParent(createAgent("disp-1"), "disp-1");
+    await host.spawnWorker("x", {
+      parentSessionId: "disp-1",
+      streamKey: "s",
+      title: "t",
+    });
+    return { ctx, host };
+  }
+
+  it("a completed settle leaves a bounded excerpt visible before core observers run", async () => {
+    const { ctx, host } = await settleOne();
+    let excerptDuringSettle: unknown = "not-read";
+    host.onWorkerSettled(() => {
+      // The projection reads the seat from inside the settle-triggered
+      // roster publish — it must already see the text here.
+      excerptDuringSettle = host.recentResult("child-1");
+    });
+    ctx.fire("subagent/end", {
+      id: "child-1",
+      stopReason: "completed",
+      lastAssistantMessage: [{ type: "text", text: "All done." }],
+    });
+    assert.equal(
+      (excerptDuringSettle as { text: string } | null)?.text,
+      "All done.",
+      "the settle-time publish already sees the excerpt",
+    );
+    assert.equal(
+      typeof (excerptDuringSettle as { settledAtMs: number } | null)?.settledAtMs,
+      "number",
+    );
+    assert.equal(host.recentResult("child-1")?.text, "All done.");
+  });
+
+  it("clamps an over-long report to the excerpt bound; empty abort leaves null", async () => {
+    const { ctx, host } = await settleOne();
+    ctx.fire("subagent/end", {
+      id: "child-1",
+      stopReason: "completed",
+      lastAssistantMessage: [{ type: "text", text: "y".repeat(5_000) }],
+    });
+    const clamped = host.recentResult("child-1");
+    assert.equal(clamped?.text.length, RECENT_RESULT_EXCERPT_CHARS);
+    assert.ok(clamped?.text.endsWith("…"));
+
+    // An aborted worker with no text invents nothing.
+    await host.spawnWorker("x", {
+      parentSessionId: "disp-1",
+      streamKey: "s2",
+      title: "t2",
+    });
+    ctx.fire("subagent/end", {
+      id: "child-2",
+      stopReason: "aborted",
+      lastAssistantMessage: undefined,
+    });
+    assert.equal(host.recentResult("child-2"), null);
+    assert.equal(host.recentResult("never-settled"), null);
+  });
+
+  it("unknown children never gain an excerpt; dispose clears the map", async () => {
+    const { ctx, host } = await settleOne();
+    ctx.fire("subagent/end", {
+      id: "not-ours",
+      stopReason: "completed",
+      lastAssistantMessage: [{ type: "text", text: "ghost" }],
+    });
+    assert.equal(host.recentResult("not-ours"), null);
+
+    ctx.fire("subagent/end", {
+      id: "child-1",
+      stopReason: "completed",
+      lastAssistantMessage: [{ type: "text", text: "real" }],
+    });
+    assert.notEqual(host.recentResult("child-1"), null);
+    host.dispose();
+    assert.equal(host.recentResult("child-1"), null);
   });
 });
 

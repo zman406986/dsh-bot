@@ -259,11 +259,15 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   // the panel shows state only while a live session exists). The v2
   // presence fields join existing core truth at publish time: pending
   // access asks (blocked, names only) and the ledger's delivered state.
+  // Ticket 41 (v3): the deliverables line's `recentResult` joins at publish
+  // time too — the adapter's own settle observation (`host.recentResult`,
+  // clamped), never a core store. No new core state holds report text.
   const publishRosterSnapshot = (sessionId: string): void => {
     rosterChannel.publish(
       projectRosterSnapshot(sessionId, multitask.listWorkers(sessionId), Date.now(), {
         pendingAccess: multitask.listPendingAccess(sessionId),
         todos: multitask.listTodos(sessionId),
+        recentResultOf: (workerId) => host.recentResult(workerId),
       }),
     );
   };

@@ -23,8 +23,11 @@
  * control: no direct stop/deactivate authority exists on this surface
  * (ADR-0005/0009; ticket 31's guard). The default seat is a no-op, so the
  * capsule stays render-only; ticket 40 binds the callback to the verified
- * user-verbatim command path. The deliverables line and footer are later
- * sub-tickets (41–42) and deliberately absent.
+ * user-verbatim command path. The deliverables line (ticket 41) renders in
+ * the activated card between the roster and the (ticket-42) footer: the
+ * completed-but-not-delivered count plus the snapshot's bounded most-recent
+ * excerpt, hidden entirely at count 0 and count-only when no honest excerpt
+ * exists. The footer is ticket 42 and deliberately absent.
  *
  * Expansion state is the entry's OWN state (ADR-0013 — the host offers no
  * expansion/anchoring API): the `CapsuleStore` created with the module fiber.
@@ -53,9 +56,14 @@ import {
   CAPSULE_CHIP_WAKE_KEY,
   CAPSULE_CHIP_WORKERS_KEY,
   CAPSULE_COLLAPSE_KEY,
+  CAPSULE_DELIVERABLES_COLLAPSE_KEY,
+  CAPSULE_DELIVERABLES_COUNT_KEY,
+  CAPSULE_DELIVERABLES_EXPAND_KEY,
+  CAPSULE_DELIVERABLES_LABEL_KEY,
   CAPSULE_DOT_KEYS,
   describeCapsuleActivationRow,
   describeCapsuleChip,
+  describeCapsuleDeliverables,
   dispatchActivationIntent,
   noopOnActivationIntent,
   type CapsuleStore,
@@ -107,6 +115,12 @@ export const CAPSULE_CSS = `
 .${CAPSULE_CLASS}__activation-button{align-self:flex-start;padding:3px 10px;border-radius:6px;border:1px solid #30363d;background:#21262d;color:inherit;cursor:pointer;font:inherit}
 .${CAPSULE_CLASS}__activation-button:hover{border-color:#8b949e}
 .${CAPSULE_CLASS}__action-notice{opacity:.85;color:#f85149;font-size:11px}
+.${CAPSULE_CLASS}__deliverables{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px;margin-top:10px;padding-top:8px;border-top:1px solid #30363d}
+.${CAPSULE_CLASS}__deliverables-label{font-weight:600}
+.${CAPSULE_CLASS}__deliverables-count{opacity:.75}
+.${CAPSULE_CLASS}__deliverables-toggle{border:none;background:transparent;color:inherit;opacity:.6;cursor:pointer;font:inherit;font-size:11px;padding:0}
+.${CAPSULE_CLASS}__deliverables-toggle:hover{opacity:1}
+.${CAPSULE_CLASS}__deliverables-excerpt{flex-basis:100%;white-space:pre-wrap;word-break:break-word;opacity:.85;font-size:11px}
 `;
 
 /**
@@ -142,6 +156,7 @@ export function createDispatcherCapsule(
     const now = Date.now();
     const chip = describeCapsuleChip(box.state, now);
     const activation = describeCapsuleActivationRow(box.state, now);
+    const deliverables = describeCapsuleDeliverables(box.state, now);
     const affordance = activation.affordance;
 
     // Same honesty rule as the panel: the mirror channel has no heartbeat,
@@ -211,6 +226,49 @@ export function createDispatcherCapsule(
                 a degraded channel has no honest rows to show, so the row's
                 unavailable line is the whole story. */}
             {activation.composition === "activated" ? <Panel /> : null}
+            {/* Ticket 41 deliverables line: between the roster and the
+                (ticket-42) footer. The view model hides it entirely at count
+                0 or on a degraded feed; a landed row without an honest
+                excerpt renders count-only (no expand affordance, no invented
+                text — a post-restart restore carries no report). */}
+            {activation.composition === "activated" && deliverables.visible ? (
+              <div
+                className={`${CAPSULE_CLASS}__deliverables`}
+                data-count={deliverables.count}
+              >
+                <span className={`${CAPSULE_CLASS}__deliverables-label`}>
+                  {t(CAPSULE_DELIVERABLES_LABEL_KEY)}
+                </span>
+                <span className={`${CAPSULE_CLASS}__deliverables-count`}>
+                  {formatTemplate(t(CAPSULE_DELIVERABLES_COUNT_KEY), {
+                    count: String(deliverables.count ?? 0),
+                  })}
+                </span>
+                {deliverables.excerpt !== null ? (
+                  <button
+                    type="button"
+                    className={`${CAPSULE_CLASS}__deliverables-toggle`}
+                    data-open={expansion.deliverablesOpen}
+                    aria-expanded={expansion.deliverablesOpen}
+                    onClick={capsule.toggleDeliverables}
+                  >
+                    {t(
+                      expansion.deliverablesOpen
+                        ? CAPSULE_DELIVERABLES_COLLAPSE_KEY
+                        : CAPSULE_DELIVERABLES_EXPAND_KEY,
+                    )}
+                  </button>
+                ) : null}
+                {deliverables.excerpt !== null && expansion.deliverablesOpen ? (
+                  <div className={`${CAPSULE_CLASS}__deliverables-excerpt`}>
+                    {deliverables.excerpt.title.length > 0
+                      ? `${deliverables.excerpt.title}: `
+                      : ""}
+                    {deliverables.excerpt.text}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
           </div>
         </div>
       );

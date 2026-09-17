@@ -13,6 +13,14 @@ export const ERROR_CLAMP_CHARS = 800;
 /** Max characters of a check-row activity line. */
 export const CHECK_ACTIVITY_CHARS = 120;
 
+/**
+ * Max characters of the roster snapshot's recent-result excerpt (ticket 41).
+ * The bound applies to the WHOLE kept string — the truncation ellipsis
+ * included — so the wire field and its defensive parse agree on
+ * `text.length <= RECENT_RESULT_EXCERPT_CHARS` exactly.
+ */
+export const RECENT_RESULT_EXCERPT_CHARS = 200;
+
 /** Check roster rows before head/tail fold. */
 export const TOOL_RESULT_SUMMARY_MAX_ROWS = 20;
 
@@ -93,4 +101,22 @@ export function clampActivity(
   if (text.length === 0) return null;
   if (text.length <= limit) return text;
   return `${text.slice(0, limit)}…`;
+}
+
+/**
+ * Clamp a settle report down to the roster's recent-result excerpt bound
+ * (ticket 41). Null/empty → null (the snapshot carries no excerpt rather
+ * than an invented one); over-limit → a hard cut whose TOTAL length —
+ * ellipsis included — never exceeds the bound, so the defensive parse and
+ * this clamp share one exact rule.
+ */
+export function clampRecentResultExcerpt(
+  raw: string | null | undefined,
+  limit: number = RECENT_RESULT_EXCERPT_CHARS,
+): string | null {
+  if (raw === undefined || raw === null) return null;
+  const text = raw.trim();
+  if (text.length === 0) return null;
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit - 1)}…`;
 }

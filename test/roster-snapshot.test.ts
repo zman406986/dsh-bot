@@ -1,13 +1,14 @@
 /**
- * Tickets 21 + 27 — roster snapshot projection + settings-namespace data
- * path (host half; design-16 §4.2, design-17 §4.1/§6).
+ * Tickets 21 + 27 + 41 — roster snapshot projection + settings-namespace
+ * data path (host half; design-16 §4.2, design-17 §4.1/§6).
  *
  * Offline only (S8): FakeDshHost + createMultitask with the roster observer,
- * pure projection/parse/staleness checks (v2 wire contract, v1 rejected),
- * the settings-owner-scope channel, and the real plugin apply() publishing
- * through a fake settings provider on activation and on roster-affecting
- * transitions (now including access-ask park). No network, no LLM, no
- * running dsh.
+ * pure projection/parse/staleness checks (v3 wire contract; v1/v2 rejected
+ * fail-closed), the deliverables-line excerpt (bounded, most-recent,
+ * cleared at the delivered transition), the settings-owner-scope channel,
+ * and the real plugin apply() publishing through a fake settings provider
+ * on activation and on roster-affecting transitions (now including
+ * access-ask park). No network, no LLM, no running dsh.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -17,6 +18,7 @@ import {
   type MultitaskOptions,
 } from "../src/core/multitask.js";
 import { createInMemoryDurability } from "../src/core/durability.js";
+import { RECENT_RESULT_EXCERPT_CHARS } from "../src/core/report-clamp.js";
 import {
   ROSTER_SETTINGS_KEY,
   ROSTER_SNAPSHOT_SCHEMA_VERSION,
@@ -480,10 +482,191 @@ describe("roster snapshot — observer covers the presence-field mutations (tick
   });
 });
 
-describe("roster snapshot — parse and staleness (v2 wire contract)", () => {
+describe("roster snapshot — deliverables excerpt (ticket 41, schema v3)", () => {
+  const landedRow = {
+    workerId: "w-1",
+    parentSessionId: "s-1",
+    streamKey: "k",
+    title: "Parser worker",
+    status: "completed" as const,
+    startedAtMs: 10,
+    elapsedMs: 0,
+    toolCallCount: 1,
+    transcriptRef: null,
+    todoId: "todo-1",
+  };
+  const landedTodo = {
+    id: "todo-1",
+    sessionId: "s-1",
+    title: "T",
+    status: "in_progress" as const,
+    streamKey: "k",
+    workerId: "w-1",
+    delivered: false,
+    createdAtMs: 0,
+    updatedAtMs: 0,
+  };
+
+  it("projects the settled-undelivered worker's excerpt through the seat", () => {
+    const snapshot = projectRosterSnapshot(
+      "s-1",
+      [landedRow],
+      1_000,
+      { todos: [landedTodo], recentResultOf: () => ({ text: "All done.", settledAtMs: 500 }) },
+    );
+    assert.deepEqual(snapshot.recentResult, {
+      workerId: "w-1",
+      title: "Parser worker",
+      text: "All done.",
+    });
+    // And the excerpt survives the defensive parse unchanged.
+    assert.deepEqual(parseRosterSnapshot(snapshot)?.recentResult, snapshot.recentResult);
+  });
+
+  it("picks the MOST RECENTLY SETTLED landed worker, not the first roster row", () => {
+    const early = { ...landedRow, workerId: "w-early", todoId: "todo-e" };
+    const late = {
+      ...landedRow,
+      workerId: "w-late",
+      title: "Later worker",
+      todoId: "todo-l",
+    };
+    const snapshot = projectRosterSnapshot(
+      "s-1",
+      [early, late],
+      1_000,
+      {
+        todos: [
+          { ...landedTodo, id: "todo-e", workerId: "w-early", delivered: false },
+          { ...landedTodo, id: "todo-l", workerId: "w-late", delivered: false },
+        ],
+        recentResultOf: (workerId) =>
+          workerId === "w-early"
+            ? { text: "early report", settledAtMs: 100 }
+            : { text: "late report", settledAtMs: 900 },
+      },
+    );
+    assert.equal(snapshot.recentResult?.workerId, "w-late");
+    assert.equal(snapshot.recentResult?.text, "late report");
+  });
+
+  it("clamps an over-long report to the shared excerpt bound (ellipsis included)", () => {
+    const snapshot = projectRosterSnapshot(
+      "s-1",
+      [landedRow],
+      1_000,
+      {
+        todos: [landedTodo],
+        recentResultOf: () => ({
+          text: "x".repeat(RECENT_RESULT_EXCERPT_CHARS + 500),
+          settledAtMs: 500,
+        }),
+      },
+    );
+    assert.equal(snapshot.recentResult?.text.length, RECENT_RESULT_EXCERPT_CHARS);
+    assert.ok(snapshot.recentResult?.text.endsWith("…"));
+  });
+
+  it("never speaks for delivered rows or workers still running", () => {
+    const delivered = projectRosterSnapshot(
+      "s-1",
+      [landedRow],
+      1_000,
+      {
+        // The delivered flip: same row, ledger says delivered.
+        todos: [{ ...landedTodo, delivered: true }],
+        recentResultOf: () => ({ text: "All done.", settledAtMs: 500 }),
+      },
+    );
+    assert.equal(delivered.recentResult, null, "delivered transition clears the line");
+
+    const running = projectRosterSnapshot(
+      "s-1",
+      [{ ...landedRow, status: "running" as const }],
+      1_000,
+      {
+        todos: [landedTodo],
+        recentResultOf: () => ({ text: "All done.", settledAtMs: 500 }),
+      },
+    );
+    assert.equal(running.recentResult, null);
+  });
+
+  it("an absent seat or an empty observed report projects null — count-only, never invented", () => {
+    const noSeat = projectRosterSnapshot("s-1", [landedRow], 1_000, {
+      todos: [landedTodo],
+    });
+    assert.equal(noSeat.recentResult, null);
+
+    const emptyReport = projectRosterSnapshot("s-1", [landedRow], 1_000, {
+      todos: [landedTodo],
+      recentResultOf: () => ({ text: "   ", settledAtMs: 500 }),
+    });
+    assert.equal(emptyReport.recentResult, null);
+  });
+
+  it("parse fail-closed matrix: v1 AND v2 payloads, missing/malformed/unbounded excerpts all fail to null", () => {
+    const valid = projectRosterSnapshot("s-1", [], 1_000);
+    assert.equal(valid.recentResult, null);
+
+    // The version rule design-17 §4.1 accepted for v1→v2 applies unchanged
+    // to v2→v3: old payloads fail the whole snapshot, the panel degrades.
+    const v2 = { ...valid, schemaVersion: 2 };
+    assert.equal(parseRosterSnapshot(v1Payload()), null, "v1 fails parse");
+    assert.equal(parseRosterSnapshot(v2), null, "v2 fails parse under v3");
+
+    // The field must EXIST on a v3 envelope — the projection always writes it.
+    const missing = { ...valid } as Record<string, unknown>;
+    delete missing.recentResult;
+    assert.equal(parseRosterSnapshot(missing), null, "missing key fails closed");
+
+    const malformed: Array<Record<string, unknown>> = [
+      "done",
+      42,
+      {},
+      { workerId: "", title: "T", text: "x" },
+      { workerId: "w-1", title: 7, text: "x" },
+      { workerId: "w-1", title: "T" },
+      { workerId: "w-1", title: "T", text: "" },
+      { workerId: "w-1", title: "T", text: "y".repeat(RECENT_RESULT_EXCERPT_CHARS + 1) },
+    ];
+    for (const recentResult of malformed) {
+      assert.equal(
+        parseRosterSnapshot({ ...valid, recentResult }),
+        null,
+        `malformed recentResult must fail the whole snapshot: ${JSON.stringify(recentResult).slice(0, 40)}`,
+      );
+    }
+
+    // Exactly-at-bound text parses; null stays the valid "nothing owed".
+    const atBound = parseRosterSnapshot({
+      ...valid,
+      recentResult: {
+        workerId: "w-1",
+        title: "T",
+        text: "z".repeat(RECENT_RESULT_EXCERPT_CHARS),
+      },
+    });
+    assert.equal(atBound?.recentResult?.text.length, RECENT_RESULT_EXCERPT_CHARS);
+    assert.equal(parseRosterSnapshot({ ...valid, recentResult: null })?.recentResult, null);
+  });
+
+  function v1Payload(): unknown {
+    return {
+      schemaVersion: 1,
+      dispatcherSessionId: "s-1",
+      publishedAtMs: 1_000,
+      workers: [
+        { workerId: "w", title: "T", status: "running", todoId: null },
+      ],
+    };
+  }
+});
+
+describe("roster snapshot — parse and staleness (v3 wire contract)", () => {
   const valid: RosterSnapshot = projectRosterSnapshot("s-1", [], 1_000);
 
-  it("round-trips a projected v2 snapshot", () => {
+  it("round-trips a projected v3 snapshot", () => {
     const populated = projectRosterSnapshot(
       "s-1",
       [
@@ -896,6 +1079,11 @@ describe("roster snapshot — plugin publishes through the settings namespace", 
     assert.equal(second.workers[0]?.title, "Parser worker");
 
     // Host settle → accepted transition → third publish with the new status.
+    // Ticket 41: the v3 envelope always carries `recentResult`. This worker
+    // has no ledger link, so it projects delivered — it owes nothing and
+    // the excerpt is rightly withheld. The positive path (seat text →
+    // published excerpt) is covered by the projection suite above and the
+    // adapter seat suite in adapter-cordis-dsh-host.test.ts.
     ctx.fire("subagent/end", {
       id: spawned.worker_id,
       stopReason: "completed",
@@ -904,8 +1092,14 @@ describe("roster snapshot — plugin publishes through the settings namespace", 
     assert.equal(updates.length, 3);
     const third = (updates[2] as Record<string, unknown>)[
       ROSTER_SETTINGS_KEY
-    ] as { workers: Array<{ status: string }> };
+    ] as {
+      schemaVersion: number;
+      workers: Array<{ status: string }>;
+      recentResult: unknown;
+    };
+    assert.equal(third.schemaVersion, ROSTER_SNAPSHOT_SCHEMA_VERSION);
     assert.equal(third.workers[0]?.status, "completed");
+    assert.equal(third.recentResult, null);
   });
 
   it("a parked access ask republishes the roster with the blocked reason (names only)", async () => {

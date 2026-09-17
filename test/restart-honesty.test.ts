@@ -650,19 +650,21 @@ describe("restart honesty — no-stop guard (design-17 §4.6)", () => {
       {
         kind: "snapshot",
         snapshot: {
-          schemaVersion: 2,
+          schemaVersion: 3,
           dispatcherSessionId: "s-1",
           publishedAtMs: 10_000,
           workers,
+          recentResult: null,
         },
       },
       {
         kind: "snapshot",
         snapshot: {
-          schemaVersion: 2,
+          schemaVersion: 3,
           dispatcherSessionId: "s-1",
           publishedAtMs: 1_000,
           workers,
+          recentResult: null,
         },
       },
     ] as const;

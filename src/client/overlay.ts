@@ -106,6 +106,11 @@ export interface LocaleDictionary {
  * per-row steer affordance copy (button, post-prefill hint — focus is not
  * exposed so the user must review and send — and the copy-only fallback for
  * when the composer draft is unreachable).
+ *
+ * Ticket 41 adds the expanded card's deliverables-line copy: the S6 label
+ * ("undelivered results" — completed means delivered, so only owed results
+ * count), the `{count}` phrasing, and the excerpt's expand/collapse
+ * affordance. The excerpt text itself is wire truth, never localized.
  */
 export const localeDictionary: LocaleDictionary = {
   en: {
@@ -156,6 +161,14 @@ export const localeDictionary: LocaleDictionary = {
     "capsule.dot.dormant": "Dispatcher not started",
     "capsule.dot.active": "Dispatcher active",
     "capsule.dot.error": "Worker status unavailable",
+    // Ticket 41: the expanded card's deliverables line — the label, the
+    // count phrasing ({count} substituted), and the excerpt's expand/
+    // collapse affordance. S6 wording: completed means DELIVERED, so the
+    // line speaks only of results not yet delivered to the user.
+    "capsule.deliverables.label": "Undelivered results",
+    "capsule.deliverables.count": "{count} awaiting delivery",
+    "capsule.deliverables.expand": "Show latest result",
+    "capsule.deliverables.collapse": "Hide latest result",
     // Ticket 39: the activation row. The stop label is an honest
     // conversational-stop ask (the intent rides the user-verbatim command
     // path in ticket 40) — never phrased as a kill/deactivate control.
@@ -218,6 +231,10 @@ export const localeDictionary: LocaleDictionary = {
     "capsule.dot.dormant": "调度器未启动",
     "capsule.dot.active": "调度器运行中",
     "capsule.dot.error": "工作者状态不可用",
+    "capsule.deliverables.label": "未送达结果",
+    "capsule.deliverables.count": "{count} 个等待送达",
+    "capsule.deliverables.expand": "显示最新结果",
+    "capsule.deliverables.collapse": "隐藏最新结果",
     "capsule.activation.start": "在本聊天中启动调度器",
     "capsule.activation.stop": "请求调度器停止",
     "capsule.activation.pitch":

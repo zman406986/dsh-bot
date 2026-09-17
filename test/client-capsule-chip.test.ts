@@ -25,9 +25,14 @@ import {
   CAPSULE_CHIP_WAKE_KEY,
   CAPSULE_CHIP_WORKERS_KEY,
   CAPSULE_COLLAPSE_KEY,
+  CAPSULE_DELIVERABLES_COLLAPSE_KEY,
+  CAPSULE_DELIVERABLES_COUNT_KEY,
+  CAPSULE_DELIVERABLES_EXPAND_KEY,
+  CAPSULE_DELIVERABLES_LABEL_KEY,
   CAPSULE_DOT_KEYS,
   createCapsuleStore,
   describeCapsuleChip,
+  describeCapsuleDeliverables,
   type CapsuleChipDot,
 } from "../src/client/capsule-store.js";
 import { CAPSULE_CSS } from "../src/client/capsule.js";
@@ -58,16 +63,17 @@ function row(
   };
 }
 
-/** A v2 snapshot builder for chip view-model tests. */
+/** A v3 snapshot builder for chip view-model tests. */
 function snapshot(
   workers: RosterSnapshotWorker[],
   publishedAtMs = 1_000,
 ): RosterSnapshot {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     dispatcherSessionId: "s-1",
     publishedAtMs,
     workers,
+    recentResult: null,
   };
 }
 
@@ -305,9 +311,13 @@ describe("capsule chip — worker count + wake badge (ticket 38)", () => {
 });
 
 describe("capsule chip — the capsule's own expansion store (ticket 38, ADR-0013)", () => {
-  it("defaults collapsed", () => {
+  it("defaults collapsed (chip and deliverables excerpt both closed)", () => {
     const capsule = createCapsuleStore();
-    assert.deepEqual(capsule.getBox(), { expanded: false, version: 0 });
+    assert.deepEqual(capsule.getBox(), {
+      expanded: false,
+      deliverablesOpen: false,
+      version: 0,
+    });
   });
 
   it("expand/collapse/toggle follow the transitions; no-ops keep box identity", () => {
@@ -329,6 +339,19 @@ describe("capsule chip — the capsule's own expansion store (ticket 38, ADR-001
     assert.equal(capsule.getBox().expanded, false);
   });
 
+  it("toggleDeliverables flips the excerpt disclosure without touching the chip (ticket 41)", () => {
+    const capsule = createCapsuleStore();
+    capsule.toggleDeliverables();
+    const open = capsule.getBox();
+    assert.equal(open.deliverablesOpen, true);
+    assert.equal(open.expanded, false, "the chip's own state is untouched");
+    assert.equal(open.version, 1);
+    capsule.toggleDeliverables();
+    assert.equal(capsule.getBox().deliverablesOpen, false);
+    capsule.expand();
+    assert.equal(capsule.getBox().deliverablesOpen, false, "independent disclosures");
+  });
+
   it("state survives re-renders: identity changes only on a real transition", () => {
     const capsule = createCapsuleStore();
     const before = capsule.getBox();
@@ -347,10 +370,148 @@ describe("capsule chip — the capsule's own expansion store (ticket 38, ADR-001
     });
     capsule.expand();
     capsule.expand();
-    assert.equal(notified, 1);
+    capsule.toggleDeliverables();
+    capsule.toggleDeliverables();
+    assert.equal(notified, 3);
     dispose();
     capsule.collapse();
-    assert.equal(notified, 1);
+    assert.equal(notified, 3);
+  });
+});
+
+describe("capsule deliverables line — count math over terminal × delivered (ticket 41)", () => {
+  it("counts exactly the settled-undelivered workers: completed/error/aborted × delivered", () => {
+    const view = describeCapsuleDeliverables(
+      {
+        kind: "snapshot",
+        snapshot: snapshot([
+          row("w-1", "completed", { delivered: false }),
+          row("w-2", "error", { delivered: false }),
+          row("w-3", "aborted", { delivered: true }),
+          row("w-4", "completed", { delivered: true }),
+          row("w-5", "running", { delivered: false }),
+          row("w-6", "spawned", { delivered: false }),
+        ]),
+      },
+      1_000,
+    );
+    // Only w-1 and w-2 owe the user a delivery (S6).
+    assert.equal(view.visible, true);
+    assert.equal(view.count, 2);
+  });
+
+  it("count 0 hides the line entirely; the chip's wake math stays shared, not duplicated", () => {
+    const view = describeCapsuleDeliverables(
+      {
+        kind: "snapshot",
+        snapshot: snapshot([
+          row("w-1", "completed", { delivered: true }),
+          row("w-2", "running", { delivered: false }),
+        ]),
+      },
+      1_000,
+    );
+    assert.deepEqual(view, { visible: false, count: 0, excerpt: null });
+  });
+
+  it("the delivered flip clears the line (S6 visible proof)", () => {
+    const before = describeCapsuleDeliverables(
+      {
+        kind: "snapshot",
+        snapshot: snapshot([row("w-1", "completed", { delivered: false })]),
+      },
+      1_000,
+    );
+    assert.equal(before.visible, true);
+    assert.equal(before.count, 1);
+
+    const after = describeCapsuleDeliverables(
+      {
+        kind: "snapshot",
+        snapshot: snapshot([row("w-1", "completed", { delivered: true })]),
+      },
+      1_000,
+    );
+    assert.deepEqual(after, { visible: false, count: 0, excerpt: null });
+  });
+
+  it("a fresh snapshot's recentResult excerpt rides through verbatim", () => {
+    const excerpt = {
+      workerId: "w-1",
+      title: "Parser worker",
+      text: "Finished the parse; 12 files touched.",
+    };
+    const view = describeCapsuleDeliverables(
+      {
+        kind: "snapshot",
+        snapshot: {
+          ...snapshot([row("w-1", "completed", { delivered: false })]),
+          recentResult: excerpt,
+        },
+      },
+      1_000,
+    );
+    assert.equal(view.visible, true);
+    assert.deepEqual(view.excerpt, excerpt);
+  });
+
+  it("a landed row with no honest excerpt renders count-only (excerpt null, no invented text)", () => {
+    const view = describeCapsuleDeliverables(
+      {
+        kind: "snapshot",
+        snapshot: snapshot([row("w-1", "completed", { delivered: false })]),
+      },
+      1_000,
+    );
+    assert.equal(view.visible, true);
+    assert.equal(view.count, 1);
+    assert.equal(view.excerpt, null);
+  });
+
+  it("degraded and stale feeds vouch for nothing: line hidden, count null", () => {
+    const state = {
+      kind: "snapshot",
+      snapshot: snapshot([row("w", "completed", { delivered: false })]),
+    } as const;
+    assert.equal(
+      describeCapsuleDeliverables(state, 1_000 + ROSTER_STALE_WINDOW_MS + 1)
+        .visible,
+      false,
+    );
+    assert.equal(
+      describeCapsuleDeliverables(state, 1_000 + ROSTER_STALE_WINDOW_MS + 1)
+        .count,
+      null,
+    );
+    for (const kind of ["channel-missing", "invalid", "waiting"] as const) {
+      const view = describeCapsuleDeliverables({ kind }, 5_000);
+      assert.deepEqual(view, { visible: false, count: null, excerpt: null });
+    }
+  });
+});
+
+describe("capsule deliverables line — locale contract (ticket 41)", () => {
+  it("the four keys exist in BOTH faces; the count is a template, never a literal", () => {
+    assert.deepEqual(validateLocaleDictionary(localeDictionary), []);
+    const keys = [
+      CAPSULE_DELIVERABLES_LABEL_KEY,
+      CAPSULE_DELIVERABLES_COUNT_KEY,
+      CAPSULE_DELIVERABLES_EXPAND_KEY,
+      CAPSULE_DELIVERABLES_COLLAPSE_KEY,
+    ];
+    for (const key of keys) {
+      assert.equal(typeof localeDictionary.en[key], "string", `en missing ${key}`);
+      assert.equal(typeof localeDictionary.zh[key], "string", `zh missing ${key}`);
+      assert.notEqual(localeDictionary.en[key], "", `en ${key} empty`);
+      assert.notEqual(localeDictionary.zh[key], "", `zh ${key} empty`);
+    }
+    assert.match(localeDictionary.en[CAPSULE_DELIVERABLES_COUNT_KEY] ?? "", /\{count\}/);
+    assert.match(localeDictionary.zh[CAPSULE_DELIVERABLES_COUNT_KEY] ?? "", /\{count\}/);
+  });
+
+  it("the label wording is honest S6 copy: undelivered, not 'complete'", () => {
+    assert.match(localeDictionary.en[CAPSULE_DELIVERABLES_LABEL_KEY] ?? "", /[Uu]ndelivered/);
+    assert.match(localeDictionary.zh[CAPSULE_DELIVERABLES_LABEL_KEY] ?? "", /未送达/);
   });
 });
 
