@@ -117,6 +117,14 @@ export const localeDictionary: LocaleDictionary = {
     "toolview.field.steer": "Steer",
     "toolview.field.delivered": "Delivered",
     "toolview.field.attachments": "Attachments",
+    // Ticket 32 (design-17 §7): the activation success presence hint. The
+    // host command copy (`src/adapter/activation-command.ts`
+    // `ACTIVATION_PRESENCE_HINT`) is the en authority; this face carries the
+    // identical en string plus the zh translation so the pair stays a single
+    // localized copy unit. The client face does not render it today — the
+    // host command result is the surface — but the key set is shared.
+    "activation.presence-hint":
+      "The Workers panel shows live progress; results arrive in this chat as they finish.",
   },
   zh: {
     "roster.title": "工作者",
@@ -143,6 +151,8 @@ export const localeDictionary: LocaleDictionary = {
     "toolview.field.steer": "纠偏",
     "toolview.field.delivered": "已送达",
     "toolview.field.attachments": "附件",
+    "activation.presence-hint":
+      "“工作者”面板会显示实时进度；结果完成后会直接送达本聊天。",
   },
 };
 

@@ -202,6 +202,37 @@ describe("activation lifecycle — flag matrix (design-16 §3.7)", () => {
     ]);
     assert.deepEqual(ctx.toolNames(), []);
   });
+
+  // Ticket 32: the dormant-registration matrix. Tickets 27–31 (snapshot v2,
+  // panel sections, live activity, approval UX, restart rebuild) all landed
+  // after this matrix was written; the dormant surface must remain exactly
+  // the two commands with the passive listeners and no tool surface. The
+  // negative assertions pin the absence, so a future ticket cannot quietly
+  // register a dormant-visible surface.
+  it("tickets 27–31 add no dormant-visible registration: no tools, no listeners beyond the passive four", () => {
+    const ctx = createFullCtx();
+    apply(ctx, { enabled: true });
+
+    assert.deepEqual(ctx.commandNames().sort(), [
+      DISPATCHER_START_COMMAND,
+      DISPATCHER_STEER_COMMAND,
+    ]);
+    assert.deepEqual(ctx.toolNames(), []);
+    // Two lifecycle listeners (agent/disposed, agent/status) + two host
+    // listeners (subagent/end, session/event) — unchanged by 27–31.
+    assert.equal(ctx.listenerCount(), 4);
+    // No dispatcher tool claims a dormant key: a stock caller sees stock.
+    for (const name of [
+      "spawn_worker",
+      "check_workers",
+      "steer_worker",
+      "stop_worker",
+      "deliver_result",
+      "request_access",
+    ]) {
+      assert.equal(ctx.tool(name), undefined, `${name} must not be dormant`);
+    }
+  });
 });
 
 describe("activation lifecycle — command behavior", () => {

@@ -22,10 +22,25 @@ export const DISPATCHER_START_COMMAND = "dispatcher-start";
 export const DISPATCHER_START_DESCRIPTION =
   "Turn this chat into the multitask dispatcher for this session.";
 
+/**
+ * Presence hint appended to the activation success copy (ticket 32,
+ * design-17 §7 `activation.presence-hint`). It tells the user where presence
+ * lives — the app-wide Workers panel — and sets the delivery expectation:
+ * results arrive as ordinary chat turns, never as a notification (no push
+ * seam exists; design-17 §4.8). Appended exactly once
+ * ({@link DISPATCHER_START_SUCCESS}); the client locale dictionary carries
+ * the same string as `activation.presence-hint` (en) plus the zh face, and
+ * `test/composition-polish.test.ts` asserts the two stay in lockstep.
+ */
+export const ACTIVATION_PRESENCE_HINT =
+  "The Workers panel shows live progress; results arrive in this chat as " +
+  "they finish.";
+
 /** Success copy shown in the activated chat. */
 export const DISPATCHER_START_SUCCESS =
   "Dispatcher active in this chat. Workers spawned here report back here; " +
-  "use /dispatcher-steer to nudge a running worker.";
+  "use /dispatcher-steer to nudge a running worker. " +
+  ACTIVATION_PRESENCE_HINT;
 
 /** Same chat is already the dispatcher. */
 export const DISPATCHER_START_ALREADY_HERE =

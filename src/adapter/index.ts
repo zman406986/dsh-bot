@@ -41,6 +41,7 @@ export {
   type RegisterableTool,
 } from "./dispatcher-tools.js";
 export {
+  ACTIVATION_PRESENCE_HINT,
   activationResultCopy,
   createDispatcherStartCommand,
   DISPATCHER_START_ALREADY_ELSEWHERE,
