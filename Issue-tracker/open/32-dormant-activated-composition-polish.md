@@ -144,3 +144,5 @@ Also for the verifier to check while reading this comment: it says tickets 27/30
 missing ADRs forward, but in the ticket files only ticket 31 mentions `ADR-0012` (and this ticket
 mentions the set); tickets 27 and 30 do not mention `ADR-0010`/`ADR-0011`. Ticket 33 still owns resolving
 them.
+
+2026-09-18 — **Considered passed (human deferral).** The independent verification pass at `77baef8` (612/0/162, typecheck/build/locale) has **not** been run; all counts remain implementation claims. For continuation-of-work purposes only, this ticket is **considered passed** so the epic may proceed. The human deferred the verification run until the client UI surfaces are complete and will verify in one consolidated pass. Ticket 33 (closeout) still owns reproducing the gates before merge.

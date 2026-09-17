@@ -58,3 +58,7 @@ Stale/silence sub-demo (part of D6): fire a duplicate/already-summarized settle 
 - `recent_activity` stays `null` until a live jobs/step-line resolver is wired (design open point 2).
 - User-turn reminder relies on `agent.inject` when present; hosts without inject still get session policy + wake-path reminder + tool descriptions.
 - `deliver_result` without an injectable send marks the todo delivered after the tool call (wake followup turn is already user-visible); a real host send can be plugged in later without changing the tool shape.
+
+## 2026-09-18 — Considered passed (human deferral)
+
+Human review of the live dsh demo (D1–D8, S1–S5) is **deferred, not done**: the human has not executed it. For continuation-of-work purposes only, this ticket is **considered passed** so downstream tickets may proceed. The deferral reason is that the human is waiting for the client UI surfaces to be complete, then will run the demo against the finished product in one pass. This note does not constitute verification; ticket 33 (closeout) still owns ensuring the demo happens before merge.

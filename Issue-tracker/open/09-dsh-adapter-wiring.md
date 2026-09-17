@@ -55,3 +55,7 @@ Note: dsh **is** installed on this machine (`@deepseek-ai/dsh@0.1.5-rc.1`, globa
 - Restored markers carry no report text 鈥?T11 delivery of `landedUndelivered` must fetch from child transcript.
 - Multi-agent profiles: first top-level session-start wins; later top-level agents ignored (logged residual).
 - dsh developer-preview drift: pin `0.1.5-rc.1`; re-verify API names at integration.
+
+## 2026-09-18 — Considered passed (human deferral)
+
+Human review of the live smoke checklist is **deferred, not done**: the human has not executed it. For continuation-of-work purposes only, this ticket is **considered passed** so downstream tickets may proceed. The deferral reason is that the human is waiting for the client UI surfaces (tickets 20–28 line) to be complete, then will run the live checks against the finished product in one pass. This note does not constitute verification; ticket 33 (closeout) still owns ensuring the live smoke happens before merge.

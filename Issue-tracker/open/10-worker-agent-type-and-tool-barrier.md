@@ -63,3 +63,7 @@
 - `run_code` / PTC transport cannot be named in restrict (documented gap in design 搂8).
 - Worker resume (cold-resume of continuable children) is **not** blank-spawn reuse 鈥?separate decision.
 - dsh developer-preview drift: pin `0.1.5-rc.1`; re-verify tool names at integration.
+
+## 2026-09-18 — Considered passed (human deferral)
+
+Human review of the live smoke checklist is **deferred, not done**: the human has not executed it. For continuation-of-work purposes only, this ticket is **considered passed** so downstream tickets may proceed. The deferral reason is that the human is waiting for the client UI surfaces to be complete, then will run the live checks (including the denied-tool probe) against the finished product in one pass. This note does not constitute verification; ticket 33 (closeout) still owns ensuring the live smoke happens before merge.
