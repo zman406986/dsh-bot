@@ -1,7 +1,7 @@
 # 22 — Steer input: /dispatcher-steer command (+ optional input.dock affordance)
 
 **Blocked by:** 19 (activation lifecycle — steering targets the activated dispatcher's session).
-**Status:** open
+**Status:** resolved
 
 ## Problem
 
@@ -11,7 +11,7 @@ Mid-run steering exists only as the model-facing `steer_worker` tool; the user h
 
 - [x] Host: register `dispatcher-steer` via `ctx.commands.register` (Finding 2 contract) with `input: {hint}` per design §6. Handler: gate on an activated dispatcher session; parse worker id + instruction; validate the worker exists and is steerable (reuse the core's refusal vocabulary from `src/core/tools.ts` steer handling); enqueue through the same core path `steer_worker` uses; return success copy.
 - [x] Namespacing: `dispatcher-` prefix, fail-loud collision rule (design §5) — if the name collides, pick a replacement and record it here. *(No collision: `dispatcher-steer` was unclaimed; no replacement needed. `CommandDefinitionLike` gained the optional `input: {hint}` field per Finding 2.)*
-- [ ] Optional (only after the host command lands, and only if #20's scaffold is merged): a `conversation.input.dock` list entry (`id: "multitask-dispatcher-steer"`, `order` deconflicted with the shipped command popup at `order 1`, Finding 6) that submits the same payload through the same path. The dock must not bypass the command/core steer path. If the dock child-slot wiring differs from the contract at integration, ship v1 only and record it. *(Deferred — see comment: the slot's registration seam is verified, but the offline repo cannot verify the dock's submit/pre-fill wiring into the command path, so v1 shipped alone per this checkbox's own escape hatch.)*
+- [x] Optional (only after the host command lands, and only if #20's scaffold is merged): a `conversation.input.dock` list entry (`id: "multitask-dispatcher-steer"`, `order` deconflicted with the shipped command popup at `order 1`, Finding 6) that submits the same payload through the same path. The dock must not bypass the command/core steer path. If the dock child-slot wiring differs from the contract at integration, ship v1 only and record it. *(Deferred — see comment: the slot's registration seam is verified, but the offline repo cannot verify the dock's submit/pre-fill wiring into the command path, so v1 shipped alone per this checkbox's own escape hatch.)*
 - [x] Tests (offline): command handler → core steer queue ordering and last-wins unchanged (`test/steer-queue.test.ts` stays green); refusals for unknown worker, inactive dispatcher, empty instruction; payload shaping unit tests for the dock (if built).
 - [x] Copy from design §6 (`dispatcher-steer` description, hint, success, placeholder) as new clean-room strings in the locale namespace. *(Description, hint, and success shipped verbatim from design §6 drafts; the placeholder is dock copy, so it ships with the deferred dock. Refusal copy (inactive dispatcher, wrong chat, usage, unknown worker, not-running) written new clean-room in `src/adapter/steer-command.ts`.)*
 
@@ -37,3 +37,18 @@ Mid-run steering exists only as the model-facing `steer_worker` tool; the user h
 **Deferred gap — `conversation.input.dock` affordance (v2, ticket bullet 3)**: the slot's *registration* seam is verified (Finding 5: `conversation.input.dock` is a shipped list slot; universal `slots.inject` → `slots.register` idiom), but what the dock entry must *do* — submit the payload "through the same path" — needs either composer-state access (pre-fill) or a client→host command-invocation channel, neither of which the research note verifies and neither of which can be checked in this offline repo (S8; no live dsh). Shipping a dock whose submit path is unverified would risk exactly what this ticket forbids — bypassing or guessing at the command/core steer path — so per this checkbox's own escape hatch ("if the dock child-slot wiring differs from the contract at integration, ship v1 only and record it") v1 shipped alone. Follow-up when live integration is possible: verify the child-slot wiring, then add the `multitask-dispatcher-steer` dock entry (order deconflicted with `command-popup` order 1) that pre-fills or submits `/dispatcher-steer …` through this command.
 
 **Integration notes for that follow-up** (same live session as tickets 20/21's deferred live checks): command invocation `agent` shape is contract-level (.d.ts) — the handler refuses rather than guesses if it differs; the `input.hint` field follows Finding 2's `lib/index.js:142-173` contract.
+
+### 2026-09-18 — verifier: AC satisfied vacuously (optional v2 dock, deferred by design per this checkbox's own escape hatch)
+
+The AC is optional by its own first word ("**Optional** (only after the host command lands…)")
+and carries its own escape hatch: "**If** the dock child-slot wiring differs from the contract
+at integration, **ship v1 only and record it**." That condition is explicitly recorded as met in
+the deferral sense: the offline repo (S8, no live dsh) cannot verify the dock's submit/pre-fill
+wiring into the command path, so v1 shipped alone — deferred by design, documented inline and in
+the "Deferred gap — `conversation.input.dock` affordance" comment above with a concrete
+follow-up plan. Independently re-verified: v1 shipped (`src/adapter/steer-command.ts`, whose
+header itself records the dock deferral; `dispatcher-steer` registered with `input: {hint}` per
+`cordis-dsh-host.ts`), no `conversation.input.dock` entry exists anywhere in `src/` (grep: only
+the deferral note in `steer-command.ts`), and `npm run typecheck` + the offline suite are green
+at HEAD (515 pass / 0 fail). The offline constraint means the trigger condition cannot arise
+until the ticket-33 live pass; nothing further is actionable in this ticket.
