@@ -1,8 +1,10 @@
 # 35 — Dispatcher control capsule: expandable shell-overlay UI (epic)
 
 **Status:** open
-**Labels:** needs-triage
-**Blocked by:** 34 (client module materialization — nothing browser-side is visible until it lands).
+**Labels:** ready-for-agent
+**Blocked by:** 34 (client module materialization — landed at 80c2932, effectively unblocked).
+**Chunked:** sub-tickets 36–42 filed 2026-09-18 — see "Sub-tickets" below; this epic
+resolves when all of them resolve (plus ticket 33's browser pass asserting AC 1).
 **Read first:** `docs/research/dsh-plugin-ui-examples.md` (three reference plugins, pattern-only —
 and see Process requirement 0: you must research beyond it), `docs/research/dsh-plugin-ui-patterns.md`
 (host-tree seam findings), design-16 §4/§5,
@@ -90,6 +92,23 @@ chip visible, panel shows the activation pitch, nothing else pretends to run.
    33's merge has not landed yet; otherwise on `main` after the merge. Tracker records stay on
    `main` either way (worktree-workflow §2).
 
+## Sub-tickets (chunked 2026-09-18)
+
+Implement in this order; each is one coherent step, offline-verifiable, with a
+named verification method in the ticket:
+
+| # | Slug | Scope | Blocked by |
+|---|---|---|---|
+| 36 | `capsule-seam-research-verification` | Process req 0: verify the five capsule seams against installed dsh 0.1.5-rc.1 + the three reference plugin repos (pattern-only); new note `docs/research/dsh-capsule-seams.md` with verified/degraded verdicts | — |
+| 37 | `capsule-draft-adrs` | Process req 2: draft ADRs 0013–0015 (slot choice, materialization contract, Playwright infra), `-draft-nonhuman-approved`, numbering conflict with design-17 §9's reserved 0010–0012 resolved in headers | 36 |
+| 38 | `capsule-chip-expand-skeleton` | One `shell.overlay` entry becomes the two-state capsule: collapsed chip view model (activation dot, worker count, wake badge) + expand/collapse; expanded renders the existing panel | 36 |
+| 39 | `capsule-activation-row-compositions` | Expanded panel §1: activation row (start/stop **intents**, since-timestamp only if honestly sourced), dormant vs activated compositions, no-stop guard extended | 38 |
+| 40 | `capsule-action-wiring` | Bind intents to ticket 36's verified seams: `/dispatcher-start` verbatim via the user send path, per-row steer prefill, conversational stop phrasing; degrade UX for unverified seams | 36, 39 |
+| 41 | `capsule-deliverables-line` | §3: completed-not-delivered count (snapshot v2 math) + most recent result excerpt via snapshot v3 bump (fail-closed) or count-only fallback | 38 |
+| 42 | `capsule-footer-toolview-link-closeout` | §4–5: footer provenance + Settings link, tool-view link (or recorded gap); offline composition close-out (fixtures, locale parity, guards, surfaces README) | 38, 39, 40, 41 |
+
+Adaptations recorded in the first comment below.
+
 ## Acceptance criteria (epic-level)
 
 - [ ] Ticket 34 landed; capsule visible in a real browser on a launcher boot, dormant and
@@ -101,3 +120,36 @@ chip visible, panel shows the activation pitch, nothing else pretends to run.
       addressed in their headers.
 - [ ] Offline unit suite (`npm test`) still 0-fail; no regression in the host face.
 - [ ] Epic close-out comment lists every spawned ticket + ADR with hashes.
+
+## Comments
+
+### 2026-09-18 — chunked into sub-tickets 36–42 (planning pass)
+
+Triaged and split per process req 1; label set to `ready-for-agent`. Chunking
+decisions and adaptations, binding on the sub-tickets:
+
+1. **Per-chunk real-browser tests are deferred to ticket 33.** Process req 3's
+   Playwright step is satisfied epic-wide by ticket 33's launcher/browser pass
+   (which already holds ticket 34's deferred ACs). Every sub-ticket names an
+   **offline** verification method instead (unit suites over the pure
+   store/view models, `npm run typecheck`, `npm run build:client`); epic AC 1
+   (capsule Playwright-asserted dormant + activated on a launcher boot) is
+   unchanged and gates the epic's resolution.
+2. **ADR numbering resolved:** design-17 §9 reserves 0010 (presence
+   projection), 0011 (approval options), 0012 (restart replay) for tickets
+   27/30/31; the capsule's draft ADRs take 0013–0015 and say so in their
+   headers (ticket 37). This closes the numbering conflict req 2 flagged.
+3. **Honesty reconciliations the sub-tickets implement, not reopen:**
+   the active-state "stop affordance" is an *intent* bound to the same
+   user-verbatim command path as everything else (no off-while-running exists —
+   ADR-0005/0009, design-17 §4.6, ticket 31's guard); the "since-timestamp"
+   ships only if an honest `activatedAtMs` source exists (never `publishedAtMs`
+   relabeled); any seam ticket 36 cannot verify degrades to copy/hint with the
+   gap recorded.
+4. **Tree rule (req 6) applies per sub-ticket:** implement on the ticket-17
+   worktree (`clone/always-on-dispatcher`) while ticket 33's merge is pending —
+   the chip's wake badge and the sectioned panel ride the worktree's snapshot
+   v2 code; tracker edits stay on `main`.
+5. **Completion:** this epic resolves when sub-tickets 36–42 are all resolved,
+   ticket 33's browser pass has asserted AC 1 against the assembled capsule,
+   and the close-out comment lists every ticket + ADR with hashes (AC 5).
