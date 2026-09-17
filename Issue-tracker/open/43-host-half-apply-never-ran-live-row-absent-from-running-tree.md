@@ -90,20 +90,25 @@ The plugin and both delivery mechanisms work; what failed is invocation/coverage
 
 ## Acceptance criteria
 
-- [ ] (offline, gate) `npm test`, `npm run typecheck`, `npm run build` all green with zero
+- [x] (offline, gate) `npm test`, `npm run typecheck`, `npm run build` all green with zero
       product-code diff from `07155f6` for this fix (config/launcher-only).
 - [ ] (live, ZERO LLM calls) `dsh --profile <p> --dump-config --patch <overlay>` shows the
       row AND a real boot with the same invocation shows host-apply evidence: the
       `multitask-dispatcher` settings section appears in the web UI Settings, and
       `/dispatcher-start` appears in the composer command menu. (Dump alone is explicitly
-      NOT sufficient — that was this bug.)
+      NOT sufficient — that was this bug.) — **re-pass 2026-09-18: host-apply half PROVEN
+      (settings service registers the namespace + schema + config), but the two UI-surface
+      halves did NOT appear; see re-pass comment below.**
 - [ ] (live, ZERO LLM calls) `/dispatcher-start` typed in the composer is intercepted (no
       plain-text leak to the LLM) and activates the chat: dormant capsule flips to
-      activated; no worker spawned yet.
+      activated; no worker spawned yet. — **re-pass 2026-09-18: NOT met; the command does
+      not resolve in the host admission view, so composer typing was deliberately not
+      attempted (leak guard).**
 - [ ] (live, BURNS tokens — last, single trivial task) one worker spawn → deliver →
       completed-means-delivered flow, minimal prompts per AGENTS.md kill/token rules. May be
-      deferred to the full re-pass if the pass owner prefers.
-- [ ] Server log of the passing boot attached to this ticket (or 33) as the recorded
+      deferred to the full re-pass if the pass owner prefers. — **not run; activation gate
+      above is red.**
+- [x] Server log of the passing boot attached to this ticket (or 33) as the recorded
       evidence; boot shows no "did not activate" error.
 
 ## Verification
@@ -133,3 +138,26 @@ The plugin and both delivery mechanisms work; what failed is invocation/coverage
   drifted from the probed one; capture the exact launcher command in the pass artifacts
   next time.
 - The multitask profile directory was deleted after the pass; recreate it per Requirement 2.
+
+## Comments
+
+### 2026-09-18 — live re-pass: host-half apply PROVEN green on the profile route; activation command still unresolvable (NEW diagnosis, evidence recorded, no product change)
+
+Setup per Requirement 2: `multitask` profile recreated (`--from-default-profile web`), `npm run build` first, `dsh plugin --profile multitask add file:C:/Users/TZhen/Desktop/dsh-bot` (forward slashes; backslash `file:` paths are eaten — ERR_PNPM_LINKED_PKG_DIR_NOT_FOUND), insert row written into the profile's `cordis.patch.yml` exactly per Finding 2 **before** any boot. `--dump-config` composes the row at :541-544 with all seven injected services present. Boot: `dsh --profile multitask --port 8807 --no-open`, kill timers armed at launch (port-keyed `taskkill /F /T`; driver had its own 14-min self-exit backstop; one timer re-armed mid-pass). Zero LLM calls in the entire pass (the prior pass's leak guard was honored: composer text was never submitted). Evidence root: `C:\Users\TZhen\Desktop\dsh-live-repass-2026-09-18\` (outside the repo).
+
+**GREEN — the ticket's headline bug is fixed. The row is in the RUNNING tree and host-half apply executes:**
+- Served page boot graph contains the live row (`{"id":"dsh-multitask-dispatcher","url":"/plugins/??dsh-multitask-dispatcher/client.js&rev=…","inject":[renderer,locale],…}`, `served-page-multitask.html`), dormant capsule renders (chip `data-expanded=false`, dot `dormant`, expand → `data-composition="dormant"`), client half healthy — `shots/01–03`.
+- Offline gate green: `npm test` 701/0, typecheck clean (both configs), build + build:client OK, `git diff 07155f6` product-code empty (AC 1).
+- Host apply evidence, stronger than the original probe: `POST /api/settings/describe` (RPC, zero LLM) lists the `multitask-dispatcher` namespace with OUR schema dict (`enabled` boolean default true, `accessRequestTimeoutMs` number default 120000) and `value = base = {enabled:true, accessRequestTimeoutMs:120000}` — the section is installed in the live settings service.
+- Probe-wrapper boot (Requirement 3's wrapper technique, wrapper outside the repo; row name pointed at `file:///…/dsh-live-repass-2026-09-18/probe-wrapper.mjs`): `apply start config={"enabled":true,"accessRequestTimeoutMs":120000}` → `ctx.commands.register is a function` → `real.apply returned` → healthy serve, **no "did not activate" error** (`dsh-server-multitask2.log`) (AC 5).
+- `enableLogs` could NOT be turned on: the root include entry is constructed internally with only `{path, patches}` (`dsh-app-boot` `mountRootInclude`), and no profile-facing config surface for the tree flag exists on 0.1.5-rc.1. Observability came from the wrapper's stderr + live RPC probes instead.
+
+**RED — ACs 2/3 as written did not happen, so phase 2 (token flow) was gated off:**
+1. Settings UI → 插件配置 renders only 终端/Agent 循环/Subagent/网页搜索 — no Multitask Dispatcher section, even though the namespace exists service-side (`shots/04–05`).
+2. Composer slash menu (`"/dis"` filter, never submitted) shows no dispatcher command (`shots/06`); `commands/list` RPC returns only built-ins for both a blank and a resumed session.
+3. Decisive zero-LLM admission probe — `commands/execute` RPC against a live agent in the same process: `"/goal"` MATCHES (`value:{commandId,result:{kind:"success",…}}`), `"/dispatcher-start"` returns `{ok:true}` with NO value = UNMATCHED. Composer-typed commands are admitted host-side (`dsh-api-session-controller` `command()` → `commands.execute`), so typing it now would leak as plain text — exactly the ticket-33 incident. Not attempted.
+4. Client mirror still dead: footer `data-flag="unknown"` before and after a full reload (`shots/07`).
+
+**New diagnosis (recorded, not fixed — per the pass's no-product-change rule):** apply runs the full enabled path (wrapper probe: config validated, `commands.register` callable, no early return), the settings section installs service-side, yet the command never becomes resolvable and the section/mirror never reach client surfaces. Shipped-idiom delta: `dsh-command-compact` registers its command INSIDE `ctx.effect(function* () { yield ctx.commands.register(…) })` during its own fiber start; our `apply` calls `commands.register` synchronously (`src/adapter/activation-command.ts:129` via `src/plugin.ts:456`). Under the ScopedLayers semantics (`dsh-scope/lib/index.js` `effect`/`merge`), a generator effect queued on the already-started commands-service context plausibly never executes — silently, no error — which matches every observation. The offline FakeDshHost registers eagerly, so `npm test` cannot catch this. Follow-up needed: adopt the shipped generator-effect registration idiom (and re-check the section/mirror client sync) in a NEW ticket, then re-run this re-pass's probes as its ACs.
+
+Also still open: Requirement 1's committed `dev/cordis.web.patch.yml` + launcher pass-through (this re-pass ran the profile route per the pass plan; the web-overlay route was not exercised). No ticket files moved; nothing here checked beyond AC 1 and AC 5.
