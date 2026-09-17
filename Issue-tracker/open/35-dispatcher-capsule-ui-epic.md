@@ -153,3 +153,23 @@ decisions and adaptations, binding on the sub-tickets:
 5. **Completion:** this epic resolves when sub-tickets 36–42 are all resolved,
    ticket 33's browser pass has asserted AC 1 against the assembled capsule,
    and the close-out comment lists every ticket + ADR with hashes (AC 5).
+
+### 2026-09-18 — agent (status note: all sub-tickets implemented; offline scope closed at 42)
+
+Sub-tickets 36–42 now all have implementation comments on their worktree
+branches: seam research 36, draft ADRs 37, chip/expand 38, activation row 39,
+intent wiring 40, deliverables line 41, and footer + close-out 42 (worktree
+`clone/always-on-dispatcher` @ `1e7c735`). Ticket 42 closed the epic's
+OFFLINE scope: the full-composition fixture suite, the enlarged-dictionary
+locale validation, the no-stop guard's final form over every capsule view
+model, the surfaces-README capsule section, and the identifier grep. The
+footer's degraded seams are recorded there per 36's verdicts: no Settings
+deep-link (copy-only hint), no profile line (no source), no tool-view link
+(no navigation path; ticket 24's registrations byte-unchanged).
+
+**Still open before this epic resolves:** ticket 33's launcher/browser pass
+— the real-browser Playwright assertion of the assembled capsule (dormant +
+activated, epic AC 1) — plus its LQA/provenance close-out and the merge to
+`main`. AC 4's independent-verification requirement is satisfied per-ticket
+by each sub-ticket's verification comment; AC 5's hash listing is ticket 33's
+close-out comment.
