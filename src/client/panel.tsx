@@ -4,6 +4,10 @@
  *
  * Presentation only: the panel never spawns, steers, or stops anything — all
  * authority stays with the bound parent agent via the core (design-16 §3.4).
+ * Ticket 40 adds the epic's per-row steer affordance, which stays inside
+ * that rule: it only PREFILLS the user's own composer draft (verified seam,
+ * `actions.ts`) — the send, and the host-side `/dispatcher-steer` transport
+ * into the core last-wins queue, remain the user's and the host's.
  * It renders the store's view model: title, the three ticket-28 sections
  * (Active / Needs you / Finished, design-17 §4.2), and within them one row
  * per worker carrying the design-17 §4.1 presence picture (status dot,
@@ -31,7 +35,7 @@
  * `prefers-reduced-motion`. The element mounts and unmounts with the panel,
  * so an HMR fiber swap removes it with everything else.
  */
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import type { JSX } from "react";
 import {
   ROSTER_FINISHED_COUNT_KEY,
@@ -43,6 +47,12 @@ import {
   type RosterSectionView,
   type RosterStore,
 } from "./roster-store.js";
+import {
+  ROSTER_STEER_BUTTON_KEY,
+  ROSTER_STEER_COPY_FALLBACK_KEY,
+  ROSTER_STEER_HINT_KEY,
+  type SteerPrefillOutcome,
+} from "./actions.js";
 
 /** Bound translate seat (`ctx.locale.bind(namespace)`), re-exported. */
 export type { TranslateFn } from "./overlay.js";
@@ -86,6 +96,10 @@ export const ROSTER_PANEL_CSS = `
 .multitask-dispatcher-roster-panel__row-marker{align-self:flex-start;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 6px;border-radius:8px;border:1px solid currentColor}
 .multitask-dispatcher-roster-panel__row-marker--blocked{color:#d29922}
 .multitask-dispatcher-roster-panel__row-marker--landed{color:#2ea043}
+.multitask-dispatcher-roster-panel__row-steer{display:flex;align-items:center;gap:6px;margin-top:2px;flex-wrap:wrap}
+.multitask-dispatcher-roster-panel__steer{align-self:flex-start;padding:1px 8px;border-radius:6px;border:1px solid #30363d;background:transparent;color:inherit;opacity:.75;cursor:pointer;font:inherit;font-size:11px}
+.multitask-dispatcher-roster-panel__steer:hover{opacity:1;border-color:#8b949e}
+.multitask-dispatcher-roster-panel__steer-hint{opacity:.6;font-size:11px;min-width:0}
 .multitask-dispatcher-roster-panel__finished-count{opacity:.5;font-size:11px}
 .multitask-dispatcher-roster-panel__finished-count > summary{opacity:1;cursor:default}
 `;
@@ -120,14 +134,28 @@ function detailLine(row: RosterRowView): string {
 }
 
 /**
- * One roster row (tickets 27 + 28). `collapsed` lives on the view model, so
- * the component only decides *where* a row renders, never *whether* it
- * belongs (the partition rule is asserted in the store's offline tests).
+ * One roster row (tickets 27 + 28; steer affordance ticket 40). `collapsed`
+ * lives on the view model, so the component only decides *where* a row
+ * renders, never *whether* it belongs (the partition rule is asserted in
+ * the store's offline tests).
+ *
+ * The per-row steer affordance (non-finished rows only — steering a
+ * settled worker is refused host-side, so offering it would be a lie) is a
+ * prefill seat, not a transport: clicking calls the injected
+ * `onRowSteer(workerId)` which writes `/dispatcher-steer <workerId> ` into
+ * the composer draft (verified seam, focus not exposed) and the row pairs
+ * the result with the honest hint, or with the copy-only fallback when the
+ * draft is unreachable. The row never sends anything.
  */
-function rosterRow(t: TranslateFn, row: RosterRowView): JSX.Element {
+function RosterRow(props: {
+  t: TranslateFn;
+  row: RosterRowView;
+  onSteer?: ((workerId: string) => SteerPrefillOutcome) | undefined;
+}): JSX.Element {
+  const { t, row, onSteer } = props;
+  const [steerCopyKey, setSteerCopyKey] = useState<string | null>(null);
   return (
     <li
-      key={row.workerId}
       className={`${PANEL_CLASS}__row`}
       data-status={row.statusLabel}
       data-visual={row.visual}
@@ -168,6 +196,30 @@ function rosterRow(t: TranslateFn, row: RosterRowView): JSX.Element {
         {row.todoId !== null ? (
           <span className={`${PANEL_CLASS}__row-todo`}>{row.todoId}</span>
         ) : null}
+        {onSteer !== undefined && row.finished === false ? (
+          <span className={`${PANEL_CLASS}__row-steer`}>
+            <button
+              type="button"
+              className={`${PANEL_CLASS}__steer`}
+              data-worker={row.workerId}
+              onClick={() => {
+                const outcome = onSteer(row.workerId);
+                setSteerCopyKey(
+                  outcome.kind === "prefilled"
+                    ? ROSTER_STEER_HINT_KEY
+                    : ROSTER_STEER_COPY_FALLBACK_KEY,
+                );
+              }}
+            >
+              {t(ROSTER_STEER_BUTTON_KEY)}
+            </button>
+            {steerCopyKey !== null ? (
+              <span className={`${PANEL_CLASS}__steer-hint`}>
+                {formatTemplate(t(steerCopyKey), { workerId: row.workerId })}
+              </span>
+            ) : null}
+          </span>
+        ) : null}
       </span>
     </li>
   );
@@ -181,6 +233,7 @@ function rosterRow(t: TranslateFn, row: RosterRowView): JSX.Element {
 function rosterSection(
   t: TranslateFn,
   section: RosterSectionView,
+  onSteer?: (workerId: string) => SteerPrefillOutcome,
 ): JSX.Element | null {
   const visible = section.rows.filter((row) => !row.collapsed);
   const collapsed = section.rows.filter((row) => row.collapsed);
@@ -188,7 +241,9 @@ function rosterSection(
   const list = (rows: readonly RosterRowView[]) =>
     rows.length === 0 ? null : (
       <ul className={`${PANEL_CLASS}__list`}>
-        {rows.map((row) => rosterRow(t, row))}
+        {rows.map((row) => (
+          <RosterRow key={row.workerId} t={t} row={row} onSteer={onSteer} />
+        ))}
       </ul>
     );
   return (
@@ -215,10 +270,17 @@ function rosterSection(
   );
 }
 
-/** Create the roster panel component bound to a translate seat and store. */
+/**
+ * Create the roster panel component bound to a translate seat and store.
+ * `onSteer` (ticket 40) is the optional per-row steer prefill seat — a
+ * pure `(workerId) => outcome` function over the verified composer-draft
+ * seam; without it the rows render without the affordance (same
+ * render-only default discipline as the capsule's intent seat).
+ */
 export function createRosterPanel(
   t: TranslateFn,
   store: RosterStore,
+  onSteer?: (workerId: string) => SteerPrefillOutcome,
 ): () => JSX.Element {
   return () => {
     const box = useSyncExternalStore(store.subscribe, store.getBox);
@@ -246,7 +308,7 @@ export function createRosterPanel(
           <div className={`${PANEL_CLASS}__empty`}>{t("roster.empty")}</div>
         ) : (
           <div className={`${PANEL_CLASS}__sections`}>
-            {view.sections.map((section) => rosterSection(t, section))}
+            {view.sections.map((section) => rosterSection(t, section, onSteer))}
           </div>
         )}
       </div>

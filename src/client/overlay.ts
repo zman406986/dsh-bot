@@ -97,6 +97,15 @@ export interface LocaleDictionary {
  * wording — an ask handed to the dispatcher, never a kill control,
  * ADR-0005/0009) and the dormant composition's activation-pitch body. The
  * row's state lines reuse the `capsule.dot.*` keys above.
+ *
+ * Ticket 40 adds the action-wiring copy: the SUBMITTED conversational stop
+ * phrasing (`capsule.stop.message` — sent verbatim as the user's own plain
+ * message, matching ticket 31's stop/course-change policy rule, design-17
+ * §7), the honest failure lines for the activation intents (send failure /
+ * command-not-available / no channel — never a fake success), and the
+ * per-row steer affordance copy (button, post-prefill hint — focus is not
+ * exposed so the user must review and send — and the copy-only fallback for
+ * when the composer draft is unreachable).
  */
 export const localeDictionary: LocaleDictionary = {
   en: {
@@ -154,6 +163,26 @@ export const localeDictionary: LocaleDictionary = {
     "capsule.activation.stop": "Ask the dispatcher to stop",
     "capsule.activation.pitch":
       "Start the dispatcher to run workers in this chat; results arrive here as they finish.",
+    // Ticket 40: the action-wiring copy. The stop message is SUBMITTED
+    // verbatim as the user's own plain-language ask (ticket 31's policy rule
+    // treats it as steer/stop + honest confirmation); the failure lines are
+    // the only notices the capsule itself renders — there is deliberately no
+    // success key (the roster feed is the only success truth).
+    "capsule.stop.message":
+      "Please stop the dispatcher: stop the running workers and do not start new ones. Confirm what you stopped.",
+    "capsule.action.send-failed":
+      "The message could not be sent. Nothing was changed.",
+    "capsule.action.not-available":
+      "The dispatcher command is not available in this chat.",
+    "capsule.action.no-channel": "No command channel is available here.",
+    // Ticket 40: the per-row steer affordance. The hint renders after a
+    // successful prefill (focus is not exposed — review and send); the
+    // fallback is the copy-only degrade for when the draft is unreachable.
+    "roster.steer.button": "Steer",
+    "roster.steer.hint":
+      "Placed in the composer for {workerId} — review and send.",
+    "roster.steer.copy-fallback":
+      "Composer not reachable here — type /dispatcher-steer {workerId} followed by your instruction in this chat.",
   },
   zh: {
     "roster.title": "工作者",
@@ -193,6 +222,15 @@ export const localeDictionary: LocaleDictionary = {
     "capsule.activation.stop": "请求调度器停止",
     "capsule.activation.pitch":
       "启动调度器以在本聊天中运行工作者；结果完成后会送达此处。",
+    "capsule.stop.message":
+      "请停止调度器：停止运行中的工作者，不要再启动新的。请确认你停止了哪些工作者。",
+    "capsule.action.send-failed": "消息未能发送。没有任何更改。",
+    "capsule.action.not-available": "此聊天中调度器命令不可用。",
+    "capsule.action.no-channel": "此处没有可用的命令通道。",
+    "roster.steer.button": "纠偏",
+    "roster.steer.hint": "已为 {workerId} 填入输入框——请检查后发送。",
+    "roster.steer.copy-fallback":
+      "此处无法访问输入框——请在本聊天中输入 /dispatcher-steer {workerId} 加上你的指示。",
   },
 };
 

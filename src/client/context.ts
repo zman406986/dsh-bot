@@ -73,9 +73,73 @@ export interface ClientEffectContext {
   effect(execute: () => unknown, label?: string): unknown;
 }
 
-/** The narrow client context this scaffold's `apply` needs. */
+/**
+ * A session-scoped context view (`ctx.sessions.scope(id)`, ticket 36 seam
+ * 2/3): a use-and-discard Agent-scoped context whose scope-addressed
+ * conversation face carries the plain-prompt sink. The host's own guidance
+ * for a root-scope plugin is to "address one via
+ * ctx.sessions.scope(id).conversation" — `send` puts the text into that
+ * session as the user's own queued turn.
+ */
+export interface ScopedAgentContextLike {
+  conversation?: {
+    /** Send a prompt into the scoped session (queued user turn). */
+    send(text: string): Promise<void>;
+  };
+}
+
+/**
+ * The sessions service face the action wiring needs (ticket 36 seams 2/3):
+ * the current session selection off the standard list snapshot (shipped
+ * read idiom `list.getSnapshot().current`) and the Agent-scoped context
+ * view (`undefined` for a session neither listed nor already scoped).
+ */
+export interface ClientSessionsLike {
+  list: { getSnapshot(): { current?: string } };
+  scope(id: string): ScopedAgentContextLike | undefined;
+}
+
+/**
+ * The conversation service face the action wiring needs (ticket 36 seam 3):
+ * the per-session input resolver whose `for(actx)` facade exposes
+ * `setDraft` (whole-draft programmatic write, caret at end). Focus is
+ * deliberately absent — the composer editor is package-internal.
+ */
+export interface ClientConversationLike {
+  input: {
+    for(actx: unknown): { setDraft(text: string): void };
+  };
+}
+
+/**
+ * The remote command service face (ticket 36 seam 2): the composer's exact
+ * command transaction — `execute(sessionId, line, attachments)` — resolving
+ * to `undefined` when the line parses to no command.
+ */
+export interface ClientRemoteLike {
+  commands: {
+    execute(
+      sessionId: string,
+      line: string,
+      attachments: readonly unknown[],
+    ): Promise<unknown>;
+  };
+}
+
+/**
+ * The narrow client context this scaffold's `apply` needs. The three action
+ * services are OPTIONAL structural faces: they are always present in the
+ * shipped web composition (connection/composer core), are read lazily at
+ * send/click time (never declared as boot-time binds — ADR-0014's smallest-
+ * set rule; same runtime-dynamic idiom as the settings watch), and a
+ * runtime without them degrades to honest `no-channel`/copy-fallback UX
+ * instead of blocking module materialization.
+ */
 export interface ClientContext extends ClientEffectContext {
   slots: SlotsServiceLike;
   locale: LocaleServiceLike;
   inject?: ClientInjectFn;
+  remote?: ClientRemoteLike;
+  sessions?: ClientSessionsLike;
+  conversation?: ClientConversationLike;
 }
