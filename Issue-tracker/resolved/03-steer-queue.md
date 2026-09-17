@@ -4,7 +4,7 @@
 
 **Blocked by:** 02 鈥?Worker lifecycle FSM.
 
-**Status:** open
+**Status:** resolved
 
 - [x] A steer sent to a running worker is delivered into that worker and its context is preserved 鈥?the worker does not restart from zero.
 - [x] Sending a steer interrupts the worker's current step and work resumes at the next step boundary with the steer folded in.
@@ -16,3 +16,7 @@
 ## Implementation notes
 
 2026-09-16 鈥?Pure single-slot last-wins `SteerQueue` in `src/core/steer-queue.ts` (`park`/`pop`/`clear`/`peek`) plus `wrapParentCorrection` (new copy). `DshHost` gains `sendMessage` and `onStepBoundary`; `FakeDshHost` records `sendMessageCalls` and exposes `fireStepBoundary`. `Multitask.steerWorker` parks the steer (replace if already steering), drives `running 鈫?steering`, and interrupts the current step; on step boundary the core pops the latest steer, wraps it, delivers via `sendMessage`, and returns to `running`. Refusals (`unknown-worker` / `not-running`) never recreate a worker and the not-running detail says the worker may already be done. Tests: `test/steer-queue.test.ts` (10 cases 鈥?queue unit + multitask delivery via FakeDshHost records). Suite total 27 green. Next unblocked ticket: 04 (stop semantics).
+
+## Comments
+
+- Moved to resolved by overnight sweep 2026-09-18: all ACs checked; verified via implementing commits and artifact spot-check on main.

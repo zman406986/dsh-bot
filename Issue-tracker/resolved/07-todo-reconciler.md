@@ -4,7 +4,7 @@
 
 **Blocked by:** 06 鈥?Wake bus + coalescing.
 
-**Status:** open
+**Status:** resolved
 
 - [x] A todo entry is created before a spawn, and moves to `in_progress` when the worker starts.
 - [x] Several items may be `in_progress` at the same time 鈥?one per live stream, plus at most one inline.
@@ -25,3 +25,7 @@
 - Workers never see the ledger: spawn prompt/opts carry no todo titles; `WorkerRecord` has only `todoId`; wake notices have no ledger payload. Spawn without `todoId` creates no entry (pure chat / trivial lookups).
 - Exported from `src/index.ts`: `createTodoLedger`, `reconcileTodos`, and the todo/reconcile types.
 - Tests: `test/todo-reconciler.test.ts` (18 new). Suite total 84 pass.
+
+## Comments
+
+- Moved to resolved by overnight sweep 2026-09-18: all ACs checked; verified via implementing commits and artifact spot-check on main.

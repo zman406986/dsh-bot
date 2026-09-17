@@ -4,7 +4,7 @@
 
 **Blocked by:** 03 鈥?Steer queue.
 
-**Status:** open
+**Status:** resolved
 
 - [x] Stopping a running worker aborts it and returns a plain confirmation to the caller; no user-facing message is sent by the stop path.
 - [x] Stopping disarms the completion wake that was armed at spawn, so the worker's finish never wakes the dispatcher.
@@ -17,3 +17,7 @@
 ## Implementation notes
 
 2026-09-16 鈥?`Multitask.abortWorker` now returns a `StopResult` (`ok: true` confirmation, or refusal with `reason: "already-settled"` and detail that the worker may already be done). On a successful stop the core transitions to `aborted`, calls `steerQueue.clear(workerId)` (per ticket 03's note 鈥?the queue lives inside `createMultitask`), then interrupts through the host; the stop path never calls `sendMessage` and never requests a wake. Terminal workers (already settled or previously stopped) are refused without a second interrupt, and an already-delivered completion wake is left intact. Late settles after stop are dropped by the existing terminal FSM gate 鈥?no delivery, no wake, no status change. Unknown workers still throw (unchanged). Tests: `test/stop-semantics.test.ts` (9 cases via FakeDshHost records only). Suite total 36 green.
+
+## Comments
+
+- Moved to resolved by overnight sweep 2026-09-18: all ACs checked; verified via implementing commits and artifact spot-check on main.

@@ -1,7 +1,7 @@
 # 25 — Coexistence + clean-room QA close-out for #16
 
 **Blocked by:** 19, 20, 21, 22, 23, 24.
-**Status:** open
+**Status:** resolved
 
 ## Problem
 
@@ -185,3 +185,4 @@ pre-existing):**
   `host.sendMessage` after the parent unbinds throws into a void'd promise —
   potential unhandled rejection in the real host). Both warrant their own
   tickets per this ticket's "anything broken gets its own ticket" rule.
+- Moved to resolved by overnight sweep 2026-09-18: all ACs checked; verified via implementing commits and artifact spot-check on main.

@@ -4,7 +4,7 @@
 
 **Blocked by:** 12 鈥?Feature flag + profile split.
 
-**Status:** open
+**Status:** resolved
 
 - [x] A peer agent can send a message to the dispatcher without waiting for a reply; the send returns a delivery acknowledgement only.
 - [x] A peer message arrives as a fresh hidden turn with a cue that it comes from another assistant, never as the user.
@@ -30,3 +30,4 @@ Shipped as pure core modules + wake-bus integration (design-14):
 - Tests: `test/peer-inbox.test.ts`, `test/wake-bus-peer.test.ts`, `test/multitask-peer.test.ts` (52 new). Suite 249 鈫?301 pass.
 
 **Out of MVP (as designed):** messaging hub, fan-out directory, images, restart durability, out-of-process transport, dispatcher `send_peer` tool.
+- Moved to resolved by overnight sweep 2026-09-18: all ACs checked; verified via implementing commits and artifact spot-check on main.

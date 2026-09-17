@@ -4,7 +4,7 @@
 
 **Blocked by:** 08 鈥?Durable roster marker + restart behavior.
 
-**Status:** open
+**Status:** resolved
 
 Note: dsh **is** installed on this machine (`@deepseek-ai/dsh@0.1.5-rc.1`, global npm, live `web` profile) 鈥?see `docs/research/dsh-local-install.md`. This ticket is verifiable against a real host, not just the fake.
 
@@ -59,3 +59,7 @@ Note: dsh **is** installed on this machine (`@deepseek-ai/dsh@0.1.5-rc.1`, globa
 ## 2026-09-18 — Considered passed (human deferral)
 
 Human review of the live smoke checklist is **deferred, not done**: the human has not executed it. For continuation-of-work purposes only, this ticket is **considered passed** so downstream tickets may proceed. The deferral reason is that the human is waiting for the client UI surfaces (tickets 20–28 line) to be complete, then will run the live checks against the finished product in one pass. This note does not constitute verification; ticket 33 (closeout) still owns ensuring the live smoke happens before merge.
+
+## Comments
+
+- Moved to resolved by overnight sweep 2026-09-18: all ACs checked; verified via implementing commits and artifact spot-check on main.

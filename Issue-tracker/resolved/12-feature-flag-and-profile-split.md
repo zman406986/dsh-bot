@@ -4,7 +4,7 @@
 
 **Blocked by:** 11 鈥?Dispatcher tools + policy prompts.
 
-**Status:** open
+**Status:** resolved
 
 Note: the multitask profile must be created 鈥?only `web` exists on this machine (`docs/research/dsh-local-install.md`). Ticket 01 establishes it; this ticket owns the flag semantics.
 
@@ -28,3 +28,7 @@ Note: the multitask profile must be created 鈥?only `web` exists on this machin
 - Settings API: structural `ctx.settings.installSection` (current dsh 0.1.5-rc.x surface). No hard dependency on `@deepseek-ai/dsh-settings`.
 - Policy assembler already accepts `enabled: boolean` and returns `""` when false (design-11 / T11).
 - Profile verification: `dsh --profile web --dump-config` 鈫?no multitask-dispatcher row; `dsh --profile multitask --dump-config` 鈫?`enabled: true`.
+
+## Comments
+
+- Moved to resolved by overnight sweep 2026-09-18: all ACs checked; verified via implementing commits and artifact spot-check on main.

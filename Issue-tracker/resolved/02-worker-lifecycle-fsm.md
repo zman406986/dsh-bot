@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 鈥?Plugin scaffold + `DshHost` seam + fake host.
 
-**Status:** open
+**Status:** resolved
 
 - [x] A worker moves `spawned 鈫?running` when its first turn starts.
 - [x] A running worker moves into `steering` when a steer is received and back to `running` when the steer is injected and work continues.
@@ -16,3 +16,4 @@
 ## Comments
 
 2026-09-16 鈥?Pure FSM in `src/core/worker-fsm.ts` (`canTransition` / `applyEvent`, no host). Wired through `createMultitask` as `noteTurnStarted` / `noteSteerReceived` / `noteSteerInjected`; settle and abort go through the same FSM so terminal states reject every further event. Illegal transitions (including double settle and post-abort settle) are ignored, not thrown. Abort marks `aborted` before interrupting so a racing settle cannot revive the worker. Tests: `test/worker-lifecycle-fsm.test.ts` (8 cases, behavior-only via `getWorker` + `FakeDshHost` records). Suite total 17 green. Next unblocked ticket: 03 (steer queue).
+- Moved to resolved by overnight sweep 2026-09-18: all ACs checked; verified via implementing commits and artifact spot-check on main.

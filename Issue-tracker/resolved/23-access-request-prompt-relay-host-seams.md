@@ -1,7 +1,7 @@
 # 23 — Access-request prompt relay via host prompt seams
 
 **Blocked by:** 19 (activation lifecycle — prompts belong to the activated dispatcher session).
-**Status:** open
+**Status:** resolved
 
 ## Problem
 
@@ -104,3 +104,4 @@ dormant stock surface. All offline (S8), no real Cordis.
   (2) `test/access-relay.test.ts` T1/T7/T14 park tickets with the real
   120 s default timeout and never resolve, adding ~2 min to every suite run
   (the whole-suite `duration_ms ≈ 120190` is that file, not ticket 23).
+- Moved to resolved by overnight sweep 2026-09-18: all ACs checked; verified via implementing commits and artifact spot-check on main.

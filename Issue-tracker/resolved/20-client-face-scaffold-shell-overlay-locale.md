@@ -1,7 +1,7 @@
 # 20 — Client-face scaffold: web bundle, shell.overlay hello-world, locale namespace
 
 **Blocked by:** None — can start immediately (independent of #19).
-**Status:** open
+**Status:** resolved
 
 ## Problem
 
@@ -49,3 +49,4 @@ Handover notes / seam gaps:
 - React delivery is pinned to the verified static-seed table; if integration shows a different mechanism, only `dsh.client.external` + the esbuild externals list need adjusting.
 - esbuild's postinstall was blocked by this environment's allow-scripts gate; the platform binary from optionalDependencies works — no action needed.
 - `client/index.js` is a build output (gitignored); `exports["./client"]` resolves only after `npm run build:client`, same discipline as `lib/` for the host face.
+- Moved to resolved by overnight sweep 2026-09-18: all ACs checked; verified via implementing commits and artifact spot-check on main.

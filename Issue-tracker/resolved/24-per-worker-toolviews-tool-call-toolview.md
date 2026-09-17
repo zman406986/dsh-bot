@@ -1,7 +1,7 @@
 # 24 — Per-worker detail: tool.call.toolview entries for the dispatcher tools
 
 **Blocked by:** 20 (client-face scaffold).
-**Status:** open
+**Status:** resolved
 
 ## Problem
 
@@ -28,3 +28,4 @@ The five dispatcher tools render as dsh's generic tool rows. Design 16 (§4.2, �
   - **Verbatim vocabulary:** check-row status labels use the core FSM words as-is (identity contract, same as the roster panel); outcomes render `ok` or the payload's failure reason verbatim; booleans render `true`/`false`; long steer text collapses to one line clamped at 160 chars.
   - **Tests:** suite 415 → **501 passing, 0 fail** (+86: new `test/client-toolviews.test.ts` — per-tool payload parsing from realistic `src/core/tools.ts` shapes, malformed/partial payloads degrade without throwing across all five tools, foreign-tool/key-conflict semantics, HMR reversal; `test/client-face-scaffold.test.ts` + `test/client-roster-panel.test.ts` updated for the second inject). `npm run typecheck` clean on both configs; client esbuild contract test still green.
   - **Deferred gaps:** (1) the renderer's exact toolview prop face is unverified against a live dsh host — parsers accept `{args, result}` and degrade on any deviation; re-verify at integration per design-16 §8 version-drift risk. (2) Views render compact detail only (no elapsed/activity/attachment paths) per the ticket's compactness rule. (3) Component rendering remains build+typecheck-only (S8, no DOM harness).
+- Moved to resolved by overnight sweep 2026-09-18: all ACs checked; verified via implementing commits and artifact spot-check on main.

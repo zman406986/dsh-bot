@@ -4,7 +4,7 @@
 
 **Blocked by:** 07 鈥?Todo reconciler.
 
-**Status:** open
+**Status:** resolved
 
 - [x] At spawn, a small durable marker is written carrying the minimum needed to rebuild the roster across a restart: worker id, transcript pointer, todo link, and status.
 - [x] The marker is written through the host's durable session/storage facility; no second transcript database is introduced.
@@ -20,3 +20,7 @@
 - `rebuildFromDurability(parentSessionId)` restores terminal markers onto the roster and recreates the linked in-progress todo so `reconcileTodos` reports `landedUndelivered` (S4). Live markers become `UnknownStateWorker` (transcript pointer = marker value or worker id); stream keys stay free for re-dispatch; no host spawn/interrupt/message.
 - Marker carries no report body 鈥?result text stays in dsh's transcript. No second transcript DB.
 - Ticket 09 owns the live `storageDomain` backend behind `DurabilityPort` (design-09 搂8); keep this interface.
+
+## Comments
+
+- Moved to resolved by overnight sweep 2026-09-18: all ACs checked; verified via implementing commits and artifact spot-check on main.

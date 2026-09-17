@@ -4,7 +4,7 @@
 
 **Blocked by:** 11 鈥?Dispatcher tools + policy prompts.
 
-**Status:** open
+**Status:** resolved
 
 Note: dsh ships approval and credential seams (`dsh-user-approval`, `dsh-credentials`, `dsh-permission-presets` 鈥?see `docs/research/dsh-local-install.md`). Build the relay on those rather than inventing a request flow.
 
@@ -34,3 +34,7 @@ Fork recorded in [ADR-0008](../../../docs/adr/0008-worker-access-ask-structured-
 | Tests T1鈥揟14 + policy/tool units | `test/access-relay.test.ts` |
 
 Secret values never enter core types, prompts, steers, or logs. `AccessDecision` has no value field. Tickets are in-memory (ADR-0006 rule).
+
+## Comments
+
+- Moved to resolved by overnight sweep 2026-09-18: all ACs checked; verified via implementing commits and artifact spot-check on main.

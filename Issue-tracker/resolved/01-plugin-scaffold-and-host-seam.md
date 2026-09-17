@@ -4,7 +4,7 @@
 
 **Blocked by:** None 鈥?can start immediately.
 
-**Status:** open
+**Status:** resolved
 
 - [x] The plugin follows the shape of an existing small dsh plugin: an ES module exporting `name`, `inject`, a schemastery `Config`, and `apply(ctx, config)`; a package manifest with `type: module`, a `main` entry, and `peerDependencies` on the dsh services it touches (`@deepseek-ai/cordis` plus the specific `@deepseek-ai/dsh-*` packages). Read `@deepseek-ai/dsh-web-search-exa` in the local profile's `node_modules` as the worked template 鈥?dsh is MIT and safe to imitate; the forbidden reference tree is not.
 - [x] A TypeScript module exporting an `apply(ctx)` function loads as a dsh/Cordis plugin without error, and its registrations are reversible on unload.
@@ -19,3 +19,4 @@
 2026-09-16 鈥?Implemented as package `dsh-multitask-dispatcher` at the repo root (`type: module`, `main: lib/index.js`, peerDep `@deepseek-ai/cordis`, dep `@deepseek-ai/schemastery`). Core seam lives under `src/core/`: `DshHost`, `FakeDshHost`, `createMultitask`. Tests: `npm test` via `tsx` + `node:test` (9 green). Install workflow settled in `docs/research/plugin-install-workflow.md`: persistent `dsh plugin --profile multitask add file:...` + `insert` row in `cordis.patch.yml`; `--patch` overlay for transient experiments. Multitask profile seeded from `web` template; stock `web` dump has no dispatcher row. Profile boot verified: `dsh --profile multitask` came up with no plugin-load error.
 
 Ready for human review. Next unblocked ticket: 02 (worker lifecycle FSM).
+- Moved to resolved by overnight sweep 2026-09-18: all ACs checked; verified via implementing commits and artifact spot-check on main.

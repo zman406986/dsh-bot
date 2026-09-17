@@ -1,7 +1,7 @@
 # 18 — Worker deny-list omits the five dispatcher tools
 
 **Blocked by:** None — can start immediately.
-**Status:** open
+**Status:** resolved
 
 ## Problem
 
@@ -22,3 +22,4 @@ Found during ticket 16 phase 1 (`.scratch/multitask-dispatcher/research-16-hijac
 ## Comments
 
 - 2026-09-17 (agent team): Implemented — dispatcher tool names added to worker deny-list (src/worker/tool-barrier.ts:31-36); offline test test/worker-agent-type.test.ts proves workers cannot resolve them. typecheck clean; 302 tests passing. Commit 6477ed7.
+- Moved to resolved by overnight sweep 2026-09-18: all ACs checked; verified via implementing commits and artifact spot-check on main.

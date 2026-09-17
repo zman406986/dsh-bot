@@ -4,7 +4,7 @@
 
 **Blocked by:** 05 鈥?Worker registry + `stream_key` uniqueness.
 
-**Status:** open
+**Status:** resolved
 
 - [x] A settled worker enqueues exactly one wake for its parent session; settling twice does not enqueue a second.
 - [x] Wakes route to the correct parent session 鈥?a settle never wakes a different dispatcher.
@@ -23,3 +23,7 @@
 - Peer/timer/external-event are in the source vocabulary and `WAKE_SOURCES` but have no enqueue API yet 鈥?later tickets add them without changing the type.
 - Exported from `src/index.ts`: `createWakeBus`, `WAKE_SOURCES`, and the wake types.
 - Tests: `test/wake-bus.test.ts` (17 new). Suite total 66 pass.
+
+## Comments
+
+- Moved to resolved by overnight sweep 2026-09-18: all ACs checked; verified via implementing commits and artifact spot-check on main.

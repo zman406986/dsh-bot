@@ -4,7 +4,7 @@
 
 **Blocked by:** 09 鈥?dsh adapter wiring.
 
-**Status:** open
+**Status:** resolved
 
 - [x] A worker starts with a blank context 鈥?no dispatcher memory, no sibling transcripts, no user chat.
 - [x] A worker is offered the work tools (shell, filesystem, search, web, and the other task tools as available).
@@ -67,3 +67,7 @@
 ## 2026-09-18 — Considered passed (human deferral)
 
 Human review of the live smoke checklist is **deferred, not done**: the human has not executed it. For continuation-of-work purposes only, this ticket is **considered passed** so downstream tickets may proceed. The deferral reason is that the human is waiting for the client UI surfaces to be complete, then will run the live checks (including the denied-tool probe) against the finished product in one pass. This note does not constitute verification; ticket 33 (closeout) still owns ensuring the live smoke happens before merge.
+
+## Comments
+
+- Moved to resolved by overnight sweep 2026-09-18: all ACs checked; verified via implementing commits and artifact spot-check on main.

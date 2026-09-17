@@ -1,7 +1,7 @@
 # 26 — Test hygiene: parked 120 s default timers + unbound-parent deny delivery
 
 **Blocked by:** None — can start immediately.
-**Status:** open
+**Status:** resolved
 
 ## Problem
 
@@ -57,3 +57,4 @@ behavior unchanged.
 0 failing**; duration **≈ 120.2 s → ≈ 1.2 s** whole suite (access-relay file
 alone: 120237 ms → 248 ms). Tests remain fully offline (S8).
 
+- Moved to resolved by overnight sweep 2026-09-18: all ACs checked; verified via implementing commits and artifact spot-check on main.
