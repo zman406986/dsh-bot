@@ -14,6 +14,7 @@ export {
   clampApprovalDetail,
   createAccessPromptPump,
   describeAccessAction,
+  isWildcardAccessTarget,
   parseAccessPromptAnswer,
   secretStoredAccessNotice,
   type AccessPromptAnswerItemLike,

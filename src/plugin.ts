@@ -17,6 +17,7 @@ import {
   createSettingsRosterChannel,
   createStorageDomainDurability,
   installMultitaskSettingsSection,
+  isWildcardAccessTarget,
   registerDispatcherStartCommand,
   registerDispatcherSteerCommand,
   registerDispatcherTools,
@@ -293,7 +294,13 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     // row (class + exact target) into the relay's existing policy table —
     // future matching asks auto-answer on the shipped policy no-op path.
     // Profile/preset writes are deliberately NOT plumbed (consent boundary).
+    // Wildcard fence (ticket 30), last line: a session row is only ever
+    // written for the exact target the human consented to. The prompt path
+    // already degrades metacharacter targets, so a wildcard pattern reaching
+    // this sink (constructed or queued always-allow) fails closed here
+    // instead of remembering a whole class or prefix of targets.
     alwaysAllow: (ticket) => {
+      if (isWildcardAccessTarget(ticket.body.target)) return;
       multitask.accessPolicy.set({
         class: ticket.body.class,
         targetPattern: ticket.body.target,

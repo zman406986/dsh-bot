@@ -28,6 +28,7 @@ import {
   clampApprovalDetail,
   createAccessPromptPump,
   describeAccessAction,
+  isWildcardAccessTarget,
   parseAccessPromptAnswer,
   type AccessPromptAnswerLike,
   type AccessPromptRequestLike,
@@ -138,6 +139,40 @@ describe("access prompt — payload copy (design-16 §6 + ticket 30)", () => {
       { label: ACCESS_PROMPT_ALWAYS_ALLOW },
       { label: ACCESS_PROMPT_DENY },
     ]);
+  });
+
+  it("a bare `*` target offers Allow/Deny only — never Always allow (ticket 30 fence)", () => {
+    const question = accessPromptQuestion(
+      ticket({ body: { class: "tool", target: "*", reason: "anything" } }),
+    );
+    assert.deepEqual(question.options, [
+      { label: ACCESS_PROMPT_ALLOW },
+      { label: ACCESS_PROMPT_DENY },
+    ]);
+  });
+
+  it("a prefix-style `gh-api*` target also drops the Always allow option", () => {
+    const question = accessPromptQuestion(
+      ticket({
+        body: { class: "network", target: "gh-api*", reason: "reach the api" },
+      }),
+    );
+    assert.deepEqual(question.options, [
+      { label: ACCESS_PROMPT_ALLOW },
+      { label: ACCESS_PROMPT_DENY },
+    ]);
+  });
+
+  it("the fence covers `*` anywhere in the target and leaves exact targets alone", () => {
+    // `*` is the policy pattern metacharacter (`matchTargetPattern`): a bare
+    // or trailing `*` would be stored as a class/prefix pattern. A
+    // mid-string `*` is fenced too — consent never covers a pattern shape.
+    assert.equal(isWildcardAccessTarget("*"), true);
+    assert.equal(isWildcardAccessTarget("gh-api*"), true);
+    assert.equal(isWildcardAccessTarget("gh*api"), true);
+    assert.equal(isWildcardAccessTarget("write_file"), false);
+    assert.equal(isWildcardAccessTarget("gh-api-2"), false);
+    assert.equal(isWildcardAccessTarget(""), false);
   });
 
   it("every prompt detail carries the constant local location line", () => {
@@ -405,6 +440,41 @@ describe("access prompt pump — surfacing and routing", () => {
     assert.deepEqual(h.resolved, [
       { workerId: "w-1", decision: { kind: "allow" } },
     ]);
+  });
+
+  it("an Always-allow answer for a wildcard target degrades to a one-shot allow — no row", async () => {
+    const h = createHarness();
+    h.pending.push(
+      ticket({ body: { class: "tool", target: "*", reason: "r" } }),
+    );
+    h.pump.sync();
+    const ask = h.seam.asks[0];
+    assert.ok(ask);
+    ask.resolve({
+      answers: [
+        { id: questionIdOf(ask), selected: [ACCESS_PROMPT_ALWAYS_ALLOW] },
+      ],
+    });
+    await tick();
+    // Never forwarded to the row insert; the ask itself is still allowed.
+    assert.equal(h.alwaysAllowed.length, 0);
+    assert.deepEqual(h.resolved, [
+      { workerId: "w-1", decision: { kind: "allow" } },
+    ]);
+  });
+
+  it("a wildcard target still routes a plain Allow without remembering anything", async () => {
+    const h = createHarness();
+    h.pending.push(
+      ticket({ body: { class: "tool", target: "gh-api*", reason: "r" } }),
+    );
+    h.pump.sync();
+    h.seam.asks[0]?.resolve(allowAnswer(questionIdOf(h.seam.asks[0])));
+    await tick();
+    assert.deepEqual(h.resolved, [
+      { workerId: "w-1", decision: { kind: "allow" } },
+    ]);
+    assert.equal(h.alwaysAllowed.length, 0);
   });
 
   it("an answer for a ticket that already left the relay is expired: copy only, nothing resolved", async () => {
@@ -889,6 +959,56 @@ describe("plugin apply — access prompts over the host seam", () => {
     assert.equal(seam.asks.length, 1);
     assert.equal(ctx.sentMessages.length, 2);
     assert.ok(ctx.sentMessages[1]?.text.includes("[Parent: access allowed]"));
+  });
+
+  it("wildcard fence: a `gh-api*` ask offers Allow/Deny only and records no session row", async () => {
+    const seam = createFakeUserQuestions();
+    const ctx = createFullCtx(seam);
+    apply(ctx, { enabled: true });
+    const { workerId } = await activateAndSpawn(ctx);
+
+    await requestAccess(ctx, workerId, {
+      class: "network",
+      target: "gh-api*",
+      reason: "reach the github api",
+    });
+    assert.equal(seam.asks.length, 1);
+    const ask = seam.asks[0];
+    assert.ok(ask);
+    // A metacharacter target is never offered the session memory option.
+    assert.deepEqual(ask.request.questions[0]?.options, [
+      { label: ACCESS_PROMPT_ALLOW },
+      { label: ACCESS_PROMPT_DENY },
+    ]);
+
+    // Even a constructed always-shaped answer degrades to the one-shot
+    // allow: the target is never remembered as a stored pattern.
+    ask.resolve({
+      answers: [
+        { id: questionIdOf(ask), selected: [ACCESS_PROMPT_ALWAYS_ALLOW] },
+      ],
+    });
+    await tick();
+    await tick();
+    assert.equal(ctx.sentMessages.length, 1);
+    assert.ok(ctx.sentMessages[0]?.text.includes("[Parent: access allowed]"));
+
+    // No `gh-api*` row was stored: the prefix neighbour must prompt again,
+    // where a stored pattern would have auto-allowed it silently.
+    await requestAccess(ctx, workerId, {
+      class: "network",
+      target: "gh-api-2",
+      reason: "same class, neighbouring target",
+    });
+    assert.equal(seam.asks.length, 2);
+    const neighbour = seam.asks[1];
+    assert.ok(neighbour);
+    // Deny to cancel the relay's armed default timeout (test hygiene).
+    neighbour.resolve(denyAnswer(questionIdOf(neighbour)));
+    await tick();
+    await tick();
+    assert.equal(ctx.sentMessages.length, 2);
+    assert.ok(ctx.sentMessages[1]?.text.includes("[Parent: access denied]"));
   });
 
   it("session always-allow rows clear on deactivation: a new session prompts again", async () => {

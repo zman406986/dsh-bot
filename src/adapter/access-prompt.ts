@@ -46,6 +46,13 @@
  *   consent trap; session rows are cleared on deactivation/unload via
  *   `Multitask.clearSessionAccessPolicy` so "always" never outlives the
  *   session (ADR-0011).
+ * - Wildcard fence: a worker-supplied target containing `*` (the policy
+ *   pattern metacharacter — `matchTargetPattern`: a bare `*` matches every
+ *   target in the class, a trailing `*` a prefix) is never offered the
+ *   "Always allow" option; the ask degrades to Allow / Deny, and an
+ *   always-shaped answer that still arrives (constructed or queued) resolves
+ *   as a plain one-shot allow without ever being recorded as a row. Consent
+ *   always covers the exact target shown, never a class or prefix pattern.
  * - Location line: workers are local dsh child sessions, so every prompt
  *   detail carries the constant honest line "Runs on your computer.".
  * - Clamped detail: the reason text is hard-cut at `APPROVAL_DETAIL_CLAMP_CHARS`
@@ -209,10 +216,24 @@ export function describeAccessAction(body: AccessRequestBody): string {
 }
 
 /**
+ * Wildcard fence (ticket 30): `*` is the only metacharacter
+ * `matchTargetPattern` treats specially — a bare `*` matches every target in
+ * the class, a trailing `*` a prefix. Targets arrive from workers untrusted,
+ * so a target containing `*` anywhere is never eligible for "Always allow":
+ * consent always covers the exact target shown, never a class or prefix
+ * pattern.
+ */
+export function isWildcardAccessTarget(target: string): boolean {
+  return target.includes("*");
+}
+
+/**
  * Build the structured user question for a pending access ask.
  * Question copy is the design-16 §6 template; the detail carries the
  * (clamped) reason plus the constant location line on every prompt
- * (ticket 30). Options: Allow / Always allow (this session) / Deny.
+ * (ticket 30). Options: Allow / Always allow (this session) / Deny —
+ * minus the always option when the target carries a pattern wildcard
+ * (wildcard fence, ticket 30).
  */
 export function accessPromptQuestion(ticket: {
   workerId: string;
@@ -228,11 +249,13 @@ export function accessPromptQuestion(ticket: {
     id: accessPromptQuestionId(ticket.requestId),
     question: `Worker ${ticket.workerId} needs approval to ${describeAccessAction(ticket.body)}.`,
     detail,
-    options: [
-      { label: ACCESS_PROMPT_ALLOW },
-      { label: ACCESS_PROMPT_ALWAYS_ALLOW },
-      { label: ACCESS_PROMPT_DENY },
-    ],
+    options: isWildcardAccessTarget(ticket.body.target)
+      ? [{ label: ACCESS_PROMPT_ALLOW }, { label: ACCESS_PROMPT_DENY }]
+      : [
+          { label: ACCESS_PROMPT_ALLOW },
+          { label: ACCESS_PROMPT_ALWAYS_ALLOW },
+          { label: ACCESS_PROMPT_DENY },
+        ],
   };
 }
 
@@ -327,7 +350,9 @@ export interface AccessPromptPumpOptions {
    * Ticket 30: insert a session-scope allow row (class + exact target) into
    * the relay's existing policy table so future matching asks auto-answer
    * on the shipped policy no-op path. Session scope ONLY — profile/preset
-   * writes are a consent trap and are deliberately not plumbed here.
+   * writes are a consent trap and are deliberately not plumbed here. The
+   * pump never calls this for a wildcard-bearing target (wildcard fence,
+   * ticket 30), so `targetPattern` is always an exact target.
    */
   readonly alwaysAllow?: (ticket: AccessTicket) => void;
   /**
@@ -435,9 +460,17 @@ export function createAccessPromptPump(
         options.notifyExpired?.(ticket);
         return;
       }
-      if (choice === "always-allow") {
+      if (
+        choice === "always-allow" &&
+        !isWildcardAccessTarget(ticket.body.target)
+      ) {
         // Record the session-scope row first, then route this ask's allow —
         // identical decision to plain Allow, plus the remembered row.
+        // Wildcard fence (ticket 30): the option set above never offers
+        // "Always allow" for a metacharacter target, and a constructed (or
+        // queued) always-shaped answer for one is NOT forwarded to the row
+        // insert — it degrades to this ask's plain one-shot allow, so no
+        // class-wildcard session row can ever be created.
         options.alwaysAllow?.(ticket);
       }
       const allowed =
