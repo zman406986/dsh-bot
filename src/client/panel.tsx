@@ -4,11 +4,19 @@
  *
  * Presentation only: the panel never spawns, steers, or stops anything — all
  * authority stays with the bound parent agent via the core (design-16 §3.4).
- * It renders the store's view model: title, one row per worker carrying the
- * design-17 §4.1 presence picture (status dot, animated ring only while
- * running/steering, blocked-with-reason chip, landed marker, derived
- * activity line, muted ledger linkage), the empty state, the loading state,
- * or the honest "unavailable" state — never a spinner that hangs.
+ * It renders the store's view model: title, the three ticket-28 sections
+ * (Active / Needs you / Finished, design-17 §4.2), and within them one row
+ * per worker carrying the design-17 §4.1 presence picture (status dot,
+ * animated ring only while running/steering, blocked-with-reason chip,
+ * landed marker, derived activity line, muted ledger linkage), plus the
+ * empty state, the loading state, or the honest "unavailable" state — never
+ * a spinner that hangs. Delivered terminal rows collapse into a muted count
+ * line within Finished; the count comes from the view model, so the
+ * component only localizes it.
+ *
+ * The Needs-you section is the honest pull-only stand-in for push attention
+ * (no push seam exists; design-17 §4.8) — see `roster-store.ts` for the
+ * partition rule. This component does no precedence logic of its own.
  *
  * The component is a zero-prop function component created through a factory so
  * the translate seat and the data store are captured at registration time;
@@ -26,11 +34,13 @@
 import { useEffect, useSyncExternalStore } from "react";
 import type { JSX } from "react";
 import {
+  ROSTER_FINISHED_COUNT_KEY,
   ROSTER_STALE_RECHECK_MS,
   describeRosterPanel,
   formatTemplate,
   rosterBlockedKey,
   type RosterRowView,
+  type RosterSectionView,
   type RosterStore,
 } from "./roster-store.js";
 
@@ -42,9 +52,9 @@ import type { TranslateFn } from "./overlay.js";
 const PANEL_CLASS = "multitask-dispatcher-roster-panel";
 
 /**
- * Panel styles (ticket 27). Presentation only — no layout promises beyond
- * this panel's own subtree; colors are self-contained so no theme contract
- * is assumed.
+ * Panel styles (tickets 27 + 28). Presentation only — no layout promises
+ * beyond this panel's own subtree; colors are self-contained so no theme
+ * contract is assumed.
  */
 export const ROSTER_PANEL_CSS = `
 .multitask-dispatcher-roster-panel{font-size:12px;line-height:1.5;min-width:0}
@@ -52,6 +62,8 @@ export const ROSTER_PANEL_CSS = `
 .multitask-dispatcher-roster-panel__unavailable,
 .multitask-dispatcher-roster-panel__empty,
 .multitask-dispatcher-roster-panel__loading{opacity:.7}
+.multitask-dispatcher-roster-panel__sections{display:flex;flex-direction:column;gap:12px}
+.multitask-dispatcher-roster-panel__section-title{font-weight:600;opacity:.75;margin-bottom:4px}
 .multitask-dispatcher-roster-panel__list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
 .multitask-dispatcher-roster-panel__row{display:flex;align-items:flex-start;gap:8px;min-width:0}
 .multitask-dispatcher-roster-panel__row[data-finished="true"] .multitask-dispatcher-roster-panel__row-title,
@@ -67,12 +79,15 @@ export const ROSTER_PANEL_CSS = `
 @media (prefers-reduced-motion: reduce){.multitask-dispatcher-roster-panel__dot[data-visual="working"]::after{animation:none;transform:none;opacity:.35}}
 .multitask-dispatcher-roster-panel__row-body{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
 .multitask-dispatcher-roster-panel__row-title{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.multitask-dispatcher-roster-panel__row-detail{opacity:.55}
 .multitask-dispatcher-roster-panel__row-status{opacity:.75}
 .multitask-dispatcher-roster-panel__row-activity{opacity:.55}
 .multitask-dispatcher-roster-panel__row-todo{opacity:.45;font-size:11px;max-width:16ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .multitask-dispatcher-roster-panel__row-marker{align-self:flex-start;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 6px;border-radius:8px;border:1px solid currentColor}
 .multitask-dispatcher-roster-panel__row-marker--blocked{color:#d29922}
 .multitask-dispatcher-roster-panel__row-marker--landed{color:#2ea043}
+.multitask-dispatcher-roster-panel__finished-count{opacity:.5;font-size:11px}
+.multitask-dispatcher-roster-panel__finished-count > summary{opacity:1;cursor:default}
 `;
 
 /** Localize the blocked waiting phrase from the structured class+target. */
@@ -94,6 +109,110 @@ function activityLine(t: TranslateFn, row: RosterRowView): string {
     count: String(row.toolCallCount),
   });
   return `${row.statusLabel} · ${row.elapsedText} · ${toolCalls}`;
+}
+
+/**
+ * The detail line: start time (client clock) + the kind-typed generic label,
+ * e.g. `09:07 · worker` (design-17 §4.2 "start time, detail line").
+ */
+function detailLine(row: RosterRowView): string {
+  return `${row.startText} · ${row.kindLabel}`;
+}
+
+/**
+ * One roster row (tickets 27 + 28). `collapsed` lives on the view model, so
+ * the component only decides *where* a row renders, never *whether* it
+ * belongs (the partition rule is asserted in the store's offline tests).
+ */
+function rosterRow(t: TranslateFn, row: RosterRowView): JSX.Element {
+  return (
+    <li
+      key={row.workerId}
+      className={`${PANEL_CLASS}__row`}
+      data-status={row.statusLabel}
+      data-visual={row.visual}
+      data-marker={row.marker?.kind ?? ""}
+      data-section={row.section}
+      data-finished={row.finished ? "true" : "false"}
+    >
+      {/* Status dot / running ring: `data-status` keys the verbatim
+          core vocabulary; the ring animates only for working rows. */}
+      <span
+        className={`${PANEL_CLASS}__dot`}
+        data-status={row.statusLabel}
+        data-visual={row.visual}
+        aria-hidden="true"
+      />
+      <span className={`${PANEL_CLASS}__row-body`}>
+        <span className={`${PANEL_CLASS}__row-title`}>{row.title}</span>
+        {row.marker?.kind === "blocked" ? (
+          <span
+            className={`${PANEL_CLASS}__row-marker ${PANEL_CLASS}__row-marker--blocked`}
+          >
+            {blockedPhrase(t, row)}
+          </span>
+        ) : row.marker?.kind === "landed" ? (
+          <span
+            className={`${PANEL_CLASS}__row-marker ${PANEL_CLASS}__row-marker--landed`}
+          >
+            {t("roster.landed")}
+          </span>
+        ) : null}
+        <span className={`${PANEL_CLASS}__row-status`}>
+          {row.statusLabel}
+        </span>
+        <span className={`${PANEL_CLASS}__row-detail`}>{detailLine(row)}</span>
+        <span className={`${PANEL_CLASS}__row-activity`}>
+          {activityLine(t, row)}
+        </span>
+        {row.todoId !== null ? (
+          <span className={`${PANEL_CLASS}__row-todo`}>{row.todoId}</span>
+        ) : null}
+      </span>
+    </li>
+  );
+}
+
+/**
+ * One section. Empty sections render nothing (no dangling heading); the
+ * Finished section's collapsed rows hide behind a native `<details>`, so the
+ * "count line that expands" needs no state and no imperative handler.
+ */
+function rosterSection(
+  t: TranslateFn,
+  section: RosterSectionView,
+): JSX.Element | null {
+  const visible = section.rows.filter((row) => !row.collapsed);
+  const collapsed = section.rows.filter((row) => row.collapsed);
+  if (visible.length === 0 && collapsed.length === 0) return null;
+  const list = (rows: readonly RosterRowView[]) =>
+    rows.length === 0 ? null : (
+      <ul className={`${PANEL_CLASS}__list`}>
+        {rows.map((row) => rosterRow(t, row))}
+      </ul>
+    );
+  return (
+    <div
+      key={section.id}
+      className={`${PANEL_CLASS}__section`}
+      data-section={section.id}
+    >
+      <div className={`${PANEL_CLASS}__section-title`}>
+        {t(section.titleKey)}
+      </div>
+      {list(visible)}
+      {collapsed.length > 0 ? (
+        <details className={`${PANEL_CLASS}__finished-count`}>
+          <summary>
+            {formatTemplate(t(ROSTER_FINISHED_COUNT_KEY), {
+              count: String(collapsed.length),
+            })}
+          </summary>
+          {list(collapsed)}
+        </details>
+      ) : null}
+    </div>
+  );
 }
 
 /** Create the roster panel component bound to a translate seat and store. */
@@ -126,54 +245,9 @@ export function createRosterPanel(
         ) : view.kind === "empty" ? (
           <div className={`${PANEL_CLASS}__empty`}>{t("roster.empty")}</div>
         ) : (
-          <ul className={`${PANEL_CLASS}__list`}>
-            {view.rows.map((row) => (
-              <li
-                key={row.workerId}
-                className={`${PANEL_CLASS}__row`}
-                data-status={row.statusLabel}
-                data-visual={row.visual}
-                data-marker={row.marker?.kind ?? ""}
-                data-finished={row.finished ? "true" : "false"}
-              >
-                {/* Status dot / running ring: `data-status` keys the verbatim
-                    core vocabulary; the ring animates only for working rows. */}
-                <span
-                  className={`${PANEL_CLASS}__dot`}
-                  data-status={row.statusLabel}
-                  data-visual={row.visual}
-                  aria-hidden="true"
-                />
-                <span className={`${PANEL_CLASS}__row-body`}>
-                  <span className={`${PANEL_CLASS}__row-title`}>{row.title}</span>
-                  {row.marker?.kind === "blocked" ? (
-                    <span
-                      className={`${PANEL_CLASS}__row-marker ${PANEL_CLASS}__row-marker--blocked`}
-                    >
-                      {blockedPhrase(t, row)}
-                    </span>
-                  ) : row.marker?.kind === "landed" ? (
-                    <span
-                      className={`${PANEL_CLASS}__row-marker ${PANEL_CLASS}__row-marker--landed`}
-                    >
-                      {t("roster.landed")}
-                    </span>
-                  ) : null}
-                  <span className={`${PANEL_CLASS}__row-status`}>
-                    {row.statusLabel}
-                  </span>
-                  <span className={`${PANEL_CLASS}__row-activity`}>
-                    {activityLine(t, row)}
-                  </span>
-                  {row.todoId !== null ? (
-                    <span className={`${PANEL_CLASS}__row-todo`}>
-                      {row.todoId}
-                    </span>
-                  ) : null}
-                </span>
-              </li>
-            ))}
-          </ul>
+          <div className={`${PANEL_CLASS}__sections`}>
+            {view.sections.map((section) => rosterSection(t, section))}
+          </div>
         )}
       </div>
     );

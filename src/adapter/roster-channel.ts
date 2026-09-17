@@ -22,6 +22,19 @@ import type { SettingsOwnerScopeLike } from "./settings-section.js";
  * document. Recorded in the ticket; if integration shows replacement, the
  * channel switches to a read-modify-write over `get()` without changing the
  * seam shape.
+ *
+ * Ticket 28 coalescing decision: **not added.** Coalescing was offered as an
+ * option if settings-write churn showed up. It does not: every caller
+ * publishes once per roster-affecting semantic transition (`onRosterChanged`
+ * from spawn / status change / access park+resolve / delivery / reconcile /
+ * drain), with no tick, poll, or per-keystroke path, and no settings write
+ * can itself trigger another publish (the client's staleness recheck is
+ * local render state, never a publish). Adding a per-tick timer here would
+ * introduce a scheduling seam and defer updates for latency nobody pays
+ * today, so writes stay synchronous and one-per-event. If a future producer
+ * does burst, coalesce at that producer — not here, and never at the cost of
+ * dropping the last snapshot ({@link SettingsRosterChannel.lastSnapshot}
+ * retain semantics are unconditional either way).
  */
 export interface RosterChannelStats {
   /** Whether a settings owner scope has attached. */

@@ -540,10 +540,11 @@ describe("restart honesty — no-stop guard (design-17 §4.6)", () => {
     if (view.kind === "rows") {
       // Precondition: the fixture really covers blocked + landed + terminal
       // rows, so the scan means something.
-      assert.equal(view.rows.length, 7);
-      assert.ok(view.rows.some((row) => row.marker?.kind === "blocked"));
-      assert.ok(view.rows.some((row) => row.marker?.kind === "landed"));
-      assert.ok(view.rows.some((row) => row.finished));
+      const rows = view.sections.flatMap((section) => section.rows);
+      assert.equal(rows.length, 7);
+      assert.ok(rows.some((row) => row.marker?.kind === "blocked"));
+      assert.ok(rows.some((row) => row.marker?.kind === "landed"));
+      assert.ok(rows.some((row) => row.finished));
     }
 
     const keys: string[] = [];

@@ -26,14 +26,24 @@ import {
   type SlotRegistrationOptions,
 } from "../src/client/overlay.js";
 import {
+  ROSTER_FINISHED_COUNT_KEY,
+  ROSTER_SECTION_IDS,
+  ROSTER_SECTION_KEYS,
   ROSTER_STALE_RECHECK_MS,
   createRosterStore,
   describeRosterPanel,
   formatRosterElapsed,
+  formatRosterStartTime,
   formatTemplate,
+  rosterGenericTitle,
+  rosterKindLabel,
+  rosterSectionFor,
   rosterStatusLabel,
   rosterStatusVisual,
+  rosterViewCopyKey,
   type RosterPanelState,
+  type RosterPanelView,
+  type RosterRowView,
   type RosterStatusVisual,
 } from "../src/client/roster-store.js";
 import { ROSTER_PANEL_CSS } from "../src/client/panel.js";
@@ -77,6 +87,37 @@ function snapshot(
     publishedAtMs,
     workers,
   };
+}
+
+/** All rows across the three sections, in section order (ticket 28). */
+function allRows(view: RosterPanelView): readonly RosterRowView[] {
+  return view.kind === "rows"
+    ? view.sections.flatMap((section) => section.rows)
+    : [];
+}
+
+/** The rows of one section, or an empty list when the view has no sections. */
+function rowsOf(view: RosterPanelView, id: string): readonly RosterRowView[] {
+  return view.kind === "rows"
+    ? (view.sections.find((section) => section.id === id)?.rows ?? [])
+    : [];
+}
+
+/** The finished section's collapsed count, or 0 when it has no sections. */
+function collapsedOf(view: RosterPanelView): number {
+  return view.kind === "rows"
+    ? (view.sections.find((section) => section.id === "finished")
+        ?.collapsedCount ?? 0)
+    : 0;
+}
+
+/**
+ * Look a row up by id across all sections. Section order is the presentation
+ * order, not the snapshot order, so tests that care about a specific row use
+ * this instead of positional indexing.
+ */
+function rowById(view: RosterPanelView, workerId: string): RosterRowView | undefined {
+  return allRows(view).find((candidate) => candidate.workerId === workerId);
 }
 
 /** Fake the client face (see test/client-face-scaffold.test.ts for the idiom),
@@ -208,10 +249,10 @@ describe("roster panel — view model degrades honestly (design-16 §6, design-1
       1_100,
     );
     assert.equal(view.kind, "rows");
-    if (view.kind !== "rows") return;
-    assert.equal(view.rows.length, ROSTER_STATUS_KEYS.length);
+    const rows = allRows(view);
+    assert.equal(rows.length, ROSTER_STATUS_KEYS.length);
     for (const [index, status] of ROSTER_STATUS_KEYS.entries()) {
-      const rowView = view.rows[index];
+      const rowView = rows[index];
       assert.ok(rowView);
       assert.equal(rowView.statusLabel, status);
       assert.equal(rowView.title, `Worker w-${index}`);
@@ -219,7 +260,7 @@ describe("roster panel — view model degrades honestly (design-16 §6, design-1
     }
   });
 
-  it("an empty title falls back to the worker id; the label mapping is identity", () => {
+  it("an empty title falls back to the kind-typed generic label; the label mapping is identity", () => {
     assert.equal(rosterStatusLabel("steering"), "steering");
     const view = describeRosterPanel(
       {
@@ -229,9 +270,8 @@ describe("roster panel — view model degrades honestly (design-16 §6, design-1
       1_000,
     );
     assert.equal(view.kind, "rows");
-    if (view.kind !== "rows") return;
-    assert.equal(view.rows[0]?.title, "w-1");
-    assert.equal(view.rows[0]?.statusLabel, "running");
+    assert.equal(allRows(view)[0]?.title, "worker w-1");
+    assert.equal(allRows(view)[0]?.statusLabel, "running");
   });
 
   it("a snapshot past the stale window renders unavailable, not old data", () => {
@@ -277,8 +317,10 @@ describe("roster panel — presence view model (ticket 27, design-17 §4.1)", ()
       1_000,
     );
     assert.equal(view.kind, "rows");
-    if (view.kind !== "rows") return;
-    const [blocked, landed, finished, quiet] = view.rows;
+    const blocked = rowById(view, "w-blocked");
+    const landed = rowById(view, "w-landed");
+    const finished = rowById(view, "w-finished");
+    const quiet = rowById(view, "w-quiet");
     assert.deepEqual(blocked?.marker, {
       kind: "blocked",
       blocked: { class: "tool", target: "edit_file" },
@@ -304,8 +346,7 @@ describe("roster panel — presence view model (ticket 27, design-17 §4.1)", ()
       1_000,
     );
     assert.equal(view.kind, "rows");
-    if (view.kind !== "rows") return;
-    assert.deepEqual(view.rows[0]?.marker, {
+    assert.deepEqual(rowsOf(view, "needs-you")[0]?.marker, {
       kind: "blocked",
       blocked: { class: "credential", target: "API_TOKEN" },
     });
@@ -329,11 +370,12 @@ describe("roster panel — presence view model (ticket 27, design-17 §4.1)", ()
       63_500,
     );
     assert.equal(view.kind, "rows");
-    if (view.kind !== "rows") return;
-    assert.equal(view.rows[0]?.elapsedText, "1m 2s");
-    assert.equal(view.rows[0]?.toolCallCount, 7);
-    assert.equal(view.rows[1]?.elapsedText, "1m 1s");
-    assert.equal(view.rows[2]?.elapsedText, "1m 3s");
+    // All three are live rows, so they sit in Active in snapshot order.
+    const active = rowsOf(view, "active");
+    assert.equal(active[0]?.elapsedText, "1m 2s");
+    assert.equal(active[0]?.toolCallCount, 7);
+    assert.equal(active[1]?.elapsedText, "1m 1s");
+    assert.equal(active[2]?.elapsedText, "1m 3s");
 
     // Clock skew (startedAtMs in the future of the render clock) clamps.
     const skew = describeRosterPanel(
@@ -344,8 +386,7 @@ describe("roster panel — presence view model (ticket 27, design-17 §4.1)", ()
       1_000,
     );
     assert.equal(skew.kind, "rows");
-    if (skew.kind !== "rows") return;
-    assert.equal(skew.rows[0]?.elapsedText, "0s");
+    assert.equal(rowsOf(skew, "active")[0]?.elapsedText, "0s");
   });
 
   it("elapsed text is compact and locale-neutral", () => {
@@ -414,6 +455,292 @@ describe("roster panel — presence view model (ticket 27, design-17 §4.1)", ()
     assert.match(animations[0] ?? "", /^multitask-dispatcher-roster-ring/);
     assert.match(ROSTER_PANEL_CSS, /prefers-reduced-motion/);
     assert.match(ROSTER_PANEL_CSS, /animation:none/);
+  });
+});
+
+describe("roster panel — sections: Active / Needs you / Finished (ticket 28, design-17 §4.2)", () => {
+  it("the partition is total: every FSM status × blocked × delivered lands in exactly one section", () => {
+    const blockedCases = [null, { class: "tool", target: "shell" }] as const;
+    for (const status of ROSTER_STATUS_KEYS) {
+      for (const delivered of [true, false]) {
+        for (const blocked of blockedCases) {
+          const section = rosterSectionFor(status, blocked, delivered);
+          // The rule in one assertion, checked for all 24 combinations.
+          const expected =
+            blocked !== null
+              ? "needs-you"
+              : status === "spawned" ||
+                  status === "running" ||
+                  status === "steering"
+                ? "active"
+                : delivered
+                  ? "finished"
+                  : "needs-you";
+          assert.equal(
+            section,
+            expected,
+            `${status} blocked=${blocked !== null} delivered=${delivered}`,
+          );
+        }
+      }
+    }
+  });
+
+  it("active covers exactly spawned/running/steering; terminal statuses never are", () => {
+    for (const status of ROSTER_STATUS_KEYS) {
+      const section = rosterSectionFor(status, null, true);
+      assert.equal(
+        section === "active",
+        status === "spawned" || status === "running" || status === "steering",
+        `active mismatch for ${status}`,
+      );
+    }
+  });
+
+  it("precedence: blocked outranks landed — a row that is both renders in Needs-you as blocked", () => {
+    // Terminal, undelivered, AND blocked: the collision case.
+    const section = rosterSectionFor(
+      "completed",
+      { class: "credential", target: "API_TOKEN" },
+      false,
+    );
+    assert.equal(section, "needs-you");
+
+    const view = describeRosterPanel(
+      {
+        kind: "snapshot",
+        snapshot: snapshot([
+          row("w-both", "completed", {
+            delivered: false,
+            blocked: { class: "credential", target: "API_TOKEN" },
+          }),
+        ]),
+      },
+      1_000,
+    );
+    assert.equal(view.kind, "rows");
+    const both = rowById(view, "w-both");
+    assert.equal(both?.section, "needs-you");
+    // Blocked marker wins; the landed marker is suppressed.
+    assert.deepEqual(both?.marker, {
+      kind: "blocked",
+      blocked: { class: "credential", target: "API_TOKEN" },
+    });
+    // And it is not hidden behind the finished count line.
+    assert.equal(both?.collapsed, false);
+    assert.equal(collapsedOf(view), 0);
+  });
+
+  it("landed (terminal, undelivered) is Needs-you and stays visible; delivered terminal is Finished", () => {
+    const view = describeRosterPanel(
+      {
+        kind: "snapshot",
+        snapshot: snapshot([
+          row("w-landed", "completed", { delivered: false }),
+          row("w-delivered", "completed", { delivered: true }),
+          row("w-error-delivered", "error", { delivered: true }),
+          row("w-aborted-landed", "aborted", { delivered: false }),
+        ]),
+      },
+      1_000,
+    );
+    assert.equal(view.kind, "rows");
+    assert.deepEqual(
+      rowsOf(view, "needs-you").map((r) => r.workerId),
+      ["w-landed", "w-aborted-landed"],
+    );
+    assert.equal(rowById(view, "w-landed")?.collapsed, false);
+    // Delivered terminal rows are all in Finished, all collapsed.
+    assert.deepEqual(
+      rowsOf(view, "finished").map((r) => r.workerId),
+      ["w-delivered", "w-error-delivered"],
+    );
+    assert.deepEqual(
+      rowsOf(view, "finished").map((r) => r.collapsed),
+      [true, true],
+    );
+    assert.equal(collapsedOf(view), 2);
+  });
+
+  it("collapsed finished count is exactly the delivered-terminal rows; landed rows never inflate it", () => {
+    const view = describeRosterPanel(
+      {
+        kind: "snapshot",
+        snapshot: snapshot([
+          row("w-1", "running"),
+          row("w-2", "completed", { delivered: true }),
+          row("w-3", "error", { delivered: true }),
+          row("w-4", "aborted", { delivered: false }),
+          row("w-5", "completed", { delivered: false }),
+        ]),
+      },
+      1_000,
+    );
+    assert.equal(collapsedOf(view), 2);
+    // All rows remain queryable — collapse hides, it never drops.
+    assert.equal(allRows(view).length, 5);
+  });
+
+  it("sections are always present in fixed order, empty ones included", () => {
+    const view = describeRosterPanel(
+      {
+        kind: "snapshot",
+        snapshot: snapshot([row("w", "running")]),
+      },
+      1_000,
+    );
+    assert.equal(view.kind, "rows");
+    if (view.kind !== "rows") return;
+    assert.deepEqual(
+      view.sections.map((section) => section.id),
+      [...ROSTER_SECTION_IDS],
+    );
+    assert.deepEqual(
+      view.sections.map((section) => section.titleKey),
+      ["roster.section.active", "roster.section.needs-you", "roster.section.finished"],
+    );
+    // No needs-you or finished rows in this fixture: empty, not absent.
+    assert.deepEqual(rowsOf(view, "needs-you"), []);
+    assert.deepEqual(rowsOf(view, "finished"), []);
+    assert.equal(collapsedOf(view), 0);
+  });
+
+  it("section membership tracks the snapshot: a delivered flip moves the row out of Needs-you", () => {
+    const base = row("w", "completed", { delivered: false });
+    const before = describeRosterPanel(
+      { kind: "snapshot", snapshot: snapshot([base]) },
+      1_000,
+    );
+    assert.equal(rowById(before, "w")?.section, "needs-you");
+
+    const after = describeRosterPanel(
+      { kind: "snapshot", snapshot: snapshot([{ ...base, delivered: true }]) },
+      1_000,
+    );
+    assert.equal(rowById(after, "w")?.section, "finished");
+    assert.equal(rowById(after, "w")?.collapsed, true);
+  });
+
+  it("row detail line: start time on the client clock plus the kind-typed generic label", () => {
+    const view = describeRosterPanel(
+      {
+        kind: "snapshot",
+        snapshot: snapshot([
+          row("w-titled", "running", { title: "Parser", startedAtMs: 1_000 }),
+          row("w-untitled", "running", { title: "", startedAtMs: 1_000 }),
+        ]),
+      },
+      2_000,
+    );
+    assert.equal(view.kind, "rows");
+    const expectedStart = formatRosterStartTime(1_000);
+    assert.match(expectedStart, /^\d{2}:\d{2}$/);
+    assert.equal(rowById(view, "w-titled")?.startText, expectedStart);
+    assert.equal(rowById(view, "w-titled")?.kindLabel, "worker");
+    // Shipped title honored; generic fallback is kind + id, not the raw id.
+    assert.equal(rowById(view, "w-titled")?.title, "Parser");
+    assert.equal(rowById(view, "w-untitled")?.title, "worker w-untitled");
+  });
+
+  it("the kind label vocabulary is trivially extendable; an unknown kind forwards verbatim", () => {
+    assert.equal(rosterKindLabel("worker"), "worker");
+    assert.equal(rosterGenericTitle("worker", "w-3"), "worker w-3");
+    // Future kinds need one map entry, not a second vocabulary: unknown
+    // kinds render their own name rather than blanking the row.
+    assert.equal(rosterKindLabel("background-command" as "worker"), "background-command");
+    assert.equal(
+      rosterGenericTitle("background-command" as "worker", "b-1"),
+      "background-command b-1",
+    );
+  });
+
+  it("snapshot-state vocabulary alignment: state → copy key, snapshot → sections (design-17 §4.2)", () => {
+    assert.equal(rosterViewCopyKey({ kind: "loading" }), "roster.loading");
+    assert.equal(rosterViewCopyKey({ kind: "empty" }), "roster.empty");
+    assert.equal(rosterViewCopyKey({ kind: "unavailable" }), "roster.unavailable");
+    assert.equal(
+      rosterViewCopyKey({ kind: "rows", sections: [] }),
+      null,
+      "a ready snapshot renders sections, not a status line",
+    );
+
+    // The store's states map onto that vocabulary end to end.
+    assert.equal(
+      rosterViewCopyKey(describeRosterPanel({ kind: "waiting" }, 5_000)),
+      "roster.loading",
+    );
+    assert.equal(
+      rosterViewCopyKey(
+        describeRosterPanel(
+          { kind: "snapshot", snapshot: snapshot([], 1_000) },
+          1_000,
+        ),
+      ),
+      "roster.empty",
+    );
+    for (const state of [
+      { kind: "channel-missing" },
+      { kind: "invalid" },
+    ] as const satisfies readonly RosterPanelState[]) {
+      assert.equal(
+        rosterViewCopyKey(describeRosterPanel(state, 5_000)),
+        "roster.unavailable",
+      );
+    }
+    // Stale snapshot → unavailable, the same copy as a missing channel.
+    assert.equal(
+      rosterViewCopyKey(
+        describeRosterPanel(
+          {
+            kind: "snapshot",
+            snapshot: snapshot([row("w", "running")], 1_000),
+          },
+          1_000 + ROSTER_STALE_WINDOW_MS + 1,
+        ),
+      ),
+      "roster.unavailable",
+    );
+    // Every key the mapping produces exists in both faces.
+    for (const key of [
+      "roster.loading",
+      "roster.empty",
+      "roster.unavailable",
+    ]) {
+      assert.equal(typeof localeDictionary.en[key], "string", `en missing ${key}`);
+      assert.equal(typeof localeDictionary.zh[key], "string", `zh missing ${key}`);
+    }
+  });
+
+  it("the ticket-28 locale keys exist in both faces with identical key sets", () => {
+    assert.deepEqual(validateLocaleDictionary(localeDictionary), []);
+    const keys = [
+      "roster.section.active",
+      "roster.section.needs-you",
+      "roster.section.finished",
+      ROSTER_FINISHED_COUNT_KEY,
+    ];
+    for (const key of keys) {
+      assert.equal(typeof localeDictionary.en[key], "string", `en missing ${key}`);
+      assert.equal(typeof localeDictionary.zh[key], "string", `zh missing ${key}`);
+      assert.notEqual(localeDictionary.en[key], "", `en ${key} empty`);
+      assert.notEqual(localeDictionary.zh[key], "", `zh ${key} empty`);
+    }
+    // Section title keys resolve through the same map the view model exposes,
+    // so a heading can never point at a missing dictionary entry.
+    for (const id of ROSTER_SECTION_IDS) {
+      const key = ROSTER_SECTION_KEYS[id];
+      assert.equal(typeof localeDictionary.en[key], "string");
+      assert.equal(typeof localeDictionary.zh[key], "string");
+    }
+    // The count line's {count} placeholder is real, not literal text.
+    assert.match(localeDictionary.en[ROSTER_FINISHED_COUNT_KEY] ?? "", /\{count\}/);
+    assert.match(localeDictionary.zh[ROSTER_FINISHED_COUNT_KEY] ?? "", /\{count\}/);
+    assert.equal(
+      formatTemplate(localeDictionary.en[ROSTER_FINISHED_COUNT_KEY] ?? "", {
+        count: "3",
+      }),
+      "3 finished",
+    );
   });
 });
 
@@ -530,15 +857,16 @@ describe("roster panel — apply() wires the fallback data path and the overlay 
     assert.deepEqual(store.getBox().state, { kind: "snapshot", snapshot: feed });
     const view = describeRosterPanel(store.getBox().state, 2_000);
     assert.ok(view.kind === "rows");
+    const active = rowsOf(view, "active");
     assert.deepEqual(
-      view.rows.map((r) => [r.title, r.statusLabel, r.visual, r.todoId]),
+      active.map((r) => [r.title, r.statusLabel, r.visual, r.todoId]),
       [
         ["Parser", "running", "working", null],
         ["Tester", "steering", "working", "t-9"],
       ],
     );
     assert.deepEqual(
-      view.rows.map((r) => [r.elapsedText, r.toolCallCount]),
+      active.map((r) => [r.elapsedText, r.toolCallCount]),
       [
         ["1s", 4],
         ["1s", 2],
