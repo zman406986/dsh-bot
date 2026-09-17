@@ -38,6 +38,21 @@ Landed in worktree `clone/always-on-dispatcher`, commit `0e2e9fa` ("Enrich acces
 
 Deferred: none blocking. Session-row clearance covers deactivation + unload; profile-scope "always" remains out of scope by design (consent trap).
 
+### 2026-09-17 — agent team (security rework: wildcard always-allow fence)
+
+Read-only verification FAILED check 2a: an always-allow row persisted whatever `target` the worker supplied, and `matchTargetPattern` (`src/core/access-relay.ts`) honors `*` and trailing-`*` as class/prefix patterns. `toAccessRequestBody` only requires a non-empty target, so a worker asking for `*` (or `gh-api*`) and getting an "Always allow" click stored a session row matching an entire class (or prefix family) of targets — privilege escalation.
+
+- **Fix, consent time (not matching semantics)**: `isWildcardAccessTarget` added to `src/adapter/access-prompt.ts` — true when the target contains `*`, the only metacharacter `matchTargetPattern` special-cases. Checked anywhere in the string so consent never covers a pattern shape; exact targets are unaffected.
+- **Option set**: `accessPromptQuestion` degrades to Allow / Deny for a wildcard target — no "Always allow (this session)" is ever offered.
+- **Pump**: an always-shaped answer that still arrives for a wildcard target (constructed or queued path) is not forwarded to the row insert; it degrades to this ask's plain one-shot allow.
+- **Defense in depth at the row sink** (`src/plugin.ts` `alwaysAllow`): refuses to write any session row whose target carries a wildcard, so no class/prefix pattern can be remembered even if a caller bypasses the pump. Profile rows, already-stored rows, and `matchTargetPattern` semantics are untouched.
+- **Tests** (6 new, offline): bare-`*` ask offers Allow/Deny only; `gh-api*` ask drops Always allow; the fence predicate covers `*` anywhere and leaves exact targets alone; pump always-shaped answer for `*` is not forwarded to the row insert and still resolves as a one-shot allow; a wildcard target still routes a plain Allow; plugin end-to-end — a `gh-api*` ask offers Allow/Deny only, and after an always-shaped answer the prefix neighbour `gh-api-2` prompts again instead of auto-allowing (a leaked `gh-api*` row would auto-allow it silently).
+- **Red first**: with the fence absent the new tests failed on their behavioral assertions; with only the option-set degradation applied the pump and plugin tests still failed (plugin: `actual: 1, expected: 2` — the leaked `gh-api*` row auto-allowed `gh-api-2`), so the row-leak path is covered independently of the option set. Full fix → all green.
+- **Gates** (worktree `clone/always-on-dispatcher`): baseline `npm test` 582 pass / 0 fail (157 suites); final `npm test` 588 pass / 0 fail; `npm run typecheck` clean (both configs); `npm run build` ok; `npm run build:client` ok. Clean-room identifier grep over the diff: clean.
+- **Commit**: worktree `7c90a25` — "Reject wildcard targets in always-allow consent (ticket 30 fix)" (4 files, +169/−8).
+
+Not changed, deliberately: `toAccessRequestBody` still accepts wildcard targets (the ask still happens — only the memory option is withdrawn), and stored rows keep their existing matching semantics.
+
 ## Constraints
 
 - Offline tests only (S8).
