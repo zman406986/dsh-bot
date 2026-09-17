@@ -41,3 +41,31 @@ Work happens per the workflow doc: tests/greps run in the worktree checkout `C:\
 **Provenance + §5 revisit rows:** recorded as a dated comment on `Issue-tracker/open/17-behavior-clone-reference-always-on-dispatcher.md` this date — 43 files clean, gate evidence cited, rows 1–8 spot-checked PASS, and row 4's required note recorded: default-activation remains unadopted by choice, not oversight (activation only via explicit `/dispatcher-start`).
 
 **Remaining after this step (NOT done here):** the live browser pass, then the closures — tickets 27–33 and ticket 17 Phase 3, each with dated comments carrying commit hashes. No AC above is checked off by this step; no ticket file moved.
+
+### 2026-09-18 — live browser pass (Playwright headless Chromium per ADR-0015): PARTIAL PASS — dormant/client-face assertions green; activation-dependent assertions **blocked** by host-half `apply` never running
+
+Setup: real launcher route reproduced verbatim (`dsh --profile web --patch %TEMP%\dsh-bot-main.patch.yml --port 8799 --no-open`; overlay identical to `dsh-bot.ps1 -Checkout 1 -DryRun` output; `npm run build` + `build:client` re-run first). Playwright headless Chromium driven from an out-of-repo tools dir. Kill timers armed at every launch (port-keyed `taskkill /F /T` for the dsh server, commandline-keyed for Playwright Chromium; one timer fired on schedule mid-pass and was re-armed). Evidence root: `C:\Users\TZhen\Desktop\dsh-live-pass-2026-09-18\` (outside the repo — `git status` clean; nothing committed but this comment). Stock `web` profile untouched (cordis.patch.yml still `[]`); disposable `multitask` profile created for one fix attempt and deleted after.
+
+**PASS — ticket 34 AC 2 (served page / boot graph / bundle route):**
+- Served page boot graph contains the row: `{"id":"dsh-multitask-dispatcher","url":"/plugins/??dsh-multitask-dispatcher/client.js&rev=…","inject":["@deepseek-ai/dsh-client-ui-renderer","@deepseek-ai/dsh-client-locale"],…}` and the plugin appears in the combo bundle list (`served-page.html`).
+- Combo route serves our module: 64,914 bytes, contains `id: "dsh-multitask-dispatcher"` and `multitask-dispatcher-capsule` (`combo.js`). (A plain `/plugins/<name>/client.js` route 404s — the combo URL from the boot graph is the real route; Finding 3's check should pin that.)
+- Shell did not crash: zero pageerror/console-error events while idle and interacting (`01-initial-load.png`, `13-collapsed-final.png`).
+
+**PASS — ticket 34 AC 3 evidence + dormant side of epic AC 1 (fresh, non-activated chat):**
+- Exactly one `.multitask-dispatcher-capsule` entry; collapsed chip `data-expanded="false"`, `data-dot="dormant"`, chip text empty (no invented worker count / wake badge).
+- Expand → card: `__activation[data-composition="dormant"]`, state line, pitch body, single start affordance `data-intent="start"`; roster sections and deliverables line absent (count 0); footer present with copy-only Settings hint, flag segment honestly omitted (`data-flag="unknown"` — the settings-mirror watch never delivered). Screenshot `shots/02-dormant-panel.png`.
+- Collapse → chip again (`data-expanded="false"`, `shots/13-collapsed-final.png`); full expand/collapse cycle clean on a second boot.
+
+**BLOCKED — activation-dependent set (34 AC 4; epic AC 1 activated composition; tickets 09/10/11 live smoke; ticket 32 live presence):** `/dispatcher-start` typed into the dsh composer was **not intercepted as a command — it reached the LLM as plain prompt text** (session screenshots `03`/`04`; the turn's own analysis says so verbatim).
+
+**live pass blocked:** the plugin's host-half `apply` never runs on either boot route. Diagnostics:
+1. Settings → 插件配置 never shows a "Multitask Dispatcher" section (the first thing `apply` installs) — `shots/06-settings-plugins.png` (web+overlay), `shots/11-multitask-profile-settings.png` (persistent install).
+2. Capsule footer stays `data-flag="unknown"` — the client's watch on our settings namespace never receives a document, i.e. the section/mirror channel never existed server-side.
+3. Fix attempt inside budget: created the dedicated `multitask` profile from the web template, `dsh plugin --profile multitask add file:<repo>` (persistent install, warning noted: "declares no dsh.bundle — installed as a plain dependency"), insert row in its `cordis.patch.yml`, rebooted → identical result.
+4. Not our artifact shape: composed tree contains the insert at root (`web-patched-config-dump.yml:540-544`, `name: file:///…/lib/index.js`, `enabled: true`); the service-providing packages ARE composed (`multitask-config-dump.yml` — user-questions:38, jobs-local:49, storage-domain:78, commands:184, subagent + subagent-spawn-in-process:258-261); built entry exports the standard Cordis shape (`export { Config, apply, inject, name }`).
+5. Plugin inventory lists the package as an enabled global plugin (`shots/09-plugin-search-result.png`) — loaded, but never applied.
+Working hypothesis (for whoever picks this up): the declared inject set (`subagents`,`agents`,`jobs`,`storageDomain`,`tools`,`commands`,`userQuestions`) never resolves at the plugin's scope on dsh 0.1.5-rc.1, so Cordis defers `apply` indefinitely — these are typert-registered services, and ticket 09's deferred live smoke item 1 ("confirm plugin loads without inject-missing errors; profile must mount subagent + spawn-in-process + jobs + storage stack") is exactly the check that fails. Needs dsh-side investigation (or a dsh debug surface for cordis inject state) before the live pass can resume; no code change is indicated on our side by this evidence.
+
+**Token discipline incident (recorded honestly):** the plain-text `/dispatcher-start` triggered ONE unintended LLM turn (381K tok context, ~90% cache-hit, 36s, read-only tools — List/Glob/Grep/read/inspect; it spawned no workers and wrote nothing) before ending on its own. That was the only live LLM call of the pass; the budgeted worker spawn / steer / stop were never reached. The composer's slash-command interception failing silently is what converted a no-token command into an LLM turn — worth a guard note for future live passes (verify the command is registered — e.g. the settings section exists — before typing any slash command).
+
+No AC checkbox is ticked by this comment; no ticket moved; closures stay pending on a resumed live pass.
