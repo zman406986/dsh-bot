@@ -1,6 +1,6 @@
 # 37 — Draft ADRs for the capsule epic: slot choice, materialization contract, browser-test infra (epic 35, process req 2)
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Epic:** 35
 **Blocked by:** 36 (ADR-0013's evidence is the re-verified seam findings).
@@ -109,3 +109,7 @@ ticket 30; ADR-0012 activation-replays-durability → ticket 31), which supersed
 
 **Handoff:** human sign-off of the drafts rides ticket 33's close-out pass, per epic process
 req 2.
+
+### 2026-09-18 — resolved
+
+Resolved by overnight sweep: offline ACs verified (independent verifier PASS); implementation on clone/always-on-dispatcher @ 949bafb. Live browser assertion reserved to ticket 33 / epic 35.

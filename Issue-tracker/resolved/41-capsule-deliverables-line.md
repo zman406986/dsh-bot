@@ -1,6 +1,6 @@
 # 41 — Capsule deliverables line: completed-but-not-delivered count + most recent result excerpt (epic 35 §3)
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Epic:** 35
 **Blocked by:** 38 (the expanded panel exists; the count math rides the same
@@ -151,3 +151,7 @@ identifiers).
 3. **(b)-branch n/a** — (a) shipped; the count-only degrade inside (a) is
    the tested equivalent (excerpt `null` → no expand affordance).
 4. Browser assertion deferred to ticket 33 per this ticket's Verification.
+
+### 2026-09-18 — resolved
+
+Resolved by overnight sweep: offline ACs verified (independent verifier PASS); implementation on clone/always-on-dispatcher @ 883ac0f. Live browser assertion reserved to ticket 33 / epic 35.

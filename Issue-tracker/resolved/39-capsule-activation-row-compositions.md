@@ -1,6 +1,6 @@
 # 39 — Capsule expanded panel: activation row + dormant vs activated compositions (epic 35 §1)
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Epic:** 35
 **Blocked by:** 38 (the expanded panel surface and store exist).
@@ -146,3 +146,7 @@ For tickets 40–42: the intent seat is unbound (no-op); ticket 40 injects the
 real transport at `src/client/index.ts` composition time; the pitch/stop copy
 keys exist in both faces for its degrade UX; deliverables line (41) and footer
 (42) still absent.
+
+### 2026-09-18 — resolved
+
+Resolved by overnight sweep: offline ACs verified (independent verifier PASS); implementation on clone/always-on-dispatcher @ fc0434e. Live browser assertion reserved to ticket 33 / epic 35.

@@ -1,6 +1,6 @@
 # 38 — Capsule skeleton: collapsed chip + expand/collapse in the existing shell.overlay entry (epic 35)
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Epic:** 35
 **Blocked by:** 36 (chip interactivity is bounded by the verified `shell.overlay`
@@ -153,3 +153,7 @@ log/flag a crashing (abdicated) capsule entry — is not among this ticket's
 Requirements or Acceptance criteria, so it was not implemented; it needs a
 small `ClientContext` seam addition and a supervision effect, and should ride
 a follow-up ticket or be folded into 39–42 wiring explicitly.
+
+### 2026-09-18 — resolved
+
+Resolved by overnight sweep: offline ACs verified (independent verifier PASS); implementation on clone/always-on-dispatcher @ 8d907fe. Live browser assertion reserved to ticket 33 / epic 35.

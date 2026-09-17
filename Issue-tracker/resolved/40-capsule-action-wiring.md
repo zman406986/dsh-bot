@@ -1,6 +1,6 @@
 # 40 — Wire capsule intents to the verified seams: start, per-row steer, conversational stop (epic 35 §2)
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Epic:** 35
 **Blocked by:** 36 (the seam verdicts), 39 (the intent callbacks exist).
@@ -174,3 +174,7 @@ Ticket 41/42 notes: the notice line and per-row affordance are in place;
 footer/deliverables still absent; the action-status store is reusable for
 any future send UX. End-to-end send-path truth remains ticket 33's browser
 pass (offline here per its FORBIDDEN-live rule).
+
+### 2026-09-18 — resolved
+
+Resolved by overnight sweep: offline ACs verified (independent verifier PASS); implementation on clone/always-on-dispatcher @ 98991a8. Live browser assertion reserved to ticket 33 / epic 35.

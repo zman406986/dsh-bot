@@ -1,6 +1,6 @@
 # 36 — Capsule seam verification: re-verify host-tree claims + study the three reference plugins (epic 35, process req 0)
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Epic:** 35
 **Blocked by:** none (ticket 34 landed at 80c2932 — the client module materializes).
@@ -122,3 +122,7 @@ two repos were **not** read — nothing depends on them, noted in the ticket and
 note. Clean-room respected throughout; the forbidden tree was not opened.
 Diff scope: `docs/research/*` (new note + 3 dated lines in 2 notes) and this
 tracker record; zero product-code changes; `npm test` untouched and green.
+
+### 2026-09-18 — resolved
+
+Resolved by overnight sweep: offline ACs verified (independent verifier PASS); implementation on clone/always-on-dispatcher @ 2eacc2e. Live browser assertion reserved to ticket 33 / epic 35.

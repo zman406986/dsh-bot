@@ -1,6 +1,6 @@
 # 42 — Capsule footer provenance + tool-view link + offline composition close-out (epic 35 §4–5)
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Epic:** 35
 **Blocked by:** 38, 39, 40, 41 (all capsule sections exist; this finishes the
@@ -144,3 +144,7 @@ epic's AC 1 and its last open gate. No deviations from the ticket; the only
 interpretation note is that the footer renders in every expanded composition
 (dormant included) since provenance is plugin-level, not activation-gated —
 the flag segment itself degrades to omission until a document vouches.
+
+### 2026-09-18 — resolved
+
+Resolved by overnight sweep: offline ACs verified (independent verifier PASS); implementation on clone/always-on-dispatcher @ 1e7c735. Live browser assertion reserved to ticket 33 / epic 35.
