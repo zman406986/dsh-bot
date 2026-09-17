@@ -178,9 +178,16 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
     assert.deepEqual(validateLocaleDictionary(localeDictionary), []);
     const keys = Object.keys(localeDictionary.en).sort();
     // Roster copy (tickets 21 + 27 + 28), the ticket-32 activation presence
-    // hint, and the ticket-24 toolview copy.
+    // hint, the ticket-24 toolview copy, and the ticket-38 capsule chip copy.
     assert.deepEqual(keys, [
       "activation.presence-hint",
+      "capsule.chip.open",
+      "capsule.chip.wake",
+      "capsule.chip.workers",
+      "capsule.collapse",
+      "capsule.dot.active",
+      "capsule.dot.dormant",
+      "capsule.dot.error",
       "roster.activity.toolcalls",
       "roster.blocked.credential",
       "roster.blocked.filesystem",

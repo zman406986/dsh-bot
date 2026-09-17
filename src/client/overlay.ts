@@ -87,6 +87,10 @@ export interface LocaleDictionary {
  * Ticket 24 adds the per-tool call view copy: field labels for the compact
  * detail rows and the degraded-row fallback. Outcome values and check-row
  * status labels stay verbatim payload/core vocabulary, never localized.
+ *
+ * Ticket 38 adds the collapsed capsule chip copy: accessible labels for the
+ * expand/collapse controls and the activation-dot states, plus the badge
+ * text templates (ADR-0013).
  */
 export const localeDictionary: LocaleDictionary = {
   en: {
@@ -125,6 +129,18 @@ export const localeDictionary: LocaleDictionary = {
     // host command result is the surface — but the key set is shared.
     "activation.presence-hint":
       "The Workers panel shows live progress; results arrive in this chat as they finish.",
+    // Ticket 38 (ADR-0013): the collapsed capsule chip. Accessible labels
+    // for the expand/collapse controls and the three activation-dot states,
+    // plus the badge text templates ({count} substituted by
+    // `formatTemplate`). Status vocabulary stays unlocalized store truth;
+    // only the chip's own copy lives here.
+    "capsule.chip.open": "Open the Workers panel",
+    "capsule.chip.workers": "{count} workers",
+    "capsule.chip.wake": "{count} ready",
+    "capsule.collapse": "Collapse",
+    "capsule.dot.dormant": "Dispatcher not started",
+    "capsule.dot.active": "Dispatcher active",
+    "capsule.dot.error": "Worker status unavailable",
   },
   zh: {
     "roster.title": "工作者",
@@ -153,6 +169,13 @@ export const localeDictionary: LocaleDictionary = {
     "toolview.field.attachments": "附件",
     "activation.presence-hint":
       "“工作者”面板会显示实时进度；结果完成后会直接送达本聊天。",
+    "capsule.chip.open": "打开工作者面板",
+    "capsule.chip.workers": "{count} 个工作者",
+    "capsule.chip.wake": "{count} 个就绪",
+    "capsule.collapse": "收起",
+    "capsule.dot.dormant": "调度器未启动",
+    "capsule.dot.active": "调度器运行中",
+    "capsule.dot.error": "工作者状态不可用",
   },
 };
 

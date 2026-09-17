@@ -19,7 +19,9 @@
  * 2. the data path: a watch on our settings namespace, where the host half
  *    mirrors the roster snapshot under the `roster` key (the documented
  *    config-channel fallback — no invented push channel);
- * 3. the roster panel entry into the shipped `shell.overlay` list slot;
+ * 3. the dispatcher capsule entry (ticket 38, ADR-0013) into the shipped
+ *    `shell.overlay` list slot: collapsed chip → expandable panel, one
+ *    entry, unchanged id;
  * 4. the per-tool call views (ticket 24): keyed `tool.call.toolview` entries
  *    for the five dispatcher wire tool names — unclaimed keys, so additive-
  *    safe against the shipped composition (research Finding 5).
@@ -32,7 +34,8 @@ import {
   SHELL_OVERLAY_SLOT,
   rosterOverlayRegistration,
 } from "./overlay.js";
-import { createRosterPanel } from "./panel.js";
+import { createDispatcherCapsule } from "./capsule.js";
+import { createCapsuleStore, type CapsuleStore } from "./capsule-store.js";
 import { createRosterStore, type RosterStore } from "./roster-store.js";
 import { createToolviewComponent } from "./toolview-panel.js";
 import {
@@ -50,16 +53,22 @@ export const inject: readonly string[] = ["slots", "locale"];
  * and the slot entry.
  */
 export function apply(ctx: ClientContext): void {
-  applyClientModule(ctx, createRosterStore());
+  applyClientModule(ctx, createRosterStore(), createCapsuleStore());
 }
 
 /**
- * The module body, factored over an explicit store so offline tests can
- * drive the data path end to end (watch payload → store → view model)
- * without a DOM harness. Not a second entry point: `apply` is the only
- * thing the loader registers.
+ * The module body, factored over explicit stores so offline tests can drive
+ * the data path end to end (watch payload → store → view model) without a
+ * DOM harness. Not a second entry point: `apply` is the only thing the
+ * loader registers. The capsule store (ticket 38) is the entry's own
+ * expansion state; defaulting it keeps older callers working and gives a
+ * fresh fiber a collapsed capsule.
  */
-export function applyClientModule(ctx: ClientContext, store: RosterStore): void {
+export function applyClientModule(
+  ctx: ClientContext,
+  store: RosterStore,
+  capsule: CapsuleStore = createCapsuleStore(),
+): void {
   // Locale namespace (Finding 6 idiom): labeled effect; executes immediately,
   // the returned disposer is collected for unload.
   ctx.effect(
@@ -92,13 +101,15 @@ export function applyClientModule(ctx: ClientContext, store: RosterStore): void 
     };
   }, "multitask-dispatcher: roster settings watch");
 
-  // Roster overlay entry (Finding 5 universal idiom): inject waits for the
-  // shipped `shell.overlay` declaration, then registers on OUR fiber —
-  // the entry never outlives the module.
+  // Capsule overlay entry (ticket 38, ADR-0013; Finding 5 universal idiom):
+  // inject waits for the shipped `shell.overlay` declaration, then registers
+  // on OUR fiber — the entry never outlives the module. Still exactly ONE
+  // entry with the unchanged id `multitask-dispatcher-roster`; only the
+  // component changes (chip + expandable panel instead of the bare panel).
   ctx.slots.inject(SHELL_OVERLAY_SLOT, () => {
     ctx.slots.register(
       rosterOverlayRegistration(),
-      createRosterPanel(ctx.locale.bind(LOCALE_NAMESPACE), store),
+      createDispatcherCapsule(ctx.locale.bind(LOCALE_NAMESPACE), store, capsule),
     );
   });
 

@@ -51,6 +51,13 @@ import {
   rosterViewCopyKey,
 } from "../src/client/roster-store.js";
 import {
+  CAPSULE_CHIP_OPEN_KEY,
+  CAPSULE_CHIP_WAKE_KEY,
+  CAPSULE_CHIP_WORKERS_KEY,
+  CAPSULE_COLLAPSE_KEY,
+  CAPSULE_DOT_KEYS,
+} from "../src/client/capsule-store.js";
+import {
   TOOLVIEW_DEGRADED_KEY,
   TOOLVIEW_FIELD_KEYS,
 } from "../src/client/toolviews.js";
@@ -545,6 +552,12 @@ describe("composition polish — locale validation + literal sweep (§8)", () =>
       "activation.presence-hint",
       ROSTER_FINISHED_COUNT_KEY,
       TOOLVIEW_DEGRADED_KEY,
+      // Ticket 38: the capsule chip's accessible labels and badge templates.
+      CAPSULE_CHIP_OPEN_KEY,
+      CAPSULE_CHIP_WORKERS_KEY,
+      CAPSULE_CHIP_WAKE_KEY,
+      CAPSULE_COLLAPSE_KEY,
+      ...Object.values(CAPSULE_DOT_KEYS),
       ...Object.values(ROSTER_SECTION_KEYS),
       ...Object.values(TOOLVIEW_FIELD_KEYS),
       // Blocked phrases are composed per access class; all must exist.
@@ -567,18 +580,22 @@ describe("composition polish — locale validation + literal sweep (§8)", () =>
   });
 
   it("the client render path carries no hard-coded user-facing sentence", () => {
-    // Sweep the two components that render copy through the `t` seat: any
-    // quoted literal containing a space (a plausible English sentence) that
-    // is not a dotted locale key is a dictionary bypass. Comments and the
-    // self-contained CSS string are stripped first (both legitimately carry
-    // prose/spaces and neither is user-facing text).
-    for (const file of ["../src/client/panel.tsx", "../src/client/toolview-panel.tsx"]) {
+    // Sweep the copy-rendering components (panel, toolviews, and the
+    // ticket-38 capsule): any quoted literal containing a space (a plausible
+    // English sentence) that is not a dotted locale key is a dictionary
+    // bypass. Comments and the self-contained CSS strings are stripped first
+    // (both legitimately carry prose/spaces and neither is user-facing text).
+    for (const file of [
+      "../src/client/panel.tsx",
+      "../src/client/toolview-panel.tsx",
+      "../src/client/capsule.tsx",
+    ]) {
       const raw = readFileSync(new URL(file, import.meta.url), "utf8");
       const withoutComments = raw
         .replace(/\/\*[\s\S]*?\*\//g, "")
         .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
       const withoutCss = withoutComments.replace(
-        /export const ROSTER_PANEL_CSS = `[\s\S]*?`;/,
+        /export const [A-Z_]+_CSS = `[\s\S]*?`;/,
         "",
       );
       const literals = [
