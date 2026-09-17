@@ -12,6 +12,7 @@ Source: https://deepseekplugin.com/plugins/omdsh-dev-dsh-better-sidebar (MIT, re
 - Exposes its own extension service (`ctx.betterSidebar.registerTab(...)`, `inject: ['betterSidebar']`) so OTHER plugins extend it — slots + a service, the Cordis dual-face idiom.
 - Bottom-panel toggle button lives in the session-header **utilities slot** (`conversation.session.header.utilities`), not in the panel itself.
 - Build shape: dual bundle (`lib/index.js` host + `lib/client.js` client), `dsh.client.inject` referenced as a real requirement, chunked lazy loading, `pnpm test:mount` — **a real headless-browser mount smoke test**. Responsive: <768px merges panels into the sidebar drawer.
+  - **2026-09-18, confirmed at repo level** (ticket 36, `dsh-capsule-seams.md` mount-test section): shallow-cloned the public repo (pattern-only) — the mount lane is a shell script that boots a real dsh web instance with the plugin installed via the official channel and exports the URL via env; Playwright runs headless Chromium serially (1 worker, 0 retries) as a crash probe; e2e specs are filename-separated from the offline unit lane.
 
 ## Finding 2 — Visualize: the tool-call card surface
 

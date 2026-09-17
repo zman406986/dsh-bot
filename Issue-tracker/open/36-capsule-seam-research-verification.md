@@ -52,19 +52,73 @@ retry through the local proxy (`http://127.0.0.1:7897`).
 
 ## Acceptance criteria
 
-- [ ] New note `docs/research/dsh-capsule-seams.md` answers all five seams,
+- [x] New note `docs/research/dsh-capsule-seams.md` answers all five seams,
       each verdict backed by `file:line` citations (installed dsh tree and/or
       the plugin repos), with an explicit **verified / degraded** call per
       capsule action (start, steer, settings link, profile line).
-- [ ] Where a scribe note is wrong or stale, it is corrected in place with a
+- [x] Where a scribe note is wrong or stale, it is corrected in place with a
       dated correction line; where confirmed, a one-line confirmation is added.
-- [ ] Mount-test pattern from the reference plugins recorded as an abstract
+- [x] Mount-test pattern from the reference plugins recorded as an abstract
       pattern (no code, names, or assets copied); clean-room statement included.
-- [ ] Zero product-code changes: `git diff` touches only `docs/research/*`.
-- [ ] `npm test` still 515-pass green (untouched).
+- [x] Zero product-code changes: `git diff` touches only `docs/research/*`
+      (plus this tracker record).
+- [x] `npm test` still 515-pass green (untouched).
 
 ## Verification
 
 Reviewer (a different agent than the researcher) spot-checks two citations
 against the installed dsh tree, greps the new note for any verbatim plugin-repo
 code, and confirms the diff scope above.
+
+## Comments
+
+### 2026-09-18 — researched and written; verdicts: 2 verified, 1 verified-with-gap, 2 degraded
+
+All five seams verified against the installed 0.1.5-rc.1 bundle; note:
+`docs/research/dsh-capsule-seams.md`.
+
+1. **shell.overlay anatomy — verified** (ticket 38 unblocked). Layer is
+   `pointer-events:none` + `>*{pointer-events:auto}` (ui-layout lib/client.js:71);
+   the outlet's `display:contents` anchor is the direct child, so inherited
+   `auto` gives every entry pointer events automatically — pass-through gaps
+   need explicit `pointer-events:none` regions. Owner share is `{}`: no anchor
+   or geometry API, the chip/card position themselves. Per-entry error boundary
+   abdicates list entries on crash (`abdicate: kind !== "chain"`); supervision
+   via `ctx.slots.onEntryError`.
+2. **Activation path — verified** (tickets 39/40 unblocked; ADR-0009 holds).
+   The composer's own Enter path resolves to one wire call:
+   `ctx.remote.commands.execute(sessionId, line, attachments)`
+   (ui-commands lib/client.js:795–809), served host-side by
+   `CommandRuntime.execute` with `command/run`/`command/done` logged
+   `source: {kind: "user"}` (dsh-commands lib/index.js:318–329). Capsule start
+   = `ctx.sessions.list.current` → `ctx.remote.commands.execute(id,
+   "/dispatcher-start", [])`. Caveat recorded: `ctx.conversation.send` is the
+   plain prompt sink, NOT the command path — do not use it.
+3. **Steer prefill — verified, focus not exposed** (ticket 40). Prefill:
+   `ctx.conversation.input.for(actx).setDraft(text)` ("programmatic writes…
+   caret lands at the end", conversation contract/input.d.ts:172–175) via
+   `ctx.sessions.scope(id)`. Focus lives on the package-internal
+   `ComposerKeyboard` editor face ("never across a plugin boundary") — the
+   affordance is prefill + hint; copy-only fallback when no session scope
+   resolves. Transport stays `ctx.subagents.sendMessage` host-side.
+4. **Settings deep-link — degraded** (ticket 42). Settings opens from
+   `SettingsRoot`'s component-local state (ui-settings-general
+   lib/client.js:178–196); `ctx.layout.selectPanel` covers `main` keys only
+   (only shipped key: "conversation"). The only `openSection(id)` deep-link is
+   the `settings.onboarding` owner prop — hijacking onboarding to get it is
+   refused (honesty rule). Footer Settings affordance degrades to a copy hint.
+5. **Profile identity — degraded, no source exists** (ticket 42). The ready
+   frame carries only `host: {home}` (dsh-api-gateway lib/index.js:497);
+   profiles are directories *under* home (dsh-app-boot lib/index.js:311–325),
+   so the name never crosses the wire. Footer renders flag state from
+   `ctx.settingsScope` only; profile segment dropped as a recorded v1 gap.
+
+Process notes: scribe notes carry four dated confirmation/answer lines
+(patterns: shell.overlay mechanism, command.execute, `main` navigation answer;
+examples: test:mount at repo level). Mount-test pattern recorded abstractly
+from a shallow clone of the better-sidebar repo only (script-booted server +
+env-passed URL, serial headless crash probe, filename separation); the other
+two repos were **not** read — nothing depends on them, noted in the ticket and
+note. Clean-room respected throughout; the forbidden tree was not opened.
+Diff scope: `docs/research/*` (new note + 3 dated lines in 2 notes) and this
+tracker record; zero product-code changes; `npm test` untouched and green.
