@@ -200,6 +200,12 @@ export interface Multitask {
   resolveAccess(workerId: string, decision: AccessDecision): boolean;
   /** Pending access tickets, optionally filtered by parent session. */
   listPendingAccess(parentSessionId?: string): readonly AccessTicket[];
+  /**
+   * Drop every session-scope access policy row (ticket 30). Called on
+   * deactivation/unload so an "always allow (this session)" choice never
+   * leaks into a later session. Profile rows are untouched.
+   */
+  clearSessionAccessPolicy(): void;
   /** Stored policy table (session/profile). No hit → ask. */
   readonly accessPolicy: AccessPolicyTable;
 }
@@ -727,6 +733,11 @@ export function createMultitask(
     },
     listPendingAccess(parentSessionId?: string): readonly AccessTicket[] {
       return accessRelay.listPending(parentSessionId);
+    },
+    clearSessionAccessPolicy(): void {
+      // Ticket 30: "always allow (this session)" rows must never outlive the
+      // activated session — the plugin clears them on deactivation/unload.
+      accessPolicy.clearSession();
     },
     accessPolicy,
   };

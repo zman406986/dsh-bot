@@ -9,6 +9,7 @@ import {
   type WakeNotice,
 } from "./core/policy/assembler.js";
 import {
+  accessExpiredNotice,
   bindDispatcherLifecycle,
   createAccessPromptPump,
   createCordisDshHost,
@@ -19,6 +20,7 @@ import {
   registerDispatcherSteerCommand,
   registerDispatcherTools,
   resolveExecSessionId,
+  secretStoredAccessNotice,
   type AdapterContext,
   type CordisDshHost,
   type SettingsInjectContext,
@@ -285,6 +287,41 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       return multitask.listPendingAccess(sessionId);
     },
     resolve: (workerId, decision) => multitask.resolveAccess(workerId, decision),
+    // Ticket 30: "Always allow (this session)" inserts a session-scope allow
+    // row (class + exact target) into the relay's existing policy table —
+    // future matching asks auto-answer on the shipped policy no-op path.
+    // Profile/preset writes are deliberately NOT plumbed (consent boundary).
+    alwaysAllow: (ticket) => {
+      multitask.accessPolicy.set({
+        class: ticket.body.class,
+        targetPattern: ticket.body.target,
+        decision: "allow",
+        scope: "session",
+      });
+    },
+    // Ticket 30: an answer for a ticket the relay already resolved (ADR-0008
+    // timeout deny) surfaces honest expired copy on the next wake instead of
+    // silence; the pump resolves nothing for it.
+    notifyExpired: (ticket) => {
+      multitask.wakeBus.enqueueAccessNotice({
+        parentSessionId: ticket.parentSessionId,
+        notice: accessExpiredNotice(
+          ticket,
+          multitask.getWorker(ticket.workerId)?.title ?? ticket.workerId,
+        ),
+      });
+    },
+    // Ticket 30: an allowed credential ask reports the names-never-values
+    // reassurance as its post-decision notice.
+    notifySecretStored: (ticket) => {
+      multitask.wakeBus.enqueueAccessNotice({
+        parentSessionId: ticket.parentSessionId,
+        notice: secretStoredAccessNotice(
+          ticket,
+          multitask.getWorker(ticket.workerId)?.title ?? ticket.workerId,
+        ),
+      });
+    },
     requeueConversational: (ticket) => {
       // Fallback presentation after a seam failure: the same wake-bus
       // enqueue the core relay uses for conversational asks.
@@ -361,6 +398,9 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     },
     onDeactivated: () => {
       deactivateToolSurface();
+      // Ticket 30: session-scope "always allow" rows belong to the activated
+      // session — clear them here so no "always" leaks into a later session.
+      multitask.clearSessionAccessPolicy();
       // Ticket 23: prompts belong to the activated session — abandon the
       // outstanding ones. Their tickets keep the armed relay timeouts
       // (ADR-0008 deny-by-default); nothing waits indefinitely.
@@ -402,6 +442,8 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   ctx.effect(() => {
     lifecycle.unbind();
     deactivateToolSurface();
+    // Ticket 30: clear session-scope policy rows on unload/HMR too.
+    multitask.clearSessionAccessPolicy();
     // Ticket 23: abandon outstanding prompts on unload/HMR; the relay
     // timeouts still deny their asks (ADR-0008).
     accessPrompts.reset();

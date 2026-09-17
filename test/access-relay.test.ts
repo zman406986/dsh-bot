@@ -14,6 +14,10 @@ import type {
   AccessRequestBody,
   AccessRequestEvent,
 } from "../src/core/access-types.js";
+import {
+  APPROVAL_EXPIRED_COPY,
+  APPROVAL_SECRET_STORED_COPY,
+} from "../src/adapter/index.js";
 import type { SpawnResult } from "../src/core/types.js";
 import { createWakeBus, type WakeEvent } from "../src/core/wake-bus.js";
 import { assembleAccessSection } from "../src/core/policy/assembler.js";
@@ -550,6 +554,64 @@ describe("access policy table", () => {
     const table = createAccessPolicyTable();
     assert.equal(table.lookup(body(), { parentSessionId: "s" }), "ask");
   });
+
+  it("clearSession drops session rows and keeps profile rows (ticket 30)", () => {
+    const table = createAccessPolicyTable([
+      {
+        class: "tool",
+        targetPattern: "legacy_tool",
+        decision: "allow",
+        scope: "profile",
+      },
+    ]);
+    table.set({
+      class: "tool",
+      targetPattern: "write_file",
+      decision: "allow",
+      scope: "session",
+    });
+    const ctx = { parentSessionId: "s-1" };
+    const before = table.lookup(body({ target: "write_file" }), ctx);
+    assert.ok(typeof before !== "string" && before.kind === "allow");
+
+    table.clearSession();
+
+    // Session allow is gone; no other row covers write_file → ask.
+    assert.equal(table.lookup(body({ target: "write_file" }), ctx), "ask");
+    // Profile rows survive the session clearance.
+    const profile = table.lookup(body({ target: "legacy_tool" }), ctx);
+    assert.ok(typeof profile !== "string" && profile.kind === "allow");
+  });
+
+  it("Multitask.clearSessionAccessPolicy: a remembered ask prompts again after clearance", async () => {
+    const host = new FakeDshHost();
+    const scheduler = createManualScheduler();
+    const multitask = createMultitask(host, {
+      access: { timeoutMs: 50, schedule: scheduler.schedule },
+    });
+    const workerId = await spawnRunning(
+      multitask,
+      "session-1",
+      "todo-1",
+      "Always allow",
+    );
+    multitask.accessPolicy.set({
+      class: "tool",
+      targetPattern: "write_file",
+      decision: "allow",
+      scope: "session",
+    });
+
+    host.fireAccessRequest(accessEvent(workerId, { requestId: "req-1" }));
+    // Session row auto-answers: never parks, never wakes.
+    assert.equal(multitask.listPendingAccess("session-1").length, 0);
+
+    multitask.clearSessionAccessPolicy();
+    host.fireAccessRequest(accessEvent(workerId, { requestId: "req-2" }));
+    // Clearance restores the ask path.
+    assert.equal(multitask.listPendingAccess("session-1").length, 1);
+    scheduler.runAll(); // hygiene: cancel the armed default deny
+  });
 });
 
 describe("access assembler section", () => {
@@ -583,6 +645,53 @@ describe("access assembler section", () => {
     assert.ok(text.includes("timeout"));
     assert.ok(text.includes("Pending asks"));
     assert.ok(text.includes("Resolved"));
+  });
+
+  it("an allow notice renders its note (ticket 30 stored-secret reassurance)", () => {
+    const text = assembleAccessSection(
+      [],
+      [
+        {
+          kind: "access-resolved",
+          workerId: "w1",
+          title: "Cred worker",
+          decision: {
+            kind: "allow",
+            note: APPROVAL_SECRET_STORED_COPY,
+          },
+          body: {
+            class: "credential",
+            target: "API_TOKEN",
+            reason: "need it",
+            credentialName: "API_TOKEN",
+          },
+        },
+      ],
+    );
+    assert.ok(text.includes("allowed"));
+    assert.ok(text.includes("stored securely"));
+    // Names only, never a value.
+    assert.ok(!text.includes("sk-"));
+  });
+
+  it("an expired deny notice renders the expired copy as its detail (ticket 30)", () => {
+    const text = assembleAccessSection(
+      [],
+      [
+        {
+          kind: "access-resolved",
+          workerId: "w1",
+          title: "W",
+          decision: {
+            kind: "deny",
+            reason: "timeout",
+            detail: APPROVAL_EXPIRED_COPY,
+          },
+          body: body(),
+        },
+      ],
+    );
+    assert.ok(text.includes("already expired"));
   });
 });
 
