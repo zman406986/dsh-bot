@@ -41,6 +41,10 @@ import {
 } from "../src/core/report-clamp.js";
 import { describeRosterPanel } from "../src/client/roster-store.js";
 import {
+  describeCapsuleActivationRow,
+  describeCapsuleChip,
+} from "../src/client/capsule-store.js";
+import {
   describeToolview,
   TOOLVIEW_TOOL_NAMES,
 } from "../src/client/toolviews.js";
@@ -474,6 +478,23 @@ describe("restart honesty — no-stop guard (design-17 §4.6)", () => {
     }
   }
 
+  /** Recursively visit every primitive string value with its own key. */
+  function collectEntries(
+    value: unknown,
+    visit: (key: string, value: string) => void,
+  ): void {
+    if (Array.isArray(value)) {
+      for (const entry of value) collectEntries(entry, visit);
+      return;
+    }
+    if (typeof value === "object" && value !== null) {
+      for (const [key, child] of Object.entries(value)) {
+        if (typeof child === "string") visit(key, child);
+        else collectEntries(child, visit);
+      }
+    }
+  }
+
   const AFFORDANCE_PATTERN = /stop|cancel|button|action|affordance/i;
 
   it("the roster panel view model exposes no stop/cancel affordance field", () => {
@@ -593,6 +614,139 @@ describe("restart honesty — no-stop guard (design-17 §4.6)", () => {
         offenders,
         [],
         `toolview for ${toolName} must carry no stop/cancel affordance field; found: ${offenders.join(", ")}`,
+      );
+    }
+  });
+
+  it("the capsule view models carry no direct stop/deactivate authority — the stop affordance is an intent (ticket 39)", () => {
+    const workers = [
+      {
+        kind: "worker" as const,
+        workerId: "w-running",
+        title: "Task w-running",
+        status: "running" as const,
+        todoId: null,
+        startedAtMs: 1_000,
+        toolCallCount: 3,
+        delivered: false,
+        blocked: null,
+      },
+      {
+        kind: "worker" as const,
+        workerId: "w-landed",
+        title: "Task w-landed",
+        status: "completed" as const,
+        todoId: null,
+        startedAtMs: 1_000,
+        toolCallCount: 2,
+        delivered: false,
+        blocked: null,
+      },
+    ];
+    const states = [
+      { kind: "waiting" },
+      { kind: "channel-missing" },
+      { kind: "invalid" },
+      {
+        kind: "snapshot",
+        snapshot: {
+          schemaVersion: 2,
+          dispatcherSessionId: "s-1",
+          publishedAtMs: 10_000,
+          workers,
+        },
+      },
+      {
+        kind: "snapshot",
+        snapshot: {
+          schemaVersion: 2,
+          dispatcherSessionId: "s-1",
+          publishedAtMs: 1_000,
+          workers,
+        },
+      },
+    ] as const;
+
+    // The activation row is a CLOSED union of exactly three honest shapes;
+    // exact deep-equality against them leaves no room for any control field
+    // (handler, handle, command text) to ride along, so the stop affordance
+    // can only ever be the intent payload plus a label.
+    const canon = [
+      {
+        composition: "dormant",
+        stateKey: "capsule.dot.dormant",
+        affordance: { intent: "start", labelKey: "capsule.activation.start" },
+      },
+      {
+        composition: "activated",
+        stateKey: "capsule.dot.active",
+        affordance: { intent: "stop", labelKey: "capsule.activation.stop" },
+      },
+      {
+        composition: "unavailable",
+        stateKey: "capsule.dot.error",
+        affordance: null,
+      },
+    ];
+    for (const state of states) {
+      const rowView = describeCapsuleActivationRow(state, 10_000);
+      const expected = canon.find(
+        (shape) => shape.composition === rowView.composition,
+      );
+      assert.ok(expected, `unknown composition ${rowView.composition}`);
+      assert.deepEqual(
+        rowView,
+        expected,
+        "activation row must match its canonical shape exactly",
+      );
+
+      // Key scan over BOTH capsule view models (chip + activation row):
+      // no key may offer direct kill/deactivate/stop authority — the only
+      // stop-shaped thing allowed anywhere is the intent payload VALUE.
+      const models = [
+        describeCapsuleChip(state, 10_000),
+        rowView,
+      ];
+      for (const model of models) {
+        const keys: string[] = [];
+        const stopValues: string[] = [];
+        collectKeys(model, (key) => {
+          keys.push(key);
+        });
+        collectEntries(model, (key, value) => {
+          if (value === "stop") stopValues.push(key);
+        });
+        const offenders = keys.filter((key) =>
+          /stop|cancel|kill|abort|deactivate|interrupt|terminate|destroy/i.test(
+            key,
+          ),
+        );
+        assert.deepEqual(
+          offenders,
+          [],
+          `capsule view model must carry no direct stop/deactivate control field; found: ${offenders.join(", ")}`,
+        );
+        // The literal "stop" may only ever appear as the value under the
+        // `intent` payload key — never as a control field name or elsewhere.
+        for (const key of stopValues) {
+          assert.equal(
+            key,
+            "intent",
+            `"stop" must be an intent payload, never a ${key} control`,
+          );
+        }
+      }
+    }
+
+    // The intent vocabulary is exactly the two payloads ticket 40 binds;
+    // `"stop"` exists only as an intent value handed to the callback seat.
+    const intents = states.map((state) =>
+      describeCapsuleActivationRow(state, 10_000).affordance?.intent ?? null,
+    );
+    for (const intent of intents) {
+      assert.ok(
+        intent === null || intent === "start" || intent === "stop",
+        `unexpected intent payload ${String(intent)}`,
       );
     }
   });

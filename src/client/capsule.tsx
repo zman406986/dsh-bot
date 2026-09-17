@@ -8,9 +8,23 @@
  * spawns, steers, or stops anything. The chip is the glanceable presence
  * projection — activation dot (`dormant`/`active`/`error` from the chip view
  * model in `capsule-store.ts`), worker count, wake badge — and expanding
- * renders the existing panel component unchanged (ticket-28 sections); the
- * activation row, action wiring, deliverables line, and footer are later
- * sub-tickets (39–42) and deliberately absent.
+ * renders the ticket-39 activation row over the ticket-28 sections:
+ *
+ * - **dormant** (`waiting`) — the activation pitch IS the panel: state line,
+ *   pitch body, one start affordance; roster sections hidden;
+ * - **activated** (fresh snapshot) — the active state line plus a stop
+ *   INTENT affordance, and the existing panel sections below;
+ * - **unavailable** (stale/invalid/channel-missing) — the honest degraded
+ *   line, no start/stop affordance, no sections.
+ *
+ * The affordances call the injected `onActivationIntent` callback (factory
+ * injection, same pattern as the translate seat) through
+ * `dispatchActivationIntent` — the callback is an INTENT seat, not a
+ * control: no direct stop/deactivate authority exists on this surface
+ * (ADR-0005/0009; ticket 31's guard). The default seat is a no-op, so the
+ * capsule stays render-only; ticket 40 binds the callback to the verified
+ * user-verbatim command path. The deliverables line and footer are later
+ * sub-tickets (41–42) and deliberately absent.
  *
  * Expansion state is the entry's OWN state (ADR-0013 — the host offers no
  * expansion/anchoring API): the `CapsuleStore` created with the module fiber.
@@ -27,19 +41,25 @@
  * click-through.
  *
  * Rendering is covered by build + typecheck only (S8: no DOM harness); the
- * chip view model and the expansion store are asserted purely in
- * `test/client-capsule-chip.test.ts`.
+ * chip/activation view models and the intent dispatch are asserted purely in
+ * `test/client-capsule-chip.test.ts` and
+ * `test/client-capsule-activation.test.ts`.
  */
 import { useEffect, useSyncExternalStore } from "react";
 import type { JSX } from "react";
 import {
+  CAPSULE_ACTIVATION_PITCH_KEY,
   CAPSULE_CHIP_OPEN_KEY,
   CAPSULE_CHIP_WAKE_KEY,
   CAPSULE_CHIP_WORKERS_KEY,
   CAPSULE_COLLAPSE_KEY,
   CAPSULE_DOT_KEYS,
+  describeCapsuleActivationRow,
   describeCapsuleChip,
+  dispatchActivationIntent,
+  noopOnActivationIntent,
   type CapsuleStore,
+  type OnActivationIntent,
 } from "./capsule-store.js";
 import { createRosterPanel } from "./panel.js";
 import {
@@ -70,23 +90,37 @@ export const CAPSULE_CSS = `
 .${CAPSULE_CLASS}__card-bar{display:flex;justify-content:flex-end;margin-bottom:6px}
 .${CAPSULE_CLASS}__collapse{border:none;background:transparent;color:inherit;opacity:.6;cursor:pointer;font:inherit;font-size:11px;padding:0}
 .${CAPSULE_CLASS}__collapse:hover{opacity:1}
+.${CAPSULE_CLASS}__activation{display:flex;flex-direction:column;gap:8px}
+.${CAPSULE_CLASS}__activation[data-composition="activated"]{margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #30363d}
+.${CAPSULE_CLASS}__activation-state{font-weight:600}
+.${CAPSULE_CLASS}__activation-pitch{opacity:.7}
+.${CAPSULE_CLASS}__activation-button{align-self:flex-start;padding:3px 10px;border-radius:6px;border:1px solid #30363d;background:#21262d;color:inherit;cursor:pointer;font:inherit}
+.${CAPSULE_CLASS}__activation-button:hover{border-color:#8b949e}
 `;
 
 /**
  * Create the capsule component bound to a translate seat, the roster data
- * store, and the capsule's own expansion store. The existing panel component
- * is created once here and rendered unchanged when expanded.
+ * store, the capsule's own expansion store, and the activation-intent seat
+ * (ticket 39, factory injection like the translate seat). The existing panel
+ * component is created once here and rendered unchanged as the activated
+ * composition's sections. The default intent seat is a no-op: without a
+ * binding the capsule renders and dispatches into the void — render-only
+ * until ticket 40 wires the verified command path.
  */
 export function createDispatcherCapsule(
   t: TranslateFn,
   store: RosterStore,
   capsule: CapsuleStore,
+  onActivationIntent: OnActivationIntent = noopOnActivationIntent,
 ): () => JSX.Element {
   const Panel = createRosterPanel(t, store);
   return () => {
     const box = useSyncExternalStore(store.subscribe, store.getBox);
     const expansion = useSyncExternalStore(capsule.subscribe, capsule.getBox);
-    const chip = describeCapsuleChip(box.state, Date.now());
+    const now = Date.now();
+    const chip = describeCapsuleChip(box.state, now);
+    const activation = describeCapsuleActivationRow(box.state, now);
+    const affordance = activation.affordance;
 
     // Same honesty rule as the panel: the mirror channel has no heartbeat,
     // so re-evaluate staleness on a slow tick (a fresh snapshot must age
@@ -111,9 +145,40 @@ export function createDispatcherCapsule(
                 {t(CAPSULE_COLLAPSE_KEY)}
               </button>
             </div>
-            {/* The existing panel, unchanged this ticket (ticket-28
-                sections; activation row/actions/footer are tickets 39–42). */}
-            <Panel />
+            {/* Ticket-39 activation row: exactly one composition per store
+                kind. The affordance is an INTENT seat — dispatch hands the
+                payload to the injected callback and nothing else; no direct
+                stop/deactivate authority exists here (ticket 31's guard). */}
+            <div
+              className={`${CAPSULE_CLASS}__activation`}
+              data-composition={activation.composition}
+            >
+              <div className={`${CAPSULE_CLASS}__activation-state`}>
+                {t(activation.stateKey)}
+              </div>
+              {activation.composition === "dormant" ? (
+                <div className={`${CAPSULE_CLASS}__activation-pitch`}>
+                  {t(CAPSULE_ACTIVATION_PITCH_KEY)}
+                </div>
+              ) : null}
+              {affordance !== null ? (
+                <button
+                  type="button"
+                  className={`${CAPSULE_CLASS}__activation-button`}
+                  data-intent={affordance.intent}
+                  onClick={() =>
+                    dispatchActivationIntent(affordance, onActivationIntent)
+                  }
+                >
+                  {t(affordance.labelKey)}
+                </button>
+              ) : null}
+            </div>
+            {/* Sections only in the activated composition: dormant hides them
+                (the pitch IS the whole panel — ticket 32's dormant face), and
+                a degraded channel has no honest rows to show, so the row's
+                unavailable line is the whole story. */}
+            {activation.composition === "activated" ? <Panel /> : null}
           </div>
         </div>
       );

@@ -1,9 +1,11 @@
 /**
- * Capsule expansion store + collapsed-chip view model (ticket 38, ADR-0013).
+ * Capsule expansion store + collapsed-chip/activation-row view models
+ * (tickets 38 + 39, ADR-0013).
  *
  * Pure and dependency-light, same discipline as `roster-store.ts`: no React,
  * no DOM, no Cordis — asserted directly by offline tests
- * (`test/client-capsule-chip.test.ts`).
+ * (`test/client-capsule-chip.test.ts` and
+ * `test/client-capsule-activation.test.ts`).
  *
  * ADR-0013: the dispatcher capsule is ONE additive `shell.overlay` entry —
  * collapsed = a small chip (activation-state dot, worker count, wake badge),
@@ -37,6 +39,30 @@
  * carries a count that could be a fake — the wake badge especially (settled
  * workers with undelivered results) must never flicker on data the client
  * can no longer vouch for.
+ *
+ * Ticket 39 adds the expanded panel's activation row on the same discipline:
+ * a pure view model over the same store truth, mapping every store kind to
+ * exactly one composition —
+ *
+ * - `dormant` (`waiting`) — the unactivated chat's whole experience: the
+ *   activation pitch with a single start affordance, roster sections hidden;
+ * - `activated` (fresh snapshot, empty or not — a snapshot only exists once
+ *   the host published one) — the active state line plus a stop INTENT
+ *   affordance and the roster sections below;
+ * - `unavailable` (stale / `invalid` / `channel-missing`) — the honest
+ *   degraded copy and NO start/stop affordance: nothing actionable pretends
+ *   the channel can carry an activation.
+ *
+ * ADR-0005/0009 discipline (ticket 31's no-stop guard): there is no
+ * off-while-running, so the stop affordance is not a kill/deactivate
+ * control. It is an INTENT — a payload ("stop") handed to an injected
+ * callback; ticket 40 binds that callback to the same user-verbatim command
+ * path as everything else. The view model structurally carries no direct
+ * stop/deactivate authority (asserted in the guard tests), only the intent
+ * payload and a label key. Likewise no "active since" timestamp: the
+ * snapshot carries only `publishedAtMs`, which must never be presented as
+ * activation time, and the adapter offers no honest `activatedAtMs` — the
+ * timestamp is omitted entirely rather than faked.
  */
 import {
   ROSTER_STALE_WINDOW_MS,
@@ -190,3 +216,118 @@ export const CAPSULE_DOT_KEYS: Readonly<Record<CapsuleChipDot, string>> = {
   active: "capsule.dot.active",
   error: "capsule.dot.error",
 };
+
+/**
+ * The activation row's intent payload (ticket 39): what the affordance asks
+ * the injected callback to arrange. `"stop"` is a conversational stop
+ * INTENT — never direct kill/deactivate authority (ticket 31's guard);
+ * ticket 40 binds both payloads to the user-verbatim command path.
+ */
+export type CapsuleActivationIntent = "start" | "stop";
+
+/** Injected callback seat for activation intents (factory injection). */
+export type OnActivationIntent = (intent: CapsuleActivationIntent) => void;
+
+/**
+ * The factory's default seat: a no-op, so the capsule stays render-only
+ * until ticket 40 binds the real transport.
+ */
+export function noopOnActivationIntent(_intent: CapsuleActivationIntent): void {
+  // Render-only default: an unbound capsule asks the host for nothing.
+}
+
+/**
+ * The activation row's single actionable control: the intent payload plus
+ * its locale label. Deliberately NOTHING else — no handler, handle, or
+ * command text — so the view model structurally cannot carry direct
+ * stop/deactivate authority (ticket 31's guard, extended).
+ */
+export interface CapsuleActivationAffordance {
+  readonly intent: CapsuleActivationIntent;
+  readonly labelKey: string;
+}
+
+/**
+ * Exactly one composition per store kind (ticket 39): `dormant` renders the
+ * activation pitch and hides the roster sections, `activated` renders the
+ * row plus the sections, `unavailable` renders the honest degraded copy with
+ * no actionable affordance and no sections.
+ */
+export type CapsuleActivationComposition =
+  | "dormant"
+  | "activated"
+  | "unavailable";
+
+/** The expanded panel's activation row view model (ticket 39). */
+export interface CapsuleActivationRowView {
+  readonly composition: CapsuleActivationComposition;
+  /**
+   * Locale key for the row's state line — the `capsule.dot.*` vocabulary
+   * reused, so row and chip never disagree about the session's state.
+   */
+  readonly stateKey: string;
+  /**
+   * The one affordance of the row, or `null` in the `unavailable`
+   * composition: a degraded channel asks for nothing.
+   */
+  readonly affordance: CapsuleActivationAffordance | null;
+}
+
+/**
+ * Pure activation-row view model over the panel state (ticket 39), with the
+ * chip's exact truth rules: `waiting` is dormant (the pre-activation face),
+ * a fresh snapshot is activated (empty included — a snapshot only exists
+ * once the host published one), and stale/invalid/channel-missing is
+ * unavailable. `windowMs` defaults to the shared stale window;
+ * exactly-at-window counts as fresh, mirroring `isRosterSnapshotStale`.
+ */
+export function describeCapsuleActivationRow(
+  state: RosterPanelState,
+  nowMs: number,
+  windowMs: number = ROSTER_STALE_WINDOW_MS,
+): CapsuleActivationRowView {
+  if (state.kind === "waiting") {
+    return {
+      composition: "dormant",
+      stateKey: CAPSULE_DOT_KEYS.dormant,
+      affordance: { intent: "start", labelKey: CAPSULE_ACTIVATION_START_KEY },
+    };
+  }
+  if (
+    state.kind !== "snapshot" ||
+    isRosterSnapshotStale(state.snapshot, nowMs, windowMs)
+  ) {
+    return {
+      composition: "unavailable",
+      stateKey: CAPSULE_DOT_KEYS.error,
+      affordance: null,
+    };
+  }
+  return {
+    composition: "activated",
+    stateKey: CAPSULE_DOT_KEYS.active,
+    affordance: { intent: "stop", labelKey: CAPSULE_ACTIVATION_STOP_KEY },
+  };
+}
+
+/**
+ * Forward the affordance's exact intent payload to the injected callback —
+ * the whole click behavior of the activation row, kept a pure named
+ * function so the "exact payload per affordance" contract is asserted
+ * offline (the component's `onClick` is exactly this call).
+ */
+export function dispatchActivationIntent(
+  affordance: CapsuleActivationAffordance,
+  onActivationIntent: OnActivationIntent,
+): void {
+  onActivationIntent(affordance.intent);
+}
+
+/** Locale key for the dormant row's start affordance. */
+export const CAPSULE_ACTIVATION_START_KEY = "capsule.activation.start";
+
+/** Locale key for the active row's stop-intent affordance. */
+export const CAPSULE_ACTIVATION_STOP_KEY = "capsule.activation.stop";
+
+/** Locale key for the dormant composition's activation-pitch body line. */
+export const CAPSULE_ACTIVATION_PITCH_KEY = "capsule.activation.pitch";

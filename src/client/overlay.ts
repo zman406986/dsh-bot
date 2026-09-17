@@ -91,6 +91,12 @@ export interface LocaleDictionary {
  * Ticket 38 adds the collapsed capsule chip copy: accessible labels for the
  * expand/collapse controls and the activation-dot states, plus the badge
  * text templates (ADR-0013).
+ *
+ * Ticket 39 adds the expanded activation row's copy: the start and stop
+ * INTENT affordance labels (the stop label is honest conversational-stop
+ * wording — an ask handed to the dispatcher, never a kill control,
+ * ADR-0005/0009) and the dormant composition's activation-pitch body. The
+ * row's state lines reuse the `capsule.dot.*` keys above.
  */
 export const localeDictionary: LocaleDictionary = {
   en: {
@@ -141,6 +147,13 @@ export const localeDictionary: LocaleDictionary = {
     "capsule.dot.dormant": "Dispatcher not started",
     "capsule.dot.active": "Dispatcher active",
     "capsule.dot.error": "Worker status unavailable",
+    // Ticket 39: the activation row. The stop label is an honest
+    // conversational-stop ask (the intent rides the user-verbatim command
+    // path in ticket 40) — never phrased as a kill/deactivate control.
+    "capsule.activation.start": "Start dispatcher in this chat",
+    "capsule.activation.stop": "Ask the dispatcher to stop",
+    "capsule.activation.pitch":
+      "Start the dispatcher to run workers in this chat; results arrive here as they finish.",
   },
   zh: {
     "roster.title": "工作者",
@@ -176,6 +189,10 @@ export const localeDictionary: LocaleDictionary = {
     "capsule.dot.dormant": "调度器未启动",
     "capsule.dot.active": "调度器运行中",
     "capsule.dot.error": "工作者状态不可用",
+    "capsule.activation.start": "在本聊天中启动调度器",
+    "capsule.activation.stop": "请求调度器停止",
+    "capsule.activation.pitch":
+      "启动调度器以在本聊天中运行工作者；结果完成后会送达此处。",
   },
 };
 
