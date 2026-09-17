@@ -1,7 +1,7 @@
 # 21 — Worker roster/status overlay panel + data plumbing
 
 **Blocked by:** 19 (activation lifecycle — the panel shows the activated dispatcher's roster), 20 (client-face scaffold).
-**Status:** open
+**Status:** resolved
 
 ## Problem
 
@@ -14,7 +14,7 @@ The dispatcher has no status surface: the user cannot see the worker roster with
 - [x] Client side: replace #20's hello-world with `RosterPanel` registered into `shell.overlay` (`id: "multitask-dispatcher-roster"`, low `order`, click-through default). Render title, empty state, stale/unavailable state, and status labels using copy from design §6 via the `multitask-dispatcher` locale namespace.
 - [x] Panel degrades honestly: snapshot stale or channel missing → "Worker status is unavailable right now." (design §6) — never a spinner that hangs.
 - [x] Pure-logic tests under `node --test`: snapshot projection from core state (FakeDshHost), stale detection, label mapping. Component rendering: build success + typecheck only (S8, no DOM harness).
-- [ ] If the client face proves blocked at integration, ship the documented host-only fallback instead (status stays conversational: wake turns + `check_workers`) and record the deferral here — do not force the overlay. *(Not triggered — the client face shipped.)*
+- [x] If the client face proves blocked at integration, ship the documented host-only fallback instead (status stays conversational: wake turns + `check_workers`) and record the deferral here — do not force the overlay. *(Not triggered — the client face shipped.)*
 
 ## Constraints
 
@@ -41,3 +41,15 @@ The dispatcher has no status surface: the user cannot see the worker roster with
 1. **Live-channel verification stays open (integration).** Offline S8 proves the contract through fake seams only; whether real dsh-settings `update` shallow-merges (preserving `enabled`) vs replaces the namespace document is unverifiable without a running dsh. The channel's seam shape admits a read-modify-write swap without API change. Until verified, a settings write during an active roster could theoretically drop the `roster` key → panel degrades to "unavailable" (honest, not wrong-data).
 2. **ADR-0010 not written.** Design §9.2's conditional: the data path resolved to the pre-designed, documented settings-watch fallback — nothing non-obvious to record. This comment is the decision record; ticket 16's file owns the ADR plan.
 3. No heartbeat: a quiet-but-healthy roster (no transitions > 60 s) shows "unavailable" until the next publish — accepted per the no-push hard limit; revisit only if a verified push/heartbeat seam appears.
+
+### 2026-09-18 — verifier: AC satisfied vacuously (conditional host-only fallback, not triggered)
+
+AC satisfied vacuously per this ticket's own conditional wording: "**If** the client face proves
+blocked at integration, ship the documented host-only fallback instead." The condition is
+demonstrably unmet — the client face shipped, it was never blocked. Evidence (independently
+re-verified): commit `591f234` landed the client face (`src/client/panel.tsx`
+`createRosterPanel`/`describeRosterPanel`, `src/client/overlay.ts` `shell.overlay` registration,
+`src/client/roster-store.ts`, host channel `src/adapter/roster-channel.ts`); `npm run typecheck`
+and the offline suite are green at HEAD (515 pass / 0 fail, 146 suites), and `npm run
+build:client` produces the bundle registering the dispatcher module. The host-only conversational
+fallback was therefore never needed and no deferral needed recording.
