@@ -180,8 +180,9 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
     // Roster copy (tickets 21 + 27 + 28), the ticket-32 activation presence
     // hint, the ticket-24 toolview copy, the ticket-38 capsule chip copy,
     // the ticket-39 activation-row copy, the ticket-40 action-wiring copy
-    // (stop message, failure lines, per-row steer affordance), and the
-    // ticket-41 deliverables-line copy.
+    // (stop message, failure lines, per-row steer affordance), the
+    // ticket-41 deliverables-line copy, and the ticket-42 footer copy
+    // (flag provenance + copy-only Settings hint).
     assert.deepEqual(keys, [
       "activation.presence-hint",
       "capsule.action.no-channel",
@@ -201,6 +202,9 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
       "capsule.dot.active",
       "capsule.dot.dormant",
       "capsule.dot.error",
+      "capsule.footer.flag.off",
+      "capsule.footer.flag.on",
+      "capsule.footer.settings-hint",
       "capsule.stop.message",
       "roster.activity.toolcalls",
       "roster.blocked.credential",

@@ -72,6 +72,23 @@
  * (a post-restart restore — markers carry no report text) renders the line
  * count-only, never an invented text. The excerpt's expand/collapse is the
  * entry's OWN state too: `deliverablesOpen` rides the capsule store's box.
+ *
+ * Ticket 42 adds the expanded card's footer on the same discipline, with
+ * epic 35 §5's honesty rules applied to the two degraded seams
+ * (`docs/research/dsh-capsule-seams.md` verdicts 4–5):
+ *
+ * - **Flag provenance** comes from the SAME watched settings namespace the
+ *   roster rides in on — a second tiny store (`CapsuleFooterStore`) fed by
+ *   the identical watch payload, so the footer never opens a second channel.
+ *   The persisted `enabled` value (ADR-0005) is exactly what the setting
+ *   says, not the running session's frozen flag — the copy speaks of the
+ *   setting. Before any document arrives (or if the key is unreadable) the
+ *   segment is omitted entirely: degrade to omission, never a guess.
+ * - **Profile identity** is omitted permanently in v1: no client-visible
+ *   source exists (seam 5), and `$host.home` is not a profile name —
+ *   relabeling it would be an invented fact. Recorded gap, not a TODO.
+ * - **Settings link** degrades to a copy-only hint naming the path
+ *   (seam 4: no deep-link/navigation API exists); no button, no channel.
  */
 import {
   ROSTER_STALE_WINDOW_MS,
@@ -366,6 +383,106 @@ export const CAPSULE_DELIVERABLES_EXPAND_KEY = "capsule.deliverables.expand";
 
 /** Locale key for the excerpt's collapse affordance (ticket 41). */
 export const CAPSULE_DELIVERABLES_COLLAPSE_KEY = "capsule.deliverables.collapse";
+
+/**
+ * The settings-document key carrying the feature flag (ticket 42). Same
+ * on-disk key the host schema persists (`src/plugin.ts` `Config.enabled`)
+ * inside the plugin namespace; mirrored here because the client must not
+ * import host code. ADR-0005: the value is the persisted default — the
+ * running session froze its own copy at apply, so footer copy never calls
+ * it the live session state.
+ */
+export const FLAG_SETTINGS_KEY = "enabled";
+
+/** Locale key for the footer's flag-provenance line, flag on (ticket 42). */
+export const CAPSULE_FOOTER_FLAG_ON_KEY = "capsule.footer.flag.on";
+
+/** Locale key for the footer's flag-provenance line, flag off (ticket 42). */
+export const CAPSULE_FOOTER_FLAG_OFF_KEY = "capsule.footer.flag.off";
+
+/**
+ * Locale key for the footer's Settings hint (ticket 42). Degraded seam 4:
+ * no Settings deep-link exists, so this is copy-only — the path is named,
+ * nothing navigates.
+ */
+export const CAPSULE_FOOTER_SETTINGS_HINT_KEY = "capsule.footer.settings-hint";
+
+/**
+ * The expanded card's footer view model (ticket 42). `flagEnabled` is the
+ * persisted flag value from the watched settings document, or `null` when
+ * nothing vouches yet (no document seen, non-object payload, unreadable
+ * key) — `null` omits the segment entirely (honest omission).
+ */
+export interface CapsuleFooterView {
+  readonly flagEnabled: boolean | null;
+}
+
+/**
+ * Pure footer view model over one watched settings document (ticket 42).
+ * Defensive like every parser here: any deviation degrades to `null`
+ * (omission), never a guessed flag state.
+ */
+export function describeCapsuleFooter(channelValue: unknown): CapsuleFooterView {
+  if (typeof channelValue !== "object" || channelValue === null) {
+    return { flagEnabled: null };
+  }
+  const enabled = (channelValue as Record<string, unknown>)[FLAG_SETTINGS_KEY];
+  return { flagEnabled: typeof enabled === "boolean" ? enabled : null };
+}
+
+/** Box handed to React's `useSyncExternalStore` for the footer. */
+export interface CapsuleFooterBox {
+  readonly flagEnabled: boolean | null;
+  readonly version: number;
+}
+
+export interface CapsuleFooterStore {
+  /** Stable getter for `useSyncExternalStore`. */
+  getBox(): CapsuleFooterBox;
+  /**
+   * Feed one payload from the SAME settings watch that feeds the roster
+   * store (never a second channel). A vouching boolean updates the box;
+   * anything else leaves the last vouched value standing — a persisted
+   * setting does not turn into a guess just because one write skipped it.
+   */
+  applyChannelValue(value: unknown): void;
+  /** Subscribe; returns the unsubscribe disposer. */
+  subscribe(listener: () => void): () => void;
+}
+
+/**
+ * The footer's own store (ticket 42). Box identity changes only when the
+ * vouched value actually flips, so `useSyncExternalStore` never re-renders
+ * on unrelated settings writes.
+ */
+export function createCapsuleFooterStore(): CapsuleFooterStore {
+  let flagEnabled: boolean | null = null;
+  let version = 0;
+  let box: CapsuleFooterBox = { flagEnabled, version };
+  const listeners = new Set<() => void>();
+
+  return {
+    getBox() {
+      return box;
+    },
+    applyChannelValue(value: unknown) {
+      const view = describeCapsuleFooter(value);
+      if (view.flagEnabled === null || view.flagEnabled === flagEnabled) return;
+      flagEnabled = view.flagEnabled;
+      version += 1;
+      box = { flagEnabled, version };
+      for (const listener of [...listeners]) {
+        listener();
+      }
+    },
+    subscribe(listener: () => void) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
+}
 
 /**
  * The expanded panel's deliverables line view model (ticket 41): the count

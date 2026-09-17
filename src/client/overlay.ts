@@ -111,6 +111,14 @@ export interface LocaleDictionary {
  * ("undelivered results" — completed means delivered, so only owed results
  * count), the `{count}` phrasing, and the excerpt's expand/collapse
  * affordance. The excerpt text itself is wire truth, never localized.
+ *
+ * Ticket 42 adds the footer copy: the flag-provenance lines (the persisted
+ * `enabled` value from the watched settings namespace — phrased as the
+ * SETTING, never the live session state, per ADR-0005's frozen flag) and
+ * the copy-only Settings hint (degraded seam 4: no deep-link exists, so the
+ * path is named and nothing navigates). No profile key exists: seam 5 found
+ * no client-visible profile identity, and the segment is omitted rather
+ * than invented from `$host.home`.
  */
 export const localeDictionary: LocaleDictionary = {
   en: {
@@ -169,6 +177,14 @@ export const localeDictionary: LocaleDictionary = {
     "capsule.deliverables.count": "{count} awaiting delivery",
     "capsule.deliverables.expand": "Show latest result",
     "capsule.deliverables.collapse": "Hide latest result",
+    // Ticket 42: the footer. The flag lines report the PERSISTED setting
+    // (ADR-0005: the running chat froze its own flag; a change takes effect
+    // in new chats), and the Settings hint is copy-only — no deep-link seam
+    // exists, so the path is named and nothing navigates.
+    "capsule.footer.flag.on": "Dispatcher setting: enabled",
+    "capsule.footer.flag.off": "Dispatcher setting: disabled",
+    "capsule.footer.settings-hint":
+      "Change it in Settings → Multitask Dispatcher — takes effect in new chats.",
     // Ticket 39: the activation row. The stop label is an honest
     // conversational-stop ask (the intent rides the user-verbatim command
     // path in ticket 40) — never phrased as a kill/deactivate control.
@@ -235,6 +251,13 @@ export const localeDictionary: LocaleDictionary = {
     "capsule.deliverables.count": "{count} 个等待送达",
     "capsule.deliverables.expand": "显示最新结果",
     "capsule.deliverables.collapse": "隐藏最新结果",
+    // Ticket 42: 页脚。旗标行报告的是持久化设置（ADR-0005：运行中的会话已冻结
+    // 自己的旗标；更改对新会话生效），设置提示仅为文案——不存在深链 seam，
+    // 只指明路径，不做任何跳转。
+    "capsule.footer.flag.on": "调度器设置：已启用",
+    "capsule.footer.flag.off": "调度器设置：已停用",
+    "capsule.footer.settings-hint":
+      "可在 设置 → Multitask Dispatcher 中更改——对新会话生效。",
     "capsule.activation.start": "在本聊天中启动调度器",
     "capsule.activation.stop": "请求调度器停止",
     "capsule.activation.pitch":

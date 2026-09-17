@@ -21,7 +21,8 @@
  *    config-channel fallback — no invented push channel);
  * 3. the dispatcher capsule entry (ticket 38, ADR-0013) into the shipped
  *    `shell.overlay` list slot: collapsed chip → expandable panel, one
- *    entry, unchanged id;
+ *    entry, unchanged id (tickets 39–42 add the activation row, the wired
+ *    intents, the deliverables line, and the provenance footer);
  * 4. the per-tool call views (ticket 24): keyed `tool.call.toolview` entries
  *    for the five dispatcher wire tool names — unclaimed keys, so additive-
  *    safe against the shipped composition (research Finding 5).
@@ -59,7 +60,9 @@ import {
   createDispatcherCapsule
 } from "./capsule.js";
 import {
+  createCapsuleFooterStore,
   createCapsuleStore,
+  type CapsuleFooterStore,
   type CapsuleStore,
   type OnActivationIntent,
 } from "./capsule-store.js";
@@ -80,7 +83,12 @@ export const inject: readonly string[] = ["slots", "locale"];
  * and the slot entry.
  */
 export function apply(ctx: ClientContext): void {
-  applyClientModule(ctx, createRosterStore(), createCapsuleStore());
+  applyClientModule(
+    ctx,
+    createRosterStore(),
+    createCapsuleStore(),
+    createCapsuleFooterStore(),
+  );
 }
 
 /**
@@ -88,13 +96,15 @@ export function apply(ctx: ClientContext): void {
  * the data path end to end (watch payload → store → view model) without a
  * DOM harness. Not a second entry point: `apply` is the only thing the
  * loader registers. The capsule store (ticket 38) is the entry's own
- * expansion state; defaulting it keeps older callers working and gives a
- * fresh fiber a collapsed capsule.
+ * expansion state; the footer store (ticket 42) holds the persisted flag
+ * provenance read from the SAME watch; defaulting either keeps older
+ * callers working and gives a fresh fiber a collapsed capsule.
  */
 export function applyClientModule(
   ctx: ClientContext,
   store: RosterStore,
   capsule: CapsuleStore = createCapsuleStore(),
+  footer: CapsuleFooterStore = createCapsuleFooterStore(),
 ): void {
   // Locale namespace (Finding 6 idiom): labeled effect; executes immediately,
   // the returned disposer is collected for unload.
@@ -106,7 +116,9 @@ export function applyClientModule(
   // Roster data path (ticket 21, design-16 §4.2 honest gap): watch the
   // plugin's settings namespace for the host-mirrored snapshot. The panel
   // degrades to "unavailable" copy when the service is missing or the feed
-  // is stale — never against an unverified live push channel.
+  // is stale — never against an unverified live push channel. The SAME
+  // watch payload feeds the ticket-42 footer store (persisted flag
+  // provenance) — one channel, two honest readers, never a second source.
   ctx.effect(() => {
     let disposeWatch: (() => void) | undefined;
     if (typeof ctx.inject !== "function") {
@@ -121,6 +133,7 @@ export function applyClientModule(
       }
       disposeWatch = settings.watch(LOCALE_NAMESPACE, (value) => {
         store.applyChannelValue(value);
+        footer.applyChannelValue(value);
       });
     });
     return () => {
@@ -176,6 +189,7 @@ export function applyClientModule(
         onActivationIntent,
         actionStatus,
         onRowSteer,
+        footer,
       ),
     );
   });

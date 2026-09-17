@@ -24,10 +24,21 @@
  * (ADR-0005/0009; ticket 31's guard). The default seat is a no-op, so the
  * capsule stays render-only; ticket 40 binds the callback to the verified
  * user-verbatim command path. The deliverables line (ticket 41) renders in
- * the activated card between the roster and the (ticket-42) footer: the
- * completed-but-not-delivered count plus the snapshot's bounded most-recent
- * excerpt, hidden entirely at count 0 and count-only when no honest excerpt
- * exists. The footer is ticket 42 and deliberately absent.
+ * the activated card between the roster and the footer: the completed-but-
+ * not-delivered count plus the snapshot's bounded most-recent excerpt,
+ * hidden entirely at count 0 and count-only when no honest excerpt exists.
+ *
+ * The footer (ticket 42) closes the card with provenance only, per the
+ * seam-research verdicts (`docs/research/dsh-capsule-seams.md` 4–5): the
+ * persisted flag state from the already-watched settings namespace (a
+ * second tiny store fed by the SAME watch — never a second channel), and a
+ * copy-only Settings hint. Two recorded v1 gaps, deliberately: no profile
+ * segment (seam 5 — no client-visible profile identity exists, and
+ * `$host.home` must not be relabeled into one), and no tool-view link
+ * (seam research found no navigation path; the five dispatcher tool views
+ * stay keyed in `tool.call.toolview` — ticket 24, registrations untouched —
+ * where the calls happen; the capsule embeds and navigates nothing).
+ * Nothing in the footer is editable inline.
  *
  * Expansion state is the entry's OWN state (ADR-0013 — the host offers no
  * expansion/anchoring API): the `CapsuleStore` created with the module fiber.
@@ -45,8 +56,9 @@
  *
  * Rendering is covered by build + typecheck only (S8: no DOM harness); the
  * chip/activation view models and the intent dispatch are asserted purely in
- * `test/client-capsule-chip.test.ts` and
- * `test/client-capsule-activation.test.ts`.
+ * `test/client-capsule-chip.test.ts`,
+ * `test/client-capsule-activation.test.ts`, and the whole-composition
+ * close-out `test/client-capsule-composition.test.ts` (ticket 42).
  */
 import { useEffect, useSyncExternalStore } from "react";
 import type { JSX } from "react";
@@ -61,11 +73,16 @@ import {
   CAPSULE_DELIVERABLES_EXPAND_KEY,
   CAPSULE_DELIVERABLES_LABEL_KEY,
   CAPSULE_DOT_KEYS,
+  CAPSULE_FOOTER_FLAG_OFF_KEY,
+  CAPSULE_FOOTER_FLAG_ON_KEY,
+  CAPSULE_FOOTER_SETTINGS_HINT_KEY,
   describeCapsuleActivationRow,
   describeCapsuleChip,
   describeCapsuleDeliverables,
   dispatchActivationIntent,
   noopOnActivationIntent,
+  type CapsuleFooterBox,
+  type CapsuleFooterStore,
   type CapsuleStore,
   type OnActivationIntent,
 } from "./capsule-store.js";
@@ -89,6 +106,8 @@ const CAPSULE_CLASS = "multitask-dispatcher-capsule";
 const noopSubscribe = () => () => {};
 const IDLE_STATUS_BOX: CapsuleActionStatusBox = { copyKey: null, version: 0 };
 const noopStatusBox = (): CapsuleActionStatusBox => IDLE_STATUS_BOX;
+const IDLE_FOOTER_BOX: CapsuleFooterBox = { flagEnabled: null, version: 0 };
+const noopFooterBox = (): CapsuleFooterBox => IDLE_FOOTER_BOX;
 
 /**
  * Capsule styles (ticket 38). The chip/card float top-right over the frame;
@@ -121,6 +140,7 @@ export const CAPSULE_CSS = `
 .${CAPSULE_CLASS}__deliverables-toggle{border:none;background:transparent;color:inherit;opacity:.6;cursor:pointer;font:inherit;font-size:11px;padding:0}
 .${CAPSULE_CLASS}__deliverables-toggle:hover{opacity:1}
 .${CAPSULE_CLASS}__deliverables-excerpt{flex-basis:100%;white-space:pre-wrap;word-break:break-word;opacity:.85;font-size:11px}
+.${CAPSULE_CLASS}__footer{display:flex;flex-wrap:wrap;gap:2px 12px;margin-top:10px;padding-top:8px;border-top:1px solid #30363d;opacity:.7;font-size:11px}
 `;
 
 /**
@@ -133,6 +153,8 @@ export const CAPSULE_CSS = `
  * - `actionStatus` — the honest notice line for failed sends (no success
  *   state exists to flip to); `undefined` keeps the capsule render-only;
  * - `onRowSteer` — the per-row steer prefill seat handed to the panel.
+ * - `footer` — the ticket-42 footer store (same-watch flag provenance);
+ *   `undefined` renders the footer with the flag segment omitted.
  *
  * The default intent seat is a no-op: without a binding the capsule renders
  * and dispatches into the void.
@@ -144,6 +166,7 @@ export function createDispatcherCapsule(
   onActivationIntent: OnActivationIntent = noopOnActivationIntent,
   actionStatus?: CapsuleActionStatus,
   onRowSteer?: (workerId: string) => SteerPrefillOutcome,
+  footer?: CapsuleFooterStore,
 ): () => JSX.Element {
   const Panel = createRosterPanel(t, store, onRowSteer);
   return () => {
@@ -152,6 +175,10 @@ export function createDispatcherCapsule(
     const actionBox = useSyncExternalStore(
       actionStatus?.subscribe ?? noopSubscribe,
       actionStatus?.getBox ?? noopStatusBox,
+    );
+    const footerBox = useSyncExternalStore(
+      footer?.subscribe ?? noopSubscribe,
+      footer?.getBox ?? noopFooterBox,
     );
     const now = Date.now();
     const chip = describeCapsuleChip(box.state, now);
@@ -269,6 +296,39 @@ export function createDispatcherCapsule(
                 ) : null}
               </div>
             ) : null}
+            {/* Ticket-42 footer: provenance only, nothing editable inline.
+                Flag segment renders only while the same settings watch the
+                roster rides on has delivered a vouching document; before
+                that it is omitted (honest omission, never a guessed flag).
+                The Settings hint is copy-only (degraded seam 4 — no
+                deep-link/navigation API exists; the path is named and
+                nothing navigates). No profile segment (degraded seam 5 — no
+                client-visible source; $host.home is not a profile name) and
+                no tool-view link (no verified navigation path; the five
+                views stay in tool.call.toolview where the calls happen). */}
+            <div
+              className={`${CAPSULE_CLASS}__footer`}
+              data-flag={
+                footerBox.flagEnabled === null
+                  ? "unknown"
+                  : footerBox.flagEnabled
+                    ? "on"
+                    : "off"
+              }
+            >
+              {footerBox.flagEnabled !== null ? (
+                <span className={`${CAPSULE_CLASS}__footer-flag`}>
+                  {t(
+                    footerBox.flagEnabled
+                      ? CAPSULE_FOOTER_FLAG_ON_KEY
+                      : CAPSULE_FOOTER_FLAG_OFF_KEY,
+                  )}
+                </span>
+              ) : null}
+              <span className={`${CAPSULE_CLASS}__footer-hint`}>
+                {t(CAPSULE_FOOTER_SETTINGS_HINT_KEY)}
+              </span>
+            </div>
           </div>
         </div>
       );

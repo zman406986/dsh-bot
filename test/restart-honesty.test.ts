@@ -43,6 +43,8 @@ import { describeRosterPanel } from "../src/client/roster-store.js";
 import {
   describeCapsuleActivationRow,
   describeCapsuleChip,
+  describeCapsuleDeliverables,
+  describeCapsuleFooter,
 } from "../src/client/capsule-store.js";
 import {
   describeToolview,
@@ -618,7 +620,7 @@ describe("restart honesty — no-stop guard (design-17 §4.6)", () => {
     }
   });
 
-  it("the capsule view models carry no direct stop/deactivate authority — the stop affordance is an intent (ticket 39)", () => {
+  it("the capsule view models carry no direct stop/deactivate authority — the stop affordance is an intent (tickets 39 + 42, FINAL FORM)", () => {
     const workers = [
       {
         kind: "worker" as const,
@@ -702,12 +704,19 @@ describe("restart honesty — no-stop guard (design-17 §4.6)", () => {
         "activation row must match its canonical shape exactly",
       );
 
-      // Key scan over BOTH capsule view models (chip + activation row):
-      // no key may offer direct kill/deactivate/stop authority — the only
-      // stop-shaped thing allowed anywhere is the intent payload VALUE.
+      // Key scan over ALL capsule view models — chip, activation row, the
+      // full panel rows, the deliverables line, and the ticket-42 footer
+      // (the guard's FINAL FORM): no key may offer direct
+      // kill/deactivate/stop authority — the only stop-shaped thing allowed
+      // anywhere is the intent payload VALUE. The footer models cover both
+      // faces of the honest degrade: a vouching document and no document.
       const models = [
         describeCapsuleChip(state, 10_000),
         rowView,
+        describeRosterPanel(state, 10_000),
+        describeCapsuleDeliverables(state, 10_000),
+        describeCapsuleFooter({ enabled: true }),
+        describeCapsuleFooter(undefined),
       ];
       for (const model of models) {
         const keys: string[] = [];

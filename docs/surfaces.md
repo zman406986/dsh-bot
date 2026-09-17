@@ -104,6 +104,49 @@ Housekeeping notices (access denials, expired approvals, restart honesty)
 ride **inside wake turns as text** — the shipped pattern. See
 `src/adapter/restart-notice.ts` for the one-time restart notice.
 
+## The capsule (epic 35, tickets 38–42)
+
+The dispatcher's one additive `shell.overlay` entry (ADR-0013): a collapsed
+chip that expands into the panel card. Everything on it is a projection of
+existing core state through the settings-mirror channel — the same one
+watch feeding both the roster store and the footer store. Its states:
+
+- **Dormant** (`waiting` — feed alive, nothing published): the chip's grey
+  dot; the expanded panel IS the activation pitch, with the single
+  "Start dispatcher in this chat" affordance. Roster sections hidden.
+- **Activated** (fresh snapshot): blue dot, worker count, wake badge
+  (settled-undelivered); the expanded card shows the activation row
+  (conversational stop INTENT — never a kill control), the three roster
+  sections, the deliverables line, and the footer.
+- **Unavailable** (stale / `invalid` / `channel-missing`): red dot; the
+  expanded card shows only the honest degraded copy and NO affordance —
+  nothing actionable pretends a broken channel can carry an activation.
+- **Deliverables line**: hidden entirely at count 0; count-only when a
+  landed row carries no honest excerpt (post-restart restore); the excerpt
+  itself is bounded wire truth, expandable.
+
+**Footer provenance and its recorded v1 gaps** (seam verdicts in
+`docs/research/dsh-capsule-seams.md`): the footer renders the persisted
+feature-flag state from the plugin's own settings namespace, phrased as the
+SETTING (ADR-0005 freezes the running chat's flag; a change lands in new
+chats), plus a copy-only Settings hint. Deliberately absent, per the
+honesty rules — these are decisions, not oversights:
+
+- **No Settings deep-link** — no open/navigation seam exists (verdict 4),
+  so the hint names the path and nothing navigates.
+- **No profile segment** — no client-visible profile identity exists
+  (verdict 5); `$host.home` is not a profile name and is never relabeled
+  into one.
+- **No tool-view link** — the five dispatcher tool-call views stay keyed in
+  `tool.call.toolview` (ticket 24) where the calls happen; the seam research
+  found no navigation path, so the capsule links to, embeds, and navigates
+  nothing.
+
+Nothing on the capsule is editable inline. The no-stop guard's final form
+(`test/restart-honesty.test.ts`) structurally covers every capsule view
+model; the composition close-out (`test/client-capsule-composition.test.ts`)
+assembles dormant and activated end-to-end offline.
+
 ## Send journal is host-owned
 
 The composer's optimistic send / offline queue / reconnect-flush behavior
@@ -122,6 +165,8 @@ For contrast, the surfaces that exist (design-17 §3.2, §4):
 | Surface | Implementation |
 |---|---|
 | Workers panel (`shell.overlay`, app-wide) | `src/client/panel.tsx`, sections from `src/client/roster-store.ts` |
+| Capsule chip + expandable card (ADR-0013) | `src/client/capsule.tsx`, view models from `src/client/capsule-store.ts` |
+| Capsule footer (flag provenance + Settings hint) | `src/client/capsule.tsx` + `describeCapsuleFooter` |
 | Roster wire contract (snapshot v2) | `src/core/roster-snapshot.ts` |
 | Activation command + presence hint | `src/adapter/activation-command.ts` |
 | Steer command | `src/adapter/steer-command.ts` |
@@ -132,5 +177,9 @@ For contrast, the surfaces that exist (design-17 §3.2, §4):
 
 Dormant boot registers nothing beyond the two commands and the passive
 host plumbing; the roster, prompts, and tools exist only after an explicit
-`/dispatcher-start` (ADR-0009). The matrix is asserted in
-`test/composition-polish.test.ts` and `test/activation-lifecycle.test.ts`.
+`/dispatcher-start` (ADR-0009). Client-side, the capsule chip is present
+pre-activation as the dormant face (chip + activation pitch) — it spawns
+nothing and runs nothing; it is presence copy over an empty feed. The
+matrix is asserted in `test/composition-polish.test.ts`,
+`test/activation-lifecycle.test.ts`, and
+`test/client-capsule-composition.test.ts`.
