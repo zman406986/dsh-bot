@@ -3,8 +3,9 @@
 **Status:** open
 **Labels:** needs-triage
 **Blocked by:** 34 (client module materialization — nothing browser-side is visible until it lands).
-**Read first:** `docs/research/dsh-plugin-ui-examples.md` (three reference plugins, pattern-only),
-`docs/research/dsh-plugin-ui-patterns.md` (host-tree seam findings), design-16 §4/§5,
+**Read first:** `docs/research/dsh-plugin-ui-examples.md` (three reference plugins, pattern-only —
+and see Process requirement 0: you must research beyond it), `docs/research/dsh-plugin-ui-patterns.md`
+(host-tree seam findings), design-16 §4/§5,
 `.scratch/clone-always-on/worktree-workflow.md` (tree/merge rules), ticket 17 (ADR numbering note).
 
 ## Goal
@@ -50,6 +51,18 @@ chip visible, panel shows the activation pitch, nothing else pretends to run.
 **Locale:** all copy through the `multitask-dispatcher` namespace ({en, zh}) — no literals.
 
 ## Process requirements (binding on the implementing team)
+
+0. **Do your own research — the scribe's notes are a starting map, not an authority.** Before
+   filing child tickets, study the actual source of the three reference plugins on GitHub
+   (`omdsh-dev/DSH-better-sidebar`, `Nagi-ovo/dsh-visualize`, `Small-tailqwq/dsh-deep-whale`)
+   — clone or read the trees, look at real `package.json` `dsh.client` records, bundle
+   layouts, slot registrations, and mount-test setups; the pages in
+   `docs/research/dsh-plugin-ui-examples.md` summarize marketing docs only. Re-verify the
+   host-tree claims in that note and in `dsh-plugin-ui-patterns.md` against the installed
+   dsh 0.1.5-rc.1 code yourself (the ticket-34 diagnosis especially). Record new findings in
+   `docs/research/` notes of your own, cite file:line, and correct the scribe's notes where
+   they are wrong. Clean-room rules apply to every source you open: pattern learning only,
+   no copying (AGENTS.md; the reference-material tree remains forbidden).
 
 1. **This epic must brew tickets and draft ADRs — do not implement it as one blob.** Spawn
    small, granular child tickets (one surface section or one concern each), each with its own
