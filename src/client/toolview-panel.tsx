@@ -74,6 +74,11 @@ export function createToolviewComponent(
                         {row.statusLabel}
                       </span>
                     ) : null}
+                    {row.activity !== null ? (
+                      <span className={`${VIEW_CLASS}__row-activity`}>
+                        {row.activity}
+                      </span>
+                    ) : null}
                   </li>
                 ))}
               </ul>

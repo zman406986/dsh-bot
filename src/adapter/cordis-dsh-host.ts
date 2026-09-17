@@ -1,8 +1,10 @@
 import type { DshHost } from "../core/dsh-host.js";
 import type { DurabilityPort } from "../core/durability.js";
 import type { AccessRequestEvent } from "../core/access-types.js";
+import { clampActivity, clampRecentResultExcerpt } from "../core/report-clamp.js";
 import type { UserQuestionsLike } from "./access-prompt.js";
 import type { SettledEvent, SpawnOptions, TerminalWorkerStatus } from "../core/types.js";
+import type { RosterRecentResultSource } from "../core/roster-snapshot.js";
 import { assembleWorkerPrompt } from "../worker/prompt.js";
 import {
   normalizeWorkerErrorReport,
@@ -155,7 +157,8 @@ export interface AdapterContext {
     list(caller?: unknown): readonly JobSnapshotLike[];
   };
   storageDomain: StorageDomainLike;
-  on(name: string, cb: (payload: never) => void): () => void;
+  /** Host event bus. Payload arity varies per event (e.g. session/event is two-arg). */
+  on(name: string, cb: (...args: never[]) => void): () => void;
 }
 
 export interface CordisDshHostOptions {
@@ -192,6 +195,22 @@ export interface CordisDshHost extends DshHost {
   workerIdOf(agentSessionId: string): string | undefined;
   /** Whether this host spawned the worker id. */
   owns(workerId: string): boolean;
+  /**
+   * Latest observed activity phrase for an owned worker, derived from the
+   * host `session/event` firehose (`tool/call` events; ticket 29). Null
+   * when nothing has been observed or the worker settled — never polled,
+   * never guessed.
+   */
+  recentActivity(workerId: string): string | null;
+  /**
+   * Ticket 41: the bounded settle-report excerpt observed for an owned
+   * worker when it settled (adapter-side projection of the same
+   * `subagent/end` event the core receives), or `null` when nothing honest
+   * was observed (never settled, empty report). The core stores no report
+   * text — this seam is how the roster projection sources the deliverables
+   * line's excerpt at publish time without new core state.
+   */
+  recentResult(workerId: string): RosterRecentResultSource | null;
   /** Fire step-boundary callbacks (called from parent-agent status wiring). */
   emitStepBoundary(workerId: string): void;
   /** Notify core that a worker's first turn started (spawned → running). */
@@ -206,6 +225,69 @@ export interface CordisDshHost extends DshHost {
 
 /** Default in-process spawn provider name (dsh-subagent-spawn-in-process). */
 export const SPAWN_PROVIDER = "spawn";
+
+/** Max characters of the argument hint inside an activity phrase. */
+export const ACTIVITY_HINT_CHARS = 60;
+
+/**
+ * Committed session event, structural view (`dsh-session` `session/event`
+ * firehose; ticket 29 live-verification). Only the fields the activity
+ * derivation reads are declared — everything else stays opaque.
+ */
+export interface SessionEventLike {
+  readonly type?: unknown;
+  readonly data?: unknown;
+}
+
+/** Session handle carried as the first `session/event` argument. */
+export interface SessionRefLike {
+  readonly id?: unknown;
+}
+
+/**
+ * One human-readable activity phrase from a `tool/call` event body
+ * (`{ name, arguments }`): the tool name plus a short primary-argument
+ * hint, whitespace-collapsed and clamped to `CHECK_ACTIVITY_CHARS`.
+ * Null for anything unreadable — never invented.
+ */
+export function describeToolActivity(data: unknown): string | null {
+  if (typeof data !== "object" || data === null) return null;
+  const record = data as Record<string, unknown>;
+  if (typeof record.name !== "string" || record.name.length === 0) {
+    return null;
+  }
+  const hint = primaryArgumentHint(record.arguments);
+  return clampActivity(hint === null ? record.name : `${record.name}: ${hint}`);
+}
+
+/**
+ * First non-empty string field of the parsed raw-arguments JSON — a generic
+ * primary-argument hint without knowing any host tool's vocabulary. Junk,
+ * non-JSON, or no string field → null.
+ */
+function primaryArgumentHint(rawArguments: unknown): string | null {
+  if (typeof rawArguments !== "string" || rawArguments.length === 0) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawArguments);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return null;
+  }
+  for (const value of Object.values(parsed as Record<string, unknown>)) {
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, ACTIVITY_HINT_CHARS);
+    }
+  }
+  return null;
+}
 
 /**
  * Map dsh SubagentStopReason → core TerminalWorkerStatus.
@@ -284,6 +366,14 @@ export function createCordisDshHost(
   const settledCallbacks: Array<(event: SettledEvent) => void> = [];
   const stepBoundaryCallbacks: Array<(workerId: string) => void | Promise<void>> = [];
   const accessRequestCallbacks: Array<(event: AccessRequestEvent) => void> = [];
+  // Ticket 29: latest activity phrase per owned worker, projected from the
+  // host `session/event` firehose. Pure subscription — no polling, no timers.
+  const workerActivity = new Map<string, string>();
+  // Ticket 41: latest bounded settle-report excerpt per settled worker,
+  // clamped once at observation. Same subscription discipline as
+  // `workerActivity`: adapter-side projection of host-observed truth —
+  // the core stores no report text and no second transcript exists.
+  const workerResults = new Map<string, RosterRecentResultSource>();
   let wakeMissingLogged = false;
 
   function ownsSession(agentSessionId: string): string | undefined {
@@ -298,6 +388,9 @@ export function createCordisDshHost(
     };
     const workerId = String(end.id);
     if (!workers.has(workerId)) return;
+    // A settled worker has no live activity; the check row shows the
+    // terminal status instead (ticket 29 honesty rule).
+    workerActivity.delete(workerId);
     const status = mapStopReason(end.stopReason);
     const event: SettledEvent = {
       workerId,
@@ -305,9 +398,32 @@ export function createCordisDshHost(
       report: normalizeSettleReport(status, end.lastAssistantMessage),
       transcriptRef: workerId,
     };
+    // Ticket 41: hold the bounded excerpt for the roster's deliverables
+    // line BEFORE the core observers run, so the publish the settle
+    // transition triggers already sees it. Empty report (an aborted worker
+    // with no text) → no excerpt rather than an invented one.
+    const excerpt = clampRecentResultExcerpt(event.report);
+    if (excerpt !== null) {
+      workerResults.set(workerId, { text: excerpt, settledAtMs: Date.now() });
+    } else {
+      workerResults.delete(workerId);
+    }
     for (const cb of [...settledCallbacks]) {
       cb(event);
     }
+  });
+
+  const offSessionEvent = ctx.on("session/event", (...args: never[]) => {
+    const [sessionRef, rawEvent] = args as unknown as [unknown, unknown];
+    const event = rawEvent as SessionEventLike | null;
+    if (typeof event !== "object" || event === null) return;
+    if (event.type !== "tool/call") return;
+    const session = sessionRef as SessionRefLike | null;
+    if (typeof session !== "object" || session === null) return;
+    const workerId = String(session.id);
+    if (!workers.has(workerId)) return;
+    const phrase = describeToolActivity(event.data);
+    if (phrase !== null) workerActivity.set(workerId, phrase);
   });
 
   const host: CordisDshHost = {
@@ -347,6 +463,14 @@ export function createCordisDshHost(
 
     owns(workerId: string): boolean {
       return workers.has(workerId);
+    },
+
+    recentActivity(workerId: string): string | null {
+      return workerActivity.get(workerId) ?? null;
+    },
+
+    recentResult(workerId: string): RosterRecentResultSource | null {
+      return workerResults.get(workerId) ?? null;
     },
 
     emitStepBoundary(workerId: string): void {
@@ -493,11 +617,14 @@ export function createCordisDshHost(
 
     dispose(): void {
       offSubagentEnd();
+      offSessionEvent();
       for (const controller of spawnControllers.values()) {
         controller.abort();
       }
       spawnControllers.clear();
       workers.clear();
+      workerActivity.clear();
+      workerResults.clear();
       settledCallbacks.length = 0;
       stepBoundaryCallbacks.length = 0;
       accessRequestCallbacks.length = 0;

@@ -199,9 +199,51 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
   it("ships en and zh faces with identical key sets and string values", () => {
     assert.deepEqual(validateLocaleDictionary(localeDictionary), []);
     const keys = Object.keys(localeDictionary.en).sort();
-    // Roster copy plus the ticket-24 toolview copy.
+    // Roster copy (tickets 21 + 27 + 28), the ticket-32 activation presence
+    // hint, the ticket-24 toolview copy, the ticket-38 capsule chip copy,
+    // the ticket-39 activation-row copy, the ticket-40 action-wiring copy
+    // (stop message, failure lines, per-row steer affordance), the
+    // ticket-41 deliverables-line copy, and the ticket-42 footer copy
+    // (flag provenance + copy-only Settings hint).
     assert.deepEqual(keys, [
+      "activation.presence-hint",
+      "capsule.action.no-channel",
+      "capsule.action.not-available",
+      "capsule.action.send-failed",
+      "capsule.activation.pitch",
+      "capsule.activation.start",
+      "capsule.activation.stop",
+      "capsule.chip.open",
+      "capsule.chip.wake",
+      "capsule.chip.workers",
+      "capsule.collapse",
+      "capsule.deliverables.collapse",
+      "capsule.deliverables.count",
+      "capsule.deliverables.expand",
+      "capsule.deliverables.label",
+      "capsule.dot.active",
+      "capsule.dot.dormant",
+      "capsule.dot.error",
+      "capsule.footer.flag.off",
+      "capsule.footer.flag.on",
+      "capsule.footer.settings-hint",
+      "capsule.stop.message",
+      "roster.activity.toolcalls",
+      "roster.blocked.credential",
+      "roster.blocked.filesystem",
+      "roster.blocked.network",
+      "roster.blocked.other",
+      "roster.blocked.tool",
       "roster.empty",
+      "roster.finished.count",
+      "roster.landed",
+      "roster.loading",
+      "roster.section.active",
+      "roster.section.finished",
+      "roster.section.needs-you",
+      "roster.steer.button",
+      "roster.steer.copy-fallback",
+      "roster.steer.hint",
       "roster.title",
       "roster.unavailable",
       "toolview.degraded",

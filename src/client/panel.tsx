@@ -1,25 +1,58 @@
 /**
- * Roster/status panel (ticket 21), replacing ticket 20's hello placeholder.
+ * Roster/status panel (tickets 21 + 27), replacing ticket 20's hello
+ * placeholder.
  *
  * Presentation only: the panel never spawns, steers, or stops anything — all
  * authority stays with the bound parent agent via the core (design-16 §3.4).
- * It renders the store's view model: title, one row per worker (title, verbatim
- * core FSM status label, todo link when present), the design-16 §6 empty
- * state, or the honest "unavailable" state — never a spinner that hangs.
+ * Ticket 40 adds the epic's per-row steer affordance, which stays inside
+ * that rule: it only PREFILLS the user's own composer draft (verified seam,
+ * `actions.ts`) — the send, and the host-side `/dispatcher-steer` transport
+ * into the core last-wins queue, remain the user's and the host's.
+ * It renders the store's view model: title, the three ticket-28 sections
+ * (Active / Needs you / Finished, design-17 §4.2), and within them one row
+ * per worker carrying the design-17 §4.1 presence picture (status dot,
+ * animated ring only while running/steering, blocked-with-reason chip,
+ * landed marker, derived activity line, muted ledger linkage), plus the
+ * empty state, the loading state, or the honest "unavailable" state — never
+ * a spinner that hangs. Delivered terminal rows collapse into a muted count
+ * line within Finished; the count comes from the view model, so the
+ * component only localizes it.
+ *
+ * The Needs-you section is the honest pull-only stand-in for push attention
+ * (no push seam exists; design-17 §4.8) — see `roster-store.ts` for the
+ * partition rule. This component does no precedence logic of its own.
  *
  * The component is a zero-prop function component created through a factory so
  * the translate seat and the data store are captured at registration time;
  * slot entries may be handed renderer-controlled props, which this panel
  * deliberately ignores. Rendering itself is covered by build + typecheck only
  * (S8: no DOM harness); the view model is asserted purely in tests.
+ *
+ * Styles ship as a plain string rendered into a <style> element by the
+ * component itself: every class and keyframe name is `multitask-dispatcher-`
+ * prefixed (no shipped kit classes, no build-toolchain change), the only
+ * animation is the running ring, and it turns off under
+ * `prefers-reduced-motion`. The element mounts and unmounts with the panel,
+ * so an HMR fiber swap removes it with everything else.
  */
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import type { JSX } from "react";
 import {
+  ROSTER_FINISHED_COUNT_KEY,
   ROSTER_STALE_RECHECK_MS,
   describeRosterPanel,
+  formatTemplate,
+  rosterBlockedKey,
+  type RosterRowView,
+  type RosterSectionView,
   type RosterStore,
 } from "./roster-store.js";
+import {
+  ROSTER_STEER_BUTTON_KEY,
+  ROSTER_STEER_COPY_FALLBACK_KEY,
+  ROSTER_STEER_HINT_KEY,
+  type SteerPrefillOutcome,
+} from "./actions.js";
 
 /** Bound translate seat (`ctx.locale.bind(namespace)`), re-exported. */
 export type { TranslateFn } from "./overlay.js";
@@ -28,10 +61,226 @@ import type { TranslateFn } from "./overlay.js";
 /** Class prefix — ours, namespaced, no shipped kit classes. */
 const PANEL_CLASS = "multitask-dispatcher-roster-panel";
 
-/** Create the roster panel component bound to a translate seat and store. */
+/**
+ * Panel styles (tickets 27 + 28). Presentation only — no layout promises
+ * beyond this panel's own subtree; colors are self-contained so no theme
+ * contract is assumed.
+ */
+export const ROSTER_PANEL_CSS = `
+.multitask-dispatcher-roster-panel{font-size:12px;line-height:1.5;min-width:0}
+.multitask-dispatcher-roster-panel__title{font-weight:600;margin-bottom:6px}
+.multitask-dispatcher-roster-panel__unavailable,
+.multitask-dispatcher-roster-panel__empty,
+.multitask-dispatcher-roster-panel__loading{opacity:.7}
+.multitask-dispatcher-roster-panel__sections{display:flex;flex-direction:column;gap:12px}
+.multitask-dispatcher-roster-panel__section-title{font-weight:600;opacity:.75;margin-bottom:4px}
+.multitask-dispatcher-roster-panel__list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
+.multitask-dispatcher-roster-panel__row{display:flex;align-items:flex-start;gap:8px;min-width:0}
+.multitask-dispatcher-roster-panel__row[data-finished="true"] .multitask-dispatcher-roster-panel__row-title,
+.multitask-dispatcher-roster-panel__row[data-finished="true"] .multitask-dispatcher-roster-panel__row-status{opacity:.6}
+.multitask-dispatcher-roster-panel__dot{flex:none;position:relative;width:8px;height:8px;margin-top:4px;border-radius:50%;background:#8b949e}
+.multitask-dispatcher-roster-panel__dot[data-visual="working"]{background:#2f81f7}
+.multitask-dispatcher-roster-panel__dot[data-visual="starting"]{background:#d29922}
+.multitask-dispatcher-roster-panel__dot[data-visual="done"]{background:#2ea043}
+.multitask-dispatcher-roster-panel__dot[data-visual="failed"]{background:#f85149}
+.multitask-dispatcher-roster-panel__dot[data-visual="stopped"]{background:#8b949e}
+.multitask-dispatcher-roster-panel__dot[data-visual="working"]::after{content:"";position:absolute;inset:-3px;border-radius:50%;border:2px solid rgba(47,129,247,.55);animation:multitask-dispatcher-roster-ring 1.6s ease-out infinite}
+@keyframes multitask-dispatcher-roster-ring{0%{transform:scale(.6);opacity:.9}100%{transform:scale(1.5);opacity:0}}
+@media (prefers-reduced-motion: reduce){.multitask-dispatcher-roster-panel__dot[data-visual="working"]::after{animation:none;transform:none;opacity:.35}}
+.multitask-dispatcher-roster-panel__row-body{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+.multitask-dispatcher-roster-panel__row-title{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.multitask-dispatcher-roster-panel__row-detail{opacity:.55}
+.multitask-dispatcher-roster-panel__row-status{opacity:.75}
+.multitask-dispatcher-roster-panel__row-activity{opacity:.55}
+.multitask-dispatcher-roster-panel__row-todo{opacity:.45;font-size:11px;max-width:16ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.multitask-dispatcher-roster-panel__row-marker{align-self:flex-start;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 6px;border-radius:8px;border:1px solid currentColor}
+.multitask-dispatcher-roster-panel__row-marker--blocked{color:#d29922}
+.multitask-dispatcher-roster-panel__row-marker--landed{color:#2ea043}
+.multitask-dispatcher-roster-panel__row-steer{display:flex;align-items:center;gap:6px;margin-top:2px;flex-wrap:wrap}
+.multitask-dispatcher-roster-panel__steer{align-self:flex-start;padding:1px 8px;border-radius:6px;border:1px solid #30363d;background:transparent;color:inherit;opacity:.75;cursor:pointer;font:inherit;font-size:11px}
+.multitask-dispatcher-roster-panel__steer:hover{opacity:1;border-color:#8b949e}
+.multitask-dispatcher-roster-panel__steer-hint{opacity:.6;font-size:11px;min-width:0}
+.multitask-dispatcher-roster-panel__finished-count{opacity:.5;font-size:11px}
+.multitask-dispatcher-roster-panel__finished-count > summary{opacity:1;cursor:default}
+`;
+
+/** Localize the blocked waiting phrase from the structured class+target. */
+function blockedPhrase(t: TranslateFn, row: RosterRowView): string {
+  const blocked = row.blocked;
+  if (blocked === null) return "";
+  const template = t(rosterBlockedKey(blocked.class));
+  // Unknown template (copy drift) falls back to the generic class phrase.
+  const safe =
+    template === rosterBlockedKey(blocked.class)
+      ? t("roster.blocked.other")
+      : template;
+  return formatTemplate(safe, { target: blocked.target });
+}
+
+/** The activity line: `{status} · {elapsed} · {n} tool calls`. */
+function activityLine(t: TranslateFn, row: RosterRowView): string {
+  const toolCalls = formatTemplate(t("roster.activity.toolcalls"), {
+    count: String(row.toolCallCount),
+  });
+  return `${row.statusLabel} · ${row.elapsedText} · ${toolCalls}`;
+}
+
+/**
+ * The detail line: start time (client clock) + the kind-typed generic label,
+ * e.g. `09:07 · worker` (design-17 §4.2 "start time, detail line").
+ */
+function detailLine(row: RosterRowView): string {
+  return `${row.startText} · ${row.kindLabel}`;
+}
+
+/**
+ * One roster row (tickets 27 + 28; steer affordance ticket 40). `collapsed`
+ * lives on the view model, so the component only decides *where* a row
+ * renders, never *whether* it belongs (the partition rule is asserted in
+ * the store's offline tests).
+ *
+ * The per-row steer affordance (non-finished rows only — steering a
+ * settled worker is refused host-side, so offering it would be a lie) is a
+ * prefill seat, not a transport: clicking calls the injected
+ * `onRowSteer(workerId)` which writes `/dispatcher-steer <workerId> ` into
+ * the composer draft (verified seam, focus not exposed) and the row pairs
+ * the result with the honest hint, or with the copy-only fallback when the
+ * draft is unreachable. The row never sends anything.
+ */
+function RosterRow(props: {
+  t: TranslateFn;
+  row: RosterRowView;
+  onSteer?: ((workerId: string) => SteerPrefillOutcome) | undefined;
+}): JSX.Element {
+  const { t, row, onSteer } = props;
+  const [steerCopyKey, setSteerCopyKey] = useState<string | null>(null);
+  return (
+    <li
+      className={`${PANEL_CLASS}__row`}
+      data-status={row.statusLabel}
+      data-visual={row.visual}
+      data-marker={row.marker?.kind ?? ""}
+      data-section={row.section}
+      data-finished={row.finished ? "true" : "false"}
+    >
+      {/* Status dot / running ring: `data-status` keys the verbatim
+          core vocabulary; the ring animates only for working rows. */}
+      <span
+        className={`${PANEL_CLASS}__dot`}
+        data-status={row.statusLabel}
+        data-visual={row.visual}
+        aria-hidden="true"
+      />
+      <span className={`${PANEL_CLASS}__row-body`}>
+        <span className={`${PANEL_CLASS}__row-title`}>{row.title}</span>
+        {row.marker?.kind === "blocked" ? (
+          <span
+            className={`${PANEL_CLASS}__row-marker ${PANEL_CLASS}__row-marker--blocked`}
+          >
+            {blockedPhrase(t, row)}
+          </span>
+        ) : row.marker?.kind === "landed" ? (
+          <span
+            className={`${PANEL_CLASS}__row-marker ${PANEL_CLASS}__row-marker--landed`}
+          >
+            {t("roster.landed")}
+          </span>
+        ) : null}
+        <span className={`${PANEL_CLASS}__row-status`}>
+          {row.statusLabel}
+        </span>
+        <span className={`${PANEL_CLASS}__row-detail`}>{detailLine(row)}</span>
+        <span className={`${PANEL_CLASS}__row-activity`}>
+          {activityLine(t, row)}
+        </span>
+        {row.todoId !== null ? (
+          <span className={`${PANEL_CLASS}__row-todo`}>{row.todoId}</span>
+        ) : null}
+        {onSteer !== undefined && row.finished === false ? (
+          <span className={`${PANEL_CLASS}__row-steer`}>
+            <button
+              type="button"
+              className={`${PANEL_CLASS}__steer`}
+              data-worker={row.workerId}
+              onClick={() => {
+                const outcome = onSteer(row.workerId);
+                setSteerCopyKey(
+                  outcome.kind === "prefilled"
+                    ? ROSTER_STEER_HINT_KEY
+                    : ROSTER_STEER_COPY_FALLBACK_KEY,
+                );
+              }}
+            >
+              {t(ROSTER_STEER_BUTTON_KEY)}
+            </button>
+            {steerCopyKey !== null ? (
+              <span className={`${PANEL_CLASS}__steer-hint`}>
+                {formatTemplate(t(steerCopyKey), { workerId: row.workerId })}
+              </span>
+            ) : null}
+          </span>
+        ) : null}
+      </span>
+    </li>
+  );
+}
+
+/**
+ * One section. Empty sections render nothing (no dangling heading); the
+ * Finished section's collapsed rows hide behind a native `<details>`, so the
+ * "count line that expands" needs no state and no imperative handler.
+ */
+function rosterSection(
+  t: TranslateFn,
+  section: RosterSectionView,
+  onSteer?: (workerId: string) => SteerPrefillOutcome,
+): JSX.Element | null {
+  const visible = section.rows.filter((row) => !row.collapsed);
+  const collapsed = section.rows.filter((row) => row.collapsed);
+  if (visible.length === 0 && collapsed.length === 0) return null;
+  const list = (rows: readonly RosterRowView[]) =>
+    rows.length === 0 ? null : (
+      <ul className={`${PANEL_CLASS}__list`}>
+        {rows.map((row) => (
+          <RosterRow key={row.workerId} t={t} row={row} onSteer={onSteer} />
+        ))}
+      </ul>
+    );
+  return (
+    <div
+      key={section.id}
+      className={`${PANEL_CLASS}__section`}
+      data-section={section.id}
+    >
+      <div className={`${PANEL_CLASS}__section-title`}>
+        {t(section.titleKey)}
+      </div>
+      {list(visible)}
+      {collapsed.length > 0 ? (
+        <details className={`${PANEL_CLASS}__finished-count`}>
+          <summary>
+            {formatTemplate(t(ROSTER_FINISHED_COUNT_KEY), {
+              count: String(collapsed.length),
+            })}
+          </summary>
+          {list(collapsed)}
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Create the roster panel component bound to a translate seat and store.
+ * `onSteer` (ticket 40) is the optional per-row steer prefill seat — a
+ * pure `(workerId) => outcome` function over the verified composer-draft
+ * seam; without it the rows render without the affordance (same
+ * render-only default discipline as the capsule's intent seat).
+ */
 export function createRosterPanel(
   t: TranslateFn,
   store: RosterStore,
+  onSteer?: (workerId: string) => SteerPrefillOutcome,
 ): () => JSX.Element {
   return () => {
     const box = useSyncExternalStore(store.subscribe, store.getBox);
@@ -47,33 +296,20 @@ export function createRosterPanel(
 
     return (
       <div className={PANEL_CLASS}>
+        <style>{ROSTER_PANEL_CSS}</style>
         <div className={`${PANEL_CLASS}__title`}>{t("roster.title")}</div>
         {view.kind === "unavailable" ? (
           <div className={`${PANEL_CLASS}__unavailable`}>
             {t("roster.unavailable")}
           </div>
+        ) : view.kind === "loading" ? (
+          <div className={`${PANEL_CLASS}__loading`}>{t("roster.loading")}</div>
         ) : view.kind === "empty" ? (
           <div className={`${PANEL_CLASS}__empty`}>{t("roster.empty")}</div>
         ) : (
-          <ul className={`${PANEL_CLASS}__list`}>
-            {view.rows.map((row) => (
-              <li
-                key={row.workerId}
-                className={`${PANEL_CLASS}__row`}
-                data-status={row.statusLabel}
-              >
-                <span className={`${PANEL_CLASS}__row-title`}>{row.title}</span>
-                <span className={`${PANEL_CLASS}__row-status`}>
-                  {row.statusLabel}
-                </span>
-                {row.todoId !== null ? (
-                  <span className={`${PANEL_CLASS}__row-todo`}>
-                    {row.todoId}
-                  </span>
-                ) : null}
-              </li>
-            ))}
-          </ul>
+          <div className={`${PANEL_CLASS}__sections`}>
+            {view.sections.map((section) => rosterSection(t, section, onSteer))}
+          </div>
         )}
       </div>
     );

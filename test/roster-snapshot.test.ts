@@ -1,18 +1,24 @@
 /**
- * Ticket 21 — roster snapshot projection + settings-namespace data path
- * (host half; design-16 §4.2).
+ * Tickets 21 + 27 + 41 — roster snapshot projection + settings-namespace
+ * data path (host half; design-16 §4.2, design-17 §4.1/§6).
  *
  * Offline only (S8): FakeDshHost + createMultitask with the roster observer,
- * pure projection/parse/staleness checks, the settings-owner-scope channel,
- * and the real plugin apply() publishing through a fake settings provider on
- * activation and on roster-affecting transitions. No network, no LLM, no
- * running dsh.
+ * pure projection/parse/staleness checks (v3 wire contract; v1/v2 rejected
+ * fail-closed), the deliverables-line excerpt (bounded, most-recent,
+ * cleared at the delivered transition), the settings-owner-scope channel,
+ * and the real plugin apply() publishing through a fake settings provider
+ * on activation and on roster-affecting transitions (now including
+ * access-ask park). No network, no LLM, no running dsh.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { FakeDshHost } from "../src/core/fake-host.js";
-import { createMultitask } from "../src/core/multitask.js";
+import {
+  createMultitask,
+  type MultitaskOptions,
+} from "../src/core/multitask.js";
 import { createInMemoryDurability } from "../src/core/durability.js";
+import { RECENT_RESULT_EXCERPT_CHARS } from "../src/core/report-clamp.js";
 import {
   ROSTER_SETTINGS_KEY,
   ROSTER_SNAPSHOT_SCHEMA_VERSION,
@@ -21,6 +27,7 @@ import {
   isRosterSnapshotStale,
   parseRosterSnapshot,
   projectRosterSnapshot,
+  type RosterSnapshot,
 } from "../src/core/roster-snapshot.js";
 import {
   createSettingsRosterChannel,
@@ -35,48 +42,60 @@ import { apply as pluginApply } from "../src/plugin.js";
 function makeCore(
   observer?: (sessionId: string) => void,
   durability: ReturnType<typeof createInMemoryDurability> = createInMemoryDurability(),
+  access?: MultitaskOptions["access"],
 ) {
   const host = new FakeDshHost();
   const multitask = createMultitask(host, {
     durability,
     ...(observer === undefined ? {} : { onRosterChanged: observer }),
+    ...(access === undefined ? {} : { access }),
   });
   return { host, durability, multitask };
 }
 
 describe("roster snapshot — projection is a pure core projection (ticket 21)", () => {
-  it("projects id, title, core FSM status, and todo link — nothing else", () => {
+  it("projects the v2 presence row: id, title, FSM status, todo link, clock, count, delivered, blocked", async () => {
     const { host, multitask } = makeCore();
     const todo = multitask.createTodo({
       sessionId: "s-1",
       title: "Write the parser",
     });
-    return multitask
-      .spawnWorker({
-        parentSessionId: "s-1",
-        streamKey: "stream-a",
-        title: "Parser worker",
-        prompt: "do things",
-        todoId: todo.id,
-      })
-      .then((result) => {
-        assert.equal(result.ok, true);
-        const snapshot = projectRosterSnapshot(
-          "s-1",
-          multitask.listWorkers("s-1"),
-          1_000,
-        );
-        assert.equal(snapshot.schemaVersion, ROSTER_SNAPSHOT_SCHEMA_VERSION);
-        assert.equal(snapshot.dispatcherSessionId, "s-1");
-        assert.equal(snapshot.publishedAtMs, 1_000);
-        assert.equal(snapshot.workers.length, 1);
-        assert.deepEqual(snapshot.workers[0], {
-          workerId: result.ok ? result.workerId : "",
-          title: "Parser worker",
-          status: "spawned",
-          todoId: todo.id,
-        });
-      });
+    const spawn = await multitask.spawnWorker({
+      parentSessionId: "s-1",
+      streamKey: "stream-a",
+      title: "Parser worker",
+      prompt: "do things",
+      todoId: todo.id,
+    });
+    assert.equal(spawn.ok, true);
+    const workerId = spawn.ok ? spawn.workerId : "";
+    const summary = multitask.listWorkers("s-1")[0];
+    assert.ok(summary);
+    const snapshot = projectRosterSnapshot(
+      "s-1",
+      multitask.listWorkers("s-1"),
+      1_000,
+      {
+        pendingAccess: multitask.listPendingAccess("s-1"),
+        todos: multitask.listTodos("s-1"),
+      },
+    );
+    assert.equal(snapshot.schemaVersion, ROSTER_SNAPSHOT_SCHEMA_VERSION);
+    assert.equal(snapshot.dispatcherSessionId, "s-1");
+    assert.equal(snapshot.publishedAtMs, 1_000);
+    assert.equal(snapshot.workers.length, 1);
+    assert.deepEqual(snapshot.workers[0], {
+      kind: "worker",
+      workerId,
+      title: "Parser worker",
+      status: "spawned",
+      todoId: todo.id,
+      startedAtMs: summary.startedAtMs,
+      toolCallCount: 0,
+      // Linked todo exists and has not been delivered — landed marker fuel.
+      delivered: false,
+      blocked: null,
+    });
   });
 
   it("projects each core FSM status verbatim (the vocabulary is the label)", () => {
@@ -97,6 +116,117 @@ describe("roster snapshot — projection is a pure core projection (ticket 21)",
       ], 5);
       assert.equal(snapshot.workers[0]?.status, status);
     }
+  });
+});
+
+describe("roster snapshot — v2 presence fields join existing core truth (ticket 27)", () => {
+  it("joins a pending access ask by workerId — class+target names only", async () => {
+    const { host, multitask } = makeCore();
+    const spawn = await multitask.spawnWorker({
+      parentSessionId: "s-1",
+      streamKey: "k",
+      title: "T",
+      prompt: "P",
+    });
+    const workerId = spawn.ok ? spawn.workerId : "";
+    multitask.noteTurnStarted(workerId);
+    host.fireAccessRequest({
+      workerId,
+      requestId: "r-1",
+      body: {
+        class: "credential",
+        target: "API_TOKEN",
+        reason: "to call the deploy service",
+        credentialName: "API_TOKEN",
+      },
+      createdAtMs: 1,
+    });
+
+    const snapshot = projectRosterSnapshot(
+      "s-1",
+      multitask.listWorkers("s-1"),
+      1_000,
+      { pendingAccess: multitask.listPendingAccess("s-1") },
+    );
+    assert.deepEqual(snapshot.workers[0]?.blocked, {
+      class: "credential",
+      target: "API_TOKEN",
+    });
+    // Names only: reason text and any credential reference never ride the
+    // roster wire (access-types hard rule mirrored by the projection).
+    const blockedKeys = Object.keys(snapshot.workers[0]?.blocked ?? {}).sort();
+    assert.deepEqual(blockedKeys, ["class", "target"]);
+  });
+
+  it("a worker without a pending ask projects blocked: null", async () => {
+    const { multitask } = makeCore();
+    await multitask.spawnWorker({
+      parentSessionId: "s-1",
+      streamKey: "k",
+      title: "T",
+      prompt: "P",
+    });
+    const snapshot = projectRosterSnapshot(
+      "s-1",
+      multitask.listWorkers("s-1"),
+      1_000,
+      { pendingAccess: multitask.listPendingAccess("s-1") },
+    );
+    assert.equal(snapshot.workers[0]?.blocked, null);
+  });
+
+  it("delivered follows the ledger: no todo → true; linked todo → false until markDelivered", async () => {
+    const { host, multitask } = makeCore();
+    const todo = multitask.createTodo({ sessionId: "s-1", title: "T" });
+    const spawn = await multitask.spawnWorker({
+      parentSessionId: "s-1",
+      streamKey: "k",
+      title: "T",
+      prompt: "P",
+      todoId: todo.id,
+    });
+    const workerId = spawn.ok ? spawn.workerId : "";
+    host.fireSettled({ workerId, status: "completed", report: "done" });
+
+    const sources = () => ({
+      pendingAccess: multitask.listPendingAccess("s-1"),
+      todos: multitask.listTodos("s-1"),
+    });
+    const before = projectRosterSnapshot(
+      "s-1",
+      multitask.listWorkers("s-1"),
+      1_000,
+      sources(),
+    );
+    assert.equal(before.workers[0]?.delivered, false);
+
+    assert.equal(multitask.markDelivered(todo.id), true);
+    const after = projectRosterSnapshot(
+      "s-1",
+      multitask.listWorkers("s-1"),
+      1_000,
+      sources(),
+    );
+    assert.equal(after.workers[0]?.delivered, true);
+  });
+
+  it("a todo-less worker projects delivered: true — it can never sit landed-undelivered", async () => {
+    const { host, multitask } = makeCore();
+    const spawn = await multitask.spawnWorker({
+      parentSessionId: "s-1",
+      streamKey: "k",
+      title: "T",
+      prompt: "P",
+    });
+    const workerId = spawn.ok ? spawn.workerId : "";
+    host.fireSettled({ workerId, status: "completed", report: "done" });
+    const snapshot = projectRosterSnapshot(
+      "s-1",
+      multitask.listWorkers("s-1"),
+      1_000,
+      { todos: multitask.listTodos("s-1") },
+    );
+    assert.equal(snapshot.workers[0]?.delivered, true);
   });
 });
 
@@ -220,14 +350,387 @@ describe("roster snapshot — core observer fires on roster-affecting transition
   });
 });
 
-describe("roster snapshot — parse and staleness (wire contract)", () => {
-  const valid = projectRosterSnapshot("s-1", [], 1_000);
+describe("roster snapshot — observer covers the presence-field mutations (ticket 27)", () => {
+  it("fires when a pending ask parks and again when it resolves; a policy auto-answer stays silent", async () => {
+    const seen: string[] = [];
+    const { host, multitask } = makeCore((s) => seen.push(s));
+    const spawn = await multitask.spawnWorker({
+      parentSessionId: "s-1",
+      streamKey: "k",
+      title: "T",
+      prompt: "P",
+    });
+    const workerId = spawn.ok ? spawn.workerId : "";
+    multitask.noteTurnStarted(workerId);
+    const afterStart = seen.length;
 
-  it("round-trips a projected snapshot", () => {
-    assert.deepEqual(parseRosterSnapshot(valid), valid);
+    host.fireAccessRequest({
+      workerId,
+      requestId: "r-1",
+      body: { class: "tool", target: "edit", reason: "need" },
+      createdAtMs: 1,
+    });
+    assert.equal(multitask.listPendingAccess("s-1").length, 1);
+    assert.equal(seen.length - afterStart, 1, "park notifies once");
+
+    assert.equal(multitask.resolveAccess(workerId, { kind: "allow" }), true);
+    assert.equal(multitask.listPendingAccess("s-1").length, 0);
+    assert.equal(seen.length - afterStart, 2, "resolve notifies once");
   });
 
-  it("rejects wrong shape, version skew, bad clocks, and unknown statuses", () => {
+  it("an auto-answered allow never parks, so no observer noise; a policy deny notifies via onResolved", async () => {
+    const seen: string[] = [];
+    const { host, multitask } = makeCore((s) => seen.push(s));
+    multitask.accessPolicy.set({
+      class: "tool",
+      targetPattern: "allowed-*",
+      decision: "allow",
+      scope: "session",
+    });
+    multitask.accessPolicy.set({
+      class: "tool",
+      targetPattern: "denied-*",
+      decision: "deny",
+      scope: "session",
+    });
+    const spawn = await multitask.spawnWorker({
+      parentSessionId: "s-1",
+      streamKey: "k",
+      title: "T",
+      prompt: "P",
+    });
+    const workerId = spawn.ok ? spawn.workerId : "";
+    multitask.noteTurnStarted(workerId);
+    const afterStart = seen.length;
+
+    host.fireAccessRequest({
+      workerId,
+      requestId: "r-1",
+      body: { class: "tool", target: "allowed-thing", reason: "need" },
+      createdAtMs: 1,
+    });
+    assert.equal(multitask.listPendingAccess("s-1").length, 0);
+    assert.equal(seen.length - afterStart, 0, "auto-allow is roster-silent");
+
+    host.fireAccessRequest({
+      workerId,
+      requestId: "r-2",
+      body: { class: "tool", target: "denied-thing", reason: "need" },
+      createdAtMs: 2,
+    });
+    assert.equal(multitask.listPendingAccess("s-1").length, 0);
+    assert.equal(seen.length - afterStart, 1, "deny re-projects the marker");
+  });
+
+  it("the timeout deny re-projects through the relay's onResolved", async () => {
+    const seen: string[] = [];
+    const scheduled: Array<() => void> = [];
+    const { host, multitask } = makeCore(
+      (s) => seen.push(s),
+      createInMemoryDurability(),
+      {
+        timeoutMs: 5,
+        schedule: (fn) => {
+          scheduled.push(fn);
+          return () => {};
+        },
+      },
+    );
+    const spawn = await multitask.spawnWorker({
+      parentSessionId: "s-1",
+      streamKey: "k",
+      title: "T",
+      prompt: "P",
+    });
+    const workerId = spawn.ok ? spawn.workerId : "";
+    multitask.noteTurnStarted(workerId);
+    const afterStart = seen.length;
+
+    host.fireAccessRequest({
+      workerId,
+      requestId: "r-1",
+      body: { class: "network", target: "example.test", reason: "need" },
+      createdAtMs: 1,
+    });
+    assert.equal(seen.length - afterStart, 1);
+
+    const timeout = scheduled[0];
+    assert.ok(timeout, "deny timeout was armed");
+    timeout();
+    assert.equal(multitask.listPendingAccess("s-1").length, 0);
+    assert.equal(seen.length - afterStart, 2, "timeout deny notifies once");
+  });
+
+  it("markDelivered notifies the todo's session so the landed marker clears", async () => {
+    const seen: string[] = [];
+    const { host, multitask } = makeCore((s) => seen.push(s));
+    const todo = multitask.createTodo({ sessionId: "s-1", title: "T" });
+    const spawn = await multitask.spawnWorker({
+      parentSessionId: "s-1",
+      streamKey: "k",
+      title: "T",
+      prompt: "P",
+      todoId: todo.id,
+    });
+    const workerId = spawn.ok ? spawn.workerId : "";
+    host.fireSettled({ workerId, status: "completed", report: "done" });
+    const before = seen.length;
+
+    assert.equal(multitask.markDelivered(todo.id), true);
+    assert.equal(seen.length - before, 1);
+    assert.equal(seen.at(-1), "s-1");
+  });
+});
+
+describe("roster snapshot — deliverables excerpt (ticket 41, schema v3)", () => {
+  const landedRow = {
+    workerId: "w-1",
+    parentSessionId: "s-1",
+    streamKey: "k",
+    title: "Parser worker",
+    status: "completed" as const,
+    startedAtMs: 10,
+    elapsedMs: 0,
+    toolCallCount: 1,
+    transcriptRef: null,
+    todoId: "todo-1",
+  };
+  const landedTodo = {
+    id: "todo-1",
+    sessionId: "s-1",
+    title: "T",
+    status: "in_progress" as const,
+    streamKey: "k",
+    workerId: "w-1",
+    delivered: false,
+    createdAtMs: 0,
+    updatedAtMs: 0,
+  };
+
+  it("projects the settled-undelivered worker's excerpt through the seat", () => {
+    const snapshot = projectRosterSnapshot(
+      "s-1",
+      [landedRow],
+      1_000,
+      { todos: [landedTodo], recentResultOf: () => ({ text: "All done.", settledAtMs: 500 }) },
+    );
+    assert.deepEqual(snapshot.recentResult, {
+      workerId: "w-1",
+      title: "Parser worker",
+      text: "All done.",
+    });
+    // And the excerpt survives the defensive parse unchanged.
+    assert.deepEqual(parseRosterSnapshot(snapshot)?.recentResult, snapshot.recentResult);
+  });
+
+  it("picks the MOST RECENTLY SETTLED landed worker, not the first roster row", () => {
+    const early = { ...landedRow, workerId: "w-early", todoId: "todo-e" };
+    const late = {
+      ...landedRow,
+      workerId: "w-late",
+      title: "Later worker",
+      todoId: "todo-l",
+    };
+    const snapshot = projectRosterSnapshot(
+      "s-1",
+      [early, late],
+      1_000,
+      {
+        todos: [
+          { ...landedTodo, id: "todo-e", workerId: "w-early", delivered: false },
+          { ...landedTodo, id: "todo-l", workerId: "w-late", delivered: false },
+        ],
+        recentResultOf: (workerId) =>
+          workerId === "w-early"
+            ? { text: "early report", settledAtMs: 100 }
+            : { text: "late report", settledAtMs: 900 },
+      },
+    );
+    assert.equal(snapshot.recentResult?.workerId, "w-late");
+    assert.equal(snapshot.recentResult?.text, "late report");
+  });
+
+  it("clamps an over-long report to the shared excerpt bound (ellipsis included)", () => {
+    const snapshot = projectRosterSnapshot(
+      "s-1",
+      [landedRow],
+      1_000,
+      {
+        todos: [landedTodo],
+        recentResultOf: () => ({
+          text: "x".repeat(RECENT_RESULT_EXCERPT_CHARS + 500),
+          settledAtMs: 500,
+        }),
+      },
+    );
+    assert.equal(snapshot.recentResult?.text.length, RECENT_RESULT_EXCERPT_CHARS);
+    assert.ok(snapshot.recentResult?.text.endsWith("…"));
+  });
+
+  it("never speaks for delivered rows or workers still running", () => {
+    const delivered = projectRosterSnapshot(
+      "s-1",
+      [landedRow],
+      1_000,
+      {
+        // The delivered flip: same row, ledger says delivered.
+        todos: [{ ...landedTodo, delivered: true }],
+        recentResultOf: () => ({ text: "All done.", settledAtMs: 500 }),
+      },
+    );
+    assert.equal(delivered.recentResult, null, "delivered transition clears the line");
+
+    const running = projectRosterSnapshot(
+      "s-1",
+      [{ ...landedRow, status: "running" as const }],
+      1_000,
+      {
+        todos: [landedTodo],
+        recentResultOf: () => ({ text: "All done.", settledAtMs: 500 }),
+      },
+    );
+    assert.equal(running.recentResult, null);
+  });
+
+  it("an absent seat or an empty observed report projects null — count-only, never invented", () => {
+    const noSeat = projectRosterSnapshot("s-1", [landedRow], 1_000, {
+      todos: [landedTodo],
+    });
+    assert.equal(noSeat.recentResult, null);
+
+    const emptyReport = projectRosterSnapshot("s-1", [landedRow], 1_000, {
+      todos: [landedTodo],
+      recentResultOf: () => ({ text: "   ", settledAtMs: 500 }),
+    });
+    assert.equal(emptyReport.recentResult, null);
+  });
+
+  it("parse fail-closed matrix: v1 AND v2 payloads, missing/malformed/unbounded excerpts all fail to null", () => {
+    const valid = projectRosterSnapshot("s-1", [], 1_000);
+    assert.equal(valid.recentResult, null);
+
+    // The version rule design-17 §4.1 accepted for v1→v2 applies unchanged
+    // to v2→v3: old payloads fail the whole snapshot, the panel degrades.
+    const v2 = { ...valid, schemaVersion: 2 };
+    assert.equal(parseRosterSnapshot(v1Payload()), null, "v1 fails parse");
+    assert.equal(parseRosterSnapshot(v2), null, "v2 fails parse under v3");
+
+    // The field must EXIST on a v3 envelope — the projection always writes it.
+    const missing = { ...valid } as Record<string, unknown>;
+    delete missing.recentResult;
+    assert.equal(parseRosterSnapshot(missing), null, "missing key fails closed");
+
+    const malformed: Array<Record<string, unknown>> = [
+      "done",
+      42,
+      {},
+      { workerId: "", title: "T", text: "x" },
+      { workerId: "w-1", title: 7, text: "x" },
+      { workerId: "w-1", title: "T" },
+      { workerId: "w-1", title: "T", text: "" },
+      { workerId: "w-1", title: "T", text: "y".repeat(RECENT_RESULT_EXCERPT_CHARS + 1) },
+    ];
+    for (const recentResult of malformed) {
+      assert.equal(
+        parseRosterSnapshot({ ...valid, recentResult }),
+        null,
+        `malformed recentResult must fail the whole snapshot: ${JSON.stringify(recentResult).slice(0, 40)}`,
+      );
+    }
+
+    // Exactly-at-bound text parses; null stays the valid "nothing owed".
+    const atBound = parseRosterSnapshot({
+      ...valid,
+      recentResult: {
+        workerId: "w-1",
+        title: "T",
+        text: "z".repeat(RECENT_RESULT_EXCERPT_CHARS),
+      },
+    });
+    assert.equal(atBound?.recentResult?.text.length, RECENT_RESULT_EXCERPT_CHARS);
+    assert.equal(parseRosterSnapshot({ ...valid, recentResult: null })?.recentResult, null);
+  });
+
+  function v1Payload(): unknown {
+    return {
+      schemaVersion: 1,
+      dispatcherSessionId: "s-1",
+      publishedAtMs: 1_000,
+      workers: [
+        { workerId: "w", title: "T", status: "running", todoId: null },
+      ],
+    };
+  }
+});
+
+describe("roster snapshot — parse and staleness (v3 wire contract)", () => {
+  const valid: RosterSnapshot = projectRosterSnapshot("s-1", [], 1_000);
+
+  it("round-trips a projected v3 snapshot", () => {
+    const populated = projectRosterSnapshot(
+      "s-1",
+      [
+        {
+          workerId: "w-1",
+          parentSessionId: "s-1",
+          streamKey: "k",
+          title: "T",
+          status: "steering",
+          startedAtMs: 10,
+          elapsedMs: 0,
+          toolCallCount: 3,
+          transcriptRef: null,
+          todoId: "todo-1",
+        },
+      ],
+      1_000,
+      {
+        pendingAccess: [
+          {
+            workerId: "w-1",
+            requestId: "r-1",
+            body: { class: "filesystem", target: "/etc/hosts", reason: "need" },
+            createdAtMs: 1,
+            parentSessionId: "s-1",
+            status: "pending",
+          },
+        ],
+        todos: [
+          {
+            id: "todo-1",
+            sessionId: "s-1",
+            title: "T",
+            status: "in_progress",
+            streamKey: "k",
+            workerId: "w-1",
+            delivered: false,
+            createdAtMs: 0,
+            updatedAtMs: 0,
+          },
+        ],
+      },
+    );
+    assert.deepEqual(parseRosterSnapshot(populated), populated);
+  });
+
+  it("rejects a v1 payload cleanly — the panel degrades, never half-renders", () => {
+    const v1 = {
+      schemaVersion: 1,
+      dispatcherSessionId: "s-1",
+      publishedAtMs: 1_000,
+      workers: [
+        { workerId: "w", title: "T", status: "running", todoId: null },
+      ],
+    };
+    assert.equal(parseRosterSnapshot(v1), null, "v1 version bump fails parse");
+    // A v1 row grafted into a v2 envelope is still broken: no kind field.
+    assert.equal(
+      parseRosterSnapshot({ ...valid, workers: v1.workers }),
+      null,
+    );
+  });
+
+  it("rejects wrong shape, version skew, bad clocks, unknown kinds/statuses, and malformed rows", () => {
     assert.equal(parseRosterSnapshot(null), null);
     assert.equal(parseRosterSnapshot("nope"), null);
     assert.equal(
@@ -244,21 +747,85 @@ describe("roster snapshot — parse and staleness (wire contract)", () => {
       null,
     );
     assert.equal(parseRosterSnapshot({ ...valid, workers: "no" }), null);
+    const v2Row = {
+      kind: "worker",
+      workerId: "w",
+      title: "T",
+      status: "running",
+      todoId: null,
+      startedAtMs: 0,
+      toolCallCount: 0,
+      delivered: true,
+      blocked: null,
+    };
     assert.equal(
       parseRosterSnapshot({
         ...valid,
-        workers: [{ workerId: "w", title: "T", status: "zombie", todoId: null }],
+        workers: [{ ...v2Row, status: "zombie" }],
       }),
       null,
     );
     assert.equal(
       parseRosterSnapshot({
         ...valid,
-        workers: [{ workerId: "w", title: "T", status: "running" }],
+        workers: [{ ...v2Row, kind: "robot" }],
       }),
       null,
-      "missing todoId is not null",
+      "unknown producer kind fails closed (conflict 6)",
     );
+    assert.equal(
+      parseRosterSnapshot({
+        ...valid,
+        workers: [v2Row],
+      })?.workers[0]?.kind,
+      "worker",
+    );
+  });
+
+  it("rejects malformed presence fields (ticket 27 fail-closed)", () => {
+    const v2Row = {
+      kind: "worker",
+      workerId: "w",
+      title: "T",
+      status: "running",
+      todoId: null,
+      startedAtMs: 0,
+      toolCallCount: 0,
+      delivered: true,
+      blocked: null,
+    };
+    const withRow = (row: Record<string, unknown>) =>
+      parseRosterSnapshot({ ...valid, workers: [row] });
+
+    // Clocks and counts must be finite, sane numbers.
+    assert.equal(withRow({ ...v2Row, startedAtMs: Number.NaN }), null);
+    assert.equal(withRow({ ...v2Row, startedAtMs: Number.POSITIVE_INFINITY }), null);
+    assert.equal(withRow({ ...v2Row, startedAtMs: -1 }), null);
+    assert.equal(withRow({ ...v2Row, toolCallCount: 1.5 }), null);
+    assert.equal(withRow({ ...v2Row, toolCallCount: -3 }), null);
+    assert.equal(withRow({ ...v2Row, delivered: "yes" }), null);
+
+    // Structured blocked: null is fine; anything malformed fails the row.
+    assert.equal(withRow({ ...v2Row, blocked: "tool:edit" }), null);
+    assert.equal(withRow({ ...v2Row, blocked: {} }), null);
+    assert.equal(withRow({ ...v2Row, blocked: { class: "tool" } }), null);
+    assert.equal(
+      withRow({ ...v2Row, blocked: { class: "laser", target: "x" } }),
+      null,
+      "unknown access class is version skew — fail closed",
+    );
+    assert.equal(
+      withRow({ ...v2Row, blocked: { class: "tool", target: 7 } }),
+      null,
+    );
+    const parsed = withRow({
+      ...v2Row,
+      blocked: { class: "other", target: "something" },
+    });
+    assert.deepEqual(parsed?.workers[0]?.blocked, {
+      class: "other",
+      target: "something",
+    });
   });
 
   it("staleness boundary: exactly at the window is fresh, beyond is stale", () => {
@@ -461,6 +1028,17 @@ function topLevelAgent(id: string): AgentLike {
 }
 
 describe("roster snapshot — plugin publishes through the settings namespace", () => {
+  /**
+   * Ticket 31: the on-activation publish rides the async durability
+   * rebuild (`rebuildFromDurability` BEFORE the first publish), so tests
+   * drain the queued chain before asserting on published snapshots.
+   */
+  async function flushActivation(): Promise<void> {
+    for (let i = 0; i < 5; i += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  }
+
   it("activation publishes an empty snapshot; spawn and settle update it", async () => {
     const ctx = createSettingsAwareCtx();
     const { updates } = ctx;
@@ -471,8 +1049,10 @@ describe("roster snapshot — plugin publishes through the settings namespace", 
       topLevelAgent("s-1"),
     ) as { kind: string };
     assert.equal(result.kind, "success");
+    await flushActivation();
 
-    // On-activation publish: fresh (empty) roster without any transition.
+    // On-activation publish (after the rebuild): fresh (empty) roster
+    // without any transition.
     assert.equal(updates.length, 1);
     const first = (updates[0] as Record<string, unknown>)[
       ROSTER_SETTINGS_KEY
@@ -499,6 +1079,11 @@ describe("roster snapshot — plugin publishes through the settings namespace", 
     assert.equal(second.workers[0]?.title, "Parser worker");
 
     // Host settle → accepted transition → third publish with the new status.
+    // Ticket 41: the v3 envelope always carries `recentResult`. This worker
+    // has no ledger link, so it projects delivered — it owes nothing and
+    // the excerpt is rightly withheld. The positive path (seat text →
+    // published excerpt) is covered by the projection suite above and the
+    // adapter seat suite in adapter-cordis-dsh-host.test.ts.
     ctx.fire("subagent/end", {
       id: spawned.worker_id,
       stopReason: "completed",
@@ -507,8 +1092,63 @@ describe("roster snapshot — plugin publishes through the settings namespace", 
     assert.equal(updates.length, 3);
     const third = (updates[2] as Record<string, unknown>)[
       ROSTER_SETTINGS_KEY
-    ] as { workers: Array<{ status: string }> };
+    ] as {
+      schemaVersion: number;
+      workers: Array<{ status: string }>;
+      recentResult: unknown;
+    };
+    assert.equal(third.schemaVersion, ROSTER_SNAPSHOT_SCHEMA_VERSION);
     assert.equal(third.workers[0]?.status, "completed");
+    assert.equal(third.recentResult, null);
+  });
+
+  it("a parked access ask republishes the roster with the blocked reason (names only)", async () => {
+    const ctx = createSettingsAwareCtx();
+    const { updates } = ctx;
+    pluginApply(ctx, { enabled: true });
+    const result = ctx.runCommand(
+      DISPATCHER_START_COMMAND,
+      topLevelAgent("s-1"),
+    ) as { kind: string };
+    assert.equal(result.kind, "success");
+
+    const spawn = ctx.tool("spawn_worker");
+    assert.ok(spawn);
+    const spawned = (await spawn.execute(
+      { stream_key: "k", title: "Parser worker", prompt: "P" },
+      { agent: { session: { id: "s-1" } } },
+    )) as { ok: boolean; worker_id: string };
+    assert.equal(spawned.ok, true);
+    const afterSpawn = updates.length;
+
+    // The worker asks for access: the relay parks a ticket (core observer)
+    // and the plugin republishes the snapshot carrying the blocked marker.
+    const access = ctx.tool("request_access");
+    assert.ok(access);
+    const asked = (await access.execute(
+      { class: "tool", target: "edit_file", reason: "need to edit files" },
+      { agent: { session: { id: spawned.worker_id } } },
+    )) as { ok: boolean };
+    assert.equal(asked.ok, true);
+
+    assert.equal(updates.length, afterSpawn + 1);
+    const latest = (updates.at(-1) as Record<string, unknown>)[
+      ROSTER_SETTINGS_KEY
+    ] as {
+      workers: Array<{
+        status: string;
+        blocked: { class: string; target: string } | null;
+      }>;
+    };
+    assert.deepEqual(latest.workers[0]?.blocked, {
+      class: "tool",
+      target: "edit_file",
+    });
+    // Names only — the free-text reason never rides the roster wire.
+    assert.deepEqual(Object.keys(latest.workers[0]?.blocked ?? {}).sort(), [
+      "class",
+      "target",
+    ]);
   });
 
   it("non-activated sessions never publish: transitions gate on the dispatcher session", () => {

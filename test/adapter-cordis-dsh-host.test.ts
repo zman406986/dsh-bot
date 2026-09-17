@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   createCordisDshHost,
+  describeToolActivity,
   listGlobalToolNames,
   mapStopReason,
   normalizeSettleReport,
@@ -13,6 +14,7 @@ import {
 } from "../src/adapter/cordis-dsh-host.js";
 import { bindDispatcherLifecycle, isTopLevel } from "../src/adapter/parent-agent.js";
 import { createMultitask } from "../src/core/multitask.js";
+import { CHECK_ACTIVITY_CHARS, RECENT_RESULT_EXCERPT_CHARS } from "../src/core/report-clamp.js";
 import type { SettledEvent } from "../src/core/types.js";
 import { createWorkerAgentDef } from "../src/worker/agent-def.js";
 import { EMPTY_WORKER_REPORT_PLACEHOLDER } from "../src/worker/report.js";
@@ -44,7 +46,7 @@ function createStubCtx() {
   const agents = new Map<string, AgentLike>();
 
   const ctx: AdapterContext & {
-    fire(name: string, payload: unknown): void;
+    fire(name: string, ...payloads: unknown[]): void;
     startContinuableCalls: RecordedCall[];
     interruptCalls: RecordedCall[];
     sendMessageCalls: RecordedCall[];
@@ -55,9 +57,9 @@ function createStubCtx() {
     interruptCalls,
     sendMessageCalls,
     followupCalls,
-    fire(name: string, payload: unknown) {
+    fire(name: string, ...payloads: unknown[]) {
       for (const cb of listeners.get(name) ?? []) {
-        (cb as (p: unknown) => void)(payload);
+        (cb as (...args: unknown[]) => void)(...payloads);
       }
     },
     bindAgent(agent: AgentLike) {
@@ -406,6 +408,90 @@ describe("CordisDshHost settle and step boundary", () => {
   });
 });
 
+describe("CordisDshHost recentResult — deliverables excerpt source (ticket 41)", () => {
+  async function settleOne() {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    host.bindParent(createAgent("disp-1"), "disp-1");
+    await host.spawnWorker("x", {
+      parentSessionId: "disp-1",
+      streamKey: "s",
+      title: "t",
+    });
+    return { ctx, host };
+  }
+
+  it("a completed settle leaves a bounded excerpt visible before core observers run", async () => {
+    const { ctx, host } = await settleOne();
+    let excerptDuringSettle: unknown = "not-read";
+    host.onWorkerSettled(() => {
+      // The projection reads the seat from inside the settle-triggered
+      // roster publish — it must already see the text here.
+      excerptDuringSettle = host.recentResult("child-1");
+    });
+    ctx.fire("subagent/end", {
+      id: "child-1",
+      stopReason: "completed",
+      lastAssistantMessage: [{ type: "text", text: "All done." }],
+    });
+    assert.equal(
+      (excerptDuringSettle as { text: string } | null)?.text,
+      "All done.",
+      "the settle-time publish already sees the excerpt",
+    );
+    assert.equal(
+      typeof (excerptDuringSettle as { settledAtMs: number } | null)?.settledAtMs,
+      "number",
+    );
+    assert.equal(host.recentResult("child-1")?.text, "All done.");
+  });
+
+  it("clamps an over-long report to the excerpt bound; empty abort leaves null", async () => {
+    const { ctx, host } = await settleOne();
+    ctx.fire("subagent/end", {
+      id: "child-1",
+      stopReason: "completed",
+      lastAssistantMessage: [{ type: "text", text: "y".repeat(5_000) }],
+    });
+    const clamped = host.recentResult("child-1");
+    assert.equal(clamped?.text.length, RECENT_RESULT_EXCERPT_CHARS);
+    assert.ok(clamped?.text.endsWith("…"));
+
+    // An aborted worker with no text invents nothing.
+    await host.spawnWorker("x", {
+      parentSessionId: "disp-1",
+      streamKey: "s2",
+      title: "t2",
+    });
+    ctx.fire("subagent/end", {
+      id: "child-2",
+      stopReason: "aborted",
+      lastAssistantMessage: undefined,
+    });
+    assert.equal(host.recentResult("child-2"), null);
+    assert.equal(host.recentResult("never-settled"), null);
+  });
+
+  it("unknown children never gain an excerpt; dispose clears the map", async () => {
+    const { ctx, host } = await settleOne();
+    ctx.fire("subagent/end", {
+      id: "not-ours",
+      stopReason: "completed",
+      lastAssistantMessage: [{ type: "text", text: "ghost" }],
+    });
+    assert.equal(host.recentResult("not-ours"), null);
+
+    ctx.fire("subagent/end", {
+      id: "child-1",
+      stopReason: "completed",
+      lastAssistantMessage: [{ type: "text", text: "real" }],
+    });
+    assert.notEqual(host.recentResult("child-1"), null);
+    host.dispose();
+    assert.equal(host.recentResult("child-1"), null);
+  });
+});
+
 describe("dispatcher wake", () => {
   it("followup is called on the dispatcher agent", async () => {
     const ctx = createStubCtx();
@@ -560,5 +646,139 @@ describe("bindDispatcherLifecycle", () => {
       reason: "unbound",
     });
     assert.equal(host.hasParent(), false);
+  });
+});
+
+/** Fire a `session/event` the way the host bus does: (session, event). */
+function fireSessionEvent(
+  ctx: ReturnType<typeof createStubCtx>,
+  sessionId: string,
+  event: unknown,
+): void {
+  ctx.fire("session/event", { id: sessionId }, event);
+}
+
+function toolCallEvent(name: string, args: unknown): unknown {
+  return {
+    type: "tool/call",
+    data: {
+      turn: 1,
+      step: 2,
+      callId: "call-1",
+      name,
+      arguments: typeof args === "string" ? args : JSON.stringify(args),
+    },
+  };
+}
+
+/** Bind a parent and spawn one worker; returns the host and its worker id. */
+async function spawnOneWorker(ctx: ReturnType<typeof createStubCtx>) {
+  const host = createCordisDshHost(ctx);
+  host.bindParent(createAgent("disp-1"), "disp-1");
+  const workerId = await host.spawnWorker("Do the thing.", {
+    parentSessionId: "disp-1",
+    streamKey: "s1",
+    title: "Thing",
+  });
+  return { host, workerId };
+}
+
+describe("CordisDshHost session/event activity feed (ticket 29)", () => {
+  it("derives a phrase from an owned worker's tool/call event", async () => {
+    const ctx = createStubCtx();
+    const { host, workerId } = await spawnOneWorker(ctx);
+    assert.equal(host.recentActivity(workerId), null);
+
+    fireSessionEvent(ctx, workerId, toolCallEvent("bash", { command: "npm test" }));
+    assert.equal(host.recentActivity(workerId), "bash: npm test");
+  });
+
+  it("ignores non-tool events, unowned sessions, and unreadable payloads", async () => {
+    const ctx = createStubCtx();
+    const { host, workerId } = await spawnOneWorker(ctx);
+
+    fireSessionEvent(ctx, workerId, { type: "turn/start", data: { turn: 1 } });
+    fireSessionEvent(ctx, "stranger-session", toolCallEvent("bash", { command: "rm -rf /" }));
+    fireSessionEvent(ctx, workerId, { type: "tool/call", data: { name: "" } });
+    fireSessionEvent(ctx, workerId, { type: "tool/call", data: null });
+    fireSessionEvent(ctx, workerId, { type: "tool/call" });
+    fireSessionEvent(ctx, workerId, null);
+    fireSessionEvent(ctx, workerId, undefined);
+
+    assert.equal(host.recentActivity(workerId), null);
+  });
+
+  it("falls back to the bare tool name when arguments yield no hint", async () => {
+    const ctx = createStubCtx();
+    const { host, workerId } = await spawnOneWorker(ctx);
+
+    fireSessionEvent(ctx, workerId, toolCallEvent("bash", "not json"));
+    assert.equal(host.recentActivity(workerId), "bash");
+
+    fireSessionEvent(ctx, workerId, toolCallEvent("grep", { count: 3 }));
+    assert.equal(host.recentActivity(workerId), "grep");
+  });
+
+  it("collapses whitespace in the hint and prefers the first string field", async () => {
+    const ctx = createStubCtx();
+    const { host, workerId } = await spawnOneWorker(ctx);
+
+    fireSessionEvent(ctx, workerId, toolCallEvent("read_file", {
+      irrelevant: 42,
+      path: "src/auth/\n  session.ts",
+    }));
+    assert.equal(host.recentActivity(workerId), "read_file: src/auth/ session.ts");
+  });
+
+  it("clamps the phrase to CHECK_ACTIVITY_CHARS with an ellipsis", async () => {
+    const ctx = createStubCtx();
+    const { host, workerId } = await spawnOneWorker(ctx);
+
+    const longName = "tool_".padEnd(150, "x");
+    fireSessionEvent(ctx, workerId, toolCallEvent(longName, { command: "go" }));
+    const phrase = host.recentActivity(workerId);
+    assert.ok(phrase !== null);
+    assert.ok(
+      phrase.length <= CHECK_ACTIVITY_CHARS + 1,
+      `phrase clamped: ${phrase.length}`,
+    );
+    assert.ok(phrase.endsWith("…"));
+  });
+
+  it("latest event wins; settle clears the phrase", async () => {
+    const ctx = createStubCtx();
+    const { host, workerId } = await spawnOneWorker(ctx);
+
+    fireSessionEvent(ctx, workerId, toolCallEvent("bash", { command: "first" }));
+    fireSessionEvent(ctx, workerId, toolCallEvent("grep", { pattern: "second" }));
+    assert.equal(host.recentActivity(workerId), "grep: second");
+
+    ctx.fire("subagent/end", {
+      id: workerId,
+      stopReason: "completed",
+      lastAssistantMessage: [{ type: "text", text: "ok" }],
+    });
+    assert.equal(host.recentActivity(workerId), null);
+  });
+
+  it("dispose unsubscribes and clears recorded activity", async () => {
+    const ctx = createStubCtx();
+    const { host, workerId } = await spawnOneWorker(ctx);
+    fireSessionEvent(ctx, workerId, toolCallEvent("bash", { command: "go" }));
+    assert.equal(host.recentActivity(workerId), "bash: go");
+
+    host.dispose();
+    fireSessionEvent(ctx, workerId, toolCallEvent("bash", { command: "after dispose" }));
+    assert.equal(host.recentActivity(workerId), null);
+  });
+
+  it("describeToolActivity is null-safe on hostile input", () => {
+    assert.equal(describeToolActivity(undefined), null);
+    assert.equal(describeToolActivity(null), null);
+    assert.equal(describeToolActivity(42), null);
+    assert.equal(describeToolActivity("bash: npm test"), null);
+    assert.equal(describeToolActivity({}), null);
+    assert.equal(describeToolActivity({ name: 7, arguments: "{}" }), null);
+    assert.equal(describeToolActivity({ name: "bash" }), "bash");
   });
 });

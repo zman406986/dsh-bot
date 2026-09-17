@@ -77,12 +77,16 @@ export interface MultitaskOptions {
   /** Peer inbox knobs (ticket 14). */
   readonly peer?: PeerInboxOptions;
   /**
-   * Roster-change observer (ticket 21). Fired after every roster-affecting
-   * mutation — spawn, accepted FSM transition (turn/steer/abort/settle),
-   * durability restore, and todo reconcile — with the affected parent
-   * session id. Fire-and-forget: observer errors are swallowed so telemetry
-   * can never break core flow. The observer only READS the core back to
-   * project a snapshot; the core keeps no snapshot state (no second store).
+   * Roster-change observer (tickets 21 + 27). Fired after every
+   * roster-affecting mutation — spawn, accepted FSM transition
+   * (turn/steer/abort/settle), durability restore, todo reconcile, a
+   * pending access ask parking or resolving (the blocked marker), and a
+   * todo flipping to delivered (the delivered flag) — with the affected
+   * parent session id. Fire-and-forget: observer errors are swallowed so
+   * telemetry can never break core flow. The observer only READS the core
+   * back to project a snapshot; the core keeps no snapshot state (no second
+   * store) and no presence state (design-17 §5 conflict 8: presence is a
+   * projection of existing truth).
    */
   readonly onRosterChanged?: (parentSessionId: string) => void;
 }
@@ -196,6 +200,12 @@ export interface Multitask {
   resolveAccess(workerId: string, decision: AccessDecision): boolean;
   /** Pending access tickets, optionally filtered by parent session. */
   listPendingAccess(parentSessionId?: string): readonly AccessTicket[];
+  /**
+   * Drop every session-scope access policy row (ticket 30). Called on
+   * deactivation/unload so an "always allow (this session)" choice never
+   * leaks into a later session. Profile rows are untouched.
+   */
+  clearSessionAccessPolicy(): void;
   /** Stored policy table (session/profile). No hit → ask. */
   readonly accessPolicy: AccessPolicyTable;
 }
@@ -252,7 +262,10 @@ export function createMultitask(
       });
     },
     onResolved: (notice, parentSessionId) => {
-      // Honest deny reporting: surface the denial on the next wake.
+      // Honest deny reporting: surface the denial on the next wake. Ticket
+      // 27: the pending-access set changed here (timeout/policy deny), so
+      // the blocked marker must re-project too.
+      notifyRosterChanged(parentSessionId);
       wakeBus.enqueueAccessNotice({ parentSessionId, notice });
     },
     getWorkerTitle: (workerId) => workers.get(workerId)?.title ?? workerId,
@@ -376,10 +389,18 @@ export function createMultitask(
 
   // Structured access ask from a worker (ticket 13). Policy may auto-answer;
   // otherwise the relay parks a ticket, arms the timeout, and wakes us.
+  // Ticket 27: a parked ask changes the worker's blocked marker, so the
+  // roster observer fires too. Only an actual park notifies — a policy
+  // auto-answer (or a refused duplicate) leaves the pending set unchanged;
+  // auto-answer denials re-project through `onResolved` above.
   host.onAccessRequest((event) => {
     const record = workers.get(event.workerId);
     if (record === undefined || isTerminalStatus(record.status)) return;
+    const pendingBefore = accessRelay.listPending(record.parentSessionId).length;
     accessRelay.noteRequest(event, record.parentSessionId);
+    if (accessRelay.listPending(record.parentSessionId).length > pendingBefore) {
+      notifyRosterChanged(record.parentSessionId);
+    }
   });
 
   return {
@@ -562,6 +583,9 @@ export function createMultitask(
     markDelivered(todoId: string): boolean {
       const ok = todoLedger.markDelivered(todoId);
       if (!ok) return false;
+      // Ticket 27: the delivered flag flipped — presence must re-project.
+      const todo = todoLedger.get(todoId);
+      if (todo !== undefined) notifyRosterChanged(todo.sessionId);
       // Delivery obligation closed — drop the durable marker for its worker.
       if (durability !== undefined) {
         const workerId = todoLedger.get(todoId)?.workerId;
@@ -698,10 +722,22 @@ export function createMultitask(
     },
     peerInbox,
     resolveAccess(workerId: string, decision: AccessDecision): boolean {
-      return accessRelay.resolve(workerId, decision);
+      const resolved = accessRelay.resolve(workerId, decision);
+      // Ticket 27: the pending-access set changed — re-project the roster
+      // so the worker's blocked marker clears promptly.
+      if (resolved) {
+        const record = workers.get(workerId);
+        if (record !== undefined) notifyRosterChanged(record.parentSessionId);
+      }
+      return resolved;
     },
     listPendingAccess(parentSessionId?: string): readonly AccessTicket[] {
       return accessRelay.listPending(parentSessionId);
+    },
+    clearSessionAccessPolicy(): void {
+      // Ticket 30: "always allow (this session)" rows must never outlive the
+      // activated session — the plugin clears them on deactivation/unload.
+      accessPolicy.clearSession();
     },
     accessPolicy,
   };

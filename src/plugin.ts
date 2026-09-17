@@ -9,16 +9,21 @@ import {
   type WakeNotice,
 } from "./core/policy/assembler.js";
 import {
+  accessExpiredNotice,
+  assembleRestartNotice,
   bindDispatcherLifecycle,
   createAccessPromptPump,
   createCordisDshHost,
   createSettingsRosterChannel,
   createStorageDomainDurability,
   installMultitaskSettingsSection,
+  isWildcardAccessTarget,
   registerDispatcherStartCommand,
   registerDispatcherSteerCommand,
   registerDispatcherTools,
   resolveExecSessionId,
+  RESTART_DEGRADED_NOTICE,
+  secretStoredAccessNotice,
   type AdapterContext,
   type CordisDshHost,
   type SettingsInjectContext,
@@ -244,20 +249,26 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   });
   multitaskRef = multitask;
 
-  // Roster snapshot projection (ticket 21). Pure projection of the core
-  // roster — never a second source of truth. The core observer fires on
-  // every roster-affecting transition, gated to the activated dispatcher
-  // session; before activation nothing is published (no dispatcher roster
-  // exists). On deactivation publishing simply stops: the snapshot ages past
-  // the stale window and the panel degrades to "unavailable" copy (design-16
-  // §3.6 — the panel shows state only while a live session exists).
+  // Roster snapshot projection (tickets 21 + 27). Pure projection of the
+  // core roster — never a second source of truth. The core observer fires on
+  // every roster-affecting transition (including access-ask park/resolve and
+  // todo delivery), gated to the activated dispatcher session; before
+  // activation nothing is published (no dispatcher roster exists). On
+  // deactivation publishing simply stops: the snapshot ages past the stale
+  // window and the panel degrades to "unavailable" copy (design-16 §3.6 —
+  // the panel shows state only while a live session exists). The v2
+  // presence fields join existing core truth at publish time: pending
+  // access asks (blocked, names only) and the ledger's delivered state.
+  // Ticket 41 (v3): the deliverables line's `recentResult` joins at publish
+  // time too — the adapter's own settle observation (`host.recentResult`,
+  // clamped), never a core store. No new core state holds report text.
   const publishRosterSnapshot = (sessionId: string): void => {
     rosterChannel.publish(
-      projectRosterSnapshot(
-        sessionId,
-        multitask.listWorkers(sessionId),
-        Date.now(),
-      ),
+      projectRosterSnapshot(sessionId, multitask.listWorkers(sessionId), Date.now(), {
+        pendingAccess: multitask.listPendingAccess(sessionId),
+        todos: multitask.listTodos(sessionId),
+        recentResultOf: (workerId) => host.recentResult(workerId),
+      }),
     );
   };
 
@@ -283,6 +294,47 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       return multitask.listPendingAccess(sessionId);
     },
     resolve: (workerId, decision) => multitask.resolveAccess(workerId, decision),
+    // Ticket 30: "Always allow (this session)" inserts a session-scope allow
+    // row (class + exact target) into the relay's existing policy table —
+    // future matching asks auto-answer on the shipped policy no-op path.
+    // Profile/preset writes are deliberately NOT plumbed (consent boundary).
+    // Wildcard fence (ticket 30), last line: a session row is only ever
+    // written for the exact target the human consented to. The prompt path
+    // already degrades metacharacter targets, so a wildcard pattern reaching
+    // this sink (constructed or queued always-allow) fails closed here
+    // instead of remembering a whole class or prefix of targets.
+    alwaysAllow: (ticket) => {
+      if (isWildcardAccessTarget(ticket.body.target)) return;
+      multitask.accessPolicy.set({
+        class: ticket.body.class,
+        targetPattern: ticket.body.target,
+        decision: "allow",
+        scope: "session",
+      });
+    },
+    // Ticket 30: an answer for a ticket the relay already resolved (ADR-0008
+    // timeout deny) surfaces honest expired copy on the next wake instead of
+    // silence; the pump resolves nothing for it.
+    notifyExpired: (ticket) => {
+      multitask.wakeBus.enqueueAccessNotice({
+        parentSessionId: ticket.parentSessionId,
+        notice: accessExpiredNotice(
+          ticket,
+          multitask.getWorker(ticket.workerId)?.title ?? ticket.workerId,
+        ),
+      });
+    },
+    // Ticket 30: an allowed credential ask reports the names-never-values
+    // reassurance as its post-decision notice.
+    notifySecretStored: (ticket) => {
+      multitask.wakeBus.enqueueAccessNotice({
+        parentSessionId: ticket.parentSessionId,
+        notice: secretStoredAccessNotice(
+          ticket,
+          multitask.getWorker(ticket.workerId)?.title ?? ticket.workerId,
+        ),
+      });
+    },
     requeueConversational: (ticket) => {
       // Fallback presentation after a seam failure: the same wake-bus
       // enqueue the core relay uses for conversational asks.
@@ -313,6 +365,9 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       multitask,
       getSessionId: () => lifecycle.dispatcherSessionId(),
       resolveCallerSessionId: resolveExecSessionId,
+      // Ticket 29: live activity phrases for check rows, projected from the
+      // host session/event firehose (host-observed truth; no polling).
+      recentActivity: (workerId) => host.recentActivity(workerId),
     });
     // T13: worker-only request_access tool. Emits structured asks into the core.
     const disposeAccessTool = registerWorkerAccessTool({
@@ -343,19 +398,49 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   // Passive status wiring (wake bounds, worker FSM, steer delivery) plus the
   // activate/deactivate hooks. Policy flag is session-scoped (ADR-0005); the
   // frozen `enabled` is the authority — policy is ON whenever we are here.
+  // Ticket 31 (design-17 §4.7): restart honesty. The rebuild is async, so
+  // activation completes immediately; the chain below lands the first roster
+  // publish and the one-time restart notice once markers have been read.
+  // Ordering is the acceptance rule: `rebuildFromDurability` runs BEFORE the
+  // first `publishRosterSnapshot`, so restored terminal rows are in the very
+  // first snapshot the panel sees, and landed-undelivered items flush on the
+  // first wake (S4 across restart). Core rebuild semantics are frozen
+  // (ADR-0006); this is adapter ordering only.
+  const rebuildAndNotice = async (sessionId: string): Promise<void> => {
+    let notice: string | null = null;
+    try {
+      notice = assembleRestartNotice(
+        await multitask.rebuildFromDurability(sessionId),
+      );
+    } catch {
+      // Marker store unreadable: activation still succeeds; the honest
+      // degraded notice says nothing was restored or replayed.
+      notice = RESTART_DEGRADED_NOTICE;
+    }
+    // The activation may have ended while markers were being read — never
+    // publish or inject for a session that is no longer the dispatcher.
+    if (lifecycle.dispatcherSessionId() !== sessionId) return;
+    publishRosterSnapshot(sessionId);
+    // Ticket 23: prompts sync stays after the first publish, as before.
+    accessPrompts.sync();
+    if (notice !== null) lifecycle.injectNotice(notice);
+  };
+
   const lifecycle = bindDispatcherLifecycle(ctx, host, multitask, {
     policyEnabled: enabled,
     onActivated: (sessionId) => {
       activateToolSurface();
       // Ticket 21: publish immediately on activation so the panel has a
       // fresh (possibly empty) snapshot without waiting for a transition.
-      publishRosterSnapshot(sessionId);
-      // Ticket 23: surface any asks that parked while dormant (workers
-      // keep running across deactivations) as prompts now.
-      accessPrompts.sync();
+      // Ticket 31: the publish now happens inside `rebuildAndNotice`, AFTER
+      // the durability rebuild, so restored rows are in the first snapshot.
+      void rebuildAndNotice(sessionId);
     },
     onDeactivated: () => {
       deactivateToolSurface();
+      // Ticket 30: session-scope "always allow" rows belong to the activated
+      // session — clear them here so no "always" leaks into a later session.
+      multitask.clearSessionAccessPolicy();
       // Ticket 23: prompts belong to the activated session — abandon the
       // outstanding ones. Their tickets keep the armed relay timeouts
       // (ADR-0008 deny-by-default); nothing waits indefinitely.
@@ -397,6 +482,8 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   ctx.effect(() => {
     lifecycle.unbind();
     deactivateToolSurface();
+    // Ticket 30: clear session-scope policy rows on unload/HMR too.
+    multitask.clearSessionAccessPolicy();
     // Ticket 23: abandon outstanding prompts on unload/HMR; the relay
     // timeouts still deny their asks (ADR-0008).
     accessPrompts.reset();

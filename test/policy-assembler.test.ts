@@ -15,8 +15,16 @@ import {
   STEER_WORKER_TOOL,
   STOP_WORKER_TOOL,
   TOOL_DESCRIPTIONS,
+  buildStandingRulesBlock,
+  buildWakeInstructionsBlock,
 } from "../src/core/policy/prompts.js";
 import { emptyReportPlaceholder } from "../src/core/report-clamp.js";
+import {
+  formatSpawnAck,
+  formatSteerNote,
+  formatStopNote,
+} from "../src/core/tool-results.js";
+import { WAKE_CUE } from "../src/adapter/wake-copy.js";
 import type { TodoItem } from "../src/core/todo-reconciler.js";
 
 const FORBIDDEN_VOCAB = [
@@ -232,5 +240,74 @@ describe("tool descriptions (new copy)", () => {
     const description = TOOL_DESCRIPTIONS[DELIVER_RESULT_TOOL];
     assert.ok(description.includes("otherwise stay silent"));
     assert.ok(description.includes("concrete thing"));
+  });
+});
+
+describe("wake-copy narration guard (ticket 29)", () => {
+  // Machinery-UI vocabulary that must never leak into the wake/settle copy
+  // (PRD §6.1: the machinery is invisible; no worker-console reading).
+  const MACHINERY_TOKENS = [
+    "console",
+    "subagent",
+    "toolview",
+    "overlay",
+    "timeline",
+    "progress bar",
+    "streaming",
+  ] as const;
+
+  function assertOrdinaryNarration(text: string): void {
+    const lower = text.toLowerCase();
+    for (const token of MACHINERY_TOKENS) {
+      assert.ok(!lower.includes(token), `machinery token in copy: ${token}`);
+    }
+    assertNewCopy(text);
+  }
+
+  function fullWakeTurn(): string {
+    return assembleWakeTurn(
+      [
+        notice(),
+        notice({
+          workerId: "w-2",
+          title: "Grid sweep",
+          status: "error",
+          report: "Boom at step 3.",
+          transcriptRef: "child-2",
+        }),
+      ],
+      { resolved: [] },
+    );
+  }
+
+  it("the wake turn reads as ordinary narration with no machinery tokens", () => {
+    const wake = fullWakeTurn();
+    assertOrdinaryNarration(wake);
+    // Settle framing stays result-first, not console-like.
+    assert.ok(wake.includes("# Background work landed"));
+    assert.ok(wake.includes("Rewrite auth docs — completed"));
+  });
+
+  it("the wake cue is a plain instruction, not a console notice", () => {
+    assertOrdinaryNarration(WAKE_CUE);
+    assert.ok(WAKE_CUE.includes("Background workers finished"));
+  });
+
+  it("spawn/steer/stop notes stay narration-shaped", () => {
+    assertOrdinaryNarration(
+      formatSpawnAck({
+        title: "Rewrite auth docs",
+        workerId: "w-1",
+        streamKey: "t-1",
+        prompt: "Do the work.",
+      }),
+    );
+    assertOrdinaryNarration(formatSteerNote("Rewrite auth docs"));
+    assertOrdinaryNarration(formatStopNote());
+  });
+
+  it("wake instructions and standing rules carry no machinery tokens", () => {
+    assertOrdinaryNarration(buildWakeInstructionsBlock());
+    assertOrdinaryNarration(buildStandingRulesBlock());
   });
 });

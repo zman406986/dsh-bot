@@ -167,6 +167,16 @@ export function assembleAccessSection(
       if (decision.kind === "deny" && decision.detail.length > 0) {
         lines.push(`  ${decision.detail}`);
       }
+      // Ticket 30: an allow notice may carry a user-facing reassurance
+      // (credential asks: "stored securely, never shown"). Deny copy rides
+      // `detail` above; allow copy rides `note` — both rendered verbatim.
+      if (
+        decision.kind === "allow" &&
+        decision.note !== undefined &&
+        decision.note.length > 0
+      ) {
+        lines.push(`  ${decision.note}`);
+      }
     }
   }
   lines.push("");

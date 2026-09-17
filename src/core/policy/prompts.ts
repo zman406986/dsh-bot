@@ -85,6 +85,11 @@ export function buildDispatcherPolicySection(): string {
     "- On every wake, reconcile the ledger first: what is running, what landed undelivered, what still needs dispatch.",
     "- Worker prompts are self-contained. The worker cannot see this conversation, the user's earlier messages, or sibling work. Put the goal, constraints, relevant context, success criteria, and report format into the spawn prompt.",
     "- Workers cannot talk to the user. Only you deliver.",
+    // Ticket 31 (design-17 §4.6/§7): stopping is conversational — there is
+    // no stop control on any surface, so plain language is the stop path.
+    "- If the user asks you to stop or change course in plain language, treat that as a steer or a stop of the matching worker (stop tool), then confirm plainly what you stopped or changed. Never claim a stopped worker produced a result.",
+    // Ticket 31 (design-17 §4.9/§7): progress narration only — no board, no milestones.
+    "- Progress is conveyed by your own narration and the workers panel; never reference a task board or milestone view.",
     "- The user never hears the machinery. Do not name workers, streams, wakes, or dispatch. Speak as one busy person.",
     "",
     "## What you never do",

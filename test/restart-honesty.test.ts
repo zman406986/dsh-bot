@@ -1,0 +1,840 @@
+/**
+ * Ticket 31 — conversational stop semantics + restart honesty
+ * (design-17 §4.6/§4.7/§7).
+ *
+ * Offline only (S8): a fake host context with a PERSISTENT marker table
+ * and a settings-capturing scope drives the real plugin apply(). The
+ * markers are seeded to simulate a previous host life; activation must
+ * rebuild BEFORE the first roster publish and inject exactly one honest
+ * restart notice. Plus: the no-stop guard (structural absence of any
+ * stop/cancel affordance on the client face), the new policy rules, and
+ * the aborted-worker no-revival presentation. No network, no LLM.
+ */
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import { apply as pluginApply } from "../src/plugin.js";
+import {
+  DISPATCHER_START_COMMAND,
+  DISPATCHER_STEER_COMMAND,
+  MARKER_TABLE_NAME,
+  RESTART_DEGRADED_NOTICE,
+  RESTART_NOTICE_HEADING,
+  restartRestoredLine,
+  type AdapterContext,
+  type AgentLike,
+  type CommandDefinitionLike,
+  type CommandResultLike,
+} from "../src/adapter/index.js";
+import type { DurableWorkerMarker } from "../src/core/durability.js";
+import {
+  ROSTER_SETTINGS_KEY,
+  projectRosterSnapshot,
+} from "../src/core/roster-snapshot.js";
+import { buildDispatcherPolicySection } from "../src/core/policy/prompts.js";
+import {
+  assembleSessionPolicy,
+  assembleWakeTurn,
+} from "../src/core/policy/assembler.js";
+import {
+  abortedReportBody,
+  formatWakeReportBody,
+} from "../src/core/report-clamp.js";
+import { describeRosterPanel } from "../src/client/roster-store.js";
+import {
+  describeCapsuleActivationRow,
+  describeCapsuleChip,
+  describeCapsuleDeliverables,
+  describeCapsuleFooter,
+} from "../src/client/capsule-store.js";
+import {
+  describeToolview,
+  TOOLVIEW_TOOL_NAMES,
+} from "../src/client/toolviews.js";
+
+/** Drain the async rebuild chain queued by activation (ticket 31). */
+async function flushActivation(): Promise<void> {
+  for (let i = 0; i < 8; i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+interface TestAgent extends AgentLike {
+  readonly injected: unknown[];
+}
+
+function createAgent(id: string): TestAgent {
+  const injected: unknown[] = [];
+  return {
+    session: {
+      id,
+      header: { parentSession: null, delegationDepth: 0 },
+    },
+    followup() {},
+    inject(message: unknown) {
+      injected.push(message);
+    },
+    injected,
+  };
+}
+
+function textOf(message: unknown): string {
+  const content = (message as { content?: Array<{ text?: string }> }).content;
+  if (!Array.isArray(content)) return "";
+  return content.map((block) => block.text ?? "").join("");
+}
+
+/**
+ * Host context whose marker table PERSISTS across `table()` calls (the
+ * durability port re-resolves the table per operation) and whose settings
+ * scope records every mirrored update. Markers can be seeded through the
+ * stub before apply() to simulate a previous host life (ADR-0006 source).
+ */
+function createRestartCtx() {
+  const listeners = new Map<string, Array<(payload: never) => void>>();
+  const commands = new Map<string, CommandDefinitionLike>();
+  const tools = new Map<
+    string,
+    { execute: (args: unknown, exec?: unknown) => Promise<unknown> }
+  >();
+  const tables = new Map<string, Map<string, unknown>>();
+  const updates: unknown[] = [];
+  let nextChild = 1;
+
+  const fire = (name: string, payload: unknown) => {
+    for (const cb of [...(listeners.get(name) ?? [])]) {
+      cb(payload as never);
+    }
+  };
+
+  const makeTable = (name: string) => {
+    let table = tables.get(name);
+    if (table === undefined) {
+      table = new Map<string, unknown>();
+      tables.set(name, table);
+    }
+    return {
+      get: (key: string) => table!.get(key) as never,
+      entries: () => table!.entries() as never,
+      async put(key: string, value: unknown) {
+        table!.set(key, value);
+      },
+      async delete(key: string) {
+        return table!.delete(key);
+      },
+    };
+  };
+
+  const ctx = {
+    effect(dispose: () => void) {
+      void dispose;
+    },
+    inject(services: readonly string[], callback: (child: unknown) => void) {
+      if (services.includes("settings")) {
+        callback({
+          settings: {
+            installSection() {
+              return {
+                update(value: unknown) {
+                  updates.push(value);
+                },
+              };
+            },
+          },
+        });
+      }
+    },
+    on(name: string, cb: (payload: never) => void) {
+      const list = listeners.get(name) ?? [];
+      list.push(cb);
+      listeners.set(name, list);
+      return () => {
+        listeners.set(
+          name,
+          (listeners.get(name) ?? []).filter((c) => c !== cb),
+        );
+      };
+    },
+    commands: {
+      register(definition: CommandDefinitionLike) {
+        commands.set(definition.name, definition);
+        return () => {
+          commands.delete(definition.name);
+        };
+      },
+    },
+    tools: {
+      schemas: () => [...tools.keys()].map((name) => ({ name })),
+      register(definition: {
+        name: string;
+        execute: (args: unknown, exec?: unknown) => Promise<unknown>;
+      }) {
+        tools.set(definition.name, definition);
+        return () => {
+          tools.delete(definition.name);
+        };
+      },
+    },
+    subagents: {
+      async startContinuable() {
+        const childId = `child-${nextChild++}`;
+        return { childId, messageId: `msg-${childId}` };
+      },
+      interrupt() {},
+      async sendMessage() {
+        return "msg-stub";
+      },
+    },
+    agents: { get: () => undefined },
+    jobs: { list: () => [] },
+    storageDomain: {
+      async open() {
+        return {
+          table: makeTable,
+          async close() {},
+          name: "stub",
+        };
+      },
+    },
+    // Test surface
+    fire,
+    updates,
+    commandNames: () => [...commands.keys()],
+    tool: (name: string) => tools.get(name),
+    runCommand(invocation: {
+      commandId: string;
+      agent?: AgentLike;
+    }): CommandResultLike {
+      const command = commands.get(invocation.commandId);
+      if (command === undefined) {
+        throw new Error(`command not registered: ${invocation.commandId}`);
+      }
+      return command.handler(invocation as never) as CommandResultLike;
+    },
+  };
+  return ctx as unknown as AdapterContext & {
+    fire(name: string, payload: unknown): void;
+    readonly updates: unknown[];
+    commandNames(): string[];
+    runCommand(invocation: {
+      commandId: string;
+      agent?: AgentLike;
+    }): CommandResultLike;
+  };
+}
+
+async function seedMarkers(
+  ctx: ReturnType<typeof createRestartCtx>,
+  markers: DurableWorkerMarker[],
+): Promise<void> {
+  const domain = await ctx.storageDomain.open();
+  const table = domain.table(MARKER_TABLE_NAME);
+  for (const marker of markers) {
+    await table.put(marker.workerId, marker);
+  }
+}
+
+function rosterSnapshots(
+  updates: readonly unknown[],
+): Array<{
+  dispatcherSessionId: string;
+  workers: Array<{ workerId: string; status: string }>;
+}> {
+  return updates
+    .map((update) => (update as Record<string, unknown>)[ROSTER_SETTINGS_KEY])
+    .filter((snapshot) => snapshot !== undefined)
+    .map(
+      (snapshot) => snapshot as {
+        dispatcherSessionId: string;
+        workers: Array<{ workerId: string; status: string }>;
+      },
+    );
+}
+
+const DONE_MARKER: DurableWorkerMarker = {
+  workerId: "w-done",
+  parentSessionId: "s-1",
+  streamKey: "todo-done",
+  title: "Report generator",
+  status: "completed",
+  transcriptRef: "child-done",
+  todoId: "todo-done",
+  startedAtMs: 1_000,
+  updatedAtMs: 2_000,
+};
+
+const LIVE_MARKER: DurableWorkerMarker = {
+  workerId: "w-live",
+  parentSessionId: "s-1",
+  streamKey: "todo-live",
+  title: "Live at crash",
+  status: "running",
+  transcriptRef: null,
+  todoId: null,
+  startedAtMs: 1_000,
+  updatedAtMs: 2_000,
+};
+
+describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
+  it("activation rebuilds durable markers BEFORE the first publish; one notice; unknown rows stay off the roster", async () => {
+    const ctx = createRestartCtx();
+    await seedMarkers(ctx, [DONE_MARKER, LIVE_MARKER]);
+
+    pluginApply(ctx, { enabled: true });
+    const agent = createAgent("s-1");
+
+    const result = ctx.runCommand({
+      commandId: DISPATCHER_START_COMMAND,
+      agent,
+    });
+    assert.equal(result.kind, "success");
+    await flushActivation();
+
+    // Exactly ONE restart notice, carrying the id, the transcript pointer,
+    // the honest unknown wording, and the restored count (design-17 §7).
+    const notices = agent.injected
+      .map(textOf)
+      .filter((text) => text.includes(RESTART_NOTICE_HEADING));
+    assert.equal(notices.length, 1);
+    const notice = notices[0] ?? "";
+    assert.ok(notice.includes("w-live"), "notice names the unknown worker");
+    assert.ok(
+      notice.includes("state is unknown"),
+      "notice says the state is unknown",
+    );
+    assert.ok(
+      notice.includes("nothing was replayed"),
+      "notice says nothing was replayed",
+    );
+    assert.ok(
+      notice.includes("Transcripts: w-live"),
+      "notice carries the transcript pointer (id fallback)",
+    );
+    assert.ok(
+      notice.includes("1 worker(s) were still running"),
+      "notice carries the unknown count",
+    );
+    assert.ok(
+      notice.includes(restartRestoredLine(1)),
+      "notice carries the restored-count line",
+    );
+
+    // Rebuild-before-publish ordering: the FIRST mirrored snapshot already
+    // contains the restored terminal row. A publish-before-rebuild bug
+    // would publish an empty roster first.
+    const snapshots = rosterSnapshots(ctx.updates);
+    assert.ok(snapshots.length >= 1, "a roster snapshot was published");
+    const first = snapshots[0];
+    assert.ok(first);
+    assert.equal(first.dispatcherSessionId, "s-1");
+    const firstIds = first.workers.map((worker) => worker.workerId);
+    assert.ok(
+      firstIds.includes("w-done"),
+      "restored row is in the first snapshot (rebuild before publish)",
+    );
+    // Unknown-state rows NEVER land on the roster (core rule) — the notice
+    // is their only surface.
+    for (const snapshot of snapshots) {
+      assert.equal(
+        snapshot.workers.some((worker) => worker.workerId === "w-live"),
+        false,
+        "unknown-state worker never appears on the roster",
+      );
+    }
+  });
+
+  it("the notice fires once per activation: a second activation rebuilds empty and stays silent", async () => {
+    const ctx = createRestartCtx();
+    await seedMarkers(ctx, [
+      { ...DONE_MARKER, streamKey: "k1", todoId: null },
+    ]);
+
+    pluginApply(ctx, { enabled: true });
+    const agent = createAgent("s-1");
+    ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
+    await flushActivation();
+
+    const noticesAfterFirst = agent.injected
+      .map(textOf)
+      .filter((text) => text.includes(RESTART_NOTICE_HEADING));
+    assert.equal(noticesAfterFirst.length, 1);
+
+    // Deactivate (session disposed), then re-activate the same chat. The
+    // core still holds the restored worker in memory, so the rebuild report
+    // is empty and no second notice may fire.
+    ctx.fire("agent/disposed", { agent });
+    const again = ctx.runCommand({
+      commandId: DISPATCHER_START_COMMAND,
+      agent,
+    });
+    assert.equal(again.kind, "success");
+    await flushActivation();
+
+    const noticesAfterSecond = agent.injected
+      .map(textOf)
+      .filter((text) => text.includes(RESTART_NOTICE_HEADING));
+    assert.equal(
+      noticesAfterSecond.length,
+      1,
+      "no re-notice on the second activation",
+    );
+  });
+
+  it("no durable state: activation publishes the roster and injects no notice", async () => {
+    const ctx = createRestartCtx();
+    pluginApply(ctx, { enabled: true });
+    const agent = createAgent("s-1");
+    const result = ctx.runCommand({
+      commandId: DISPATCHER_START_COMMAND,
+      agent,
+    });
+    assert.equal(result.kind, "success");
+    await flushActivation();
+
+    assert.equal(agent.injected.length, 1, "only the session policy inject");
+    assert.ok(textOf(agent.injected[0]).includes("# Multitask dispatcher"));
+    assert.ok(
+      rosterSnapshots(ctx.updates).length >= 1,
+      "the (empty) roster is still published",
+    );
+  });
+
+  it("rebuild failure: activation still succeeds with the degraded honest notice", async () => {
+    const commands = new Map<string, CommandDefinitionLike>();
+    const injected: unknown[] = [];
+    const agent = createAgent("s-1");
+    const ctx = {
+      effect(dispose: () => void) {
+        void dispose;
+      },
+      inject() {},
+      on() {
+        return () => {};
+      },
+      commands: {
+        register(definition: CommandDefinitionLike) {
+          commands.set(definition.name, definition);
+          return () => {};
+        },
+      },
+      tools: {
+        schemas: () => [] as Array<{ name: string }>,
+        register() {
+          return () => {};
+        },
+      },
+      subagents: {
+        async startContinuable() {
+          return { childId: "c", messageId: "m" };
+        },
+        interrupt() {},
+        async sendMessage() {
+          return "msg";
+        },
+      },
+      agents: { get: () => undefined },
+      jobs: { list: () => [] },
+      // Broken marker store: open rejects. The rebuild must fail without
+      // taking the activation down with it.
+      storageDomain: {
+        open(): Promise<never> {
+          return Promise.reject(new Error("marker store unreadable"));
+        },
+      },
+    };
+    pluginApply(ctx as unknown as Parameters<typeof pluginApply>[0], {
+      enabled: true,
+    });
+
+    const command = commands.get(DISPATCHER_START_COMMAND);
+    assert.ok(command, "activation command registered despite broken store");
+    const result = command.handler({
+      commandId: DISPATCHER_START_COMMAND,
+      agent,
+    } as never) as CommandResultLike;
+    assert.equal(result.kind, "success", "activation survives a broken store");
+    await flushActivation();
+
+    const notices = agent.injected
+      .map(textOf)
+      .filter((text) => text.includes(RESTART_DEGRADED_NOTICE));
+    assert.equal(
+      notices.length,
+      1,
+      "exactly one degraded notice: nothing restored, nothing replayed",
+    );
+  });
+});
+
+describe("restart honesty — no-stop guard (design-17 §4.6)", () => {
+  /** Recursively collect every object key in a view model tree. */
+  function collectKeys(value: unknown, visit: (key: string) => void): void {
+    if (Array.isArray(value)) {
+      for (const entry of value) collectKeys(entry, visit);
+      return;
+    }
+    if (typeof value === "object" && value !== null) {
+      for (const [key, child] of Object.entries(value)) {
+        visit(key);
+        collectKeys(child, visit);
+      }
+    }
+  }
+
+  /** Recursively visit every primitive string value with its own key. */
+  function collectEntries(
+    value: unknown,
+    visit: (key: string, value: string) => void,
+  ): void {
+    if (Array.isArray(value)) {
+      for (const entry of value) collectEntries(entry, visit);
+      return;
+    }
+    if (typeof value === "object" && value !== null) {
+      for (const [key, child] of Object.entries(value)) {
+        if (typeof child === "string") visit(key, child);
+        else collectEntries(child, visit);
+      }
+    }
+  }
+
+  const AFFORDANCE_PATTERN = /stop|cancel|button|action|affordance/i;
+
+  it("the roster panel view model exposes no stop/cancel affordance field", () => {
+    const summaries = [
+      "w-running",
+      "w-steering",
+      "w-spawned",
+      "w-blocked",
+      "w-landed",
+      "w-failed",
+      "w-aborted",
+    ].map((workerId) => ({
+      workerId,
+      parentSessionId: "s-1",
+      streamKey: workerId,
+      title: `Task ${workerId}`,
+      status: workerId === "w-running"
+        ? "running"
+        : workerId === "w-steering"
+          ? "steering"
+          : workerId === "w-spawned"
+            ? "spawned"
+            : workerId === "w-blocked"
+              ? "running"
+              : workerId === "w-landed"
+                ? "completed"
+                : workerId === "w-failed"
+                  ? "error"
+                  : "aborted",
+      startedAtMs: 1_000,
+      elapsedMs: 5_000,
+      toolCallCount: 3,
+      transcriptRef: null,
+      todoId: workerId === "w-landed" ? "todo-landed" : null,
+    }));
+    const snapshot = projectRosterSnapshot("s-1", summaries, 10_000, {
+      pendingAccess: [
+        {
+          workerId: "w-blocked",
+          requestId: "r-1",
+          title: "Task w-blocked",
+          body: { class: "tool", target: "shell", reason: "needs the shell" },
+        },
+      ],
+      todos: [
+        {
+          id: "todo-landed",
+          sessionId: "s-1",
+          title: "Task w-landed",
+          status: "in_progress",
+          streamKey: "w-landed",
+          workerId: "w-landed",
+          delivered: false,
+          createdAtMs: 1_000,
+          updatedAtMs: 2_000,
+        },
+      ],
+    });
+    const view = describeRosterPanel(
+      { kind: "snapshot", snapshot },
+      10_000,
+    );
+    assert.equal(view.kind, "rows");
+    if (view.kind === "rows") {
+      // Precondition: the fixture really covers blocked + landed + terminal
+      // rows, so the scan means something.
+      const rows = view.sections.flatMap((section) => section.rows);
+      assert.equal(rows.length, 7);
+      assert.ok(rows.some((row) => row.marker?.kind === "blocked"));
+      assert.ok(rows.some((row) => row.marker?.kind === "landed"));
+      assert.ok(rows.some((row) => row.finished));
+    }
+
+    const keys: string[] = [];
+    collectKeys(view, (key) => keys.push(key));
+    const offenders = keys.filter((key) => AFFORDANCE_PATTERN.test(key));
+    assert.deepEqual(
+      offenders,
+      [],
+      `panel view model must carry no stop/cancel affordance field; found: ${offenders.join(", ")}`,
+    );
+  });
+
+  it("the toolview render data carries no stop/cancel affordance for any dispatcher tool", () => {
+    const richPayload = {
+      args: {
+        worker_id: "w-1",
+        title: "T",
+        stream_key: "k",
+        todo_id: "todo-1",
+        message: "correction text",
+        attachment_paths: ["/tmp/a"],
+      },
+      result: {
+        ok: true,
+        worker_id: "w-1",
+        title: "T",
+        stream_key: "k",
+        delivered: true,
+        todo_completed: "todo-1",
+        rows: [
+          {
+            worker_id: "w-1",
+            title: "T",
+            status: "running",
+            recent_activity: "editing file",
+          },
+        ],
+      },
+    };
+    for (const toolName of TOOLVIEW_TOOL_NAMES) {
+      const model = describeToolview(toolName, richPayload);
+      const keys: string[] = [];
+      collectKeys(model, (key) => keys.push(key));
+      const offenders = keys.filter((key) => AFFORDANCE_PATTERN.test(key));
+      assert.deepEqual(
+        offenders,
+        [],
+        `toolview for ${toolName} must carry no stop/cancel affordance field; found: ${offenders.join(", ")}`,
+      );
+    }
+  });
+
+  it("the capsule view models carry no direct stop/deactivate authority — the stop affordance is an intent (tickets 39 + 42, FINAL FORM)", () => {
+    const workers = [
+      {
+        kind: "worker" as const,
+        workerId: "w-running",
+        title: "Task w-running",
+        status: "running" as const,
+        todoId: null,
+        startedAtMs: 1_000,
+        toolCallCount: 3,
+        delivered: false,
+        blocked: null,
+      },
+      {
+        kind: "worker" as const,
+        workerId: "w-landed",
+        title: "Task w-landed",
+        status: "completed" as const,
+        todoId: null,
+        startedAtMs: 1_000,
+        toolCallCount: 2,
+        delivered: false,
+        blocked: null,
+      },
+    ];
+    const states = [
+      { kind: "waiting" },
+      { kind: "channel-missing" },
+      { kind: "invalid" },
+      {
+        kind: "snapshot",
+        snapshot: {
+          schemaVersion: 3,
+          dispatcherSessionId: "s-1",
+          publishedAtMs: 10_000,
+          workers,
+          recentResult: null,
+        },
+      },
+      {
+        kind: "snapshot",
+        snapshot: {
+          schemaVersion: 3,
+          dispatcherSessionId: "s-1",
+          publishedAtMs: 1_000,
+          workers,
+          recentResult: null,
+        },
+      },
+    ] as const;
+
+    // The activation row is a CLOSED union of exactly three honest shapes;
+    // exact deep-equality against them leaves no room for any control field
+    // (handler, handle, command text) to ride along, so the stop affordance
+    // can only ever be the intent payload plus a label.
+    const canon = [
+      {
+        composition: "dormant",
+        stateKey: "capsule.dot.dormant",
+        affordance: { intent: "start", labelKey: "capsule.activation.start" },
+      },
+      {
+        composition: "activated",
+        stateKey: "capsule.dot.active",
+        affordance: { intent: "stop", labelKey: "capsule.activation.stop" },
+      },
+      {
+        composition: "unavailable",
+        stateKey: "capsule.dot.error",
+        affordance: null,
+      },
+    ];
+    for (const state of states) {
+      const rowView = describeCapsuleActivationRow(state, 10_000);
+      const expected = canon.find(
+        (shape) => shape.composition === rowView.composition,
+      );
+      assert.ok(expected, `unknown composition ${rowView.composition}`);
+      assert.deepEqual(
+        rowView,
+        expected,
+        "activation row must match its canonical shape exactly",
+      );
+
+      // Key scan over ALL capsule view models — chip, activation row, the
+      // full panel rows, the deliverables line, and the ticket-42 footer
+      // (the guard's FINAL FORM): no key may offer direct
+      // kill/deactivate/stop authority — the only stop-shaped thing allowed
+      // anywhere is the intent payload VALUE. The footer models cover both
+      // faces of the honest degrade: a vouching document and no document.
+      const models = [
+        describeCapsuleChip(state, 10_000),
+        rowView,
+        describeRosterPanel(state, 10_000),
+        describeCapsuleDeliverables(state, 10_000),
+        describeCapsuleFooter({ enabled: true }),
+        describeCapsuleFooter(undefined),
+      ];
+      for (const model of models) {
+        const keys: string[] = [];
+        const stopValues: string[] = [];
+        collectKeys(model, (key) => {
+          keys.push(key);
+        });
+        collectEntries(model, (key, value) => {
+          if (value === "stop") stopValues.push(key);
+        });
+        const offenders = keys.filter((key) =>
+          /stop|cancel|kill|abort|deactivate|interrupt|terminate|destroy/i.test(
+            key,
+          ),
+        );
+        assert.deepEqual(
+          offenders,
+          [],
+          `capsule view model must carry no direct stop/deactivate control field; found: ${offenders.join(", ")}`,
+        );
+        // The literal "stop" may only ever appear as the value under the
+        // `intent` payload key — never as a control field name or elsewhere.
+        for (const key of stopValues) {
+          assert.equal(
+            key,
+            "intent",
+            `"stop" must be an intent payload, never a ${key} control`,
+          );
+        }
+      }
+    }
+
+    // The intent vocabulary is exactly the two payloads ticket 40 binds;
+    // `"stop"` exists only as an intent value handed to the callback seat.
+    const intents = states.map((state) =>
+      describeCapsuleActivationRow(state, 10_000).affordance?.intent ?? null,
+    );
+    for (const intent of intents) {
+      assert.ok(
+        intent === null || intent === "start" || intent === "stop",
+        `unexpected intent payload ${String(intent)}`,
+      );
+    }
+  });
+
+  it("the plugin registers no stop/cancel command — the absence is the design", () => {
+    const ctx = createRestartCtx();
+    pluginApply(ctx, { enabled: true });
+    const names = ctx.commandNames().sort();
+    assert.deepEqual(names, [
+      DISPATCHER_START_COMMAND,
+      DISPATCHER_STEER_COMMAND,
+    ]);
+    const offenders = names.filter((name) => /stop|cancel/i.test(name));
+    assert.deepEqual(offenders, [], "no stop/cancel command may be registered");
+  });
+});
+
+describe("restart honesty — policy copy (new, clean-room)", () => {
+  it("the session policy teaches conversational stopping and the no-board rule", () => {
+    const policy = buildDispatcherPolicySection();
+    assert.ok(
+      policy.includes("asks you to stop or change course in plain language"),
+      "stop/course-change rule present",
+    );
+    assert.ok(
+      policy.includes("treat that as a steer or a stop of the matching worker"),
+      "rule maps plain language onto steer/stop of the matching worker",
+    );
+    assert.ok(
+      policy.includes("confirm plainly what you stopped or changed"),
+      "rule requires plain confirmation",
+    );
+    assert.ok(
+      policy.includes("Never claim a stopped worker produced a result"),
+      "rule forbids claiming results from stopped workers",
+    );
+    assert.ok(
+      policy.includes("never reference a task board or milestone view"),
+      "no-board/no-milestone narration rule present",
+    );
+
+    const injected = assembleSessionPolicy(true);
+    assert.ok(injected.includes("asks you to stop or change course"));
+    assert.ok(injected.includes("task board or milestone view"));
+    // Flag OFF: empty policy — the rules ride the ADR-0005 gate like all copy.
+    assert.equal(assembleSessionPolicy(false), "");
+  });
+});
+
+describe("restart honesty — aborted workers settle with no report (no revival)", () => {
+  it("abortedReportBody is the exact no-report body and wins over any report text", () => {
+    assert.equal(
+      abortedReportBody(),
+      "(Stopped before completion. No report.)",
+    );
+    // A report that raced the stop is never shown for an aborted worker.
+    assert.equal(
+      formatWakeReportBody("aborted", "confidential partial work", "child-1"),
+      "(Stopped before completion. No report.)",
+    );
+    assert.equal(
+      formatWakeReportBody("aborted", "", null),
+      "(Stopped before completion. No report.)",
+    );
+  });
+
+  it("a wake turn for an aborted worker carries the no-report body, never its text", () => {
+    const wake = assembleWakeTurn([
+      {
+        workerId: "w-1",
+        title: "Stopped task",
+        status: "aborted",
+        report: "secret partial output",
+        transcriptRef: "child-1",
+      },
+    ]);
+    assert.ok(wake.includes("(Stopped before completion. No report.)"));
+    assert.ok(!wake.includes("secret partial output"));
+  });
+});

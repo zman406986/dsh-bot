@@ -116,12 +116,15 @@ export interface ToolviewField {
 /**
  * One `check_workers` roster row. `statusLabel` reuses the core FSM
  * vocabulary VERBATIM (identity contract, same as the roster panel); null
- * when the payload carries no readable status.
+ * when the payload carries no readable status. `activity` is the row's
+ * recent-activity phrase when the core recorded one (ticket 29) — clamped,
+ * whitespace-collapsed; null when absent so the line is omitted entirely.
  */
 export interface ToolviewStatusRow {
   readonly workerId: string;
   readonly title: string;
   readonly statusLabel: string | null;
+  readonly activity: string | null;
 }
 
 /**
@@ -252,6 +255,10 @@ function describeCheck(payload: ToolCallPayload): ToolviewModel {
         title: asString(record.title) ?? rowWorker,
         // Core FSM vocabulary verbatim; unreadable status → null (omitted).
         statusLabel: asString(record.status),
+        // Ticket 29: the core clamps `recent_activity` to
+        // CHECK_ACTIVITY_CHARS (120); this second clamp keeps a malformed
+        // or oversized wire value inside the compact-row budget too.
+        activity: clampText(record.recent_activity),
       });
     }
   }

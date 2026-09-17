@@ -41,6 +41,11 @@ export interface AccessPolicyTable {
   /** Insert or replace a row (same class+pattern+scope). */
   set(entry: PolicyEntry): void;
   list(): readonly PolicyEntry[];
+  /**
+   * Drop every session-scope row (ticket 30: "always allow (this session)"
+   * clearance on deactivation/unload). Profile rows are untouched.
+   */
+  clearSession(): void;
 }
 
 function rowKey(entry: PolicyEntry): string {
@@ -86,6 +91,11 @@ export function createAccessPolicyTable(
     },
     list(): readonly PolicyEntry[] {
       return [...rows.values()];
+    },
+    clearSession(): void {
+      for (const [key, entry] of [...rows]) {
+        if (entry.scope === "session") rows.delete(key);
+      }
     },
   };
 }

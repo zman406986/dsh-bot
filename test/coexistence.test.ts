@@ -618,6 +618,7 @@ describe("coexistence — host face: fail-loud claims (Findings 1 and 2)", () =>
       ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent }),
       { kind: "success", text: DISPATCHER_START_SUCCESS },
     );
+
     // …and the foreign command still routes to the foreign handler.
     assert.deepEqual(
       ctx.runCommand({ commandId: FOREIGN.command, agent }),
@@ -657,6 +658,12 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
       ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent }),
       { kind: "success", text: DISPATCHER_START_SUCCESS },
     );
+
+    // Ticket 31: the on-activation publish lands after the async durability
+    // rebuild — drain the queued chain before reading the mirrored snapshot.
+    for (let i = 0; i < 5; i += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
 
     // Six dispatcher tools alongside the foreign tool — no clobbering.
     assert.deepEqual(ctx.toolNames().sort(), [

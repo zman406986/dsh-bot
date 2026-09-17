@@ -25,6 +25,7 @@ import {
   SHIPPED_CLAIMED_TOOLVIEW_KEYS,
   TOOLVIEW_DEGRADED_KEY,
   TOOLVIEW_FIELD_KEYS,
+  TOOLVIEW_TEXT_CLAMP_CHARS,
   TOOLVIEW_TOOL_NAMES,
   TOOL_CALL_TOOLVIEW_SLOT,
   describeToolview,
@@ -349,6 +350,73 @@ describe("toolview — check_workers payload parsing", () => {
     assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.worker), "w-gone");
     assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "unknown-worker");
     assert.equal(view.statusRows.length, 0);
+  });
+});
+
+describe("toolview — check_workers activity rows (ticket 29)", () => {
+  it("renders the row's recent_activity phrase when present", () => {
+    const view = assertDetail(
+      describeToolview("check_workers", {
+        args: {},
+        result: {
+          ok: true,
+          rows: [
+            checkRow({ recent_activity: "bash: npm test" }),
+            checkRow({ worker_id: "w-quiet", recent_activity: null }),
+          ],
+          summary: "…",
+        },
+      }),
+    );
+    assert.equal(view.statusRows.length, 2);
+    assert.equal(view.statusRows[0]?.activity, "bash: npm test");
+    assert.equal(view.statusRows[1]?.activity, null);
+  });
+
+  it("omits the line for absent, empty, or whitespace-only activity", () => {
+    const view = assertDetail(
+      describeToolview("check_workers", {
+        args: {},
+        result: {
+          ok: true,
+          rows: [
+            checkRow({ recent_activity: null }),
+            checkRow({ recent_activity: "" }),
+            checkRow({ recent_activity: "   \n\t  " }),
+            checkRow({ recent_activity: 42 }),
+          ],
+          summary: "…",
+        },
+      }),
+    );
+    for (const row of view.statusRows) {
+      assert.equal(row.activity, null);
+    }
+  });
+
+  it("collapses whitespace and clamps an oversized phrase to the compact budget", () => {
+    const long = `bash: ${"npm run build && ".repeat(12)}done`;
+    const view = assertDetail(
+      describeToolview("check_workers", {
+        args: {},
+        result: { ok: true, rows: [checkRow({ recent_activity: long })], summary: "…" },
+      }),
+    );
+    const activity = view.statusRows[0]?.activity;
+    assert.ok(activity, "activity rendered");
+    assert.ok(activity.length <= TOOLVIEW_TEXT_CLAMP_CHARS + 1);
+    assert.ok(activity.endsWith("…"));
+    assert.ok(!activity.includes("\n"), "whitespace collapsed to one line");
+  });
+
+  it("activity never turns a malformed payload into a throw", () => {
+    for (const bad of ["junk", 7, null, { text: "x" }]) {
+      const view = describeToolview("check_workers", {
+        args: {},
+        result: { ok: true, rows: [checkRow({ recent_activity: bad })], summary: "…" },
+      });
+      assert.equal(view.kind, "detail");
+    }
   });
 });
 

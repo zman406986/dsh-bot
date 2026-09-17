@@ -19,10 +19,25 @@
  * 2. the data path: a watch on our settings namespace, where the host half
  *    mirrors the roster snapshot under the `roster` key (the documented
  *    config-channel fallback — no invented push channel);
- * 3. the roster panel entry into the shipped `shell.overlay` list slot;
+ * 3. the dispatcher capsule entry (ticket 38, ADR-0013) into the shipped
+ *    `shell.overlay` list slot: collapsed chip → expandable panel, one
+ *    entry, unchanged id (tickets 39–42 add the activation row, the wired
+ *    intents, the deliverables line, and the provenance footer);
  * 4. the per-tool call views (ticket 24): keyed `tool.call.toolview` entries
  *    for the five dispatcher wire tool names — unclaimed keys, so additive-
  *    safe against the shipped composition (research Finding 5).
+ *
+ * Ticket 40 binds the capsule/panel intents to ticket 36's verified seams
+ * at THIS composition point and nowhere else: the narrow CommandTransport
+ * (start = the composer's exact `commands.execute` transaction with
+ * `/dispatcher-start` verbatim; stop = the scope-addressed plain-prompt
+ * sink with the locale-keyed conversational phrasing) and the per-row steer
+ * prefill seat (`input.for(actx).setDraft`) are built here over lazy
+ * service sources and closed into the capsule factory. The services are
+ * read at send/click time, never declared as boot-time binds (ADR-0014's
+ * smallest-set rule — same runtime-dynamic idiom as the settings watch), so
+ * a runtime without them degrades to honest `no-channel`/copy-fallback UX
+ * via `src/client/actions.ts`.
  */
 
 import type { ClientContext } from "./context.js";
@@ -32,7 +47,25 @@ import {
   SHELL_OVERLAY_SLOT,
   rosterOverlayRegistration,
 } from "./overlay.js";
-import { createRosterPanel } from "./panel.js";
+import {
+  CAPSULE_STOP_MESSAGE_KEY,
+  activationOutcomeCopyKey,
+  bindCommandTransport,
+  createCapsuleActionStatus,
+  sendActivationIntent,
+  tryPrefillSteer,
+  type SteerPrefillOutcome,
+} from "./actions.js";
+import {
+  createDispatcherCapsule
+} from "./capsule.js";
+import {
+  createCapsuleFooterStore,
+  createCapsuleStore,
+  type CapsuleFooterStore,
+  type CapsuleStore,
+  type OnActivationIntent,
+} from "./capsule-store.js";
 import { createRosterStore, type RosterStore } from "./roster-store.js";
 import { createToolviewComponent } from "./toolview-panel.js";
 import {
@@ -50,16 +83,29 @@ export const inject: readonly string[] = ["slots", "locale"];
  * and the slot entry.
  */
 export function apply(ctx: ClientContext): void {
-  applyClientModule(ctx, createRosterStore());
+  applyClientModule(
+    ctx,
+    createRosterStore(),
+    createCapsuleStore(),
+    createCapsuleFooterStore(),
+  );
 }
 
 /**
- * The module body, factored over an explicit store so offline tests can
- * drive the data path end to end (watch payload → store → view model)
- * without a DOM harness. Not a second entry point: `apply` is the only
- * thing the loader registers.
+ * The module body, factored over explicit stores so offline tests can drive
+ * the data path end to end (watch payload → store → view model) without a
+ * DOM harness. Not a second entry point: `apply` is the only thing the
+ * loader registers. The capsule store (ticket 38) is the entry's own
+ * expansion state; the footer store (ticket 42) holds the persisted flag
+ * provenance read from the SAME watch; defaulting either keeps older
+ * callers working and gives a fresh fiber a collapsed capsule.
  */
-export function applyClientModule(ctx: ClientContext, store: RosterStore): void {
+export function applyClientModule(
+  ctx: ClientContext,
+  store: RosterStore,
+  capsule: CapsuleStore = createCapsuleStore(),
+  footer: CapsuleFooterStore = createCapsuleFooterStore(),
+): void {
   // Locale namespace (Finding 6 idiom): labeled effect; executes immediately,
   // the returned disposer is collected for unload.
   ctx.effect(
@@ -70,7 +116,9 @@ export function applyClientModule(ctx: ClientContext, store: RosterStore): void 
   // Roster data path (ticket 21, design-16 §4.2 honest gap): watch the
   // plugin's settings namespace for the host-mirrored snapshot. The panel
   // degrades to "unavailable" copy when the service is missing or the feed
-  // is stale — never against an unverified live push channel.
+  // is stale — never against an unverified live push channel. The SAME
+  // watch payload feeds the ticket-42 footer store (persisted flag
+  // provenance) — one channel, two honest readers, never a second source.
   ctx.effect(() => {
     let disposeWatch: (() => void) | undefined;
     if (typeof ctx.inject !== "function") {
@@ -85,6 +133,7 @@ export function applyClientModule(ctx: ClientContext, store: RosterStore): void 
       }
       disposeWatch = settings.watch(LOCALE_NAMESPACE, (value) => {
         store.applyChannelValue(value);
+        footer.applyChannelValue(value);
       });
     });
     return () => {
@@ -92,13 +141,56 @@ export function applyClientModule(ctx: ClientContext, store: RosterStore): void 
     };
   }, "multitask-dispatcher: roster settings watch");
 
-  // Roster overlay entry (Finding 5 universal idiom): inject waits for the
-  // shipped `shell.overlay` declaration, then registers on OUR fiber —
-  // the entry never outlives the module.
+  // Capsule overlay entry (ticket 38, ADR-0013; Finding 5 universal idiom):
+  // inject waits for the shipped `shell.overlay` declaration, then registers
+  // on OUR fiber — the entry never outlives the module. Still exactly ONE
+  // entry with the unchanged id `multitask-dispatcher-roster`; only the
+  // component changes (chip + expandable panel instead of the bare panel).
   ctx.slots.inject(SHELL_OVERLAY_SLOT, () => {
+    const t = ctx.locale.bind(LOCALE_NAMESPACE);
+
+    // Ticket 40: bind the intents to the verified seams at composition
+    // time. The transport and the seats resolve the service faces lazily at
+    // send/click time; unavailability settles into honest degrade outcomes
+    // inside `actions.ts`, never into a crash or a fake success.
+    const transport = bindCommandTransport({
+      remote: () => ctx.remote,
+      sessions: () => ctx.sessions,
+    });
+    const actionStatus = createCapsuleActionStatus();
+    const currentSessionId = () => ctx.sessions?.list.getSnapshot().current;
+    const onActivationIntent: OnActivationIntent = (intent) => {
+      // Clear the previous notice at dispatch; a `sent` outcome stays
+      // silent (no fake success — the roster feed is the success truth).
+      actionStatus.set(null);
+      const seat = ctx.locale.bind(LOCALE_NAMESPACE);
+      void sendActivationIntent(
+        transport,
+        currentSessionId,
+        intent,
+        seat(CAPSULE_STOP_MESSAGE_KEY),
+      ).then((outcome) => actionStatus.set(activationOutcomeCopyKey(outcome)));
+    };
+    const onRowSteer = (workerId: string): SteerPrefillOutcome =>
+      tryPrefillSteer(
+        {
+          sessions: () => ctx.sessions,
+          conversation: () => ctx.conversation,
+        },
+        workerId,
+      );
+
     ctx.slots.register(
       rosterOverlayRegistration(),
-      createRosterPanel(ctx.locale.bind(LOCALE_NAMESPACE), store),
+      createDispatcherCapsule(
+        t,
+        store,
+        capsule,
+        onActivationIntent,
+        actionStatus,
+        onRowSteer,
+        footer,
+      ),
     );
   });
 

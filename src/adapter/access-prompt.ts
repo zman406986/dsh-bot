@@ -35,18 +35,56 @@
  * names, never values; `AccessRequestBody` / `AccessDecision` have no value
  * field.
  *
+ * Ticket 30 (design-17 §4.5) upgrades the prompt's copy and options without
+ * touching relay semantics:
+ * - Option set Allow / **Always allow (this session)** / Deny. "Always"
+ *   inserts a SESSION-scope allow row (class + exact target fingerprint)
+ *   through the relay's existing policy table, then routes the same allow
+ *   decision as "Allow". A later matching ask auto-answers on the shipped
+ *   policy no-op path (no prompt, no wake). Boundary: profile/preset writes
+ *   are OUT OF SCOPE — mutating stored user presets from a prompt is a
+ *   consent trap; session rows are cleared on deactivation/unload via
+ *   `Multitask.clearSessionAccessPolicy` so "always" never outlives the
+ *   session (ADR-0011).
+ * - Wildcard fence: a worker-supplied target containing `*` (the policy
+ *   pattern metacharacter — `matchTargetPattern`: a bare `*` matches every
+ *   target in the class, a trailing `*` a prefix) is never offered the
+ *   "Always allow" option; the ask degrades to Allow / Deny, and an
+ *   always-shaped answer that still arrives (constructed or queued) resolves
+ *   as a plain one-shot allow without ever being recorded as a row. Consent
+ *   always covers the exact target shown, never a class or prefix pattern.
+ * - Location line: workers are local dsh child sessions, so every prompt
+ *   detail carries the constant honest line "Runs on your computer.".
+ * - Clamped detail: the reason text is hard-cut at `APPROVAL_DETAIL_CLAMP_CHARS`
+ *   with an explicit omission marker (report-clamp pattern). The target name
+ *   is never truncated.
+ * - Expired answers: an explicit answer for a ticket that already left the
+ *   relay (ADR-0008 timeout deny, or cleared) surfaces honest
+ *   `approval.expired` copy through the wake bus and resolves nothing.
+ * - Secret copy: an ALLOWED credential ask surfaces the "stored securely,
+ *   never shown" reassurance as its post-decision notice — name only, never
+ *   a value.
+ *
  * Structural only — no import of `@deepseek-ai/dsh-user-questions` (peer
- * surface). All copy is original clean-room text (design-16 §6).
+ * surface). All copy is original clean-room text (design-16 §6, design-17 §7).
  */
 
 import type {
   AccessDecision,
+  AccessNotice,
   AccessRequestBody,
   AccessTicket,
 } from "../core/access-types.js";
 
 /** Option label for approving the ask (design-16 §6). */
 export const ACCESS_PROMPT_ALLOW = "Allow";
+
+/**
+ * Option label for the session-scope always-allow (ticket 30, design-17 §7
+ * `approval.option.always-session`). Session scope only — never a profile
+ * or preset write.
+ */
+export const ACCESS_PROMPT_ALWAYS_ALLOW = "Always allow (this session)";
 
 /** Option label for refusing the ask (design-16 §6). */
 export const ACCESS_PROMPT_DENY = "Deny";
@@ -56,6 +94,56 @@ export const ACCESS_PROMPT_DENY = "Deny";
  * relay's deny wrapper ("Detail: …") and kept deliberately plain.
  */
 export const ACCESS_PROMPT_DENY_DETAIL = "denied from the access prompt";
+
+/**
+ * Constant location line on every prompt detail (ticket 30, design-17 §7
+ * `approval.location.local`): workers are local dsh child sessions, so the
+ * line is constant until a non-local producer kind ever lands (design-17
+ * conflict 6).
+ */
+export const APPROVAL_LOCATION_LOCAL = "Runs on your computer.";
+
+/**
+ * Copy surfaced when an explicit answer arrives for a ticket the relay has
+ * already resolved (ADR-0008 timeout deny) or dropped (ticket 30,
+ * design-17 §7 `approval.expired`). Nothing is resolved a second time.
+ */
+export const APPROVAL_EXPIRED_COPY =
+  "This request already expired and was denied by default.";
+
+/**
+ * Post-decision reassurance for an ALLOWED credential ask (ticket 30,
+ * design-17 §7 `approval.secret.stored`). Names-never-values invariant
+ * untouched: the notice names the credential, never a value.
+ */
+export const APPROVAL_SECRET_STORED_COPY =
+  "Saved. The value is stored securely and is never shown to workers or in this chat.";
+
+/**
+ * Max characters of an ask's reason text rendered in the prompt detail
+ * (ticket 30; design-17 §4.5 "a few hundred chars").
+ */
+export const APPROVAL_DETAIL_CLAMP_CHARS = 240;
+
+/** Omission marker appended after a hard detail cut (design-17 §7). */
+export function approvalDetailOmissionMarker(omittedChars: number): string {
+  return `… [+${omittedChars} more characters]`;
+}
+
+/**
+ * Hard character cut for rendered reason text (report-clamp pattern).
+ * Empty string stays empty; over-limit text is cut at `limit` and closed
+ * with the omission marker carrying the omitted count. The ask's target
+ * name is never routed through this — it is rendered whole or not at all.
+ */
+export function clampApprovalDetail(
+  raw: string,
+  limit: number = APPROVAL_DETAIL_CLAMP_CHARS,
+): string {
+  const text = raw.trim();
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit)}${approvalDetailOmissionMarker(text.length - limit)}`;
+}
 
 /** One selectable answer offered to the user (shipped contract shape). */
 export interface AccessPromptOptionLike {
@@ -128,39 +216,61 @@ export function describeAccessAction(body: AccessRequestBody): string {
 }
 
 /**
+ * Wildcard fence (ticket 30): `*` is the only metacharacter
+ * `matchTargetPattern` treats specially — a bare `*` matches every target in
+ * the class, a trailing `*` a prefix. Targets arrive from workers untrusted,
+ * so a target containing `*` anywhere is never eligible for "Always allow":
+ * consent always covers the exact target shown, never a class or prefix
+ * pattern.
+ */
+export function isWildcardAccessTarget(target: string): boolean {
+  return target.includes("*");
+}
+
+/**
  * Build the structured user question for a pending access ask.
- * Copy is exactly the design-16 §6 template:
- * "Worker {workerId} needs approval to {action}." with Allow/Deny options.
+ * Question copy is the design-16 §6 template; the detail carries the
+ * (clamped) reason plus the constant location line on every prompt
+ * (ticket 30). Options: Allow / Always allow (this session) / Deny —
+ * minus the always option when the target carries a pattern wildcard
+ * (wildcard fence, ticket 30).
  */
 export function accessPromptQuestion(ticket: {
   workerId: string;
   requestId: string;
   body: AccessRequestBody;
 }): AccessPromptQuestionLike {
-  const detail = ticket.body.reason;
+  const reason = clampApprovalDetail(ticket.body.reason);
+  const detail =
+    reason.length > 0
+      ? `${reason}\n\n${APPROVAL_LOCATION_LOCAL}`
+      : APPROVAL_LOCATION_LOCAL;
   return {
     id: accessPromptQuestionId(ticket.requestId),
     question: `Worker ${ticket.workerId} needs approval to ${describeAccessAction(ticket.body)}.`,
-    ...(detail.length > 0 ? { detail } : {}),
-    options: [
-      { label: ACCESS_PROMPT_ALLOW },
-      { label: ACCESS_PROMPT_DENY },
-    ],
+    detail,
+    options: isWildcardAccessTarget(ticket.body.target)
+      ? [{ label: ACCESS_PROMPT_ALLOW }, { label: ACCESS_PROMPT_DENY }]
+      : [
+          { label: ACCESS_PROMPT_ALLOW },
+          { label: ACCESS_PROMPT_ALWAYS_ALLOW },
+          { label: ACCESS_PROMPT_DENY },
+        ],
   };
 }
 
 /**
- * Parse a seam answer into an explicit choice. Returns "allow" / "deny"
- * only for an answer item whose id matches and whose selected labels name
- * one of our options; anything else (dismissed, custom text, unknown
- * labels, missing answers) returns null so the relay's armed timeout keeps
- * the deny-by-default decision (ADR-0008) — a missing answer is never
- * invented into a decision here.
+ * Parse a seam answer into an explicit choice. Returns "allow" /
+ * "always-allow" / "deny" only for an answer item whose id matches and
+ * whose selected labels name one of our options; anything else (dismissed,
+ * custom text, unknown labels, missing answers) returns null so the relay's
+ * armed timeout keeps the deny-by-default decision (ADR-0008) — a missing
+ * answer is never invented into a decision here.
  */
 export function parseAccessPromptAnswer(
   answer: AccessPromptAnswerLike | undefined,
   questionId: string,
-): "allow" | "deny" | null {
+): "allow" | "always-allow" | "deny" | null {
   if (answer === undefined) return null;
   const answers = answer.answers;
   if (!Array.isArray(answers)) return null;
@@ -169,14 +279,54 @@ export function parseAccessPromptAnswer(
     if (item.id !== questionId) continue;
     const selected = Array.isArray(item.selected) ? item.selected : [];
     const allow = selected.includes(ACCESS_PROMPT_ALLOW);
+    const always = selected.includes(ACCESS_PROMPT_ALWAYS_ALLOW);
     const deny = selected.includes(ACCESS_PROMPT_DENY);
-    // Single-select in practice; if a UI ever returns both, fail closed
-    // to deny (ADR-0008 spirit: never allow on ambiguity).
+    // Single-select in practice; if a UI ever returns several, fail closed:
+    // deny wins over any allow shape (ADR-0008 spirit — never allow on
+    // ambiguity), and "always" wins over plain allow (the stronger consent).
     if (deny) return "deny";
+    if (always) return "always-allow";
     if (allow) return "allow";
     return null;
   }
   return null;
+}
+
+/**
+ * Honest post-expiry notice (ticket 30): the ticket already timed out and
+ * was denied by default (ADR-0008), so the notice carries the expired copy
+ * as a timeout deny's detail. The wake bus renders it in the Resolved
+ * section; nothing is resolved a second time.
+ */
+export function accessExpiredNotice(
+  ticket: AccessTicket,
+  title?: string,
+): AccessNotice {
+  return {
+    kind: "access-resolved",
+    workerId: ticket.workerId,
+    title: title !== undefined && title.length > 0 ? title : ticket.workerId,
+    decision: { kind: "deny", reason: "timeout", detail: APPROVAL_EXPIRED_COPY },
+    body: ticket.body,
+  };
+}
+
+/**
+ * Post-decision notice for an ALLOWED credential ask (ticket 30): carries
+ * the stored-securely reassurance as the allow note. The body carries the
+ * credential NAME only — never a value (ticket 13 invariant).
+ */
+export function secretStoredAccessNotice(
+  ticket: AccessTicket,
+  title?: string,
+): AccessNotice {
+  return {
+    kind: "access-resolved",
+    workerId: ticket.workerId,
+    title: title !== undefined && title.length > 0 ? title : ticket.workerId,
+    decision: { kind: "allow", note: APPROVAL_SECRET_STORED_COPY },
+    body: ticket.body,
+  };
 }
 
 export interface AccessPromptPumpOptions {
@@ -196,6 +346,27 @@ export interface AccessPromptPumpOptions {
    * core: a late answer after a timeout deny is a no-op there.
    */
   readonly resolve: (workerId: string, decision: AccessDecision) => boolean;
+  /**
+   * Ticket 30: insert a session-scope allow row (class + exact target) into
+   * the relay's existing policy table so future matching asks auto-answer
+   * on the shipped policy no-op path. Session scope ONLY — profile/preset
+   * writes are a consent trap and are deliberately not plumbed here. The
+   * pump never calls this for a wildcard-bearing target (wildcard fence,
+   * ticket 30), so `targetPattern` is always an exact target.
+   */
+  readonly alwaysAllow?: (ticket: AccessTicket) => void;
+  /**
+   * Ticket 30: an explicit answer arrived for a ticket that already left
+   * the relay (timeout deny / cleared). Surface honest expired copy
+   * conversationally; the pump resolves nothing for it.
+   */
+  readonly notifyExpired?: (ticket: AccessTicket) => void;
+  /**
+   * Ticket 30: an ALLOW decision was routed for a credential ask. Surface
+   * the names-never-values "stored securely" reassurance as the
+   * post-decision notice.
+   */
+  readonly notifySecretStored?: (ticket: AccessTicket) => void;
   /**
    * Live agent scoping the ask (the activated dispatcher chat), or
    * undefined to omit scoping.
@@ -272,17 +443,52 @@ export function createAccessPromptPump(
         answer,
         accessPromptQuestionId(ticket.requestId),
       );
-      if (choice === "allow") {
-        options.resolve(ticket.workerId, { kind: "allow" });
-      } else if (choice === "deny") {
-        options.resolve(ticket.workerId, {
-          kind: "deny",
-          reason: "user-denied",
-          detail: ACCESS_PROMPT_DENY_DETAIL,
-        });
+      if (choice === null) {
+        // Dismissed / unanswered / unknown — no decision here; the relay's
+        // armed timeout keeps ADR-0008 deny-by-default.
+        return;
       }
-      // choice === null: dismissed / unanswered / unknown — no decision
-      // here; the relay's armed timeout keeps ADR-0008 deny-by-default.
+      // Ticket 30 expired-answer fence: the ticket must still be pending in
+      // the core before an answer routes anywhere. An answer for a ticket
+      // the relay already resolved (timeout deny) or dropped surfaces the
+      // honest expired copy and resolves nothing (not even a no-op resolve
+      // that could land on a newer ask of the same worker).
+      const stillPending = options
+        .listPending()
+        .some((live) => live.requestId === ticket.requestId);
+      if (!stillPending) {
+        options.notifyExpired?.(ticket);
+        return;
+      }
+      if (
+        choice === "always-allow" &&
+        !isWildcardAccessTarget(ticket.body.target)
+      ) {
+        // Record the session-scope row first, then route this ask's allow —
+        // identical decision to plain Allow, plus the remembered row.
+        // Wildcard fence (ticket 30): the option set above never offers
+        // "Always allow" for a metacharacter target, and a constructed (or
+        // queued) always-shaped answer for one is NOT forwarded to the row
+        // insert — it degrades to this ask's plain one-shot allow, so no
+        // class-wildcard session row can ever be created.
+        options.alwaysAllow?.(ticket);
+      }
+      const allowed =
+        choice === "allow" || choice === "always-allow"
+          ? options.resolve(ticket.workerId, { kind: "allow" })
+          : options.resolve(ticket.workerId, {
+              kind: "deny",
+              reason: "user-denied",
+              detail: ACCESS_PROMPT_DENY_DETAIL,
+            });
+      if (!allowed) {
+        options.notifyExpired?.(ticket);
+      } else if (
+        (choice === "allow" || choice === "always-allow") &&
+        ticket.body.class === "credential"
+      ) {
+        options.notifySecretStored?.(ticket);
+      }
     } catch (error) {
       if (controller.signal.aborted) {
         // Abandoned by reset()/prune (deactivation or the ticket resolving

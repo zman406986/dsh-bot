@@ -79,6 +79,12 @@ export interface BindDispatcherLifecycleResult {
    * dispatcher session is live.
    */
   activate(agent: AgentLike): ActivationOutcome;
+  /**
+   * Best-effort one-shot context inject into the activated chat (ticket 31):
+   * the same plugin-message seam as the session policy, used for the
+   * restart-honesty notice. No-op when no activation is live.
+   */
+  injectNotice(text: string): void;
   /** Current dispatcher session id, once activated. */
   dispatcherSessionId(): string | null;
   /** Tear down listeners and the activation, if any. */
@@ -220,6 +226,13 @@ export function bindDispatcherLifecycle(
       }
       onActivated?.(sessionId);
       return { ok: true };
+    },
+
+    injectNotice(text: string): void {
+      // Ticket 31: one-shot best-effort inject into the activated chat.
+      // No live parent (dormant or torn down) → nothing to inject into.
+      if (parentAgentRef === null) return;
+      tryInject(parentAgentRef, text);
     },
 
     dispatcherSessionId(): string | null {

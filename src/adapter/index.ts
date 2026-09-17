@@ -1,12 +1,22 @@
 export {
   ACCESS_PROMPT_ALLOW,
+  ACCESS_PROMPT_ALWAYS_ALLOW,
   ACCESS_PROMPT_DENY,
   ACCESS_PROMPT_DENY_DETAIL,
+  APPROVAL_DETAIL_CLAMP_CHARS,
+  APPROVAL_EXPIRED_COPY,
+  APPROVAL_LOCATION_LOCAL,
+  APPROVAL_SECRET_STORED_COPY,
+  accessExpiredNotice,
   accessPromptQuestion,
   accessPromptQuestionId,
+  approvalDetailOmissionMarker,
+  clampApprovalDetail,
   createAccessPromptPump,
   describeAccessAction,
+  isWildcardAccessTarget,
   parseAccessPromptAnswer,
+  secretStoredAccessNotice,
   type AccessPromptAnswerItemLike,
   type AccessPromptAnswerLike,
   type AccessPromptOptionLike,
@@ -31,6 +41,7 @@ export {
   type RegisterableTool,
 } from "./dispatcher-tools.js";
 export {
+  ACTIVATION_PRESENCE_HINT,
   activationResultCopy,
   createDispatcherStartCommand,
   DISPATCHER_START_ALREADY_ELSEWHERE,
@@ -97,6 +108,13 @@ export {
   type RosterChannelStats,
   type SettingsRosterChannel,
 } from "./roster-channel.js";
+export {
+  assembleRestartNotice,
+  RESTART_DEGRADED_NOTICE,
+  RESTART_NOTICE_HEADING,
+  restartRestoredLine,
+  restartUnknownStateLine,
+} from "./restart-notice.js";
 export {
   createRequestAccessHandler,
   registerWorkerAccessTool,

@@ -15,13 +15,20 @@ import { describe, it } from "node:test";
 import { apply } from "../src/plugin.js";
 import {
   ACCESS_PROMPT_ALLOW,
+  ACCESS_PROMPT_ALWAYS_ALLOW,
   ACCESS_PROMPT_DENY,
   ACCESS_PROMPT_DENY_DETAIL,
+  APPROVAL_DETAIL_CLAMP_CHARS,
+  APPROVAL_EXPIRED_COPY,
+  APPROVAL_LOCATION_LOCAL,
+  APPROVAL_SECRET_STORED_COPY,
   DISPATCHER_START_COMMAND,
   accessPromptQuestion,
   accessPromptQuestionId,
+  clampApprovalDetail,
   createAccessPromptPump,
   describeAccessAction,
+  isWildcardAccessTarget,
   parseAccessPromptAnswer,
   type AccessPromptAnswerLike,
   type AccessPromptRequestLike,
@@ -115,19 +122,64 @@ function ticket(overrides: Partial<AccessTicket> = {}): AccessTicket {
   };
 }
 
-describe("access prompt — payload copy (design-16 §6)", () => {
-  it("tool ask uses the exact design template with Allow/Deny options", () => {
+describe("access prompt — payload copy (design-16 §6 + ticket 30)", () => {
+  it("tool ask uses the exact design template with the three ticket-30 options", () => {
     const question = accessPromptQuestion(ticket());
     assert.equal(
       question.question,
       'Worker w-1 needs approval to use the tool "write_file".',
     );
     assert.equal(question.id, "access:req-1");
-    assert.equal(question.detail, "needs to write outside the workspace");
+    assert.equal(
+      question.detail,
+      `needs to write outside the workspace\n\n${APPROVAL_LOCATION_LOCAL}`,
+    );
+    assert.deepEqual(question.options, [
+      { label: ACCESS_PROMPT_ALLOW },
+      { label: ACCESS_PROMPT_ALWAYS_ALLOW },
+      { label: ACCESS_PROMPT_DENY },
+    ]);
+  });
+
+  it("a bare `*` target offers Allow/Deny only — never Always allow (ticket 30 fence)", () => {
+    const question = accessPromptQuestion(
+      ticket({ body: { class: "tool", target: "*", reason: "anything" } }),
+    );
     assert.deepEqual(question.options, [
       { label: ACCESS_PROMPT_ALLOW },
       { label: ACCESS_PROMPT_DENY },
     ]);
+  });
+
+  it("a prefix-style `gh-api*` target also drops the Always allow option", () => {
+    const question = accessPromptQuestion(
+      ticket({
+        body: { class: "network", target: "gh-api*", reason: "reach the api" },
+      }),
+    );
+    assert.deepEqual(question.options, [
+      { label: ACCESS_PROMPT_ALLOW },
+      { label: ACCESS_PROMPT_DENY },
+    ]);
+  });
+
+  it("the fence covers `*` anywhere in the target and leaves exact targets alone", () => {
+    // `*` is the policy pattern metacharacter (`matchTargetPattern`): a bare
+    // or trailing `*` would be stored as a class/prefix pattern. A
+    // mid-string `*` is fenced too — consent never covers a pattern shape.
+    assert.equal(isWildcardAccessTarget("*"), true);
+    assert.equal(isWildcardAccessTarget("gh-api*"), true);
+    assert.equal(isWildcardAccessTarget("gh*api"), true);
+    assert.equal(isWildcardAccessTarget("write_file"), false);
+    assert.equal(isWildcardAccessTarget("gh-api-2"), false);
+    assert.equal(isWildcardAccessTarget(""), false);
+  });
+
+  it("every prompt detail carries the constant local location line", () => {
+    const question = accessPromptQuestion(
+      ticket({ body: { class: "tool", target: "t", reason: "" } }),
+    );
+    assert.equal(question.detail, APPROVAL_LOCATION_LOCAL);
   });
 
   it("credential ask names the credential — never a value (ticket 13)", () => {
@@ -178,12 +230,68 @@ describe("access prompt — payload copy (design-16 §6)", () => {
   });
 });
 
+describe("access prompt — clamped detail (ticket 30)", () => {
+  it("short reason passes through unchanged", () => {
+    assert.equal(clampApprovalDetail("short reason"), "short reason");
+    assert.equal(clampApprovalDetail(""), "");
+  });
+
+  it("long reason hard-cuts at the limit with the omitted count", () => {
+    const clamped = clampApprovalDetail("x".repeat(300));
+    assert.equal(
+      clamped,
+      `${"x".repeat(APPROVAL_DETAIL_CLAMP_CHARS)}… [+${300 - APPROVAL_DETAIL_CLAMP_CHARS} more characters]`,
+    );
+  });
+
+  it("exact-limit reason gets no marker", () => {
+    const exact = "y".repeat(APPROVAL_DETAIL_CLAMP_CHARS);
+    assert.equal(clampApprovalDetail(exact), exact);
+  });
+
+  it("the prompt clamps the reason but never truncates inside the target name", () => {
+    const target = "T".repeat(500);
+    const question = accessPromptQuestion(
+      ticket({ body: { class: "tool", target, reason: "z".repeat(400) } }),
+    );
+    assert.ok(question.question.includes(target));
+    assert.ok(!question.question.includes("…"));
+    // The clamped reason does appear, with the omission marker.
+    assert.ok(question.detail?.includes("more characters]"));
+    assert.ok((question.detail ?? "").length < 400);
+  });
+});
+
 describe("access prompt — answer parsing", () => {
   const id = accessPromptQuestionId("req-1");
 
   it("maps explicit Allow and Deny selections", () => {
     assert.equal(parseAccessPromptAnswer(allowAnswer(id), id), "allow");
     assert.equal(parseAccessPromptAnswer(denyAnswer(id), id), "deny");
+  });
+
+  it("maps the session always-allow selection (ticket 30)", () => {
+    assert.equal(
+      parseAccessPromptAnswer(
+        { answers: [{ id, selected: [ACCESS_PROMPT_ALWAYS_ALLOW] }] },
+        id,
+      ),
+      "always-allow",
+    );
+  });
+
+  it("deny wins over any allow shape; always-allow wins over plain allow", () => {
+    const parse = (selected: string[]) =>
+      parseAccessPromptAnswer({ answers: [{ id, selected }] }, id);
+    assert.equal(parse([ACCESS_PROMPT_ALLOW, ACCESS_PROMPT_DENY]), "deny");
+    assert.equal(
+      parse([ACCESS_PROMPT_ALWAYS_ALLOW, ACCESS_PROMPT_DENY]),
+      "deny",
+    );
+    assert.equal(
+      parse([ACCESS_PROMPT_ALLOW, ACCESS_PROMPT_ALWAYS_ALLOW]),
+      "always-allow",
+    );
   });
 
   it("never invents a decision from a missing or foreign answer", () => {
@@ -227,6 +335,9 @@ describe("access prompt pump — surfacing and routing", () => {
     pending: AccessTicket[];
     resolved: Array<{ workerId: string; decision: AccessDecision }>;
     requeued: AccessTicket[];
+    alwaysAllowed: AccessTicket[];
+    expired: AccessTicket[];
+    secretStored: AccessTicket[];
     setActive(active: boolean): void;
   }
 
@@ -235,6 +346,9 @@ describe("access prompt pump — surfacing and routing", () => {
     const pending: AccessTicket[] = [];
     const resolved: Array<{ workerId: string; decision: AccessDecision }> = [];
     const requeued: AccessTicket[] = [];
+    const alwaysAllowed: AccessTicket[] = [];
+    const expired: AccessTicket[] = [];
+    const secretStored: AccessTicket[] = [];
     let active = true;
     const pump = createAccessPromptPump({
       ...(withSeam ? { userQuestions: seam } : {}),
@@ -244,6 +358,9 @@ describe("access prompt pump — surfacing and routing", () => {
         resolved.push({ workerId, decision });
         return true;
       },
+      alwaysAllow: (t) => alwaysAllowed.push(t),
+      notifyExpired: (t) => expired.push(t),
+      notifySecretStored: (t) => secretStored.push(t),
       getAgent: () => "agent-1",
       requeueConversational: (t) => requeued.push(t),
     });
@@ -253,6 +370,9 @@ describe("access prompt pump — surfacing and routing", () => {
       pending,
       resolved,
       requeued,
+      alwaysAllowed,
+      expired,
+      secretStored,
       setActive(value: boolean) {
         active = value;
       },
@@ -302,6 +422,132 @@ describe("access prompt pump — surfacing and routing", () => {
         },
       },
     ]);
+  });
+
+  it("Always allow inserts the session row, then routes the same allow", async () => {
+    const h = createHarness();
+    h.pending.push(ticket());
+    h.pump.sync();
+    const ask = h.seam.asks[0];
+    assert.ok(ask);
+    ask.resolve({
+      answers: [
+        { id: questionIdOf(ask), selected: [ACCESS_PROMPT_ALWAYS_ALLOW] },
+      ],
+    });
+    await tick();
+    assert.deepEqual(h.alwaysAllowed, [ticket()]);
+    assert.deepEqual(h.resolved, [
+      { workerId: "w-1", decision: { kind: "allow" } },
+    ]);
+  });
+
+  it("an Always-allow answer for a wildcard target degrades to a one-shot allow — no row", async () => {
+    const h = createHarness();
+    h.pending.push(
+      ticket({ body: { class: "tool", target: "*", reason: "r" } }),
+    );
+    h.pump.sync();
+    const ask = h.seam.asks[0];
+    assert.ok(ask);
+    ask.resolve({
+      answers: [
+        { id: questionIdOf(ask), selected: [ACCESS_PROMPT_ALWAYS_ALLOW] },
+      ],
+    });
+    await tick();
+    // Never forwarded to the row insert; the ask itself is still allowed.
+    assert.equal(h.alwaysAllowed.length, 0);
+    assert.deepEqual(h.resolved, [
+      { workerId: "w-1", decision: { kind: "allow" } },
+    ]);
+  });
+
+  it("a wildcard target still routes a plain Allow without remembering anything", async () => {
+    const h = createHarness();
+    h.pending.push(
+      ticket({ body: { class: "tool", target: "gh-api*", reason: "r" } }),
+    );
+    h.pump.sync();
+    h.seam.asks[0]?.resolve(allowAnswer(questionIdOf(h.seam.asks[0])));
+    await tick();
+    assert.deepEqual(h.resolved, [
+      { workerId: "w-1", decision: { kind: "allow" } },
+    ]);
+    assert.equal(h.alwaysAllowed.length, 0);
+  });
+
+  it("an answer for a ticket that already left the relay is expired: copy only, nothing resolved", async () => {
+    const h = createHarness();
+    h.pending.push(ticket());
+    h.pump.sync();
+    // The relay resolved the ticket elsewhere (timeout deny / clear) but the
+    // pump has not pruned its prompt yet — the answer beat the next sync().
+    h.pending.length = 0;
+    const ask = h.seam.asks[0];
+    assert.ok(ask);
+    ask.resolve(allowAnswer(questionIdOf(ask)));
+    await tick();
+    assert.equal(h.resolved.length, 0);
+    assert.deepEqual(h.expired, [ticket()]);
+    assert.equal(h.alwaysAllowed.length, 0);
+  });
+
+  it("an expired Always-allow answer inserts no session row", async () => {
+    const h = createHarness();
+    h.pending.push(ticket());
+    h.pump.sync();
+    h.pending.length = 0;
+    const ask = h.seam.asks[0];
+    assert.ok(ask);
+    ask.resolve({
+      answers: [
+        { id: questionIdOf(ask), selected: [ACCESS_PROMPT_ALWAYS_ALLOW] },
+      ],
+    });
+    await tick();
+    assert.equal(h.alwaysAllowed.length, 0);
+    assert.deepEqual(h.expired, [ticket()]);
+  });
+
+  it("a dismissed answer on a gone ticket stays silent (no invented expiry)", async () => {
+    const h = createHarness();
+    h.pending.push(ticket());
+    h.pump.sync();
+    h.pending.length = 0;
+    h.seam.asks[0]?.resolve({ answers: [] });
+    await tick();
+    assert.equal(h.resolved.length, 0);
+    assert.equal(h.expired.length, 0);
+  });
+
+  it("an allowed credential ask surfaces the stored-secret notice", async () => {
+    const h = createHarness();
+    const credentialTicket = ticket({
+      body: {
+        class: "credential",
+        target: "API_TOKEN",
+        reason: "need the API token",
+        credentialName: "API_TOKEN",
+      },
+    });
+    h.pending.push(credentialTicket);
+    h.pump.sync();
+    h.seam.asks[0]?.resolve(allowAnswer(questionIdOf(h.seam.asks[0])));
+    await tick();
+    assert.deepEqual(h.secretStored, [credentialTicket]);
+  });
+
+  it("an allowed tool ask surfaces no stored-secret notice", async () => {
+    const h = createHarness();
+    h.pending.push(ticket());
+    h.pump.sync();
+    h.seam.asks[0]?.resolve(allowAnswer(questionIdOf(h.seam.asks[0])));
+    await tick();
+    assert.deepEqual(h.resolved, [
+      { workerId: "w-1", decision: { kind: "allow" } },
+    ]);
+    assert.equal(h.secretStored.length, 0);
   });
 
   it("resolves nothing for a dismissed or foreign answer (timeout decides)", async () => {
@@ -602,8 +848,18 @@ describe("plugin apply — access prompts over the host seam", () => {
     );
     assert.deepEqual(ask.request.questions[0]?.options, [
       { label: ACCESS_PROMPT_ALLOW },
+      { label: ACCESS_PROMPT_ALWAYS_ALLOW },
       { label: ACCESS_PROMPT_DENY },
     ]);
+    // Ticket 30: detail carries the reason plus the constant location line.
+    assert.ok(
+      ask.request.questions[0]?.detail?.includes(
+        "need to write outside the workspace",
+      ),
+    );
+    assert.ok(
+      ask.request.questions[0]?.detail?.includes(APPROVAL_LOCATION_LOCAL),
+    );
     // The ask is scoped to the activated dispatcher chat.
     const agent = ask.request.agent as AgentLike | undefined;
     assert.equal(String(agent?.session?.id), "s-1");
@@ -675,6 +931,178 @@ describe("plugin apply — access prompts over the host seam", () => {
     await tick();
     await tick();
     assert.equal(ctx.sentMessages.length, 1);
+  });
+
+  it("Always allow records a session row: the next matching ask auto-answers unprompted", async () => {
+    const seam = createFakeUserQuestions();
+    const ctx = createFullCtx(seam);
+    apply(ctx, { enabled: true });
+    const { workerId } = await activateAndSpawn(ctx);
+    await requestAccess(ctx, workerId);
+    assert.equal(seam.asks.length, 1);
+
+    const ask = seam.asks[0];
+    assert.ok(ask);
+    ask.resolve({
+      answers: [
+        { id: questionIdOf(ask), selected: [ACCESS_PROMPT_ALWAYS_ALLOW] },
+      ],
+    });
+    await tick();
+    await tick();
+    // This ask's own allow was delivered.
+    assert.equal(ctx.sentMessages.length, 1);
+
+    // A later ask with the same class+target hits the session row: delivered
+    // immediately, never prompted (shipped policy no-op path).
+    await requestAccess(ctx, workerId);
+    assert.equal(seam.asks.length, 1);
+    assert.equal(ctx.sentMessages.length, 2);
+    assert.ok(ctx.sentMessages[1]?.text.includes("[Parent: access allowed]"));
+  });
+
+  it("wildcard fence: a `gh-api*` ask offers Allow/Deny only and records no session row", async () => {
+    const seam = createFakeUserQuestions();
+    const ctx = createFullCtx(seam);
+    apply(ctx, { enabled: true });
+    const { workerId } = await activateAndSpawn(ctx);
+
+    await requestAccess(ctx, workerId, {
+      class: "network",
+      target: "gh-api*",
+      reason: "reach the github api",
+    });
+    assert.equal(seam.asks.length, 1);
+    const ask = seam.asks[0];
+    assert.ok(ask);
+    // A metacharacter target is never offered the session memory option.
+    assert.deepEqual(ask.request.questions[0]?.options, [
+      { label: ACCESS_PROMPT_ALLOW },
+      { label: ACCESS_PROMPT_DENY },
+    ]);
+
+    // Even a constructed always-shaped answer degrades to the one-shot
+    // allow: the target is never remembered as a stored pattern.
+    ask.resolve({
+      answers: [
+        { id: questionIdOf(ask), selected: [ACCESS_PROMPT_ALWAYS_ALLOW] },
+      ],
+    });
+    await tick();
+    await tick();
+    assert.equal(ctx.sentMessages.length, 1);
+    assert.ok(ctx.sentMessages[0]?.text.includes("[Parent: access allowed]"));
+
+    // No `gh-api*` row was stored: the prefix neighbour must prompt again,
+    // where a stored pattern would have auto-allowed it silently.
+    await requestAccess(ctx, workerId, {
+      class: "network",
+      target: "gh-api-2",
+      reason: "same class, neighbouring target",
+    });
+    assert.equal(seam.asks.length, 2);
+    const neighbour = seam.asks[1];
+    assert.ok(neighbour);
+    // Deny to cancel the relay's armed default timeout (test hygiene).
+    neighbour.resolve(denyAnswer(questionIdOf(neighbour)));
+    await tick();
+    await tick();
+    assert.equal(ctx.sentMessages.length, 2);
+    assert.ok(ctx.sentMessages[1]?.text.includes("[Parent: access denied]"));
+  });
+
+  it("session always-allow rows clear on deactivation: a new session prompts again", async () => {
+    const seam = createFakeUserQuestions();
+    const ctx = createFullCtx(seam);
+    apply(ctx, { enabled: true });
+    const { workerId, agent } = await activateAndSpawn(ctx);
+    await requestAccess(ctx, workerId);
+    const ask = seam.asks[0];
+    assert.ok(ask);
+    ask.resolve({
+      answers: [
+        { id: questionIdOf(ask), selected: [ACCESS_PROMPT_ALWAYS_ALLOW] },
+      ],
+    });
+    await tick();
+    await tick();
+
+    // Session ends and a new session activates in the same chat.
+    ctx.fire("agent/disposed", { agent });
+    await tick();
+    const reactivation = await ctx.runCommand({
+      commandId: DISPATCHER_START_COMMAND,
+      agent,
+    });
+    assert.equal(reactivation.kind, "success");
+    await tick();
+
+    // The session row is gone: the same ask must prompt again. A leaked row
+    // would auto-answer it with no new prompt.
+    await requestAccess(ctx, workerId);
+    assert.equal(seam.asks.length, 2);
+    const second = seam.asks[1];
+    assert.ok(second);
+    // Deny to cancel the relay's armed default timeout (test hygiene).
+    second.resolve(denyAnswer(questionIdOf(second)));
+    await tick();
+    await tick();
+    // One allow delivery (the first, remembered ask) + one deny delivery.
+    assert.equal(ctx.sentMessages.length, 2);
+  });
+
+  it("a late answer after the timeout surfaces honest expired copy, resolving nothing", async () => {
+    const seam = createFakeUserQuestions();
+    const ctx = createFullCtx(seam);
+    apply(ctx, { enabled: true, accessRequestTimeoutMs: 25 });
+    const { workerId } = await activateAndSpawn(ctx);
+    await requestAccess(ctx, workerId);
+    assert.equal(ctx.sentMessages.length, 0);
+
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    assert.equal(ctx.sentMessages.length, 1); // the ADR-0008 timeout deny
+
+    // The user answers the stale prompt: the next wake carries the expired
+    // copy and no second decision is delivered.
+    const ask = seam.asks[0];
+    assert.ok(ask);
+    ask.resolve(allowAnswer(questionIdOf(ask)));
+    await tick();
+    await tick();
+    assert.equal(ctx.sentMessages.length, 1);
+    assert.ok(
+      ctx.wakeFollowups.some((text) => text.includes(APPROVAL_EXPIRED_COPY)),
+    );
+  });
+
+  it("an allowed credential ask reports the stored-secret reassurance", async () => {
+    const seam = createFakeUserQuestions();
+    const ctx = createFullCtx(seam);
+    apply(ctx, { enabled: true });
+    const { workerId } = await activateAndSpawn(ctx);
+    await requestAccess(ctx, workerId, {
+      class: "credential",
+      target: "API_TOKEN",
+      reason: "need the API token",
+      credentialName: "API_TOKEN",
+    });
+    assert.equal(seam.asks.length, 1);
+    // Names only — never a value (ticket 13 invariant on the prompt payload).
+    const ask = seam.asks[0];
+    assert.ok(ask);
+    assert.ok(JSON.stringify(ask.request).includes("API_TOKEN"));
+    ask.resolve(allowAnswer(questionIdOf(ask)));
+    await tick();
+    await tick();
+
+    // The worker got the allow; the user-facing post-decision notice carries
+    // the names-never-values reassurance.
+    assert.equal(ctx.sentMessages.length, 1);
+    assert.ok(
+      ctx.wakeFollowups.some((text) =>
+        text.includes(APPROVAL_SECRET_STORED_COPY),
+      ),
+    );
   });
 
   it("dedupe: a prompted ask is not also rendered conversationally", async () => {
