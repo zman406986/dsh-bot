@@ -25,3 +25,19 @@ Work happens per the workflow doc: tests/greps run in the worktree checkout `C:\
 - Merge gates are hard: any grep hit outside allowed fixtures, any red test, or a missing provenance comment blocks the merge.
 - One implementation ticket at a time was the rule through 27–32; this ticket runs only after 32 is committed.
 - Tracker/status updates on MAIN; product code and the merge happen via the worktree branch.
+
+## Comments
+
+2026-09-18 — **Merge step complete.** `clone/always-on-dispatcher` (HEAD `1e7c735`) merged into `main` `--no-ff` at **`400450f`**; message references 17.27–17.33 per this ticket's convention. Pre-merge sanity: worktree HEAD `1e7c735` confirmed, main `98a1262` clean, `git merge-tree --write-tree` zero conflicts. Merged tree carries both main's ticket-34 `dsh.client.inject` and the branch's capsule implementation (43 files, +9340/−252).
+
+**Post-merge gates on merged main — all green:**
+- `npm ci` — clean install from lockfile, 0 vulnerabilities.
+- `npm test` — **701 pass / 0 fail / 185 suites** (union of both tips, as predicted). The known semantic-overlap risk in `test/client-face-scaffold.test.ts` did not materialize — git auto-merged it and the suite is green; no reconciliation fix was needed.
+- `npm run typecheck` — clean (`tsconfig.json` and `tsconfig.client.json`).
+- `npm run build:client` — OK; client bundle 64,658 bytes.
+
+**S7 legal grep (post-merge, shipped tree) — PASS.** Word-aware, case-insensitive scan of `src/`, `lib/`, `client/`, `scripts/`, `docs/` (`prompts/` not present) for `sand`, `executor`, `MessageSubagent`, `SAND_MULTITASK_`: zero hits in the product tree. The only added hit versus pre-merge is the sanctioned negative-test array inside `test/composition-polish.test.ts` (an assertion that shipped copy is free of the identifiers). `docs/` hits are pre-existing main prose — the clean-room audit doc quoting its own methodology, research notes citing reference paths, and one generic host-API "executor" mention — none introduced by the merge (the merge adds only `docs/surfaces.md`, which scans clean). A separate scan of all 43 diff-added hunks confirms the same.
+
+**Provenance + §5 revisit rows:** recorded as a dated comment on `Issue-tracker/open/17-behavior-clone-reference-always-on-dispatcher.md` this date — 43 files clean, gate evidence cited, rows 1–8 spot-checked PASS, and row 4's required note recorded: default-activation remains unadopted by choice, not oversight (activation only via explicit `/dispatcher-start`).
+
+**Remaining after this step (NOT done here):** the live browser pass, then the closures — tickets 27–33 and ticket 17 Phase 3, each with dated comments carrying commit hashes. No AC above is checked off by this step; no ticket file moved.
