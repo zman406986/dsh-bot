@@ -105,3 +105,42 @@ Dropped / unfinished:
   string constant and one dictionary key pair.
 - Noted for ticket 33: **ADR-0010/0011/0012** (design-17 §9) still do not exist on the branch; tickets
   27/30/31 each flagged this forward. Ticket 33 should either file them or amend the design.
+
+### 2026-09-17 — session handover (implementation landed, verification PENDING)
+
+The implementation is committed in the worktree at `77baef8` ("Polish dormant/activated composition:
+presence hint, locale, surfaces README (ticket 32)"; 7 files, 2 new) and its checkboxes + implementation
+comment were checked off on MAIN in `803ea88`. **The session wrapped up before any independent
+verification pass: this ticket is implemented but unverified, not verified. `Status:` is deliberately
+unchanged.** A fresh session must run a read-only verification pass at `77baef8` before treating it as
+done — specifically:
+
+- **Presence hint:** `ACTIVATION_PRESENCE_HINT` (`src/adapter/activation-command.ts`) is appended
+  exactly once to `DISPATCHER_START_SUCCESS`; the en locale value is identical to the constant (not a
+  retyped near-miss); the zh face carries `activation.presence-hint`; both faces stay in lockstep under
+  `validateLocaleDictionary` and the scaffold key-set pin. Verify from code and asserted tests, not from
+  the implementation comment.
+- **Dormant-registration matrix:** the extended flag matrix genuinely shows nothing new visible from
+  tickets 27–31 — dormant boot registers exactly the two commands, zero tools, only the pre-existing
+  passive listeners, zero roster publishes, zero prompts, zero restart notices — and it would fail if a
+  new dormant registration were introduced.
+- **Deactivation → reactivation flow:** tested end-to-end with fakes (stale-window boundary exactly at
+  the window and one ms beyond; a deliberate re-activation publishing a newer snapshot that includes the
+  durable-rebuild-restored row; the restart notice staying silent on the second activation).
+- **`docs/surfaces.md`:** exists (present at `77baef8`), is clean-room, and its claimed absences actually
+  match design-17 §5 `revisit-before-merge` conflicts 2/3 (no todo board — `todoId` is linkage metadata;
+  no milestone UI).
+- **No new seams / no new core state:** the production diff at `77baef8` is only the appended copy
+  constant plus one locale key pair (and an export) — no client-face registration, no core-state change.
+- **Optional `settings.onboarding` item: deliberately dropped** — confirm the drop reasoning holds
+  against the seam catalog (no verified offline registration shape; shipping it would violate the "no new
+  seams" constraint) and that its intent is covered by the presence hint + `docs/surfaces.md`.
+
+Until that pass completes, the claimed `npm test` **612 pass / 0 fail / 162 suites** at `77baef8` and
+every tick above stand as unverified implementation claims (the newest count in the epic that no
+independent run has reproduced; ticket 28's verifier reproduced 599 / 0 / 158 at `6874cf2`).
+
+Also for the verifier to check while reading this comment: it says tickets 27/30/31 each flagged the
+missing ADRs forward, but in the ticket files only ticket 31 mentions `ADR-0012` (and this ticket
+mentions the set); tickets 27 and 30 do not mention `ADR-0010`/`ADR-0011`. Ticket 33 still owns resolving
+them.
