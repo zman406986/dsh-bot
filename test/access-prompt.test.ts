@@ -689,8 +689,24 @@ function createFullCtx(seam: UserQuestionsLike | undefined) {
   };
 
   const ctx = {
-    effect(dispose: () => void) {
-      disposers.push(dispose);
+    // Cordis effect contract (ticket 44): `execute` runs at apply; a returned
+    // function — or each value a generator yields — is the unload disposer.
+    effect(execute: () => unknown, label?: string) {
+      void label;
+      const result = execute();
+      if (typeof result === "function") {
+        disposers.push(result as () => void);
+        return;
+      }
+      if (
+        typeof result === "object" &&
+        result !== null &&
+        Symbol.iterator in result
+      ) {
+        for (const step of result as Iterable<unknown>) {
+          if (typeof step === "function") disposers.push(step as () => void);
+        }
+      }
     },
     inject() {},
     on(name: string, cb: (payload: never) => void) {

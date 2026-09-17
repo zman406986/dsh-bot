@@ -125,8 +125,19 @@ function createRestartCtx() {
   };
 
   const ctx = {
-    effect(dispose: () => void) {
-      void dispose;
+    // Cordis effect contract (ticket 44): `execute` runs at apply; whatever
+    // it returns (or a generator yields) is the unload disposer — dropped
+    // here because these tests never unload the fiber. Draining the iterator
+    // is what runs a generator effect's body (lazy until iterated).
+    effect(execute: () => unknown) {
+      const result = execute();
+      if (
+        typeof result === "object" &&
+        result !== null &&
+        Symbol.iterator in result
+      ) {
+        for (const step of result as Iterable<unknown>) void step;
+      }
     },
     inject(services: readonly string[], callback: (child: unknown) => void) {
       if (services.includes("settings")) {
@@ -403,8 +414,19 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
     const injected: unknown[] = [];
     const agent = createAgent("s-1");
     const ctx = {
-      effect(dispose: () => void) {
-        void dispose;
+      // Cordis effect contract (ticket 44): `execute` runs at apply; whatever
+      // it returns (or a generator yields) is the unload disposer — dropped
+      // here because this test never unloads the fiber. Draining the iterator
+      // is what runs a generator effect's body (lazy until iterated).
+      effect(execute: () => unknown) {
+        const result = execute();
+        if (
+          typeof result === "object" &&
+          result !== null &&
+          Symbol.iterator in result
+        ) {
+          for (const step of result as Iterable<unknown>) void step;
+        }
       },
       inject() {},
       on() {

@@ -20,7 +20,7 @@ function createAgent(id: string): AgentLike {
 }
 
 function createStubCtx(): AdapterContext & {
-  effect: (dispose: () => void) => void;
+  effect: (execute: () => unknown, label?: string) => unknown;
   inject: (
     services: readonly string[],
     callback: (child: Record<string, never>) => void,
@@ -54,8 +54,27 @@ function createStubCtx(): AdapterContext & {
     listeners,
     registeredCommands,
     registeredTools,
-    effect(dispose: () => void) {
-      disposers.push(dispose);
+    // Cordis effect contract (ticket 44): `execute` runs at apply; a returned
+    // function — or each value a generator yields — is the unload disposer.
+    // (The old inverted fake collected the passed function itself, which hid
+    // the live self-unregister bug: a regression to `ctx.effect(disposer)`
+    // now fails the registered-command assertions below.)
+    effect(execute: () => unknown, label?: string) {
+      void label;
+      const result = execute();
+      if (typeof result === "function") {
+        disposers.push(result as () => void);
+        return;
+      }
+      if (
+        typeof result === "object" &&
+        result !== null &&
+        Symbol.iterator in result
+      ) {
+        for (const step of result as Iterable<unknown>) {
+          if (typeof step === "function") disposers.push(step as () => void);
+        }
+      }
     },
     // No settings service in this stub — Cordis-style optional inject no-ops.
     inject() {},
@@ -205,6 +224,25 @@ describe("plugin scaffold", () => {
     ]);
     // Deferred to activation (ticket 19): the tool surface stays stock.
     assert.equal(ctx.registeredTools.length, 0);
+  });
+
+  it("command registration survives apply (cordis effect contract, ticket 44)", () => {
+    const ctx = createStubCtx();
+    apply(ctx, { enabled: true });
+    // The contract-faithful fake runs `execute` at apply exactly like live
+    // cordis: a plugin that handed the register DISPOSER to `ctx.effect`
+    // would invoke it right here and silently unregister the command — the
+    // live 2026-09-18 re-pass bug (ticket 44). Both commands must still be
+    // present, and each effect must have contributed exactly one real
+    // cleanup (two registrations + the teardown), so an HMR dispose-all
+    // unregisters everything through the collected disposers.
+    assert.deepEqual(ctx.registeredCommands.map((c) => c.name), [
+      DISPATCHER_START_COMMAND,
+      DISPATCHER_STEER_COMMAND,
+    ]);
+    assert.equal(ctx.disposers.length, 3);
+    for (const dispose of [...ctx.disposers]) dispose();
+    assert.equal(ctx.registeredCommands.length, 0);
   });
 
   it("command activation registers the tool surface; dispose reverses it", async () => {

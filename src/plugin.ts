@@ -89,10 +89,15 @@ export interface PluginConfig {
  * Narrow Cordis context surface. Prefer a local interface over importing
  * full Cordis types until peerDeps grow. `settings` is optional so stub
  * contexts stay minimal; the live host injects it for the UI control.
+ *
+ * `effect` is the real Cordis effect seat (ticket 44, mirroring cordis 4.0.2
+ * `Fiber.effect`): `execute` runs immediately at apply; a returned function —
+ * or each value a generator function yields — is collected as the unload
+ * disposer. It never takes a bare cleanup callback.
  */
 type CordisContext = AdapterContext &
   SettingsInjectContext & {
-    effect: (dispose: () => void) => void;
+    effect: (execute: () => unknown, label?: string) => unknown;
   };
 
 /**
@@ -449,23 +454,30 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   });
 
   // The dormant plugin's only visible affordance (design-16 §3.3).
-  const disposeCommand = registerDispatcherStartCommand({
-    ctx,
-    activeSessionId: () => lifecycle.dispatcherSessionId(),
-    activate: (agent) => lifecycle.activate(agent),
-  });
-  ctx.effect(disposeCommand);
+  // Cordis effect contract (ticket 44): the generator effect registers now
+  // and yields the register disposer as the unload cleanup — the shipped
+  // `dsh-command-compact` idiom. Passing the disposer itself as `execute`
+  // makes live cordis call it at once, silently unregistering the command.
+  ctx.effect(function* () {
+    yield registerDispatcherStartCommand({
+      ctx,
+      activeSessionId: () => lifecycle.dispatcherSessionId(),
+      activate: (agent) => lifecycle.activate(agent),
+    });
+  }, "multitask-dispatcher: dispatcher-start command");
 
   // Steer input command (ticket 22, design-16 §4.3): same lifecycle pattern
   // as dispatcher-start — registered dormant, the handler gates on the
   // activated dispatcher session and routes into the existing core steer
   // queue path (`Multitask.steerWorker`, shared with the steer_worker tool).
-  const disposeSteerCommand = registerDispatcherSteerCommand({
-    ctx,
-    activeSessionId: () => lifecycle.dispatcherSessionId(),
-    steer: (workerId, message) => multitask.steerWorker(workerId, message),
-  });
-  ctx.effect(disposeSteerCommand);
+  // Same generator-effect shape as dispatcher-start (ticket 44).
+  ctx.effect(function* () {
+    yield registerDispatcherSteerCommand({
+      ctx,
+      activeSessionId: () => lifecycle.dispatcherSessionId(),
+      steer: (workerId, message) => multitask.steerWorker(workerId, message),
+    });
+  }, "multitask-dispatcher: dispatcher-steer command");
 
   // Ticket 23: when the core parks a pending access ask, present it through
   // the prompt seam. The core's own onAccessRequest handler was registered
@@ -476,18 +488,25 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     accessPrompts.sync();
   });
 
-  // Register a direct dispose callback (CordisContext.effect contract) so
-  // unload/HMR truly reverses the activation: unbind, drop the tool surface,
-  // dispose the host, release the marker domain.
-  ctx.effect(() => {
-    lifecycle.unbind();
-    deactivateToolSurface();
-    // Ticket 30: clear session-scope policy rows on unload/HMR too.
-    multitask.clearSessionAccessPolicy();
-    // Ticket 23: abandon outstanding prompts on unload/HMR; the relay
-    // timeouts still deny their asks (ADR-0008).
-    accessPrompts.reset();
-    host.dispose();
-    void markers.dispose();
-  });
+  // Unload teardown (ticket 44): under the Cordis effect contract `execute`
+  // runs at apply and must RETURN the cleanup. (The previous shape passed the
+  // cleanup itself as `execute` — live cordis ran it at boot, unbinding the
+  // lifecycle, dropping the host subscriptions, and disposing the marker
+  // domain before any session existed, while collecting nothing for unload.)
+  // With it, unload/HMR truly reverses the activation: unbind, drop the tool
+  // surface, dispose the host, release the marker domain.
+  ctx.effect(
+    () => () => {
+      lifecycle.unbind();
+      deactivateToolSurface();
+      // Ticket 30: clear session-scope policy rows on unload/HMR too.
+      multitask.clearSessionAccessPolicy();
+      // Ticket 23: abandon outstanding prompts on unload/HMR; the relay
+      // timeouts still deny their asks (ADR-0008).
+      accessPrompts.reset();
+      host.dispose();
+      void markers.dispose();
+    },
+    "multitask-dispatcher: plugin teardown",
+  );
 }

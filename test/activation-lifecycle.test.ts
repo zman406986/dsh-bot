@@ -72,8 +72,26 @@ function createFullCtx() {
   };
 
   const ctx = {
-    effect(dispose: () => void) {
-      disposers.push(dispose);
+    // Cordis effect contract (ticket 44): `execute` runs at apply; a returned
+    // function — or each value a generator yields — is the unload disposer.
+    // (The old inverted fake collected the passed function itself, which hid
+    // the live self-unregister bug.)
+    effect(execute: () => unknown, label?: string) {
+      void label;
+      const result = execute();
+      if (typeof result === "function") {
+        disposers.push(result as () => void);
+        return;
+      }
+      if (
+        typeof result === "object" &&
+        result !== null &&
+        Symbol.iterator in result
+      ) {
+        for (const step of result as Iterable<unknown>) {
+          if (typeof step === "function") disposers.push(step as () => void);
+        }
+      }
     },
     // Settings-section optional inject: no settings service in this stub.
     inject() {},
