@@ -845,6 +845,17 @@ function topLevelAgent(id: string): AgentLike {
 }
 
 describe("roster snapshot — plugin publishes through the settings namespace", () => {
+  /**
+   * Ticket 31: the on-activation publish rides the async durability
+   * rebuild (`rebuildFromDurability` BEFORE the first publish), so tests
+   * drain the queued chain before asserting on published snapshots.
+   */
+  async function flushActivation(): Promise<void> {
+    for (let i = 0; i < 5; i += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  }
+
   it("activation publishes an empty snapshot; spawn and settle update it", async () => {
     const ctx = createSettingsAwareCtx();
     const { updates } = ctx;
@@ -855,8 +866,10 @@ describe("roster snapshot — plugin publishes through the settings namespace", 
       topLevelAgent("s-1"),
     ) as { kind: string };
     assert.equal(result.kind, "success");
+    await flushActivation();
 
-    // On-activation publish: fresh (empty) roster without any transition.
+    // On-activation publish (after the rebuild): fresh (empty) roster
+    // without any transition.
     assert.equal(updates.length, 1);
     const first = (updates[0] as Record<string, unknown>)[
       ROSTER_SETTINGS_KEY

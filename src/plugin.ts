@@ -10,6 +10,7 @@ import {
 } from "./core/policy/assembler.js";
 import {
   accessExpiredNotice,
+  assembleRestartNotice,
   bindDispatcherLifecycle,
   createAccessPromptPump,
   createCordisDshHost,
@@ -20,6 +21,7 @@ import {
   registerDispatcherSteerCommand,
   registerDispatcherTools,
   resolveExecSessionId,
+  RESTART_DEGRADED_NOTICE,
   secretStoredAccessNotice,
   type AdapterContext,
   type CordisDshHost,
@@ -385,16 +387,43 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   // Passive status wiring (wake bounds, worker FSM, steer delivery) plus the
   // activate/deactivate hooks. Policy flag is session-scoped (ADR-0005); the
   // frozen `enabled` is the authority — policy is ON whenever we are here.
+  // Ticket 31 (design-17 §4.7): restart honesty. The rebuild is async, so
+  // activation completes immediately; the chain below lands the first roster
+  // publish and the one-time restart notice once markers have been read.
+  // Ordering is the acceptance rule: `rebuildFromDurability` runs BEFORE the
+  // first `publishRosterSnapshot`, so restored terminal rows are in the very
+  // first snapshot the panel sees, and landed-undelivered items flush on the
+  // first wake (S4 across restart). Core rebuild semantics are frozen
+  // (ADR-0006); this is adapter ordering only.
+  const rebuildAndNotice = async (sessionId: string): Promise<void> => {
+    let notice: string | null = null;
+    try {
+      notice = assembleRestartNotice(
+        await multitask.rebuildFromDurability(sessionId),
+      );
+    } catch {
+      // Marker store unreadable: activation still succeeds; the honest
+      // degraded notice says nothing was restored or replayed.
+      notice = RESTART_DEGRADED_NOTICE;
+    }
+    // The activation may have ended while markers were being read — never
+    // publish or inject for a session that is no longer the dispatcher.
+    if (lifecycle.dispatcherSessionId() !== sessionId) return;
+    publishRosterSnapshot(sessionId);
+    // Ticket 23: prompts sync stays after the first publish, as before.
+    accessPrompts.sync();
+    if (notice !== null) lifecycle.injectNotice(notice);
+  };
+
   const lifecycle = bindDispatcherLifecycle(ctx, host, multitask, {
     policyEnabled: enabled,
     onActivated: (sessionId) => {
       activateToolSurface();
       // Ticket 21: publish immediately on activation so the panel has a
       // fresh (possibly empty) snapshot without waiting for a transition.
-      publishRosterSnapshot(sessionId);
-      // Ticket 23: surface any asks that parked while dormant (workers
-      // keep running across deactivations) as prompts now.
-      accessPrompts.sync();
+      // Ticket 31: the publish now happens inside `rebuildAndNotice`, AFTER
+      // the durability rebuild, so restored rows are in the first snapshot.
+      void rebuildAndNotice(sessionId);
     },
     onDeactivated: () => {
       deactivateToolSurface();

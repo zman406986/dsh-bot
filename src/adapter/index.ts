@@ -107,6 +107,13 @@ export {
   type SettingsRosterChannel,
 } from "./roster-channel.js";
 export {
+  assembleRestartNotice,
+  RESTART_DEGRADED_NOTICE,
+  RESTART_NOTICE_HEADING,
+  restartRestoredLine,
+  restartUnknownStateLine,
+} from "./restart-notice.js";
+export {
   createRequestAccessHandler,
   registerWorkerAccessTool,
   REQUEST_ACCESS_DESCRIPTION,
