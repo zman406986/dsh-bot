@@ -114,7 +114,14 @@ describe("client face scaffold — package declaration (Finding 4)", () => {
     readFileSync(new URL("../package.json", import.meta.url), "utf8"),
   ) as {
     name: string;
-    dsh?: { client?: { platform?: string; external?: string[] } };
+    dsh?: {
+      client?: {
+        platform?: string;
+        inject?: string[];
+        immediately?: boolean;
+        external?: string[];
+      };
+    };
     exports: Record<string, unknown>;
     files: string[];
   };
@@ -127,6 +134,21 @@ describe("client face scaffold — package declaration (Finding 4)", () => {
       "react",
       "react/jsx-runtime",
     ]);
+  });
+
+  it("declares dsh.client.inject after the shipped idiom; no immediately flag (ticket 34)", () => {
+    // Boot-graph edges to exactly the client packages whose services the
+    // module's Cordis-level inject (["slots", "locale"]) binds at boot:
+    // slots ← dsh-client-ui-renderer, locale ← dsh-client-locale. Without
+    // these edges nothing orders our row after its service providers and the
+    // factory stays registered-but-dormant (dsh-client-modules arriveGraphRow).
+    assert.deepEqual(pkg.dsh?.client?.inject, [
+      "@deepseek-ai/dsh-client-ui-renderer",
+      "@deepseek-ai/dsh-client-locale",
+    ]);
+    // Bootstrap tier is the shipped renderer/locale pair only; no ordinary
+    // plugin package declares dsh.client.immediately (shipped 0.1.5-rc.1 idiom).
+    assert.equal(pkg.dsh?.client?.immediately, undefined);
   });
 
   it("adds exports['./client'] and ships the client dir; host export untouched", () => {
