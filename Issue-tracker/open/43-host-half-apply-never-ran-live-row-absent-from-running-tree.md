@@ -161,3 +161,50 @@ Setup per Requirement 2: `multitask` profile recreated (`--from-default-profile 
 **New diagnosis (recorded, not fixed — per the pass's no-product-change rule):** apply runs the full enabled path (wrapper probe: config validated, `commands.register` callable, no early return), the settings section installs service-side, yet the command never becomes resolvable and the section/mirror never reach client surfaces. Shipped-idiom delta: `dsh-command-compact` registers its command INSIDE `ctx.effect(function* () { yield ctx.commands.register(…) })` during its own fiber start; our `apply` calls `commands.register` synchronously (`src/adapter/activation-command.ts:129` via `src/plugin.ts:456`). Under the ScopedLayers semantics (`dsh-scope/lib/index.js` `effect`/`merge`), a generator effect queued on the already-started commands-service context plausibly never executes — silently, no error — which matches every observation. The offline FakeDshHost registers eagerly, so `npm test` cannot catch this. Follow-up needed: adopt the shipped generator-effect registration idiom (and re-check the section/mirror client sync) in a NEW ticket, then re-run this re-pass's probes as its ACs.
 
 Also still open: Requirement 1's committed `dev/cordis.web.patch.yml` + launcher pass-through (this re-pass ran the profile route per the pass plan; the web-overlay route was not exercised). No ticket files moved; nothing here checked beyond AC 1 and AC 5.
+
+### 2026-09-18 — Requirement 1's offline half landed: committed overlay + launcher pass-through (ticket 48)
+
+Requirement 1's repo half is now implemented; the live half (a boot with the row
+in the running tree, asserted from the pass artifacts) stays open and no AC here
+is checked.
+
+**Committed overlay.** `dev/cordis.web.patch.yml` carries the insert row with a
+**relative** plugin path:
+
+```yaml
+- insert:
+    - id: multitask-dispatcher
+      name: '../lib/index.js'
+      config:
+        enabled: true
+```
+
+Relative on purpose: `anchorInsertedPluginNames`
+(`dsh-app-boot/lib/index.js:1170-1177`, the function this ticket's Requirement 1
+cites) resolves `../` against `dirname(resolve(patchFile))`, so the one committed
+file serves **either** checkout instead of hard-coding an absolute path per
+launch. Verified offline, zero LLM calls:
+
+```
+dsh --profile web --dump-config --patch dev\cordis.web.patch.yml   # exit 0
+  :540  # == C:\Users\TZhen\Desktop\dsh-bot\dev\cordis.web.patch.yml
+  :541  - id: multitask-dispatcher
+  :542    name: file:///C:/Users/TZhen/Desktop/dsh-bot/lib/index.js
+  :543    config:
+  :544      enabled: true
+```
+
+The row composes with the relative path already anchored to the checkout that
+passed it — the same file-URL shape the live probe in this ticket's Verification
+section used. The web profile's package tree and its own `cordis.patch.yml`
+remain untouched; Requirement 2's multitask-profile route is unchanged.
+
+**Launcher pass-through.** The desktop launcher (`dsh-bot.ps1`) now passes that
+committed file in the same command that spawns dsh and prints the exact command
+on every launch (this ticket's note about a pass running port 8799 while the
+probed invocation differed). Its previous behaviour — generating a transient
+`%TEMP%\dsh-bot-*.patch.yml` per launch — is gone, so the overlay a pass ran is
+the one in the tree. A missing overlay now fails loud before boot rather than
+serving a rowless tree. Launcher-side details (staleness guard, kill timer) are
+tracked in ticket 48. Config/launcher-only: no `src/`, `test/`, `lib/` or
+`client/` change.
