@@ -21,6 +21,8 @@ import {
 import {
   SHELL_CSS,
   SHELL_CLASS,
+  SHELL_LAUNCHER_CSS,
+  SHELL_LAUNCHER_CLASS,
   createDispatcherShell,
   describePresenceDot,
   waitingPhrase,
@@ -270,46 +272,68 @@ describe("wrapper shell panes (ticket 77)", () => {
 });
 
 describe("wrapper shell CSS contract (ticket 77, ticket 49's discipline)", () => {
-  const tokens = [
-    ...new Set(
-      [...SHELL_CSS.matchAll(/var\((--dsw-[a-z0-9-]+)\)/g)].map((m) => m[1]!),
-    ),
-  ].sort();
+  // Ticket 78 adds the staging launcher chip's stylesheet beside SHELL_CSS.
+  const SURFACES = [
+    { css: SHELL_CSS, cls: SHELL_CLASS },
+    { css: SHELL_LAUNCHER_CSS, cls: SHELL_LAUNCHER_CLASS },
+  ] as const;
 
-  it("carries no raw colour literal — every colour is a host token", () => {
-    assert.doesNotMatch(SHELL_CSS, /#[0-9a-fA-F]{3,8}\b/, "hex literal");
-    assert.doesNotMatch(SHELL_CSS, /(?<![a-z])rgba?\(/, "rgb()/rgba() literal");
-    assert.doesNotMatch(SHELL_CSS, /hsla?\(/, "hsl() literal");
-    assert.ok(tokens.length > 0, "no tokens referenced at all");
-  });
+  for (const { css, cls } of SURFACES) {
+    const tokens = [
+      ...new Set(
+        [...css.matchAll(/var\((--dsw-[a-z0-9-]+)\)/g)].map((m) => m[1]!),
+      ),
+    ].sort();
 
-  it("uses only tokens already evidenced by our shipped surfaces/notes", () => {
-    const allowed = new Set([
-      "--dsw-alias-bg-layer-1",
-      "--dsw-alias-bg-layer-3",
-      "--dsw-alias-border-l3",
-      "--dsw-alias-label-tertiary",
-      "--dsw-alias-state-business-primary",
-      "--dsw-alias-state-success-primary",
-      "--dsw-alias-state-warn-primary",
-    ]);
-    for (const token of tokens) {
-      assert.ok(
-        allowed.has(token),
-        `token ${token} is not in the evidenced set`,
-      );
-    }
-  });
+    it(`${cls}: carries no raw colour literal — every colour is a host token`, () => {
+      assert.doesNotMatch(css, /#[0-9a-fA-F]{3,8}\b/, "hex literal");
+      assert.doesNotMatch(css, /(?<![a-z])rgba?\(/, "rgb()/rgba() literal");
+      assert.doesNotMatch(css, /hsla?\(/, "hsl() literal");
+      assert.ok(tokens.length > 0, "no tokens referenced at all");
+    });
 
-  it("namespaces every class and ships no animation at all", () => {
+    it(`${cls}: uses only tokens already evidenced by our shipped surfaces/notes`, () => {
+      const allowed = new Set([
+        "--dsw-alias-bg-layer-1",
+        // The launcher chip borrows the capsule chip's surface vocabulary.
+        "--dsw-alias-label-primary",
+        "--dsw-alias-bg-layer-3",
+        "--dsw-alias-border-l3",
+        "--dsw-alias-label-tertiary",
+        "--dsw-alias-state-business-primary",
+        "--dsw-alias-state-success-primary",
+        "--dsw-alias-state-warn-primary",
+      ]);
+      for (const token of tokens) {
+        assert.ok(
+          allowed.has(token),
+          `token ${token} is not in the evidenced set`,
+        );
+      }
+    });
+
+    it(`${cls}: namespaces every class and ships no animation at all`, () => {
+      const foreign = [
+        ...css.matchAll(/\.([a-z-][a-z0-9_-]*)/g),
+      ]
+        .map((m) => m[1]!)
+        .filter((name) => !name.startsWith("multitask-dispatcher-"));
+      assert.deepEqual(foreign, []);
+      assert.doesNotMatch(css, /@keyframes|animation:/);
+    });
+  }
+
+  it("the shell frame stylesheet opens with the frame class", () => {
     assert.match(SHELL_CSS.trim(), new RegExp(`^\\.${SHELL_CLASS}\\{`));
-    const foreign = [
-      ...SHELL_CSS.matchAll(/\.([a-z-][a-z0-9_-]*)/g),
-    ]
-      .map((m) => m[1]!)
-      .filter((name) => !name.startsWith("multitask-dispatcher-"));
-    assert.deepEqual(foreign, []);
-    assert.doesNotMatch(SHELL_CSS, /@keyframes|animation:/);
+  });
+
+  it("the launcher self-positions inside the click-through overlay layer", () => {
+    // Verified overlay anatomy (dsh-capsule-seams.md Seam 1): entries
+    // self-position; the launcher sits below the capsule chip (top:8px).
+    assert.match(
+      SHELL_LAUNCHER_CSS.trim(),
+      new RegExp(`^\\.${SHELL_LAUNCHER_CLASS}\\{position:absolute;`),
+    );
   });
 });
 

@@ -239,6 +239,20 @@ export interface ClientRemoteLike {
 }
 
 /**
+ * The layout service face the staging launcher needs (ticket 78): the
+ * ui-layout controller's page verb — `selectPanel(panelId)` selects a keyed
+ * `main` panel ("Select a global panel or return to the Conversation";
+ * ui-layout `lib/client.js:399-412`, verified in `dsh-capsule-seams.md`
+ * Seam 4's status correction and `wrapper-vehicle-seams.md` Finding 5). The
+ * verb THROWS on an unregistered `main` key ("layout.selectPanel: main panel
+ * "X" is not registered") — `openShellPage` (`shell-mount.ts`) contains that
+ * so the affordance degrades instead of crashing its overlay entry.
+ */
+export interface ClientLayoutLike {
+  selectPanel(panelId: string): void;
+}
+
+/**
  * The narrow client context this scaffold's `apply` needs. The three action
  * services are OPTIONAL structural faces: they are always present in the
  * shipped web composition (connection/composer core), are read lazily at
@@ -254,4 +268,11 @@ export interface ClientContext extends ClientEffectContext {
   remote?: ClientRemoteLike;
   sessions?: ClientSessionsLike;
   conversation?: ClientConversationLike;
+  /**
+   * The ui-layout page controller (ticket 78). Optional structural face,
+   * read lazily at click time (never a boot-time bind — ADR-0014's
+   * smallest-set rule): a runtime without it leaves the launcher degrading
+   * to an honest no-open instead of blocking module materialization.
+   */
+  layout?: ClientLayoutLike;
 }

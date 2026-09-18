@@ -1,6 +1,9 @@
 /**
  * Wrapper shell layout component (ticket 77, ADR-0020 slice 1; sidebar row
- * presence re-host ticket 79, ADR-0020 slice 3).
+ * presence re-host ticket 79, ADR-0020 slice 3) plus the ticket-78 STAGING
+ * launcher affordance (the `shell.overlay` chip that opens the shell's
+ * `main` page; the page registration itself is composed in `index.ts` over
+ * the pure contracts in `shell-mount.ts`).
  *
  * The three-pane whole-UI frame: sidebar (dispatcher sessions), main surface
  * (an honest "conversation surface not wired yet" placeholder until ticket
@@ -46,6 +49,10 @@ import { useSyncExternalStore } from "react";
 import type { JSX } from "react";
 import type { TranslateFn } from "./overlay.js";
 import { formatTemplate, rosterBlockedKey } from "./roster-store.js";
+import {
+  SHELL_LAUNCHER_LABEL_KEY,
+  type ShellPageOpenOutcome,
+} from "./shell-mount.js";
 import {
   describeRowPreview,
   describeShellPanes,
@@ -228,6 +235,56 @@ function ShellRow(props: {
         ) : null}
       </button>
     </li>
+  );
+}
+
+/** Class prefix — ours, namespaced, no shipped kit classes (launcher chip). */
+export const SHELL_LAUNCHER_CLASS = "multitask-dispatcher-shell-launcher";
+
+/**
+ * Launcher styles (ticket 78 staging). The overlay layer is a frame-wide
+ * `pointer-events:none` absolute surface whose direct children opt back in
+ * (`dsh-capsule-seams.md` Seam 1), so the chip — like the capsule —
+ * self-positions: top-right, one row BELOW the capsule chip (top:8px), and
+ * registered one step before it in the list so an expanded capsule card
+ * paints over this chip rather than the reverse. Every colour resolves
+ * through a host `--dsw-alias-*` token (the capsule chip's own vocabulary),
+ * text hierarchy is opacity-based, there is no animation at all, and no
+ * text colour is set beyond the inherited label token.
+ */
+export const SHELL_LAUNCHER_CSS = `
+.${SHELL_LAUNCHER_CLASS}{position:absolute;top:44px;right:8px;font-size:12px;line-height:1.5}
+.${SHELL_LAUNCHER_CLASS}__chip{display:inline-flex;align-items:center;padding:3px 10px;border-radius:12px;border:1px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);cursor:pointer;font:inherit}
+.${SHELL_LAUNCHER_CLASS}__chip:hover{border-color:var(--dsw-alias-label-tertiary)}
+`;
+
+/**
+ * The staging launcher affordance (ticket 78): a small additive
+ * `shell.overlay` chip whose click runs the page-open decision —
+ * `ctx.layout.selectPanel(SHELL_PAGE_KEY)` over the injected seat. The seat
+ * is lazy (resolved at click time, same idiom as the capsule's transports);
+ * every documented failure (`no-layout`, the host's throw on an unregistered
+ * `main` key) is contained inside `openShellPage` as an honest outcome this
+ * component deliberately does not decorate — the page either opens or the
+ * chip stays as it was, with no fake success notice. A STAGING vehicle only:
+ * retired at the cutover together with the capsule overlay entry.
+ */
+export function createShellLauncher(
+  t: TranslateFn,
+  onOpen: () => ShellPageOpenOutcome,
+): () => JSX.Element {
+  return () => (
+    <div className={SHELL_LAUNCHER_CLASS} data-staging="shell-page">
+      <style>{SHELL_LAUNCHER_CSS}</style>
+      <button
+        type="button"
+        className={`${SHELL_LAUNCHER_CLASS}__chip`}
+        aria-label={t(SHELL_LAUNCHER_LABEL_KEY)}
+        onClick={onOpen}
+      >
+        {t(SHELL_LAUNCHER_LABEL_KEY)}
+      </button>
+    </div>
   );
 }
 

@@ -997,11 +997,12 @@ describe("roster panel — apply() wires the fallback data path and the overlay 
   it("fiber teardown (HMR) unsubscribes the scope; re-apply binds one fresh", () => {
     const ctx = createClientCtx();
     apply(ctx);
-    // Three declaration waits: shell.overlay, tool.call.toolview, and (ticket
-    // 47) settings.plugin.item. The settings scope stays ONE bind — the card
+    // Five declaration waits: shell.overlay, tool.call.toolview, (ticket 47)
+    // settings.plugin.item, and ticket 78's launcher shell.overlay + `main`
+    // page. The settings scope stays ONE bind — the card
     // attaches to the same scope the roster watch holds, so there are exactly
     // TWO subscriptions on that one scope (roster watch + settings card).
-    assert.equal(ctx.injects.length, 3);
+    assert.equal(ctx.injects.length, 5);
     assert.equal(ctx.boundNamespaces.length, 1);
     assert.equal(ctx.watchDisposedCount(), 0);
 
@@ -1012,7 +1013,7 @@ describe("roster panel — apply() wires the fallback data path and the overlay 
 
     // Post-HMR fiber: no duplicate accumulation.
     apply(ctx);
-    assert.equal(ctx.injects.length, 3);
+    assert.equal(ctx.injects.length, 5);
     assert.equal(ctx.boundNamespaces.length, 2);
     assert.equal(ctx.watchDisposedCount(), 2);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));

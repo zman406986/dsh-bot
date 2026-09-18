@@ -9,6 +9,12 @@
  * - Slot `name`s are ONLY dsh-owned shipped slots; never invented, never
  *   `root`, and never the rejected-for-v1 surfaces `main`,
  *   `sidebar.right.pane.tab`, or `conversation.approval.detail`.
+ *   (2026-09-19, ticket 78 / ADR-0020: `main` — and at the cutover `root` —
+ *   are now DELIBERATE elections for the wrapper shell's own registrations,
+ *   composed in `shell-mount.ts` + `index.ts`. This module's roster entry is
+ *   untouched and stays the additive `shell.overlay` entry it always was;
+ *   the v1 prohibition barred capsule-era shadowing, not the ADR-0020
+ *   vehicle.)
  * - Slot entry `id`s are `multitask-dispatcher-` prefixed and unique;
  *   `shell.overlay` is an additive list slot (order-sorted, click-through
  *   by default — Finding 5, `registry.d.ts:16-38`), so coexistence is by

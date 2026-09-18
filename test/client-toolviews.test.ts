@@ -577,9 +577,10 @@ describe("toolview — apply() registers one keyed entry per tool via the fake s
     const ctx = createClientCtx();
     apply(ctx);
 
-    // Three injects: shell.overlay (roster) + tool.call.toolview (toolviews)
-    // + settings.plugin.item (ticket 47's settings card).
-    assert.equal(ctx.injects.length, 3);
+    // Five injects: shell.overlay (roster) + tool.call.toolview (toolviews)
+    // + settings.plugin.item (ticket 47's settings card), plus ticket 78's
+    // launcher shell.overlay inject and `main` page inject.
+    assert.equal(ctx.injects.length, 5);
     const overlay = ctx.findInject(SHELL_OVERLAY_SLOT);
     const toolviews = ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT);
     assert.ok(overlay, "overlay inject present");
@@ -631,7 +632,7 @@ describe("toolview — HMR reversal over the fake seam", () => {
 
     // Post-HMR fiber: everything registers again, no accumulation.
     apply(ctx);
-    assert.equal(ctx.injects.length, 3);
+    assert.equal(ctx.injects.length, 5);
     assert.equal(ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT)?.entries.length, 5);
     assert.equal(ctx.findInject(SHELL_OVERLAY_SLOT)?.entries.length, 1);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));

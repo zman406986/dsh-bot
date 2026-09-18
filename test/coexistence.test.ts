@@ -47,6 +47,7 @@ import {
   SHELL_OVERLAY_SLOT,
   type SlotRegistrationOptions,
 } from "../src/client/overlay.js";
+import { SHELL_LAUNCHER_ENTRY_ID } from "../src/client/shell-mount.js";
 import {
   TOOLVIEW_TOOL_NAMES,
   TOOL_CALL_TOOLVIEW_SLOT,
@@ -796,24 +797,29 @@ describe("coexistence — client face: additive lists and keyed cells (Finding 5
     applyDispatcherClient(ctx);
 
     const entries = ctx.entriesAt(SHELL_OVERLAY_SLOT);
-    // Additive: BOTH plugins' entries coexist in the same list slot —
-    // neither registration replaced or evicted the other's.
-    assert.equal(entries.length, 2);
+    // Additive: ALL entries coexist in the same list slot — neither
+    // registration replaced or evicted another's. (Ticket 78 adds our
+    // launcher chip beside the roster capsule.)
+    assert.equal(entries.length, 3);
     const options = entries.map((e) => e.options as SlotRegistrationOptions);
     // Finding 5 list rule: the UI sorts by `order ?? 0` — applying that
-    // documented rule puts ours (quiet status surface, low order) first.
+    // documented rule puts the launcher (staging chip) first, then the
+    // roster (quiet status surface), then the foreign entry.
     const sorted = [...options].sort((a, b) => a.order - b.order);
     assert.deepEqual(
       sorted.map((o) => [o.id, o.order]),
       [
+        [SHELL_LAUNCHER_ENTRY_ID, -11],
         [rosterOverlayRegistration().id, rosterOverlayRegistration().order],
         [FOREIGN.overlayEntryId, FOREIGN.overlayOrder],
       ],
     );
     // Ids are unique and per-plugin prefixed (design-16 §5).
-    assert.match(sorted[0]!.id, /^multitask-dispatcher-/);
-    assert.match(sorted[1]!.id, /^foreign-helper-/);
-    assert.notEqual(sorted[0]!.id, sorted[1]!.id);
+    for (const index of [0, 1] as const) {
+      assert.match(sorted[index]!.id, /^multitask-dispatcher-/);
+    }
+    assert.match(sorted[2]!.id, /^foreign-helper-/);
+    assert.equal(new Set(sorted.map((o) => o.id)).size, sorted.length);
     // Each entry renders its own plugin's component.
     assert.notEqual(entries[0]!.component, entries[1]!.component);
   });
@@ -886,18 +892,18 @@ describe("coexistence — client face: additive lists and keyed cells (Finding 5
     assert.deepEqual([...ctx.locales.keys()], [FOREIGN.localeNs]);
 
     // The fresh post-HMR fiber re-registers cleanly — no duplication of the
-    // foreign plugin's entries.
+    // foreign plugin's entries (ours: capsule + launcher).
     applyDispatcherClient(ctx);
-    assert.equal(ctx.entriesAt(SHELL_OVERLAY_SLOT).length, 2);
+    assert.equal(ctx.entriesAt(SHELL_OVERLAY_SLOT).length, 3);
     assert.equal(ctx.entriesAt(TOOL_CALL_TOOLVIEW_SLOT).length, TOOLVIEW_TOOL_NAMES.length + 1);
     assert.deepEqual([...ctx.locales.keys()].sort(), [FOREIGN.localeNs, LOCALE_NAMESPACE]);
 
     // Unloading the foreign fiber afterwards removes exactly its own entries.
     foreignFiber.dispose();
-    assert.equal(ctx.entriesAt(SHELL_OVERLAY_SLOT).length, 1);
+    assert.equal(ctx.entriesAt(SHELL_OVERLAY_SLOT).length, 2);
     assert.deepEqual(
       ctx.entriesAt(SHELL_OVERLAY_SLOT).map((e) => (e.options as SlotRegistrationOptions).id),
-      [rosterOverlayRegistration().id],
+      [rosterOverlayRegistration().id, SHELL_LAUNCHER_ENTRY_ID],
     );
     assert.equal(ctx.entriesAt(TOOL_CALL_TOOLVIEW_SLOT).length, TOOLVIEW_TOOL_NAMES.length);
     assert.deepEqual([...ctx.locales.keys()], [LOCALE_NAMESPACE]);
