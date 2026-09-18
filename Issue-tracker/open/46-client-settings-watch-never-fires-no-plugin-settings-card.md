@@ -221,3 +221,17 @@ second clause ("the capsule flips client-side") and the footer-flag semantics ar
 is voided (always-on, ADR-0018) and the capsule vehicle is superseded. Kept open with this note;
 moot-closure proposed for the next triage. The watch-fix knowledge carries forward wherever the
 wrapper still consumes a dsh settings/namespace mirror.
+
+### 2026-09-19 — live pass 2: live AC 3 TICKED — the watch fires in an activated session; the footer flag reads a real value
+
+On the pass-2 boot (`C:\Users\TZhen\Desktop\dsh-live-pass2-2026-09-19\`, throwaway
+`multitask` profile, zero LLM calls for this), the capsule footer flag element
+(`multitask-dispatcher-capsule__footer`) read `data-flag="on"` after the composer-submitted
+`/dispatcher-start` activated the session — a REAL value, not `unknown` (shots
+`10b-after-start.png`, `13-after-stop.png`; the unknown-before state is the prior passes'
+recorded evidence). Nothing else in the client writes that attribute, so the fixed
+`settingsScope` watch demonstrably fires and delivers the namespace document client-side.
+Caveat recorded honestly: the expanded capsule CARD composition kept the dormant pitch
+(roster-keyed composition, ticket 32's model) while the flag mirror read `on` — the watch
+and the flag clause are proven; the card-pitch behavior is flagged for triage in ticket 44's
+pass-2 comment. The offline-gate AC 2 stays for the offline pass owner to tick.
