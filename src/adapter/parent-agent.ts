@@ -5,7 +5,7 @@ import {
 } from "../core/policy/assembler.js";
 import { textBlocks } from "./content-blocks.js";
 import type { AdapterContext, AgentLike, CordisDshHost } from "./cordis-dsh-host.js";
-import { PLUGIN_NAME } from "./wake-copy.js";
+import { PLUGIN_NAME, wakeUserMessage } from "./wake-copy.js";
 
 /**
  * Top-level dispatcher: no parent lineage, delegation depth 0.
@@ -57,6 +57,29 @@ function tryInject(agent: AgentLike, text: string): void {
 }
 
 /**
+ * Best-effort *waking* delivery (ticket 57, register D-4).
+ *
+ * The difference from `tryInject` is the host primitive, not the payload:
+ * `Agent.followup` is `send(input, "next-turn", wakeup=true)`, and a wake
+ * submitted while the agent is idle always opens its turn boundary. `inject`
+ * is `send(input, "next-step", wakeup=false)` — it queues context into a turn
+ * that may never come. Verified against the installed host in the ticket-52
+ * pass (`docs/research/dsh-loop-capability-map.md`, stage 7).
+ *
+ * Use this whenever the message MUST be acted on without the user happening
+ * to send something next: activation-time recovery, and the settle wake. Use
+ * `tryInject` when a turn is already open and extra model calls are waste.
+ */
+function tryWake(agent: AgentLike, text: string): void {
+  if (text.length === 0) return;
+  try {
+    agent.followup(wakeUserMessage(text));
+  } catch {
+    // Waking is best-effort; never break activation on it.
+  }
+}
+
+/**
  * Result of an activation attempt (ticket 19). Activation is explicit,
  * once per session, and refused with a reason the command handler maps
  * to user-facing copy.
@@ -80,11 +103,16 @@ export interface BindDispatcherLifecycleResult {
    */
   activate(agent: AgentLike): ActivationOutcome;
   /**
-   * Best-effort one-shot context inject into the activated chat (ticket 31):
-   * the same plugin-message seam as the session policy, used for the
-   * restart-honesty notice. No-op when no activation is live.
+   * Best-effort one-shot **waking** delivery into the activated chat
+   * (ticket 57, register D-4): opens a recovery turn rather than waiting for
+   * one. Used at activation for the restart-honesty notice, so recovery is
+   * driven by us exactly as the reference drives it on boot.
+   *
+   * Named for activation, not boot: activation is our only trigger today
+   * (ADR-0009). If ADR-0016 is signed into a boot hook, that hook calls this
+   * same primitive — the trigger model is a separate decision (item U-1).
    */
-  injectNotice(text: string): void;
+  wakeNotice(text: string): void;
   /** Current dispatcher session id, once activated. */
   dispatcherSessionId(): string | null;
   /** Tear down listeners and the activation, if any. */
@@ -228,11 +256,13 @@ export function bindDispatcherLifecycle(
       return { ok: true };
     },
 
-    injectNotice(text: string): void {
-      // Ticket 31: one-shot best-effort inject into the activated chat.
-      // No live parent (dormant or torn down) → nothing to inject into.
+    wakeNotice(text: string): void {
+      // Ticket 57 (D-4): the recovery notice must OPEN the turn it lands in.
+      // `inject` only queues, so before this fix the notice sat in context
+      // until the user happened to speak next — the chain stopped after a
+      // restart. Waking is what the reference does on boot.
       if (parentAgentRef === null) return;
-      tryInject(parentAgentRef, text);
+      tryWake(parentAgentRef, text);
     },
 
     dispatcherSessionId(): string | null {

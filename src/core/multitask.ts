@@ -623,6 +623,20 @@ export function createMultitask(
       return { wake, reconcile };
     },
 
+    /**
+     * Rebuild the roster from durable markers after a host restart (ADR-0006).
+     *
+     * Terminal rows are restored; a worker that was live at crash time becomes
+     * an honest `unknownState` entry. **This is deliberately richer than the
+     * reference, and it is not a fidelity deviation to "fix" (ticket 57 R4):**
+     * the reference reconstructs nothing about the worker either — on boot it
+     * only re-wakes the parent with a synthetic "interrupted, result unknown"
+     * notice. Neither implementation resumes or replays a worker.
+     *
+     * The host does offer continuable-session cold-resume; our non-use of it is
+     * a core design decision, not an oversight. Reversing it is a separate
+     * decision, not a side effect of this rebuild path.
+     */
     async rebuildFromDurability(
       parentSessionId: string,
     ): Promise<RebuildReport> {

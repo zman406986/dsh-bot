@@ -428,7 +428,16 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     publishRosterSnapshot(sessionId);
     // Ticket 23: prompts sync stays after the first publish, as before.
     accessPrompts.sync();
-    if (notice !== null) lifecycle.injectNotice(notice);
+    if (notice !== null) {
+      // Ticket 57 (D-4): route recovery through the WAKING primitive.
+      // `injectNotice` only queues context; the reference re-wakes its parent
+      // on boot so the notice is acted on without the user speaking first.
+      // The trigger stays activation-driven (ADR-0009) — only the primitive
+      // changes. A future boot hook (if ADR-0016 is signed) calls this same
+      // method; item U-1 (is activation itself a deviation?) is not decided
+      // here.
+      lifecycle.wakeNotice(notice);
+    }
   };
 
   const lifecycle = bindDispatcherLifecycle(ctx, host, multitask, {

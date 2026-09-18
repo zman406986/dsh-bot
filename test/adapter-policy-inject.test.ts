@@ -318,6 +318,16 @@ describe("dispatcher activation lifecycle (ticket 19)", () => {
     assert.ok(reminder.includes("## Ledger"));
     assert.ok(reminder.includes("## Standing rules"));
     assert.ok(reminder.includes("(empty)"));
+
+    // Ticket 57 R2: a turn is ALREADY open here, so the reminder queues via
+    // `inject`. Waking it would open a second turn on every dispatcher turn
+    // start — an extra model call per turn, for content already in context.
+    // Only the recovery notice wakes.
+    assert.equal(
+      agent.followed.length,
+      0,
+      "the per-turn reminder must not wake a turn",
+    );
   });
 
   it("skips inject when the agent has no inject method", () => {

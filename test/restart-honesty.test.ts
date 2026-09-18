@@ -60,20 +60,26 @@ async function flushActivation(): Promise<void> {
 
 interface TestAgent extends AgentLike {
   readonly injected: unknown[];
+  /** Ticket 57: waking deliveries (`followup`) — must not be confused with injects. */
+  readonly woken: unknown[];
 }
 
 function createAgent(id: string): TestAgent {
   const injected: unknown[] = [];
+  const woken: unknown[] = [];
   return {
     session: {
       id,
       header: { parentSession: null, delegationDepth: 0 },
     },
-    followup() {},
+    followup(message: unknown) {
+      woken.push(message);
+    },
     inject(message: unknown) {
       injected.push(message);
     },
     injected,
+    woken,
   };
 }
 
@@ -302,10 +308,35 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
 
     // Exactly ONE restart notice, carrying the id, the transcript pointer,
     // the honest unknown wording, and the restored count (design-17 §7).
-    const notices = agent.injected
+    //
+    // Ticket 57 (D-4): it must arrive on the WAKING primitive. Reading it out
+    // of `agent.injected` — what this test used to do — is precisely how the
+    // old behaviour stayed green: `inject` queues context into a turn that
+    // only opens if the user speaks next, so the recovery chain stalled.
+    const notices = agent.woken
       .map(textOf)
       .filter((text) => text.includes(RESTART_NOTICE_HEADING));
-    assert.equal(notices.length, 1);
+    assert.equal(notices.length, 1, "recovery notice is delivered by a wake");
+    assert.equal(
+      agent.injected
+        .map(textOf)
+        .filter((text) => text.includes(RESTART_NOTICE_HEADING)).length,
+      0,
+      "the recovery notice must NOT go through the queueing primitive",
+    );
+    // R2: the activation-time session policy rides the already-open turn, so
+    // it stays on `inject` (waking it would cost an extra model call).
+    const policyInjects = agent.injected
+      .map(textOf)
+      .filter((text) => text.includes("# Multitask dispatcher"));
+    assert.equal(policyInjects.length, 1, "session policy still injects");
+    assert.equal(
+      agent.woken
+        .map(textOf)
+        .filter((text) => text.includes("# Multitask dispatcher")).length,
+      0,
+      "session policy does not wake",
+    );
     const notice = notices[0] ?? "";
     assert.ok(notice.includes("w-live"), "notice names the unknown worker");
     assert.ok(
@@ -364,7 +395,7 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await flushActivation();
 
-    const noticesAfterFirst = agent.injected
+    const noticesAfterFirst = agent.woken
       .map(textOf)
       .filter((text) => text.includes(RESTART_NOTICE_HEADING));
     assert.equal(noticesAfterFirst.length, 1);
@@ -380,7 +411,7 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
     assert.equal(again.kind, "success");
     await flushActivation();
 
-    const noticesAfterSecond = agent.injected
+    const noticesAfterSecond = agent.woken
       .map(textOf)
       .filter((text) => text.includes(RESTART_NOTICE_HEADING));
     assert.equal(
@@ -403,6 +434,10 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
 
     assert.equal(agent.injected.length, 1, "only the session policy inject");
     assert.ok(textOf(agent.injected[0]).includes("# Multitask dispatcher"));
+    // Ticket 57: silence stays silence — an uneventful activation opens no
+    // recovery turn. Waking unconditionally would spawn a needless model call
+    // on every activation.
+    assert.equal(agent.woken.length, 0, "no recovery wake without a story");
     assert.ok(
       rosterSnapshots(ctx.updates).length >= 1,
       "the (empty) roster is still published",
@@ -476,7 +511,9 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
     assert.equal(result.kind, "success", "activation survives a broken store");
     await flushActivation();
 
-    const notices = agent.injected
+    // Ticket 57: the degraded path is still a story the dispatcher must act
+    // on, so it wakes like the normal one — same primitive, same guarantee.
+    const notices = agent.woken
       .map(textOf)
       .filter((text) => text.includes(RESTART_DEGRADED_NOTICE));
     assert.equal(

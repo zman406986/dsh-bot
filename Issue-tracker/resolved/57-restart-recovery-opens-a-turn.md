@@ -1,9 +1,9 @@
 # 57 — Restart recovery must open a turn (deviation D-4)
 
-**Status:** open
+**Status:** resolved
 **Type:** task
 **Labels:** ready-for-agent
-**Blocked by:** none for implementation.
+**Blocked by:** none for implementation. **Landed 2026-09-18** — `wakeNotice` now drives activation-time recovery through `Agent.followup`.
 **Related:** register item **D-4** and undecided item **U-1**; `docs/research/reference-core-loop-spec.md` G2; `docs/research/dsh-loop-capability-map.md` stage 10; ADR-0009 / ADR-0016; ticket 58 (the obligation redrive lands in that subsystem)
 
 ## The deviation
@@ -41,11 +41,27 @@ The reference has **no activation step**; it is always-on, so "boot redrive" fir
 
 ## Acceptance criteria
 
-- [ ] Activation delivers the restart notice through `agent.followup`; a test asserts the waking primitive is used.
-- [ ] A test asserts the per-turn reminder still uses `inject`.
-- [ ] Unknown-state reconstruction is unchanged, with a comment recording that the reference also reconstructs nothing.
-- [ ] `npm test` 0 fail, `npm run typecheck` clean (both configs).
-- [ ] Clean-room identifier grep: zero product-tree hits.
+- [x] Activation delivers the restart notice through `agent.followup`; a test asserts the waking primitive is used. — `src/adapter/parent-agent.ts` gains `tryWake` + `wakeNotice`; `src/plugin.ts:431` calls `lifecycle.wakeNotice(notice)`. The activation test reads the notice out of `agent.woken` **and** asserts zero notices on `agent.injected`, so a regression back to the queueing primitive fails loudly.
+- [x] A test asserts the per-turn reminder still uses `inject`. — `test/adapter-policy-inject.test.ts` ("re-injects the per-turn reminder…"), strengthened with `assert.equal(agent.followed.length, 0)` so the reminder is pinned to the queueing channel.
+- [x] Unknown-state reconstruction is unchanged, with a comment recording that the reference also reconstructs nothing. — `src/core/multitask.ts` `rebuildFromDurability` gains a doc comment stating the reference reconstructs nothing either and that cold-resume non-use is deliberate.
+- [x] `npm test` 0 fail, `npm run typecheck` clean (both configs). — **769 tests / 194 suites / 0 fail**; both tsconfigs clean.
+- [x] Clean-room identifier grep: zero product-tree hits. — see Comments.
+
+## Comments
+
+### 2026-09-18 — implemented
+
+**The fix is the primitive, not the payload.** `wakeNotice` reuses the same plugin message shape but hands it to `Agent.followup` instead of `Agent.inject`. Verified host semantics (ticket-52 pass, `dsh-loop-capability-map.md` stage 7): `followup` is `send(input, "next-turn", wakeup=true)` and a wake submitted while idle **always opens its turn boundary**; `inject` is `send(input, "next-step", wakeup=false)` and opens nothing. The recovery notice now behaves like the reference's boot redrive — it is acted on without the user speaking first.
+
+**`injectNotice` was deleted, not left as a second path.** After the swap it had no caller, and an unused second delivery primitive next to the correct one is exactly how the wrong one gets reintroduced. `tryInject` remains for the two paths that genuinely ride an open turn: the activation-time session policy and the per-turn reminder.
+
+**Silence stays silence.** The notice is still `null` when the rebuild report is empty, and a new assertion pins `agent.woken.length === 0` for an uneventful activation — waking unconditionally would burn a model call on every activation for nothing.
+
+**Scope note held:** the trigger stays activation-driven and is named `wakeNotice` (not `wakeBoot`/`redrive`) on purpose, so a future boot hook can call it without the name asserting a trigger model we have not adopted. Item U-1 is untouched.
+
+**Deliberately NOT done:** the obligation redrive pass at activation. It belongs to ticket 58, whose whole point is the bound/`lost`/telemetry layer; adding a redrive here would have created a second incomplete mechanism.
+
+Clean-room grep (`\b(sand|executor)\b|MessageSubagent|SAND_MULTITASK`) over `src/` and `lib/`: **zero hits**.
 
 ## Notes
 
