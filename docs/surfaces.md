@@ -109,7 +109,11 @@ ride **inside wake turns as text** — the shipped pattern. See
 The dispatcher's one additive `shell.overlay` entry (ADR-0013): a collapsed
 chip that expands into the panel card. Everything on it is a projection of
 existing core state through the settings-mirror channel — the same one
-watch feeding both the roster store and the footer store. Its states:
+channel feeding both the roster store and the footer store: the plugin's
+settings namespace, read through the shipped `ctx.settingsScope` service
+(`bind({namespace})` → `getSnapshot()`/`subscribe()`; ticket 46 — *not*
+`ctx.inject(["settings"])`, which is the host-side seam and never resolves in
+the browser). Its states:
 
 - **Dormant** (`waiting` — feed alive, nothing published): the chip's grey
   dot; the expanded panel IS the activation pitch, with the single
@@ -141,6 +145,11 @@ honesty rules — these are decisions, not oversights:
   `tool.call.toolview` (ticket 24) where the calls happen; the seam research
   found no navigation path, so the capsule links to, embeds, and navigates
   nothing.
+- **No Settings card yet** — `Settings → 插件配置` renders the intersection of
+  the served namespaces and the cards registered into the keyed
+  `settings.plugin.item` slot, and this plugin registers no card, so the section
+  never appears even though the Host serves our namespace. Recorded gap, not a
+  decision: owned by ticket 47 (the card), independent of the ticket-46 watch.
 
 Nothing on the capsule is editable inline. The no-stop guard's final form
 (`test/restart-honesty.test.ts`) structurally covers every capsule view

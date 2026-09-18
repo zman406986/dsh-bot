@@ -12,13 +12,15 @@
  * (Findings 1/2/5 lifecycle). `inject` names the client services the module
  * binds — the shipped idiom (e.g. dsh-client-ui-agent-preset exports
  * `inject: ["slots", "locale", ...]`). The settings service is deliberately
- * NOT listed: it is optional, reached through the runtime `ctx.inject` idiom.
+ * NOT listed: it is optional, reached through the runtime `ctx.inject` idiom
+ * under its real client name **`settingsScope`** (ticket 46).
  *
  * What registers (design-16 §4.2/§5):
  * 1. the `multitask-dispatcher` locale namespace ({en, zh});
- * 2. the data path: a watch on our settings namespace, where the host half
- *    mirrors the roster snapshot under the `roster` key (the documented
- *    config-channel fallback — no invented push channel);
+ * 2. the data path: a bind on our settings namespace through the shipped
+ *    `ctx.settingsScope` service, where the host half mirrors the roster
+ *    snapshot under the `roster` key (the documented config-channel fallback —
+ *    no invented push channel);
  * 3. the dispatcher capsule entry (ticket 38, ADR-0013) into the shipped
  *    `shell.overlay` list slot: collapsed chip → expandable panel, one
  *    entry, unchanged id (tickets 39–42 add the activation row, the wired
@@ -113,28 +115,51 @@ export function applyClientModule(
     "multitask-dispatcher: locale dictionaries",
   );
 
-  // Roster data path (ticket 21, design-16 §4.2 honest gap): watch the
-  // plugin's settings namespace for the host-mirrored snapshot. The panel
-  // degrades to "unavailable" copy when the service is missing or the feed
-  // is stale — never against an unverified live push channel. The SAME
-  // watch payload feeds the ticket-42 footer store (persisted flag
-  // provenance) — one channel, two honest readers, never a second source.
+  // Roster data path (ticket 21, design-16 §4.2 honest gap; contract corrected
+  // by ticket 46): bind our namespace's scope on the shipped settings base
+  // plugin's `ctx.settingsScope` service. NOT `ctx.inject(["settings"])` — that
+  // is the HOST seam; client-side the service is `settingsScope`, and the shape
+  // is `bind({namespace})` → `{getSnapshot, subscribe}`, with no `watch(ns, cb)`
+  // in the contract (see `context.ts`). The old name never resolved, so this
+  // body never ran and the store sat at `waiting` forever (live: capsule never
+  // flipped, footer flag `unknown`). The panel degrades to "unavailable" copy
+  // when the service is missing or the feed is stale — never against an
+  // unverified live push channel. The SAME snapshot feeds the ticket-42 footer
+  // store (persisted flag provenance) — one channel, two honest readers, never
+  // a second source.
   ctx.effect(() => {
     let disposeWatch: (() => void) | undefined;
     if (typeof ctx.inject !== "function") {
       store.set({ kind: "channel-missing" });
       return () => {};
     }
-    ctx.inject(["settings"], (child) => {
-      const settings = child.settings;
-      if (settings === undefined) {
+    ctx.inject(["settingsScope"], (child) => {
+      const binder = child.settingsScope;
+      if (binder === undefined || typeof binder.bind !== "function") {
         store.set({ kind: "channel-missing" });
         return;
       }
-      disposeWatch = settings.watch(LOCALE_NAMESPACE, (value) => {
-        store.applyChannelValue(value);
-        footer.applyChannelValue(value);
-      });
+      const scope = binder.bind({ namespace: LOCALE_NAMESPACE });
+      const readSnapshot = () => {
+        const snapshot = scope.getSnapshot();
+        if (snapshot.status === "unavailable") {
+          // Namespace not exposed to this client (or preferences are
+          // process-local): no honest feed exists at all.
+          store.set({ kind: "channel-missing" });
+          return;
+        }
+        // `loading` (or a first-section-less `ready`) means the namespace's
+        // document has not been accepted yet: stay `waiting` — the feed is
+        // alive, the roster simply is not in it.
+        if (snapshot.value === undefined) return;
+        store.applyChannelValue(snapshot.value);
+        footer.applyChannelValue(snapshot.value);
+      };
+      disposeWatch = scope.subscribe(readSnapshot);
+      // Subscribe only fires on replacements; a scope bound after the first
+      // accepted section already stands at `ready`, so read once now or the
+      // roster would wait for a write that may never come.
+      readSnapshot();
     });
     return () => {
       if (disposeWatch !== undefined) disposeWatch();

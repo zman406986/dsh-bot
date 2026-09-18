@@ -12,7 +12,10 @@
  * - `ctx.locale.register(ns, {zh, en})` registers copy dictionaries and
  *   `ctx.locale.bind(ns)` returns the `t` seat for a namespace (Finding 6);
  * - `ctx.effect(execute, label?)` runs `execute` immediately and collects the
- *   returned function as the unload disposer (vendored cordis `effect`).
+ *   returned function as the unload disposer (vendored cordis `effect`);
+ * - `ctx.settingsScope.bind({namespace})` returns that namespace's scope with
+ *   `getSnapshot()`/`subscribe()` — the roster data path (ticket 46 corrected
+ *   this from the host-side `settings`/`watch` shape; see the block below).
  */
 
 import type { LocaleDictionary, SlotRegistrationOptions } from "./overlay.js";
@@ -43,19 +46,55 @@ export interface LocaleServiceLike {
 }
 
 /**
- * Client-side settings scope (ticket 21 data path). The browser exposes a
- * settings service that can watch a plugin namespace — the same namespace
- * the host half mirrors the roster snapshot into (design-16 §4.2 fallback;
- * Finding 7 worked example 3 injects the settings scope this way).
+ * Client-side settings scope (ticket 21 data path; contract corrected by
+ * ticket 46 against the installed 0.1.5-rc.1 tree).
+ *
+ * The browser's settings base plugin (`@deepseek-ai/dsh-client-ui-settings`)
+ * provides **`ctx.settingsScope`** — a `SettingsScopeBinder`
+ * (`lib/types/client/index.d.ts:2-3`;
+ * `declare module '@deepseek-ai/cordis' { interface Context { settingsScope } }`
+ * at `settings-scope.d.ts:88-92`). There is NO client service named
+ * `settings`; that name is the *host* seam (`ctx.inject(["settings"], …)` +
+ * `installSection`, `src/adapter/settings-section.ts`). Ticket 46: the client
+ * half had copied the host name, so `ctx.inject(["settings"], …)` waited on a
+ * service that never resolves and its body never ran.
+ *
+ * Per-namespace access is a bind, not a watch: `bind(spec)` returns a scope
+ * bound to the CALLER's fiber (`settings-scope.d.ts:130-139`) exposing
+ * `getSnapshot()` + `subscribe(listener)` — there is no `watch(namespace, cb)`
+ * anywhere in the contract (`settings-contract.d.ts:50-58`). Reads never touch
+ * the wire here: the scope is a selector over the settings domain's one shared
+ * describe mirror.
  */
+export interface ClientSettingsScopeSnapshotLike {
+  /**
+   * `loading` until the first accepted section, `ready` while one stands, and
+   * `unavailable` when the namespace is not exposed to this client or the
+   * connection keeps preferences process-local
+   * (`settings-contract.d.ts:6-12`).
+   */
+  readonly status: "loading" | "ready" | "unavailable";
+  /** Last accepted schema-resolved section; undefined before the first acceptance. */
+  readonly value?: unknown;
+}
+
+/** One namespace's bound settings scope (`SettingsScopeBinder.bind` result). */
 export interface ClientSettingsScopeLike {
-  /** Watch a namespace document; returns the unsubscribe disposer. */
-  watch(namespace: string, onChange: (value: unknown) => void): () => void;
+  /** The current sync snapshot (stable reference until the next change). */
+  getSnapshot(): ClientSettingsScopeSnapshotLike;
+  /** Observe snapshot replacements; returns the disposer removing this listener. */
+  subscribe(listener: () => void): () => void;
+}
+
+/** The `ctx.settingsScope` binder face this module uses. */
+export interface ClientSettingsScopeBinderLike {
+  /** Bind one namespace scope on the caller's plugin lifecycle. */
+  bind(spec: { readonly namespace: string }): ClientSettingsScopeLike;
 }
 
 /** Services handed to an `inject` callback child context. */
 export interface ClientInjectedServices {
-  settings?: ClientSettingsScopeLike;
+  settingsScope?: ClientSettingsScopeBinderLike;
 }
 
 /**

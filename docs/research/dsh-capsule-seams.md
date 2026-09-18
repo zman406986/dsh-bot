@@ -71,6 +71,19 @@ Mapped to our epic: this is process req 3 / ticket 33's launcher boot (`dsh --pr
 
 ## Scribe-note corrections and confirmations (applied in place, dated 2026-09-18)
 
+- **Seam 5's source name was right and the code diverged from it (added 2026-09-18,
+  ticket 46).** This note said the flag source is `ctx.settingsScope` — verified
+  against the installed bundle. The client implementation nevertheless shipped
+  `ctx.inject(["settings"], …)` + `settings.watch(ns, cb)` (the *host* idiom), a
+  service that never resolves in the browser: cordis runs an `inject` callback
+  only when every named dependency exists (`cordis/src/registry.ts:300-302`), so
+  the body never ran and the roster/flag feed stayed dead (live re-pass #2:
+  capsule dormant, footer `data-flag="unknown"`). Fixed at `src/client/index.ts`
+  (ticket 46, 2026-09-18) and now pinned offline. Lesson recorded for this note's
+  future readers: **a verified seam name in `docs/research/` is only worth
+  something if the implementation is asserted against it** — the cross-check that
+  would have caught this is the "inject names the shipped service" pin in
+  `test/client-roster-panel.test.ts`.
 - `dsh-plugin-ui-patterns.md` Finding 5 / `shell.overlay` click-through — **confirmed**, with the mechanism (layer `pointer-events:none` + direct-child rule + inherited `auto` through the `display:contents` outlet anchor) recorded above.
 - `dsh-plugin-ui-patterns.md` Status item 2 ("how a third-party `main` key gets opened is unverified") — **answered**: `ctx.layout.selectPanel(panelId)` (ui-layout `lib/client.js:399-412`), documented in the runner catalog as a public cross-plugin face.
 - `dsh-plugin-ui-patterns.md` Finding 6 (decoration onSelect "typically submits a completed line back through command.execute") — **confirmed** as the literal `ctx.remote.commands.execute(sessionId, line, attachments)` transaction.

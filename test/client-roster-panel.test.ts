@@ -121,8 +121,17 @@ function rowById(view: RosterPanelView, workerId: string): RosterRowView | undef
   return allRows(view).find((candidate) => candidate.workerId === workerId);
 }
 
-/** Fake the client face (see test/client-face-scaffold.test.ts for the idiom),
- * extended with the optional settings inject/watch seam. */
+/**
+ * Fake the client face (see test/client-face-scaffold.test.ts for the idiom),
+ * extended with the optional settings-scope seam.
+ *
+ * The settings fake models the SHIPPED client contract (ticket 46): the service
+ * is `settingsScope`, a binder whose `bind({namespace})` returns a scope with
+ * `getSnapshot()` + `subscribe(listener)`. There is deliberately no
+ * `watch(namespace, cb)` here — a watch-shaped call would throw, so a
+ * regression to the pre-ticket-46 shape fails offline instead of passing on a
+ * fake that never existed live.
+ */
 function createClientCtx(options?: { withSettings?: boolean }) {
   const locales = new Map<string, unknown>();
   const injects: Array<{
@@ -131,7 +140,10 @@ function createClientCtx(options?: { withSettings?: boolean }) {
   }> = [];
   const injectControllers: Array<() => void> = [];
   const effectDisposers: Array<() => void> = [];
-  let watchCallback: ((value: unknown) => void) | undefined;
+  const boundNamespaces: string[] = [];
+  const injectRequests: string[][] = [];
+  const subscribers = new Set<() => void>();
+  let snapshot: ClientSettingsScopeSnapshotLike = { status: "loading" };
   let watchDisposed = 0;
   const withSettings = options?.withSettings ?? true;
 
@@ -145,18 +157,25 @@ function createClientCtx(options?: { withSettings?: boolean }) {
       return () => {};
     },
     inject(services: readonly string[], callback: (child: unknown) => void) {
-      if (services.includes("settings") && withSettings) {
-        callback({
-          settings: {
-            watch(_namespace: string, onChange: (value: unknown) => void) {
-              watchCallback = onChange;
-              return () => {
-                watchDisposed += 1;
-              };
-            },
+      injectRequests.push([...services]);
+      if (!withSettings || !services.includes("settingsScope")) return;
+      callback({
+        settingsScope: {
+          bind(spec: { namespace: string }) {
+            boundNamespaces.push(spec.namespace);
+            return {
+              getSnapshot: () => snapshot,
+              subscribe(listener: () => void) {
+                subscribers.add(listener);
+                return () => {
+                  subscribers.delete(listener);
+                  watchDisposed += 1;
+                };
+              },
+            };
           },
-        });
-      }
+        },
+      });
     },
     slots: {
       inject(parent: string, callback: () => unknown) {
@@ -197,9 +216,19 @@ function createClientCtx(options?: { withSettings?: boolean }) {
     // Test surface.
     locales,
     injects,
+    /** Every service list the module asked to inject, in call order. */
+    injectRequests,
+    /** Every namespace the module bound a settings scope on. */
+    boundNamespaces,
+    /** Publish a host document the way a real scope replacement would. */
     fireSettingsWatch(value: unknown) {
-      assert.ok(watchCallback, "settings watch was never installed");
-      watchCallback(value);
+      snapshot = { status: "ready", value };
+      for (const listener of [...subscribers]) listener();
+    },
+    /** Force a raw snapshot replacement (status included). */
+    pushSettingsSnapshot(next: ClientSettingsScopeSnapshotLike) {
+      snapshot = next;
+      for (const listener of [...subscribers]) listener();
     },
     watchDisposedCount: () => watchDisposed,
     runFiberTeardown() {
@@ -209,7 +238,10 @@ function createClientCtx(options?: { withSettings?: boolean }) {
     },
   };
   return ctx as typeof ctx & ClientContext & {
+    injectRequests: string[][];
+    boundNamespaces: string[];
     fireSettingsWatch(value: unknown): void;
+    pushSettingsSnapshot(next: ClientSettingsScopeSnapshotLike): void;
     watchDisposedCount(): number;
     runFiberTeardown(): void;
   };
@@ -890,10 +922,68 @@ describe("roster panel — apply() wires the fallback data path and the overlay 
     assert.equal(typeof localeDictionary.zh["roster.unavailable"], "string");
   });
 
-  it("no settings service at all: channel-missing, panel unavailable", () => {
+  it("no settings service ever appearing: the store stays `waiting`, never a fake degrade", () => {
+    // The runtime-dynamic inject simply never resolves (ticket 46's live
+    // symptom). Honest face: `waiting` — the pre-activation state the chip
+    // renders as the grey `dormant` dot, not an error.
     const ctx = createClientCtx({ withSettings: false });
+    const store = createRosterStore();
+    applyClientModule(ctx, store);
+    assert.deepEqual(store.getBox().state, { kind: "waiting" });
+    assert.deepEqual(describeRosterPanel(store.getBox().state, 0), {
+      kind: "loading",
+    });
+  });
+
+  it("injects the SHIPPED client service name — `settingsScope`, never the host-side `settings` (ticket 46 pin)", () => {
+    const ctx = createClientCtx();
     apply(ctx);
-    assert.deepEqual(describeRosterPanel({ kind: "channel-missing" }, 0), {
+    // Cordis `inject(deps, cb)` resolves only when EVERY named service exists
+    // (vendor registry.ts:300-302), so a wrong name means the callback never
+    // runs — exactly the live defect. The browser provides `settingsScope`
+    // (dsh-client-ui-settings `lib/types/client/index.d.ts:2-3`); the client
+    // has no `settings` service at all.
+    assert.deepEqual(ctx.injectRequests, [["settingsScope"]]);
+    for (const requested of ctx.injectRequests) {
+      assert.ok(!requested.includes("settings"));
+    }
+  });
+
+  it("binds the scope on the plugin's own namespace, not a guessed one", () => {
+    const ctx = createClientCtx();
+    apply(ctx);
+    assert.deepEqual(ctx.boundNamespaces, [LOCALE_NAMESPACE]);
+  });
+
+  it("reads an ALREADY-ready snapshot at bind time (subscribe alone would miss it)", () => {
+    const ctx = createClientCtx();
+    const store = createRosterStore();
+    const feed = snapshot([row("w-1", "running", { title: "Parser" })]);
+    // The section was accepted before our module ever bound the scope.
+    ctx.pushSettingsSnapshot({ status: "ready", value: { [ROSTER_SETTINGS_KEY]: feed } });
+    applyClientModule(ctx, store);
+    assert.deepEqual(store.getBox().state, { kind: "snapshot", snapshot: feed });
+  });
+
+  it("a `loading` snapshot stays waiting until a section is accepted", () => {
+    const ctx = createClientCtx();
+    const store = createRosterStore();
+    applyClientModule(ctx, store);
+    // The fake's initial snapshot IS `{status:"loading"}` — nothing to read.
+    assert.deepEqual(store.getBox().state, { kind: "waiting" });
+    ctx.pushSettingsSnapshot({ status: "ready" });
+    assert.deepEqual(store.getBox().state, { kind: "waiting" });
+    ctx.fireSettingsWatch({ [ROSTER_SETTINGS_KEY]: snapshot([]) });
+    assert.equal(store.getBox().state.kind, "snapshot");
+  });
+
+  it("an `unavailable` namespace degrades to channel-missing (honest, not an error guess)", () => {
+    const ctx = createClientCtx();
+    const store = createRosterStore();
+    applyClientModule(ctx, store);
+    ctx.pushSettingsSnapshot({ status: "unavailable" });
+    assert.deepEqual(store.getBox().state, { kind: "channel-missing" });
+    assert.deepEqual(describeRosterPanel(store.getBox().state, 0), {
       kind: "unavailable",
     });
   });
@@ -904,10 +994,11 @@ describe("roster panel — apply() wires the fallback data path and the overlay 
     assert.doesNotThrow(() => apply(ctx));
   });
 
-  it("fiber teardown (HMR) disposes the settings watch; re-apply registers one fresh", () => {
+  it("fiber teardown (HMR) unsubscribes the scope; re-apply binds one fresh", () => {
     const ctx = createClientCtx();
     apply(ctx);
     assert.equal(ctx.injects.length, 2);
+    assert.equal(ctx.boundNamespaces.length, 1);
     assert.equal(ctx.watchDisposedCount(), 0);
 
     ctx.runFiberTeardown();
@@ -918,13 +1009,17 @@ describe("roster panel — apply() wires the fallback data path and the overlay 
     // Post-HMR fiber: no duplicate accumulation.
     apply(ctx);
     assert.equal(ctx.injects.length, 2);
+    assert.equal(ctx.boundNamespaces.length, 2);
     assert.equal(ctx.watchDisposedCount(), 1);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
+    // A second fiber re-reads the standing snapshot it binds to.
+    ctx.fireSettingsWatch({ [ROSTER_SETTINGS_KEY]: snapshot([]) });
+    assert.equal(ctx.watchDisposedCount(), 1);
   });
 });
 
 describe("roster panel — module-level Cordis inject list", () => {
-  it("binds slots and locale; settings stays a runtime-optional inject", () => {
+  it("binds slots and locale; the settings scope stays a runtime-optional inject", () => {
     assert.deepEqual([...clientInject], ["slots", "locale"]);
   });
 });
