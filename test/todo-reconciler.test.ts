@@ -50,6 +50,9 @@ function todoFixture(overrides: Partial<TodoItem> & { id: string }): TodoItem {
     streamKey: null,
     workerId: null,
     delivered: false,
+    redriveAttempts: 0,
+    disposition: null,
+    dispositionReason: null,
     createdAtMs: 1_000,
     updatedAtMs: 1_000,
     ...overrides,
@@ -451,7 +454,7 @@ describe("todo reconciler — prune stale", () => {
     assert.ok(!report.mutations.some((m) => m.todoId === "ok"));
   });
 
-  it("does not prune in-progress or undelivered items", () => {
+  it("does not prune in-progress or undelivered items — it redrives them instead (ticket 58)", () => {
     const todos = [
       todoFixture({
         id: "live",
@@ -481,9 +484,28 @@ describe("todo reconciler — prune stale", () => {
       completedRetentionMs: 1,
     });
 
-    assert.deepEqual(report.mutations, []);
     assert.equal(report.running.length, 1);
     assert.equal(report.landedUndelivered.length, 1);
+    // `mutations` used to be asserted EMPTY here. That expectation was
+    // deviation D-5 written down as a requirement: an `in_progress &&
+    // !delivered` item whose worker had settled stayed untouched forever and
+    // was never escalated. Ticket 58 replaces "leave it alone" with a bounded
+    // redrive — the item is still never pruned while it is owed, but it is no
+    // longer ignored.
+    assert.deepEqual(
+      report.mutations.map((mutation) => mutation.type),
+      ["record-redrive"],
+      "a missed delivery costs exactly one redrive attempt",
+    );
+    assert.equal(report.toRedrive.length, 1);
+    assert.equal(report.toRedrive[0]?.id, "waiting");
+    assert.equal(report.toRedrive[0]?.redriveAttempts, 1);
+    assert.equal(report.lost.length, 0, "one attempt is nowhere near the bound");
+    assert.equal(
+      report.mutations.some((mutation) => mutation.type === "prune"),
+      false,
+      "an owed item is still never pruned",
+    );
   });
 });
 

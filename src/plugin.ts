@@ -438,6 +438,13 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       // here.
       lifecycle.wakeNotice(notice);
     }
+    // Ticket 58 (register D-5): activation is also a delivery opportunity.
+    // A restored result that settled before the restart and was never
+    // delivered gets a redrive turn — bounded, so it cannot become the
+    // unbounded persistence this ticket exists to remove. Called
+    // unconditionally: it is a cheap no-op when nothing is owed, and it is
+    // also the pass that escalates an already-exhausted obligation to `lost`.
+    multitask.redriveUndelivered(sessionId);
   };
 
   const lifecycle = bindDispatcherLifecycle(ctx, host, multitask, {

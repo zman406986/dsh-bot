@@ -98,14 +98,19 @@ function createCtx(): AdapterContext & {
 /** Minimal CordisDshHost stand-in for lifecycle binding tests. */
 function createHostStub(): CordisDshHost & {
   bound: Array<{ agent: AgentLike; sessionId: string }>;
+  /** Ticket 58: dispatcher wakes recorded so the redrive can be asserted. */
+  wakeups: string[];
+  fireSettled(event: unknown): void;
 } {
   const bound: Array<{ agent: AgentLike; sessionId: string }> = [];
+  const wakeups: string[] = [];
   let parent: AgentLike | null = null;
   const settledCallbacks: Array<(event: never) => void> = [];
   const stepCallbacks: Array<(workerId: string) => void | Promise<void>> = [];
 
   const host = {
     bound,
+    wakeups,
     async spawnWorker(): Promise<string> {
       return "stub-worker";
     },
@@ -120,7 +125,12 @@ function createHostStub(): CordisDshHost & {
     onAccessRequest(): void {
       // Stub: T13 access-relay wiring is not under test here.
     },
-    async requestDispatcherWakeup(): Promise<void> {},
+    async requestDispatcherWakeup(sessionId: string): Promise<void> {
+      wakeups.push(sessionId);
+    },
+    fireSettled(event: unknown): void {
+      for (const cb of [...settledCallbacks]) cb(event as never);
+    },
     bindParent(agent: AgentLike, sessionId: string): void {
       bound.push({ agent, sessionId });
       parent = agent;
@@ -144,6 +154,8 @@ function createHostStub(): CordisDshHost & {
   };
   return host as unknown as CordisDshHost & {
     bound: Array<{ agent: AgentLike; sessionId: string }>;
+    wakeups: string[];
+    fireSettled(event: unknown): void;
   };
 }
 
@@ -328,6 +340,62 @@ describe("dispatcher activation lifecycle (ticket 19)", () => {
       0,
       "the per-turn reminder must not wake a turn",
     );
+  });
+
+  it("a dispatcher turn end redrives an undelivered result by opening a turn (ticket 58)", async () => {
+    const ctx = createCtx();
+    const host = createHostStub();
+    const multitask = createMultitask(host);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask, {
+      policyEnabled: true,
+    });
+    const agent = createAgent("session-1");
+    lifecycle.activate(agent);
+
+    multitask.createTodo({
+      sessionId: "session-1",
+      id: "todo-1",
+      title: "Research",
+    });
+    const spawned = await multitask.spawnWorker({
+      parentSessionId: "session-1",
+      streamKey: "k1",
+      title: "Research",
+      prompt: "go",
+      todoId: "todo-1",
+    });
+    assert.ok(spawned.ok);
+    host.fireSettled({
+      workerId: spawned.workerId,
+      status: "completed",
+      report: "done",
+    });
+    // The settle wake itself is the item's first delivery chance.
+    multitask.drainWake("session-1");
+    const wakeupsBefore = host.wakeups.length;
+
+    // The turn that carried the result ends with the result still undelivered.
+    ctx.emit("agent/status", { agent, status: "running" });
+    ctx.emit("agent/status", { agent, status: "idle" });
+
+    assert.equal(
+      multitask.todos.get("todo-1")?.redriveAttempts,
+      1,
+      "the missed delivery cost exactly one attempt",
+    );
+    assert.equal(
+      host.wakeups.length,
+      wakeupsBefore + 1,
+      "the redrive reaches the host's waking primitive — it does not wait",
+    );
+
+    // A delivered result stops the loop dead: no further attempts, no wake.
+    multitask.markDelivered("todo-1");
+    const wakeupsAtDelivery = host.wakeups.length;
+    ctx.emit("agent/status", { agent, status: "running" });
+    ctx.emit("agent/status", { agent, status: "idle" });
+    assert.equal(multitask.todos.get("todo-1")?.redriveAttempts, 1);
+    assert.equal(host.wakeups.length, wakeupsAtDelivery);
   });
 
   it("skips inject when the agent has no inject method", () => {

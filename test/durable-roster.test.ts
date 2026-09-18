@@ -114,9 +114,15 @@ describe("durable roster marker — write path", () => {
     assert.ok(marker.startedAtMs > 0);
     assert.ok(marker.updatedAtMs > 0);
     // No second transcript DB: the marker carries no result/report body.
+    // Ticket 58 added ONE field — `redriveAttempts`, the delivery budget.
+    // It is a counter, not content: the "minimum to reconstruct" rule holds,
+    // because a restart that forgets the spent budget would hand the same
+    // obligation a fresh set of retries on every boot.
+    assert.equal(marker.redriveAttempts, 0);
     const keys = Object.keys(marker).sort();
     assert.deepEqual(keys, [
       "parentSessionId",
+      "redriveAttempts",
       "startedAtMs",
       "status",
       "streamKey",

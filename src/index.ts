@@ -84,6 +84,7 @@ export type {
   Multitask,
   MultitaskAccessOptions,
   MultitaskOptions,
+  RedriveReport,
 } from "./core/multitask.js";
 export {
   createAccessPolicyTable,
@@ -149,11 +150,15 @@ export type {
   PeerTarget,
 } from "./core/peer-types.js";
 export {
+  MAX_DELIVERY_REDRIVES,
   createTodoLedger,
   reconcileTodos,
 } from "./core/todo-reconciler.js";
 export type {
   CreateTodoInput,
+  DeliveryDisposition,
+  DeliveryEvent,
+  DeliveryReason,
   ReconcileInput,
   ReconcileReport,
   TodoItem,

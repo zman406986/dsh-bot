@@ -42,7 +42,15 @@ export function assembleSessionPolicy(enabled: boolean): string {
 
 /** Render one ledger line for the per-turn reminder. */
 export function formatLedgerLine(todo: TodoItem): string {
-  return `- ${todo.id} · ${todo.status} · ${todo.title}`;
+  const base = `- ${todo.id} · ${todo.status} · ${todo.title}`;
+  // Ticket 58 (register D-6): a closed obligation says WHY it closed. A `lost`
+  // item reading exactly like a `completed` one is the defect this exists to
+  // remove. Delivered items are left alone — "(delivered)" on every finished
+  // line is noise, and the absence of an annotation already means "fine".
+  if (todo.disposition === null || todo.disposition === "delivered") {
+    return base;
+  }
+  return `${base} (${todo.dispositionReason ?? todo.disposition})`;
 }
 
 /**

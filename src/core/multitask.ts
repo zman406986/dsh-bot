@@ -34,6 +34,7 @@ import {
 } from "./peer-types.js";
 import { applyEvent, type WorkerEvent } from "./worker-fsm.js";
 import {
+  MAX_DELIVERY_REDRIVES,
   createTodoLedger,
   reconcileTodos,
   type CreateTodoInput,
@@ -52,6 +53,17 @@ import {
 export interface DrainedWake {
   readonly wake: WakeEvent;
   readonly reconcile: ReconcileReport;
+}
+
+/**
+ * What one delivery-redrive pass did (ticket 58, register D-5).
+ * `redriven` items were re-offered to the dispatcher; `lost` items hit the
+ * bound and are now terminal. Both are empty when nothing was owed — which is
+ * the common case, and must stay cheap.
+ */
+export interface RedriveReport {
+  readonly redriven: readonly TodoItem[];
+  readonly lost: readonly TodoItem[];
 }
 
 /** Access-relay knobs (ticket 13). */
@@ -89,6 +101,12 @@ export interface MultitaskOptions {
    * projection of existing truth).
    */
   readonly onRosterChanged?: (parentSessionId: string) => void;
+  /**
+   * Redrives allowed before an undelivered obligation escalates to `lost`
+   * (ticket 58, D-5). Defaults to {@link MAX_DELIVERY_REDRIVES}. Exposed so
+   * tests can reach the bound in one step instead of looping the whole loop.
+   */
+  readonly maxRedrives?: number;
 }
 
 /**
@@ -162,6 +180,17 @@ export interface Multitask {
    * in one step. Preferred dispatcher-turn entry point.
    */
   drainWake(sessionId: string): DrainedWake | undefined;
+  /**
+   * Bounded delivery redrive (ticket 58, register D-5). Call it when a
+   * dispatcher turn ends and on activation: any result whose worker settled
+   * but which was never delivered is re-offered by **opening a turn**, up to
+   * {@link MAX_DELIVERY_REDRIVES}; past the bound the item becomes terminal
+   * `lost` with a reason instead of persisting forever.
+   *
+   * Synchronous and side-effect-safe: a no-op when nothing is owed, which is
+   * the common case. Never throws.
+   */
+  redriveUndelivered(sessionId: string): RedriveReport;
   /**
    * Rebuild the live roster from durable markers only (ADR-0006).
    * Call on a fresh core after a simulated or real restart — do not mix
@@ -322,6 +351,7 @@ export function createMultitask(
     return reconcileTodos({
       wake,
       todos: todoLedger.list(sessionId),
+      maxRedrives: options?.maxRedrives ?? MAX_DELIVERY_REDRIVES,
       workers: [...workers.values()]
         .filter((worker) => worker.parentSessionId === sessionId)
         .map((worker) => ({
@@ -431,6 +461,9 @@ export function createMultitask(
         toolCallCount: 0,
         transcriptRef: null,
         todoId: request.todoId ?? null,
+        // Fresh obligation: the settle wake is its first delivery chance, so
+        // no redrive has been spent yet (ticket 58).
+        redriveAttempts: 0,
       };
       workers.set(workerId, record);
       liveByStreamKey.set(request.streamKey, workerId);
@@ -623,6 +656,67 @@ export function createMultitask(
       return { wake, reconcile };
     },
 
+    redriveUndelivered(sessionId: string): RedriveReport {
+      // Reuse the pure reconciler with an empty wake. That is the whole
+      // point: with no settles in the wake, every landed-undelivered item is
+      // by definition past its first delivery opportunity, so the pass below
+      // is exactly the redrive set. The bound logic lives in one place (the
+      // reconciler); this method is the action layer — persist the counter,
+      // open the turn.
+      const emptyWake: WakeEvent = {
+        sessionId,
+        source: "timer",
+        settledWorkers: [],
+        accessRequests: [],
+        accessNotices: [],
+      };
+      const report = runReconcile(sessionId, emptyWake);
+      todoLedger.apply(report.mutations);
+      // Notify only when something actually moved. This pass runs on every
+      // dispatcher turn end, and an unconditional notify would publish an
+      // identical snapshot every time — visible churn in the panel for no
+      // change, and a second publish on an activation that changed nothing.
+      let changed = report.mutations.length > 0;
+
+      const lost: TodoItem[] = [...report.lost];
+
+      // A linked worker we no longer hold can never settle, so its item can
+      // never be delivered. Escalate instead of leaving it owed forever.
+      for (const todo of todoLedger.list(sessionId)) {
+        if (todo.status !== "in_progress" || todo.delivered) continue;
+        if (todo.workerId === null || workers.has(todo.workerId)) continue;
+        if (!todoLedger.markLost(todo.id, "worker-gone")) continue;
+        const after = todoLedger.get(todo.id);
+        if (after !== undefined) lost.push(after);
+        changed = true;
+      }
+
+      if (changed) notifyRosterChanged(sessionId);
+
+      // Mirror the spent attempts onto the roster records and persist them,
+      // so a restart continues the same budget rather than restarting it
+      // (D-5: a lifetime bound, like the reference's).
+      for (const todo of report.toRedrive) {
+        const record =
+          todo.workerId !== null ? workers.get(todo.workerId) : undefined;
+        if (record === undefined) continue;
+        record.redriveAttempts = todo.redriveAttempts;
+        if (durability !== undefined) {
+          void Promise.resolve(
+            durability.writeWorkerMarker(toDurableMarker(record)),
+          );
+        }
+      }
+
+      if (report.toRedrive.length > 0) {
+        // Opening the turn is the delivery mechanism — queueing context would
+        // repeat D-4, where the notice waited for a user who never spoke.
+        wakeBus.enqueueDeliveryRedrive(sessionId);
+      }
+
+      return { redriven: report.toRedrive, lost };
+    },
+
     /**
      * Rebuild the roster from durable markers after a host restart (ADR-0006).
      *
@@ -679,6 +773,9 @@ export function createMultitask(
           toolCallCount: 0,
           transcriptRef: marker.transcriptRef,
           todoId: marker.todoId,
+          // Continue the same redrive budget across the restart (D-5). A
+          // missing field means a marker written before ticket 58 → 0.
+          redriveAttempts: marker.redriveAttempts ?? 0,
         };
         workers.set(record.workerId, record);
         // Recreate the dispatcher ledger link so reconcile can notice an
@@ -695,6 +792,9 @@ export function createMultitask(
             title: marker.title,
             status: "in_progress",
             streamKey: marker.streamKey,
+            // Restore the spent budget too — otherwise every restart would
+            // hand the obligation a fresh set of redrives (D-5).
+            redriveAttempts: marker.redriveAttempts ?? 0,
             nowMs: marker.updatedAtMs,
           });
           todoLedger.linkWorker(

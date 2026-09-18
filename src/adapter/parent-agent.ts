@@ -209,6 +209,15 @@ export function bindDispatcherLifecycle(
           }
         }
         if (status === "idle") {
+          // Ticket 58 (register D-5): decide the delivery redrive BEFORE the
+          // bus is told the turn ended. Ordering matters twice over — the pass
+          // only counts an attempt if the result is still undelivered (so a
+          // turn that delivered costs nothing), and while the bus is still
+          // busy the redrive becomes a pending flag, so the turn-end flush
+          // delivers it exactly once alongside anything else waiting.
+          if (policyEnabled) {
+            multitask.redriveUndelivered(dispatcherSessionId);
+          }
           multitask.wakeBus.noteTurnEnded(dispatcherSessionId);
         }
         return;

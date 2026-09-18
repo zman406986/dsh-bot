@@ -16,6 +16,13 @@ export interface DurableWorkerMarker {
   /** Transcript pointer (child session id), when the host has one. */
   readonly transcriptRef: string | null;
   readonly todoId: string | null;
+  /**
+   * Delivery redrive attempts spent before the restart (ticket 58, D-5).
+   * Optional because markers written before that ticket exist in live stores;
+   * a missing value reads as 0. Persisting it is what makes the bound a
+   * lifetime budget rather than a per-boot one.
+   */
+  readonly redriveAttempts?: number;
   readonly startedAtMs: number;
   readonly updatedAtMs: number;
 }
@@ -72,6 +79,7 @@ export function toDurableMarker(record: WorkerRecord): DurableWorkerMarker {
     status: record.status,
     transcriptRef: record.transcriptRef,
     todoId: record.todoId,
+    redriveAttempts: record.redriveAttempts,
     startedAtMs: record.startedAtMs,
     updatedAtMs: Date.now(),
   };

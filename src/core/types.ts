@@ -27,6 +27,12 @@ export interface WorkerRecord {
   toolCallCount: number;
   transcriptRef: string | null;
   todoId: string | null;
+  /**
+   * Delivery redrive attempts spent on this worker's result (ticket 58).
+   * Mirrored from the ledger item so the durable marker can persist it and a
+   * restart continues the same budget instead of restarting it.
+   */
+  redriveAttempts: number;
 }
 
 /**

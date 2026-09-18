@@ -123,6 +123,14 @@ export interface WakeBus {
   /** Record a user wake; preempts any queued or ready non-user wake. */
   enqueueUserWake(sessionId: string): void;
   /**
+   * Open a turn to re-attempt delivery of a settled-but-undelivered result
+   * (ticket 58, register D-5). Unlike `enqueueUserWake`, this DOES ask the
+   * host to open the turn — the whole point is that nobody would otherwise
+   * speak, and the result would wait forever. Queued (not delivered) while
+   * the dispatcher is mid-turn, so a redrive never interrupts a live turn.
+   */
+  enqueueDeliveryRedrive(sessionId: string): void;
+  /**
    * Mark the dispatcher session mid-turn. Further settles/peers only queue
    * (unless a priority peer interrupts a non-user turn).
    * `owner` defaults to the pending owner from the last flush, else `"user"`.
@@ -161,6 +169,12 @@ interface SessionWakeState {
   normalPeers: PeerNotice[];
   /** Wake already prepared for the next (or current) turn. */
   ready: WakeEvent | null;
+  /**
+   * A delivery redrive is owed (ticket 58). Held as a flag rather than a
+   * queue entry: any turn that opens will surface the undelivered items
+   * anyway, so coalescing N redrives into the next turn is correct.
+   */
+  pendingRedrive: boolean;
 }
 
 export interface WakeBusOptions {
@@ -180,6 +194,16 @@ function isBackground(source: WakeSource): boolean {
   return (
     source === "worker-settled" || source === "worker-access-request"
   );
+}
+
+/**
+ * Sources whose ready wake may absorb newly arrived background content
+ * (ticket 58). A pending redrive is such a turn: it exists only to surface
+ * undelivered work, so a settle arriving before it drains should ride it
+ * rather than wait for a second turn.
+ */
+function canJoinBackground(source: WakeSource): boolean {
+  return isBackground(source) || source === "timer";
 }
 
 function isNonUser(source: WakeSource): boolean {
@@ -221,6 +245,7 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
         priorityPeers: [],
         normalPeers: [],
         ready: null,
+        pendingRedrive: false,
       };
       sessions.set(sessionId, state);
     }
@@ -248,6 +273,9 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
       accessRequests,
       accessNotices,
     };
+    // A real background batch subsumes any owed redrive: this turn will
+    // surface the undelivered items anyway, so a second turn would be noise.
+    state.pendingRedrive = false;
     state.pendingOwner = ownerForSource(source);
     onDeliver(sessionId);
   }
@@ -289,7 +317,22 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
       onDeliver(sessionId);
       return;
     }
+    // Real background content first — it subsumes an owed redrive, because
+    // the same turn surfaces the undelivered items.
     flushBackground(sessionId, state);
+    if (state.ready !== null) return;
+    if (state.pendingRedrive) {
+      state.pendingRedrive = false;
+      state.ready = {
+        sessionId,
+        source: "timer",
+        settledWorkers: [],
+        accessRequests: [],
+        accessNotices: [],
+      };
+      state.pendingOwner = "worker-settled";
+      onDeliver(sessionId);
+    }
   }
 
   /**
@@ -309,6 +352,11 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
       }
       state.priorityPeers.unshift(...toPriority);
       state.normalPeers.unshift(...toNormal);
+    } else if (state.ready.source === "timer") {
+      // A reclaimed redrive has no payload to re-queue — it is a flag
+      // (ticket 58). Re-arming it keeps the obligation alive for the next
+      // idle turn instead of silently dropping it.
+      state.pendingRedrive = true;
     } else {
       state.pending.unshift(...state.ready.settledWorkers);
       state.pendingAccessRequests.unshift(
@@ -345,8 +393,9 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
         resultText: input.resultText,
       };
       // Join the batch already waiting for the next turn — one wake, not several.
-      // Never join a peer wake (design-14: no mix).
-      if (state.ready !== null && isBackground(state.ready.source)) {
+      // Never join a peer wake (design-14: no mix). A pending redrive turn is
+      // joinable: it exists only to surface undelivered work (ticket 58).
+      if (state.ready !== null && canJoinBackground(state.ready.source)) {
         state.ready = {
           ...state.ready,
           settledWorkers: [...state.ready.settledWorkers, notice],
@@ -369,7 +418,7 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
         title: input.title,
         body: input.body,
       };
-      if (state.ready !== null && isBackground(state.ready.source)) {
+      if (state.ready !== null && canJoinBackground(state.ready.source)) {
         const existing = state.ready.accessRequests ?? [];
         state.ready = {
           ...state.ready,
@@ -389,7 +438,7 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
 
     enqueueAccessNotice(input: EnqueueAccessNoticeInput): void {
       const state = ensure(input.parentSessionId);
-      if (state.ready !== null && isBackground(state.ready.source)) {
+      if (state.ready !== null && canJoinBackground(state.ready.source)) {
         const existing = state.ready.accessNotices ?? [];
         state.ready = {
           ...state.ready,
@@ -474,6 +523,32 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
         accessNotices: [],
       };
       state.pendingOwner = "user";
+    },
+
+    enqueueDeliveryRedrive(sessionId: string): void {
+      const state = ensure(sessionId);
+      // Mid-turn: hold it as a flag. Waking now would interrupt a live turn
+      // for work that is already waiting on that turn's outcome.
+      if (state.busy) {
+        state.pendingRedrive = true;
+        return;
+      }
+      if (state.ready !== null) {
+        // A background batch already queued surfaces the undelivered items in
+        // this turn, so the redrive is subsumed. A peer or user turn is not
+        // about our workers at all — keep the redrive owed for the next one.
+        state.pendingRedrive = !isBackground(state.ready.source);
+        return;
+      }
+      state.ready = {
+        sessionId,
+        source: "timer",
+        settledWorkers: [],
+        accessRequests: [],
+        accessNotices: [],
+      };
+      state.pendingOwner = "worker-settled";
+      onDeliver(sessionId);
     },
 
     noteTurnStarted(sessionId: string, owner?: TurnOwner): void {
