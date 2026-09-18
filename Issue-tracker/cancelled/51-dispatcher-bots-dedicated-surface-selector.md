@@ -1,6 +1,6 @@
 # 51 — A dedicated dispatcher surface: select and talk to dispatcher bots without hijacking the conversation box
 
-**Status:** open
+**Status:** cancelled
 **Labels:** ready-for-agent
 **Blocked by:** none for research/seam-verification (start immediately). Its implementation depends on ticket 50's D1/D4 (what "mode" is, and whether the front desk speaks here or in the primary chat), and on ADR-0016 being signed off.
 **Related:** 35 (capsule epic — the dispatcher's *existing* surface, which this ticket extends or supersedes the exclusivity of), 38–42 (capsule implementation), ADR-0013 (capsule = one additive `shell.overlay` entry, "not a sidebar takeover or a keyed claim" — **directly probed by this ticket**), 16 (seam inventory), 36 (`dsh-capsule-seams.md` — the verified seam verdicts to build on), 49 (theme tokens rule for any new surface), 27/28/31/32 (panel + stop semantics the new surface must stay consistent with), 50 (the routing model this surface carries), 33 (live browser pass lane)

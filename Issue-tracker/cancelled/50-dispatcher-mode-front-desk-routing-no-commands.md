@@ -1,6 +1,6 @@
 # 50 — Dispatcher mode is the front desk: activate without a slash command, and let the dispatcher decide the routing
 
-**Status:** open
+**Status:** cancelled
 **Labels:** ready-for-agent
 **Blocked by:** none for research/design/offline work. **Live** verification of any routed turn is co-blocked by 45 (dispatcher tool schemas are invalid JSON Schema — the provider rejects *every* activated turn, so no spawn/route can run against the real host), 44 (host-half commands never register live), 46 (client roster/flag feed dead), 47 (no plugin settings card).
 **Related:** 19 (activation lifecycle — the `/dispatcher-start` + flag-matrix implementation this ticket reverses), 16 (activation model + ADR-0009), 17 (always-on epic — this is design-17 §3.1(b)/conflict 4's recorded revisit path), 31 (conversational stop semantics), 14 + ADR-0002 (peer inbox — the peer tier this ticket needs an outbound half of), ADR-0016 (drafted with this ticket pair), 51 (the dedicated dispatcher conversation surface this model pairs with)
