@@ -144,3 +144,50 @@ From the verified slot semantics (`dsh-plugin-ui-patterns.md` Finding 5, which c
 4. **Open verification** (flagged, not assumed): the conversation *history replay* face for a
    custom chat surface (Finding 2); per-dispatcher keying of the roster mirror rides ticket
    76/ADR-0019's keying table.
+
+## Finding 7 — history replay IS exposed: the binding's event window (Finding 2's gap, closed)
+
+Date: 2026-09-19 (ticket 80's open verification; same installed 0.1.5-rc.1 tree, read-only).
+Verdict: the replay face a custom chat surface reads **exists as an outward face** — it is the
+`SessionBinding`'s contiguous event window, not a `dsh-client-ui-conversation` internal:
+
+- `dsh-api-session-controller/lib/types/client/sessions/service.d.ts:103-110` —
+  `SessionBinding` carries `eventSource: SessionEventSource`, documented "Contiguous event
+  window reserved for Conversation assembly". `ClientSessions.binding(id)` (same file
+  :307-312, outward `ISessions.binding` at `client/contract/sessions.d.ts:118-123`) resolves
+  it for any listed session id — "the scope-addressed assembly feed".
+- `dsh-api-session-controller/lib/types/client/contract/events.d.ts:56-63` —
+  `SessionEventWindow { entries, hasMore, revision, change }`;
+  `SessionEventSource = ObservableSnapshot<SessionEventWindow>` (:63). Entries are
+  `SessionEventLikeEntry` — durable `SessionEvent`s plus client-only
+  `assistant/live-chunk` transient rows (:6-27) whose `seq` orders them between durable seqs;
+  the window's deltas are `replace`/`prepend` (older history pages) / `append` (live tail) /
+  `settle-assistant` (a durable `assistant/message` atomically supersedes one attempt's
+  transient rows) (:40-54). `MutableSessionEventSource` (:65-101) publishes every mutation
+  synchronously.
+- Snapshot/pagination semantics: the window opens when the session is STAGED —
+  `ClientSessions.followCurrent` "pull(s) the new occupant's history window. Staging IS the
+  open signal — the window opens ⟺ the session is on stage" (`sessions/service.d.ts:314-320`);
+  a reopen lazily rebuilds and backfills (`dropScope` note, :341-345). Older pages paginate
+  through `ISession.loadOlder()` ("Extend the history window backwards"; failures land in
+  `snapshot.openState/loadingOlder`, `client/contract/session.d.ts:120-124`; also
+  `loadThrough(seq)` :126-133), aliased scope-addressed as `ctx.conversation.loadOlder()`
+  (`dsh-client-ui-conversation/lib/types/client/service.d.ts:52-55,166-167`). `hasMore` on
+  each window snapshot is the pagination continuation flag.
+- Event vocabulary for the reduction: `dsh-session/lib/types/types.d.ts:242-404` —
+  `user/message` (:275-281, `UserMessage`; `source` distinguishes direct prompt from
+  synthetic injected context), `assistant/message` (:301-317, assembled message + embedded
+  `stream` + `interrupted` marker), `tool/call` (:326-339, `callId`/`name`/raw `arguments`),
+  `tool/result` (:340-361, `ToolResultMessage` + optional `error`/`meta`), plus
+  `turn/*`, `step/*`, `request/*`, `system/message`, `assistant/attempt` (log/derived-only).
+  Message/block shapes: `dsh-llm/lib/types/message.d.ts:119-153` (`content: ContentBlock[]`,
+  `source`), `dsh-llm/lib/types/types.d.ts:39-102` (text/reasoning/image/file/tool-call/
+  tool-result blocks) and :359-389 (`StreamChunk` — the live chunk payload).
+- Consequence for ticket 80: a custom conversation pane reads
+  `sessions.binding(id).eventSource` (observable window → replay + live tail in one face),
+  paginates with the scoped `loadOlder()`, and sends/cancels through Finding 2's
+  `ctx.conversation` verbs. The staged-window caveat: the window fills for the STAGED
+  session, so a pane rendering the selected session must ride `sessions.open(id)` — which
+  the shell's sidebar selection already does (ticket 79's `onOpen` hook). Nothing here is
+  host-private; the shipped chat assembles over the same window
+  (`dsh-client-ui-conversation/lib/types/client/conversation/assembly.d.ts:13-49`).
