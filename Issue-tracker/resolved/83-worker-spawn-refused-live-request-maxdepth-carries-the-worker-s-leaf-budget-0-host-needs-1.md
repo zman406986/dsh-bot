@@ -145,3 +145,12 @@ Note for future readers: `docs/research/dsh-loop-capability-map.md:48,134` still
 the pre-83 "leaf enforced by maxDepth: 0" shape — dated research observations, superseded
 by this ticket. ADR-0018's exception list untouched (D21 wake-report clamps and C15 wake
 kinds are unrelated; this change restores host fidelity rather than deviating).
+
+### 2026-09-19 — live pass 2: fix CONFIRMED live
+
+Ticket 45's re-pass spawned a real worker on the multitask profile route (host 0.1.5-rc.1,
+commit `c56e69d` tree): `spawn_worker` executed — "Started "Reply with numbers 1 to 60"
+(worker `8e7d5dc6-e25e-4ceb-8cde-c05ded840646`, stream numbers-1-to-60)" — and
+`subagents/list` returned the child with `activity:"running"`, then `"inactive"` after
+delivery. No `SubagentDepthError`. Evidence: `C:\Users\TZhen\Desktop\dsh-live-pass2-2026-09-19\`
+(`trajectory.txt`, `rpc-subagents-worker-running.json`, ticket 45's pass-2 comment).
