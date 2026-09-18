@@ -92,22 +92,24 @@ The plugin and both delivery mechanisms work; what failed is invocation/coverage
 
 - [x] (offline, gate) `npm test`, `npm run typecheck`, `npm run build` all green with zero
       product-code diff from `07155f6` for this fix (config/launcher-only).
-- [ ] (live, ZERO LLM calls) `dsh --profile <p> --dump-config --patch <overlay>` shows the
+- [x] (live, ZERO LLM calls) `dsh --profile <p> --dump-config --patch <overlay>` shows the
       row AND a real boot with the same invocation shows host-apply evidence: the
       `multitask-dispatcher` settings section appears in the web UI Settings, and
       `/dispatcher-start` appears in the composer command menu. (Dump alone is explicitly
-      NOT sufficient — that was this bug.) — **re-pass 2026-09-18: host-apply half PROVEN
-      (settings service registers the namespace + schema + config), but the two UI-surface
-      halves did NOT appear; see re-pass comment below.**
-- [ ] (live, ZERO LLM calls) `/dispatcher-start` typed in the composer is intercepted (no
+      NOT sufficient — that was this bug.) — **2026-09-19 live pass 2: profile route — dump
+      composes the row (540-543) and the SAME boot renders the settings card AND the
+      composer menu; see comment.**
+- [x] (live, ZERO LLM calls) `/dispatcher-start` typed in the composer is intercepted (no
       plain-text leak to the LLM) and activates the chat: dormant capsule flips to
-      activated; no worker spawned yet. — **re-pass 2026-09-18: NOT met; the command does
-      not resolve in the host admission view, so composer typing was deliberately not
-      attempted (leak guard).**
-- [ ] (live, BURNS tokens — last, single trivial task) one worker spawn → deliver →
+      activated; no worker spawned yet. — **2026-09-19 live pass 2: interception via the
+      host command path proven (`/api/commands/execute` in the app's own traffic, activation
+      message rendered, no LLM send, no worker yet); activation mirrored client-side
+      (`data-flag="on"`); see comment for the capsule-card caveat.**
+- [x] (live, BURNS tokens — last, single trivial task) one worker spawn → deliver →
       completed-means-delivered flow, minimal prompts per AGENTS.md kill/token rules. May be
-      deferred to the full re-pass if the pass owner prefers. — **not run; activation gate
-      above is red.**
+      deferred to the full re-pass if the pass owner prefers. — **2026-09-19 live pass 2:
+      one worker spawned (subagents/list running), delivered its reply into the dispatcher
+      chat, went inactive; see comment.**
 - [x] Server log of the passing boot attached to this ticket (or 33) as the recorded
       evidence; boot shows no "did not activate" error.
 
@@ -208,3 +210,46 @@ the one in the tree. A missing overlay now fails loud before boot rather than
 serving a rowless tree. Launcher-side details (staleness guard, kill timer) are
 tracked in ticket 48. Config/launcher-only: no `src/`, `test/`, `lib/` or
 `client/` change.
+
+### 2026-09-19 — live pass 2: remaining live ACs 2/3/4 TICKED — the row is in the running tree AND every surface it powers works; ticket moves to resolved
+
+Evidence root: `C:\Users\TZhen\Desktop\dsh-live-pass2-2026-09-19\` (outside the repo). Boot
+per Requirement 2's recipe: throwaway `multitask` profile (`--from-default-profile web`),
+`npm run build` + `build:client` first at the `c56e69d` tree (client bundle 157,823 bytes),
+`dsh plugin --profile multitask add file:C:/Users/TZhen/Desktop/dsh-bot` (forward slashes),
+insert row `./node_modules/dsh-multitask-dispatcher/lib/index.js` written into the profile's
+`cordis.patch.yml` BEFORE boot (the `./` is load-bearing — `anchorInsertedPluginNames`).
+`--dump-config` composes the row at lines 540-543. Boot `dsh --profile multitask --port 8875
+--no-open` detached via WMI node-direct, host 0.1.5-rc.1, healthy, no activation error
+(`server.log`); served HTML lists `dsh-multitask-dispatcher/client.js` (running-tree proof);
+`/api/settings/describe` carries our namespace (uid 561, value = base, applies "live",
+`rpc-settings-describe.json`). Kill timers armed at launch inside the node wrappers and
+verified in tasklist; stock `web` profile md5+mtime-identical after; throwaway profile
+deleted; port free.
+
+- **AC 2**: the dump shows the row AND the same boot shows BOTH UI halves: Settings →
+  插件配置 renders our card first (`shots/03-settings-plugin-card.png`), and `/dis` in the
+  composer lists both dispatcher commands (`shots/02-slash-menu-dis.png`). Route note: this
+  pass ran the profile route (row via the profile's own cordis.patch.yml, no `--patch`
+  flag) — the AC's substance (dump row → running boot → visible surfaces, dump-alone-insufficient
+  lesson honored) is proven; both prior web-route halves were proven in ticket 47's pass.
+- **AC 3**: composer-typed `/dispatcher-start` was submitted (registration re-proven first:
+  `commands/list` + slash menu). The app's own traffic shows `/api/commands/execute` — the
+  client/host admitted it as a COMMAND, no plain-text LLM send, and the conversation renders
+  the activation result ("Dispatcher active in this chat. …"). Activation is real and
+  mirrored client-side: the capsule footer flipped `data-flag` → `"on"` (the watch from
+  ticket 46 delivering), and the post-flow RPC `/dispatcher-start` returns "The dispatcher
+  is already active in this chat." Caveat recorded in ticket 44's pass comment: the EXPANDED
+  card composition kept the dormant pitch (roster-keyed composition), while the flag mirror
+  and host state are activated — cosmetic honesty question, not an activation failure.
+- **AC 4**: the ONE trivial flow — "Spawn one worker. Have it reply with the numbers 1 to
+  60, comma separated, nothing else." — spawned worker `8e7d5dc6-…` (subagents/list
+  `activity:"running"` ~20 s after submit, `rpc-subagents-worker-running.json`), whose reply
+  DELIVERED into the dispatcher chat as an ordinary turn ("That's the lot — 1 through 60,
+  comma separated, delivered above"), then `activity:"inactive"`. Spawned → delivered →
+  completed-means-delivered, zero INVALID_REQUEST (`trajectory.txt`: `todo_write` +
+  `spawn_worker` executed). LLM traffic the whole pass: 4 rounds / 124K tok / 86% cache.
+
+All five ACs now ticked (1 and 5 previously). Residual open threads live in their own
+tickets: 44 AC 3's mid-run steer wording, 45 AC 3, 84 (new: shell launcher dead on
+uninjected reads — found this boot, does not affect anything this ticket covered).
