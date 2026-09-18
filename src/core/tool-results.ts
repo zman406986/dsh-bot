@@ -44,7 +44,7 @@ export type SpawnWorkerToolResult =
     }
   | {
       readonly ok: false;
-      readonly reason: "duplicate-stream-key";
+      readonly reason: "duplicate-stream-key" | "auto-review-refused";
       readonly detail: string;
     };
 

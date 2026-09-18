@@ -475,3 +475,193 @@ describe("review posture — session lifecycle through Multitask (A4)", () => {
     assert.equal(multitask.reviewPosture.list().length, 0);
   });
 });
+
+describe("worker-dispatch gate (chunk A, A6)", () => {
+  interface ToolsHarness {
+    host: FakeDshHost;
+    multitask: Multitask;
+    tools: DispatcherToolDef[];
+    setSession: (sessionId: string | null) => void;
+    seamCalls: Array<{ title: string; streamKey: string }>;
+  }
+
+  async function setupTools(options?: {
+    seam?: DispatchApprovalFn;
+  }): Promise<ToolsHarness> {
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host);
+    let sessionId: string | null = "session-1";
+    const seamCalls: Array<{ title: string; streamKey: string }> = [];
+    const seam: DispatchApprovalFn =
+      options?.seam ??
+      (async (request) => {
+        seamCalls.push(request);
+        return "allowed-once" as DispatchApprovalOutcome;
+      });
+    const tools = createDispatcherTools({
+      multitask,
+      getSessionId: () => sessionId,
+      requestDispatchApproval: seam,
+    });
+    return {
+      host,
+      multitask,
+      tools,
+      setSession: (id) => {
+        sessionId = id;
+      },
+      seamCalls,
+    };
+  }
+
+  function spawnTool(tools: DispatcherToolDef[]): DispatcherToolDef {
+    const tool = tools.find((t) => t.name === SPAWN_WORKER_TOOL);
+    assert.ok(tool, "missing spawn tool");
+    return tool;
+  }
+
+  const SPAWN_ARGS = {
+    stream_key: "s-1",
+    title: "Summarize RFCs",
+    prompt: "Summarize the three auth RFCs.",
+  };
+
+  it("posture miss → spawn proceeds exactly as shipped; seam never called", async () => {
+    const { host, tools, seamCalls } = await setupTools();
+    const result = (await spawnTool(tools).execute({
+      ...SPAWN_ARGS,
+    })) as SpawnWorkerToolResult;
+    assert.ok(result.ok);
+    assert.equal(host.spawnCalls.length, 1);
+    assert.equal(seamCalls.length, 0);
+  });
+
+  it("allow row + seam allowed-once → spawn proceeds", async () => {
+    const { host, multitask, tools, seamCalls } = await setupTools();
+    multitask.reviewPosture.set({
+      class: "worker-dispatch",
+      targetPattern: "Summarize RFCs",
+      decision: "allow",
+      scope: "session",
+      session: "session-1",
+    });
+    const result = (await spawnTool(tools).execute({
+      ...SPAWN_ARGS,
+    })) as SpawnWorkerToolResult;
+    assert.ok(result.ok);
+    assert.equal(host.spawnCalls.length, 1);
+    assert.equal(seamCalls.length, 1);
+    assert.equal(seamCalls[0]?.title, "Summarize RFCs");
+    assert.equal(seamCalls[0]?.streamKey, "s-1");
+  });
+
+  it("allow row + seam refused outcome → honest refused result, no host spawn", async () => {
+    for (const outcome of ["rejected", "cancelled", "unavailable"] as const) {
+      const { host, multitask, tools, seamCalls } = await setupTools({
+        seam: async (request) => {
+          seamCalls.push(request);
+          return outcome;
+        },
+      });
+      multitask.reviewPosture.set({
+        class: "worker-dispatch",
+        targetPattern: "Summarize RFCs",
+        decision: "allow",
+        scope: "session",
+        session: "session-1",
+      });
+      const result = (await spawnTool(tools).execute({
+        ...SPAWN_ARGS,
+      })) as SpawnWorkerToolResult;
+      assert.ok(!result.ok, outcome);
+      if (result.ok) continue;
+      assert.equal(result.reason, "auto-review-refused");
+      assert.ok(result.detail.includes("Summarize RFCs"));
+      assert.ok(result.detail.includes(outcome));
+      assert.equal(host.spawnCalls.length, 0);
+      assert.equal(seamCalls.length, 1);
+    }
+  });
+
+  it("allow row + absent seam → refused (fail-closed), no host spawn", async () => {
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host);
+    multitask.reviewPosture.set({
+      class: "worker-dispatch",
+      targetPattern: "Summarize RFCs",
+      decision: "allow",
+      scope: "session",
+      session: "session-1",
+    });
+    const tools = createDispatcherTools({
+      multitask,
+      getSessionId: () => "session-1",
+      // No requestDispatchApproval: un-answerable gate refuses.
+    });
+    const result = (await spawnTool(tools).execute({
+      ...SPAWN_ARGS,
+    })) as SpawnWorkerToolResult;
+    assert.ok(!result.ok);
+    if (result.ok) return;
+    assert.equal(result.reason, "auto-review-refused");
+    assert.ok(result.detail.includes("fail-closed"));
+    assert.equal(host.spawnCalls.length, 0);
+  });
+
+  it("deny row → refused with the self-naming detail; the seam is never called", async () => {
+    const { host, multitask, tools, seamCalls } = await setupTools();
+    multitask.reviewPosture.set({
+      class: "worker-dispatch",
+      targetPattern: "Summarize RFCs",
+      decision: "deny",
+      scope: "session",
+      session: "session-1",
+    });
+    const result = (await spawnTool(tools).execute({
+      ...SPAWN_ARGS,
+    })) as SpawnWorkerToolResult;
+    assert.ok(!result.ok);
+    if (result.ok) return;
+    assert.equal(result.reason, "auto-review-refused");
+    assert.ok(result.detail.includes("auto-review posture denied"));
+    assert.equal(host.spawnCalls.length, 0);
+    assert.equal(seamCalls.length, 0);
+  });
+
+  it("dispatch rows are session-keyed: a sibling session's row never gates this session", async () => {
+    const { host, multitask, tools, seamCalls } = await setupTools();
+    multitask.reviewPosture.set({
+      class: "worker-dispatch",
+      targetPattern: "Summarize RFCs",
+      decision: "allow",
+      scope: "session",
+      session: "other-session",
+    });
+    const result = (await spawnTool(tools).execute({
+      ...SPAWN_ARGS,
+    })) as SpawnWorkerToolResult;
+    assert.ok(result.ok);
+    assert.equal(host.spawnCalls.length, 1);
+    assert.equal(seamCalls.length, 0);
+  });
+
+  it("wildcard fence covers the dispatch sink too: a refused row leaves the spawn ungated", async () => {
+    const { host, multitask, tools, seamCalls } = await setupTools();
+    assert.equal(
+      multitask.reviewPosture.set({
+        class: "worker-dispatch",
+        targetPattern: "Summarize_*",
+        decision: "deny",
+        scope: "session",
+        session: "session-1",
+      }),
+      false,
+    );
+    const result = (await spawnTool(tools).execute({
+      ...SPAWN_ARGS,
+    })) as SpawnWorkerToolResult;
+    assert.ok(result.ok);
+    assert.equal(host.spawnCalls.length, 1);
+    assert.equal(seamCalls.length, 0);
+  });
+});

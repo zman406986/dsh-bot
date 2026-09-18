@@ -105,6 +105,33 @@ export type DeliverToUserFn = (
 /** Optional live activity line for one worker (host jobs / step). */
 export type RecentActivityFn = (workerId: string) => string | null;
 
+/**
+ * Ticket 69 (chunk A, design §4): outcome of the host approval seam for a
+ * posture-gated dispatch. Same outcome vocabulary as the dsh approval
+ * contract (`docs/research/dsh-adapter-api-notes.md:220`); anything that is
+ * not `allowed-once` refuses the spawn (fail-closed).
+ */
+export type DispatchApprovalOutcome =
+  | "allowed-once"
+  | "rejected"
+  | "cancelled"
+  | "unavailable";
+
+/** What the approval answerer sees. Names only — never the prompt body. */
+export interface DispatchApprovalRequest {
+  readonly title: string;
+  readonly streamKey: string;
+}
+
+/**
+ * Injected host approval seam for a gated dispatch. Core stays host-agnostic:
+ * the live wiring raises `ctx.approval.request` in the plugin (that wiring is
+ * live-lane work, design L3); absent in tests unless a fake is injected.
+ */
+export type DispatchApprovalFn = (
+  request: DispatchApprovalRequest,
+) => Promise<DispatchApprovalOutcome>;
+
 export interface DispatcherToolDeps {
   readonly multitask: Multitask;
   /** Dispatcher parent session id. */
@@ -125,6 +152,13 @@ export interface DispatcherToolDeps {
    * `liveness: null` rather than a guessed verdict.
    */
   readonly lastActivityAtMs?: (workerId: string) => number | null;
+  /**
+   * Ticket 69 (chunk A, A6): host approval seam consulted only when the
+   * review posture gates this dispatch (a posture row hit). Absent seam +
+   * posture hit → the spawn is refused (fail-closed): an un-answerable gate
+   * must never silently become an allow. Posture miss → never called.
+   */
+  readonly requestDispatchApproval?: DispatchApprovalFn;
 }
 
 function requireString(args: Record<string, unknown>, key: string): string {
@@ -231,6 +265,47 @@ export function createDispatcherTools(
       const title = requireString(args, "title");
       const prompt = requireString(args, "prompt");
       const todoId = optionalString(args, "todo_id");
+
+      // Ticket 69 (chunk A, design §4): worker-dispatch posture gate.
+      // Miss → spawn proceeds exactly as shipped, no approval-seam call.
+      // An allow row marks the dispatch as gated: the host approval seam
+      // decides (allowed-once proceeds; anything else refuses). A deny row
+      // auto-denies without the seam — policy already decided. Absent seam
+      // on a gated dispatch refuses (fail-closed). Gating happens inside
+      // the already-running dispatcher turn — no activation step, spawns
+      // stay the single wake kind (C15).
+      const posture = multitask.reviewPosture.lookupDispatch(title, {
+        parentSessionId,
+      });
+      if (posture !== undefined) {
+        if (posture.kind === "deny") {
+          return {
+            ok: false,
+            reason: "auto-review-refused",
+            detail: posture.detail,
+          };
+        }
+        const seam = deps.requestDispatchApproval;
+        if (seam === undefined) {
+          return {
+            ok: false,
+            reason: "auto-review-refused",
+            detail:
+              `dispatch "${title}" is gated by the auto-review posture, ` +
+              `but no approval answerer is available; refusing (fail-closed)`,
+          };
+        }
+        const outcome = await seam({ title, streamKey });
+        if (outcome !== "allowed-once") {
+          return {
+            ok: false,
+            reason: "auto-review-refused",
+            detail:
+              `dispatch "${title}" was not approved ` +
+              `(approval outcome: ${outcome}); re-plan without this dispatch`,
+          };
+        }
+      }
 
       const request = {
         parentSessionId,
