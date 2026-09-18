@@ -5,6 +5,21 @@
 - Method: located the global install, read its `package.json` and bundled `@deepseek-ai/*` packages, read the user's `$DSH_HOME` (`~/.dsh`) profile layout, and read a real third-party plugin end-to-end.
 - Date: 2026-09-16
 
+## ⚠️ Correction (2026-09-18) — read before using the paths or version below
+
+This note's **environment facts are stale**, though its structural findings (profile layout, plugin composition, the worked third-party plugin example) still hold. Two defects were proven on 2026-09-18 by two independent passes, both of which were briefly derailed by them:
+
+1. **Wrong user profile in every path.** The paths below say `C:\Users\TZ\...`; this machine is `C:\Users\TZhen`. `C:\Users\TZ` does not exist.
+2. **The npm-global install path does not exist.** `C:\Users\TZhen\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh` is **absent**. Searching there — or in the repo's own `node_modules`, which holds only `cordis`, `cosmokit`, and `schemastery` — is what made one agent wrongly conclude the host was not installed at all.
+
+**Where the host actually is (verified 2026-09-18):**
+
+- `$DSH_HOME` = `C:\Users\TZhen\.dsh` — contains `profiles/`, `sessions/`, `storages/`, `settings.yaml`.
+- **The bundled packages live at `C:\Users\TZhen\.dsh\profiles\node_modules\@deepseek-ai\`** — roughly 230 packages including `dsh/` itself, plus `dsh-system-prompt/`, `dsh-persona/`, `dsh-agent-instructions/`, `dsh-agent-presets/`, `dsh-subagent*/`, `dsh-tool-subagent-control/`, `dsh-session-checkpoint-policy/`, `dsh-compaction/`, and the rest of the extension surface. This is the tree to read when a seam needs empirical verification.
+- **Version is `0.1.5-rc.2`**, not the `0.1.5-rc.1` stated below.
+
+**Lesson, recorded because it has now cost two passes:** a path or version in a research note is an *unverified claim* until something re-reads it. When a seam question depends on the host, locate the host afresh rather than trusting a path from a note — the notes are abstractions of a tree that can move.
+
 ## Verdict
 
 dsh **0.1.5-rc.1** is installed globally and is **working, configured, and used** — it has a live web profile with a custom third-party plugin (`@deepseek-ai/dsh-web-search-exa`) already added and selected. This **supersedes** `dsh-extension-surface.md`'s "host was NOT found on the local machine" finding: that absence is stale, and every adapter primitive the dispatcher needs is therefore verifiable by reading real installed code rather than public docs. The single most useful find is a **complete worked example of a custom dsh plugin** — package layout, `apply(ctx)`, config schema, service registration, settings section, credential resolution — sitting in the user's own profile directory. That is the template the dispatcher plugin should follow, and it is dsh's own MIT code, so unlike the reference tree it is entirely safe to read and imitate.
