@@ -265,7 +265,13 @@ export function createMultitask(
 ): Multitask {
   const durability = options?.durability;
   const workers = new Map<string, WorkerRecord>();
-  /** streamKey → workerId for every live (non-terminal) worker. */
+  /**
+   * Live (non-terminal) worker per stream, keyed `(parentSessionId, streamKey)`
+   * (ADR-0019 keying table). The stream key is model-authored per dispatcher,
+   * so the uniqueness domain is the dispatcher session: two dispatchers whose
+   * models both pick `"build"` must not refuse each other's spawns, while the
+   * same key twice within one session still refuses.
+   */
   const liveByStreamKey = new Map<string, string>();
   /**
    * Workers that were live at crash time, keyed by workerId (ticket 59).
@@ -275,7 +281,9 @@ export function createMultitask(
    * somewhere. What we CAN refuse is putting a second live worker on the same
    * stream: each of these keeps its stream key occupied until the dispatcher
    * resolves it. This is the one-worker-per-stream invariant holding *across*
-   * a restart, which it previously did not.
+   * a restart, which it previously did not. Hold lookup is session-scoped
+   * (ADR-0019): one dispatcher's unresolved hold never blocks a sibling's
+   * stream.
    */
   const unknownStateHolds = new Map<string, UnknownStateWorker>();
   const steerQueue: SteerQueue = createSteerQueue();
@@ -346,6 +354,17 @@ export function createMultitask(
     }
   }
 
+  /**
+   * The stream-uniqueness map's composite key (ADR-0019): one dispatcher
+   * session's stream keys never collide with a sibling's.
+   */
+  function liveStreamKeyId(
+    parentSessionId: string,
+    streamKey: string,
+  ): string {
+    return `${parentSessionId}\u0000${streamKey}`;
+  }
+
   /** Apply a lifecycle event; returns the new status or undefined if ignored. */
   function transition(
     workerId: string,
@@ -357,9 +376,10 @@ export function createMultitask(
     if (next === null) return undefined;
     record.status = next;
     if (isTerminalStatus(next)) {
-      // Terminal frees the stream key for reuse.
-      if (liveByStreamKey.get(record.streamKey) === workerId) {
-        liveByStreamKey.delete(record.streamKey);
+      // Terminal frees the stream key for reuse (this session's only).
+      const streamKeyId = liveStreamKeyId(record.parentSessionId, record.streamKey);
+      if (liveByStreamKey.get(streamKeyId) === workerId) {
+        liveByStreamKey.delete(streamKeyId);
       }
     }
     notifyRosterChanged(record.parentSessionId);
@@ -376,15 +396,23 @@ export function createMultitask(
 
   /** Pure-reconcile against the session roster. Does not apply mutations. */
   /**
-   * The unknown-state hold on a stream key, if any (ticket 59).
-   * A linear scan is deliberate: holds are created only for workers that were
-   * live at crash time, so the set is tiny and bounded by a single restart.
+   * The unknown-state hold on a stream key, if any (ticket 59). Scoped to the
+   * requesting dispatcher session (ADR-0019) — a sibling session's unresolved
+   * hold must never block this session's stream. A linear scan is deliberate:
+   * holds are created only for workers that were live at crash time, so the
+   * set is tiny and bounded by a single restart.
    */
   function findUnknownStateHold(
+    parentSessionId: string,
     streamKey: string,
   ): UnknownStateWorker | undefined {
     for (const hold of unknownStateHolds.values()) {
-      if (hold.streamKey === streamKey) return hold;
+      if (
+        hold.parentSessionId === parentSessionId &&
+        hold.streamKey === streamKey
+      ) {
+        return hold;
+      }
     }
     return undefined;
   }
@@ -480,7 +508,11 @@ export function createMultitask(
 
   return {
     async spawnWorker(request: SpawnRequest): Promise<SpawnResult> {
-      const existingId = liveByStreamKey.get(request.streamKey);
+      const streamKeyId = liveStreamKeyId(
+        request.parentSessionId,
+        request.streamKey,
+      );
+      const existingId = liveByStreamKey.get(streamKeyId);
       if (existingId !== undefined) {
         return {
           ok: false,
@@ -493,7 +525,9 @@ export function createMultitask(
       // cannot prove it stopped — and "cannot prove it stopped" must not
       // silently become "assume it stopped". Refusing is the safe half; the
       // surfacing half is the restart notice and `check_workers`.
-      const hold = findUnknownStateHold(request.streamKey);
+      // ADR-0019: the check is session-scoped — the uniqueness domain of a
+      // model-authored stream key is the dispatcher session.
+      const hold = findUnknownStateHold(request.parentSessionId, request.streamKey);
       if (hold !== undefined) {
         return {
           ok: false,
@@ -526,7 +560,7 @@ export function createMultitask(
         redriveAttempts: 0,
       };
       workers.set(workerId, record);
-      liveByStreamKey.set(request.streamKey, workerId);
+      liveByStreamKey.set(streamKeyId, workerId);
       // Structural todo↔worker link at spawn (ADR-0007). Status stays pending
       // until the worker starts (noteTurnStarted).
       if (request.todoId !== undefined) {
