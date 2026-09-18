@@ -124,3 +124,16 @@ contract) is host-mechanism knowledge and survives as design input. This ticket'
 are capsule-vehicle assertions — moot under the wrapper vehicle. Kept open as a research record;
 the wrapper shell scope ticket owns the new boot/materialization design (a standalone wrapper is
 not a plugin client module and does not ride this contract).
+
+### 2026-09-19 — live pass 2 observation (route mismatch; no AC ticked)
+
+The pass-2 boot used the persistent `multitask` PROFILE route (`C:\Users\TZhen\Desktop\dsh-live-pass2-2026-09-19\`),
+not this ticket's specified `dsh --profile web --patch <overlay>` desktop-launcher route, so
+no checkbox is ticked here. What the boot did show, consistent with this ticket's aims: the
+served boot graph carries our row, the module materializes (settings card, capsule, launcher
+chip render), the dormant composition renders (`shots/01/04`), and the dispatcher tool
+surfaces rendered as collapsed "2 次工具调用" entries during the token flow (toolview
+panels not individually expanded/verified). Remaining live ACs still want their named
+launcher-route boot; note for whoever runs it: the shell `main` page cannot open until
+ticket 84 lands, and the activated card-composition flip should be checked against the
+roster-keyed behavior flagged in ticket 44's pass-2 comment.
