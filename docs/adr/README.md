@@ -18,6 +18,7 @@
 | [0017](0017-core-loop-follows-reference-deviations-need-human-approval-draft-nonhuman-approved.md) | The core loop follows the reference; every deviation needs written human approval | draft (non-human-approved) |
 | [0018](0018-imitate-reference-in-entirety-exception-list.md) | Imitate the reference in its entirety, except an enumerated exception list | **accepted (human-ruled, 2026-09-18) — the master rule** |
 | [0019](0019-per-dispatcher-scoped-tools-draft-nonhuman-approved.md) | Per-dispatcher tool scoping: each dispatcher's tools register in its own agent scope; the process-global singleton retires | draft (non-human-approved) |
+| [0020](0020-wrapper-shell-vehicle-own-frame-over-shipped-runtime-draft-nonhuman-approved.md) | The wrapper vehicle: our own application frame over the shipped dsh client runtime (ADR-0018's "we build the whole UI") | draft (non-human-approved) |
 
 Draft ADRs 0013–0015 (capsule epic 35, ticket 37) are agent-drafted and **pending human
 sign-off** (ticket 33's close-out pass). Numbers 0010–0012 are reserved to design-17 §9's
@@ -29,6 +30,13 @@ resolves ADR-0018's per-dispatcher seam verification item: the installed host's 
 tool-scope seam was verified (research note update 2026-09-19), so dispatcher tools register
 through each activated agent's scoped context and all single-dispatcher state becomes
 session-keyed. Implementation is ticketed separately (ticket 76) per repo rule.
+
+Draft ADR 0020 (ticket 67, 2026-09-19) is agent-drafted and **pending human sign-off**. It
+picks ADR-0018's wrapper vehicle: the whole-UI shell is our own client module registering our
+own frame over the shipped dsh client runtime — every surface ours, dsh keeps store/transport/
+send-path per exceptions A4/A5; fails safe (a crashed frame abdicates back to the shipped app);
+staged through a `main` page before the `root` election flips. Vehicle evidence:
+`docs/research/wrapper-vehicle-seams.md`; decomposition tickets 77–81; areas 68–71 ride it.
 
 ADR 0016 (tickets 50/51, scribe pass 2026-09-18) was **retracted 2026-09-18**: its sign-off was
 given under a fabricated premise (ticket 50/51's "verbatim directive" was never said by the
