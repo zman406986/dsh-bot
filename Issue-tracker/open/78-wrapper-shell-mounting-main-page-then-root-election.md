@@ -112,3 +112,23 @@ surface has landed). Shape:
 in `open/` until the cutover slice (post-80): flip `root` with the dynamic
 entry (priority `SHELL_ROOT_DYNAMIC_PRIORITY`), retire the capsule AND
 launcher overlay entries, then take the live-lane confirmation on 45/33.
+
+### 2026-09-19 — live pass 2 (zero-LLM): the launcher chip renders and stacks correctly; the click does NOT open the shell page — blocked by NEW ticket 84 (uninjected service reads throw)
+
+Evidence: `C:\Users\TZhen\Desktop\dsh-live-pass2-2026-09-19\` (throwaway `multitask`
+profile, host 0.1.5-rc.1, commit `c56e69d` tree, client bundle 157,823 bytes).
+
+- **Chip renders as specified**: `multitask-dispatcher-shell-launcher__chip` (调度台，
+  `data-staging="shell-page"`) is present on a real profile boot, positioned top 44 px /
+  right 8 px — one row BELOW the capsule chip (top 10 px), matching the staging CSS comment
+  and the order −11-vs-−10 registration (`shots/04-chips-capsule-launcher.png`).
+- **Click does not open**: no `[data-shell="dispatcher"]` element ever appears; the stock
+  empty state stays (`shots/05-shell-main-page.png`); the page-error log records
+  `cannot get property "layout" without inject` (click path) and
+  `cannot get property "sessions" without inject` (the mount's feed-binding effects at
+  registration). Root cause, fix direction, and the offline-fake lesson: **ticket 84**.
+  `openShellPage`'s contained honest outcomes are unreachable because the property READ
+  itself throws before the call.
+- Consequences for this ticket's checklist: the staging-mount AC stays ticked (registration
+  contract + chip are real); the live visual confirmation of the three-pane `main` page and
+  the cutover ACs remain open and now additionally await 84. No cutover ACs were touched.
