@@ -115,3 +115,12 @@ in code for this ticket.
 ### 2026-09-18 — re-pass #2 vs AC 4: activation is now REAL host-side (command matches, policy injects live) but the panel composition never flips — AC 4 stays unchecked, blocked by two recorded defects
 
 Evidence: `C:\Users\TZhen\Desktop\dsh-live-repass2-2026-09-18\` (ticket-44 re-pass #2; full probe chain in the ticket-44 comment). `/dispatcher-start` via `commands/execute` MATCHES and the following turn carries two `上下文注入 · multitask-dispatcher` rows (session policy + reminder live — `shots/09`). But the browser capsule stays `data-dot="dormant"` with footer `data-flag="unknown"` before and after reload, even with a roster document manually present in the settings namespace — the client watch (`ctx.inject(["settings"], …)`, `src/client/index.ts:128`) never fires (ticket 44 re-pass comment, defect 2), so this AC's "panel switches to the activated composition" clause cannot render. The tool-view clause is additionally blocked by ticket 45 (provider rejects every activated turn's tool schemas, so no tool call ever executes to render). AC 4 deliberately NOT checked; no code changed.
+
+### 2026-09-19 — re-based onto the wrapper-UI vehicle (ADR-0018; ticket 64)
+
+The materialization research and fix (`dsh.client.inject` consumer-driven arrival graph, ADR-0014's
+contract) is host-mechanism knowledge and survives as design input. This ticket's open ACs 2–4
+(served-page boot-graph row, dormant composition visible, `/dispatcher-start` flip + toolviews)
+are capsule-vehicle assertions — moot under the wrapper vehicle. Kept open as a research record;
+the wrapper shell scope ticket owns the new boot/materialization design (a standalone wrapper is
+not a plugin client module and does not ride this contract).

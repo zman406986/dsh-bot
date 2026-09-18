@@ -212,3 +212,12 @@ flip assertion is the one to re-run: same probe, read `data-dot` / the panel's
 
 AC 3 therefore stays **unchecked** with its first clause green and its second
 clause blocked upstream (ticket 45). No AC box moved; ticket 46 stays open.
+
+### 2026-09-19 — re-based onto the wrapper-UI vehicle (ADR-0018; ticket 64)
+
+The `settingsScope` root-cause work and the offline fix (RED-verified pins, `c91a937`) survive as
+host knowledge — the correct client contract is recorded and pinned. The remaining live AC's
+second clause ("the capsule flips client-side") and the footer-flag semantics are moot: the flag
+is voided (always-on, ADR-0018) and the capsule vehicle is superseded. Kept open with this note;
+moot-closure proposed for the next triage. The watch-fix knowledge carries forward wherever the
+wrapper still consumes a dsh settings/namespace mirror.

@@ -217,3 +217,14 @@ but quoted paths in the command line — `-File` does not run through WMI and
 `web` profile settings document left byte-identical.
 
 
+
+### 2026-09-19 — re-scoped per ADR-0018 (ticket 64); still owns real close-out work, NOT closed
+
+ADR-0018's consequences re-scope this ticket's gates: the clean-room identifier grep (old Gate 1,
+S7) is **voided as a ship gate**; the provenance review becomes a **no-verbatim-copy review** —
+no textually identical text against the reference; adapted copying is permitted (AGENTS.md, human
+accepted-risk 2026-09-18). The merge itself already landed (`400450f`) with the old gates green,
+so the no-verbatim re-review over the shipped diff is still owed before close-out. The remaining
+live-pass chain (tickets 44/45/46/47 defects, epic 35 AC 1) targeted the capsule vehicle that
+ADR-0018 supersedes — the pass plan re-scopes to the offline gates plus live assertions only for
+surfaces that survive the wrapper re-base. Blocked-by list unchanged; Status stays open.

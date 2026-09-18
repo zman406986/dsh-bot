@@ -82,3 +82,13 @@ Deferred gaps / handover:
   zh face remains a later-localization item, consistent with all adapter copy.
 - Unknown-state workers whose marker carried a live status are reported by id only (title/todo in
   the marker are not surfaced in the notice); extend the copy only if integration feedback asks.
+
+### 2026-09-19 — re-based onto the wrapper-UI vehicle (ADR-0018; ticket 64)
+
+Survives: rebuild-from-durability, unknown-state honesty, the no-stop guard, and the
+conversational-stop policy copy (ADR-0018 confirms stops are conversational — a conformance, not
+a deviation). The trigger re-bases: "rebuild on activation" assumed the `/dispatcher-start`
+model (ADR-0009, premise retracted and voided by ADR-0018's no-mode ruling) — rebuild rides
+always-on session start/boot instead, and ticket 57 already moved restart recovery to a
+turn-opening wake. design-17's conditional ADR-0012 flag is moot in its old form. Status stays
+open (the live-verification debt is unchanged), re-scoped.

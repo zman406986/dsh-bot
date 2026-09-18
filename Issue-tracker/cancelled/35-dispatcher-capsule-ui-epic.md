@@ -1,6 +1,6 @@
 # 35 — Dispatcher control capsule: expandable shell-overlay UI (epic)
 
-**Status:** open
+**Status:** cancelled
 **Labels:** ready-for-agent
 **Blocked by:** 34 (client module materialization — landed at 80c2932, effectively unblocked).
 **Chunked:** sub-tickets 36–42 filed 2026-09-18 — see "Sub-tickets" below; this epic
@@ -198,3 +198,14 @@ capsule is legible in **both** schemes. That is a dormant-side, zero-LLM check
 and is recorded on ticket 33's pass plan. No checkbox moves; AC 1 remains open
 on the same blockers as above.
 
+
+### 2026-09-19 — CLOSED AS MOOT (ADR-0018; ticket 64) — the epic's subject is the voided vehicle
+
+ADR-0018 rules "imitate the reference in its entirety except the enumerated exceptions" and voids
+ADR-0013's capsule-as-one-additive-overlay-slot decision — this epic's entire deliverable *is*
+that vehicle. Sub-tickets 36–42 are resolved and their assets survive as wrapper design inputs:
+the seam research (36, explicitly kept valid by ADR-0018), the pure view models (27/28), the
+token styling (49), the locale faces, and the honest-composition fixtures. Epic AC 1 (capsule
+asserted live, dormant + activated) is moot. Nothing is deleted; the continuation is the wrapper
+shell scope ticket filed under ADR-0018. Moved open/ → cancelled/ (closed without shipping as the
+product surface), Status: cancelled.

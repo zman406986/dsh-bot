@@ -60,3 +60,18 @@ Not changed, deliberately: `toAccessRequestBody` still accepts wildcard targets 
 - Relay semantics frozen: timeout (ADR-0008), deny-by-default, dedupe (`suppressesConversational`), released-ask re-queue — this ticket changes presentation + option plumbing only.
 - Classifier-gated auto-review is explicitly NOT adopted (design-17 conflict 5) — do not add any auto-decision layer beyond the shipped policy table lookup.
 - Implementation one-at-a-time in the worktree; status/comments updated on MAIN.
+
+### 2026-09-19 — re-based onto the wrapper-UI vehicle (ADR-0018; ticket 64)
+
+The session-scoped always-allow choice now matches exception **U-D** exactly (session-scoped,
+never persisted; no settings-managed rule store) — the profile-writes out-of-scope boundary was
+right and stays. Two things re-base:
+
+- The constant "Runs on your computer." location line is superseded: ADR-0018 brings the
+  remote-computer area with location labels, so location lines become honest per-producer-kind.
+- The prompt pathway (`ctx.userQuestions.ask`) was the plugin-UI constraint; under the wrapper the
+  approval surface may move to the wrapper's own UI (reference-style approval cards, minus U-D
+  persistence).
+
+Classifier-gated auto-review remains NOT adopted here (per this ticket's constraint) and is seeded
+as its own scope ticket. Status stays open, re-scoped.

@@ -77,3 +77,20 @@ Deferred gaps / handover:
 - Ticket 28 (Active / Needs-you / Finished sections) can start from v2 rows unchanged — no
   blockers; v2 field provenance: FSM status + `WorkerSummary` (startedAtMs, toolCallCount),
   ledger todo (`delivered`), pending access tickets (`blocked`).
+
+### 2026-09-19 — re-based onto the wrapper-UI vehicle (ADR-0018; ticket 64)
+
+ADR-0018 voided the capsule/plugin-UI vehicle (ADR-0013); this ticket's panel work shipped
+into a surface the wrapper supersedes. Disposition (nothing deleted):
+
+- **Survives:** snapshot v2 fail-closed contract, observer-timeliness projections, and the pure
+  view-model logic (dot/ring mapping, blocked > landed > finished precedence, activity-line math)
+  — vehicle-independent design input for the wrapper's presence surface.
+- **Voided:** the shell.overlay panel delivery and its CSS/locale face — re-hosting in the
+  wrapper is new scope (wrapper shell ticket).
+- **Re-derive before porting:** the `delivered` field and landed-marker math assumed completion =
+  delivered-to-user; ADR-0018 supersedes that (completion = first-visible-ack).
+- Presence is NOT on ADR-0018's exception list, so the wrapper's presence surface is held to the
+  imitation standard (reference glanceable presence), not to this ticket's capsule-era compromises.
+
+Status stays open, re-scoped: re-host presence in the wrapper and verify against the reference bar.

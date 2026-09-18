@@ -60,3 +60,11 @@ Three findings, none blocking this ticket, recorded for ticket 33 / later work:
 3. `RosterSectionView.collapsedCount` is computed and asserted (`src/client/roster-store.ts:465`, `test/client-roster-panel.test.ts:110`) but the panel re-derives the same number from `section.rows.filter((row) => row.collapsed)` for the count line. Two sources for one number, equivalent today; any change to the collapse rule must move both.
 
 **Design-17 §5 conflict 2 (`revisit-before-merge`) — closed with evidence.** The `todoId`-chip conclusion was independently re-confirmed against the shipped tree: the chip is a bare muted truncated id string rendered only for todo-driven spawns (`panel.tsx:169`, guarded by `row.todoId !== null`), with no status/checkbox/column/count/milestone affordance and no aggregation by todo anywhere; its CSS (`panel.tsx:85`) is `opacity:.45;font-size:11px;max-width:16ch;text-overflow:ellipsis`; the only "board"/"milestone" occurrences in the shipped tree are the prohibitive policy rule (`src/core/policy/prompts.ts:91-92`) and tests asserting it. A per-worker linkage id with no affordance cannot reasonably be misread as a task board. Ticket 32's prompt review reached the same position on the prompt side.
+
+### 2026-09-19 — re-based onto the wrapper-UI vehicle (ADR-0018; ticket 64)
+
+The section partition (`rosterSectionFor`) survives as a pure view model — the design input for
+the wrapper's running-tasks surface; the shell.overlay panel delivery is voided with ADR-0013's
+vehicle. One rationale is explicitly re-opened: "Needs-you as the pull-only stand-in for push
+attention" was a capsule-era constraint. The wrapper owns the whole UI, so the reference's
+attention markers can be imitated natively instead of stood in for. Status stays open, re-scoped.

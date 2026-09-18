@@ -203,3 +203,10 @@ schemes and belongs to ticket 33's pass (it is a zero-LLM assertion — read the
 chip/card computed colours, no session needed). No ticket file moved; this ticket
 stays open on that AC.
 
+
+### 2026-09-19 — re-based onto the wrapper-UI vehicle (ADR-0018; ticket 64)
+
+The token-layer finding (368 `--dsw-*` tokens, per-scheme alias layers defined on `body`) is host
+knowledge that survives any vehicle. The open live AC (chip/card legible in both schemes) is a
+capsule-vehicle assertion — moot; the two-scheme check re-applies to whatever wrapper surfaces
+consume host tokens. Kept open with this note; moot-closure proposed for the next triage.

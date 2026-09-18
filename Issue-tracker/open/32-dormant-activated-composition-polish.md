@@ -150,3 +150,14 @@ them.
 ### 2026-09-18 — live presence observed (re-pass #2): dormant composition GREEN in a real browser; activated composition + footer flag blocked (tickets 44-defect-2 / 45)
 
 Live smoke for this ticket's composition surfaces, from the ticket-44 re-pass #2 (`C:\Users\TZhen\Desktop\dsh-live-repass2-2026-09-18\`): on a real `multitask`-profile boot the capsule renders the dormant experience exactly as composed — collapsed chip (`data-expanded="false"`, `data-dot="dormant"`), expand → activation pitch + single start affordance, roster sections and deliverables line absent, footer copy-only Settings hint with the flag segment honestly `unknown` (`shots/01–03`, `07`; zh face rendered under the zh UI). The activated composition could not be exercised live: activation IS real host-side (RPC A/B matched; policy injected), but the client roster/flag watch never fires (capsule stays dormant even with a roster document present in the namespace — ticket 44 re-pass comment, defect 2) and ticket 45's tool-schema defect prevents any worker state from existing. Activation presence hint itself is confirmed shipped in the start success copy (matched command result text). No checkboxes moved here.
+
+### 2026-09-19 — re-based onto the wrapper-UI vehicle (ADR-0018; ticket 64)
+
+The dormant/activated two-composition frame this ticket polished is voided: ADR-0018 rules
+always-on with no mode — there is no dormant state (register U-1 closed by the same ADR).
+Superseded: the activation presence hint, the dormant-registration matrix, and the
+deactivation-honesty flow. Survives as method and record: the surfaces-README discipline, the
+locale-validation tooling, the prompt-review method, and the no-board/no-milestone narration
+rules (aligned with exception C14 and the todos-private-ledger conformance). The
+composition-coherence goal re-bases onto the wrapper's onboarding/first-run surface (scope
+ticket seeded). Status stays open, re-scoped.

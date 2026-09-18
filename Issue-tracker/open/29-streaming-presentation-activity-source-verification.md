@@ -103,3 +103,12 @@ consumer pattern exactly, which is the strongest offline-verifiable evidence; fi
 integration should confirm the firehose end-to-end and note actual child-session ids appear as
 expected. Activity phrasing is best-effort (first string argument hint) — presentation only,
 never authority.
+
+### 2026-09-19 — re-based onto the wrapper-UI vehicle (ADR-0018; ticket 64)
+
+The verification half survives fully and is vehicle-independent host research: the
+`session/event` `tool/call` firehose seam and the `recentActivity` resolver. The toolview polish
+was plugin-UI (superseded vehicle); activity presentation re-hosts in the wrapper. This ticket's
+non-goals are now codified by ADR-0018: no timeline housekeeping cards = exception U-C;
+results-as-dispatcher-speech / text-only delivery = U-E; no worker-transcript streaming remains
+plain imitation (the reference streams none). Status stays open, re-scoped.
