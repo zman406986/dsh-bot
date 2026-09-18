@@ -33,3 +33,14 @@ exception list constraining it.
 - The remote box is dsh/host capability first: if the host offers no remote execution surface,
   the finding is recorded as a blocker — do not spec against fantasy.
 - New or adapted copy only.
+
+## Comments
+
+### 2026-09-19 — agent (vehicle hand-off from 67)
+
+Vehicle decided (draft): **ADR-0020**. Your surfaces land inside the wrapper: remote-box
+approval cards are ticket 81's card system with your location labels; computer/browser worker
+monitoring renders in 80's conversation surface and 79's sidebar presence. C15 binding
+unchanged: computer/browser workers must flow the dispatched-worker wake pipeline or escalate
+to the human. The dsh-host capability check remains your first AC — the wrapper adds no
+execution capability of its own.

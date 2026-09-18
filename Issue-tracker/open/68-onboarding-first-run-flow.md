@@ -26,3 +26,16 @@ Under the old model this was excluded (no dormant/onboarding state); ADR-0018 br
   reference's sign-in/account beats may have no honest counterpart; record the gap rather than
   inventing one.
 - New or adapted copy only (AGENTS.md no-verbatim rule).
+
+## Comments
+
+### 2026-09-19 — agent (vehicle hand-off from 67)
+
+The vehicle is decided (draft): **ADR-0020** — the wrapper is our own frame over the shipped
+dsh client runtime, staged through a `main` page (tickets 77–78) before surfaces land. Your
+dependencies on it: (a) first-run renders *inside our frame* (or the staging page), so beats
+that need shell chrome wait for 77/78; (b) the shipped `settings.onboarding` slot is usable
+only during the staging stage — once the frame election flips, the settings surface is displaced
+and onboarding must be ours; (c) "seen" persistence rides our settings namespace (no second
+store, A5). U-A still binds: no sign-in/account beats, no connection phases. Blocked-by line
+updated mentally: implementable once 77/78 land and your research ACs are done.

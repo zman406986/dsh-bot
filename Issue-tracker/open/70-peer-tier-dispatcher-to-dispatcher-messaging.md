@@ -32,3 +32,14 @@ work (S9).
 
 - Workers never participate in the peer tier (leaves); only dispatchers.
 - New or adapted copy only.
+
+## Comments
+
+### 2026-09-19 — agent (vehicle hand-off from 67)
+
+Vehicle decided (draft): **ADR-0020**. Placement: peers are dispatcher sessions, so the
+wrapper's sidebar roster (ticket 79, keyed by session id per ADR-0019/76) is where peer
+presence and the send targets live; conversations with peers render as conversation surfaces
+of their session (80). Your design constraints (C14 point-to-point, C15 single wake kind) are
+unchanged; your remaining block on 72 is discharged at the design level (ADR-0019 drafted) —
+the practical gate is now 76's session keying, same as 79's.

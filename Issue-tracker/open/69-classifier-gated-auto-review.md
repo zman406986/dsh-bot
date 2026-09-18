@@ -32,3 +32,14 @@ classifier; ADR-0018 brings the area in scope.
 - Relay semantics that survive (timeout ADR-0008, deny-by-default, dedupe) are not re-litigated
   here; the design extends them.
 - New or adapted copy only.
+
+## Comments
+
+### 2026-09-19 — agent (vehicle hand-off from 67)
+
+Vehicle decided (draft): **ADR-0020** — our own frame over the shipped runtime. Your rendering
+home is ticket 81 (approval cards inline in the wrapper's conversation surface, re-hosting
+ticket 30's anatomy); 80 builds that surface first. Your relay/keying question is unchanged by
+the vehicle; the classifier layer is core-side and vehicle-independent. U-D binding unchanged
+(session-scoped always-allow; no settings-managed store — note the wrapper will displace the
+shipped settings UI at cutover, so a settings-managed controller is doubly out).
