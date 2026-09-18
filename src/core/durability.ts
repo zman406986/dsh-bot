@@ -47,6 +47,8 @@ export interface DurabilityPort {
 /**
  * A live marker that cannot be reconstructed after a restart.
  * Reported honestly: never replayed, never resumed, never invented.
+ * Ticket 59 (register B-1): it keeps its stream key occupied until the
+ * dispatcher resolves it (`releaseUnknownStateHold` / `stop_worker`).
  * `transcriptRef` falls back to the worker id (child session id) so the
  * dispatcher can still point the user at the transcript.
  */
@@ -65,7 +67,12 @@ export interface UnknownStateWorker {
 export interface RebuildReport {
   /** Terminal workers restored onto the roster (delivery may still be owed). */
   readonly restored: readonly WorkerRecord[];
-  /** Live markers left as unknown-state; stream keys stay free. */
+  /**
+   * Live markers left as unknown-state. Ticket 59 (register B-1): each still
+   * **holds its stream key** until the dispatcher resolves it — the key is not
+   * free, because the worker may still be alive and we hold no interrupt
+   * handle for it.
+   */
   readonly unknownState: readonly UnknownStateWorker[];
 }
 
