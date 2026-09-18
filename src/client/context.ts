@@ -16,14 +16,21 @@
  * - `ctx.settingsScope.bind({namespace})` returns that namespace's scope with
  *   `getSnapshot()`/`subscribe()` — the roster data path (ticket 46 corrected
  *   this from the host-side `settings`/`watch` shape; see the block below).
+ *   The same scope's `set(field, value)`/`unset(field)` are the settings card's
+ *   write path (ticket 47) — one bind, one channel, two honest readers.
  */
 
 import type { LocaleDictionary, SlotRegistrationOptions } from "./overlay.js";
 import type { ToolviewRegistrationOptions } from "./toolviews.js";
+import type { SettingsCardRegistrationOptions } from "./settings-card-store.js";
 
 /** Any slot entry this module registers: list entries (id/order) or keyed
- * entries such as the `tool.call.toolview` toolviews (key). */
-export type SlotEntryOptions = SlotRegistrationOptions | ToolviewRegistrationOptions;
+ * entries such as the `tool.call.toolview` toolviews (key) and the
+ * `settings.plugin.item` settings card (key). */
+export type SlotEntryOptions =
+  | SlotRegistrationOptions
+  | ToolviewRegistrationOptions
+  | SettingsCardRegistrationOptions;
 
 /** `ctx.slots` surface used by this scaffold. */
 export interface SlotsServiceLike {
@@ -76,6 +83,28 @@ export interface ClientSettingsScopeSnapshotLike {
   readonly status: "loading" | "ready" | "unavailable";
   /** Last accepted schema-resolved section; undefined before the first acceptance. */
   readonly value?: unknown;
+  /**
+   * Composition layer the Host resolved `value` over, when the owning plugin
+   * declared one — what a cleared field reverts to (`settings-contract.d.ts:16-20`).
+   */
+  readonly base?: unknown;
+  /**
+   * Raw user layer as stored, when one exists. A field's PRESENCE here is what
+   * marks it overridden — an override whose value equals the composition
+   * default is still an override, and comparing values could not see it
+   * (`settings-contract.d.ts:20-25`). The settings card reads it (ticket 47).
+   */
+  readonly user?: unknown;
+  /** Namespace revision fencing the next write; undefined before the first Host view. */
+  readonly revision?: number;
+  /**
+   * Whether the Host document accepts writes; memory mode never does
+   * (`settings-contract.d.ts:30`). Absent on a minimal scope, and absence is
+   * NOT permission — the card treats a missing flag as read-only.
+   */
+  readonly writable?: boolean;
+  /** `host` syncs with the Host document; `memory` keeps a browser process-local. */
+  readonly mode?: "host" | "memory";
 }
 
 /** One namespace's bound settings scope (`SettingsScopeBinder.bind` result). */
@@ -84,6 +113,18 @@ export interface ClientSettingsScopeLike {
   getSnapshot(): ClientSettingsScopeSnapshotLike;
   /** Observe snapshot replacements; returns the disposer removing this listener. */
   subscribe(listener: () => void): () => void;
+  /**
+   * Queue one field write, fenced by the namespace's latest known revision
+   * (`settings-contract.d.ts:74-85`). Optional here so a scope-less or
+   * write-less runtime degrades the settings card to read-only instead of
+   * throwing; the shipped scope always provides it.
+   */
+  set?(field: string, value: unknown): Promise<void>;
+  /**
+   * Queue one field clear, so the field re-inherits the composition layer
+   * (`settings-contract.d.ts:86-93`). Optional for the same reason as `set`.
+   */
+  unset?(field: string): Promise<void>;
 }
 
 /** The `ctx.settingsScope` binder face this module uses. */

@@ -1,6 +1,7 @@
 /**
- * Ticket 49 — the capsule and panel must style themselves from the host's
- * shared design-token layer, not from a private palette.
+ * Ticket 49 (extended by ticket 47) — the capsule, the roster panel, and the
+ * settings card must style themselves from the host's shared design-token
+ * layer, not from a private palette.
  *
  * Offline only (S8): the tokens are ordinary CSS custom properties defined on
  * `body` by the shipped theme stylesheet
@@ -18,6 +19,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { CAPSULE_CSS } from "../src/client/capsule.js";
 import { ROSTER_PANEL_CSS } from "../src/client/panel.js";
+import { SETTINGS_CARD_CSS } from "../src/client/settings-card.js";
 
 /** Distinct `var(--dsw-…)` tokens referenced by a stylesheet, sorted. */
 function tokensIn(css: string): string[] {
@@ -31,6 +33,7 @@ function tokensIn(css: string): string[] {
 const SURFACES = [
   { name: "capsule (CAPSULE_CSS)", css: CAPSULE_CSS },
   { name: "roster panel (ROSTER_PANEL_CSS)", css: ROSTER_PANEL_CSS },
+  { name: "settings card (SETTINGS_CARD_CSS)", css: SETTINGS_CARD_CSS },
 ] as const;
 
 /** The colour-bearing declarations of one selector, for role assertions. */
@@ -100,6 +103,25 @@ describe("theme tokens — no private palette survives (ticket 49)", () => {
       "--dsw-alias-state-error-primary",
       "--dsw-alias-state-success-primary",
       "--dsw-alias-state-warn-primary",
+    ]);
+    // Ticket 47's card borrows the shipped settings card's own vocabulary
+    // (border-l4 hairline, bg-layer-3 → bg-layer-2 when open, the label
+    // ladder), with ONE deliberate substitution: the shipped failure line
+    // paints `var(--dsw-alias-label-error)`, a token defined nowhere in
+    // `dsh-client-ui-theme` — the reference is dead and the text would inherit.
+    // We use the defined `state-error-primary` instead.
+    assert.deepEqual(tokensIn(SETTINGS_CARD_CSS), [
+      "--dsw-alias-bg-layer-2",
+      "--dsw-alias-bg-layer-3",
+      "--dsw-alias-border-l2",
+      "--dsw-alias-border-l4",
+      "--dsw-alias-interactive-bg-hover",
+      "--dsw-alias-label-dimmed",
+      "--dsw-alias-label-primary",
+      "--dsw-alias-label-secondary",
+      "--dsw-alias-label-tertiary",
+      "--dsw-alias-state-business-primary",
+      "--dsw-alias-state-error-primary",
     ]);
   });
 });
@@ -213,5 +235,65 @@ describe("theme tokens — role mapping (ticket 49)", () => {
     );
     assert.match(steer, /border:1px solid var\(--dsw-alias-border-l3\)/);
     assert.match(steer, /color:inherit/);
+  });
+});
+
+describe("theme tokens — role mapping, settings card (ticket 47)", () => {
+  const CARD = ".multitask-dispatcher-settings-card";
+
+  it("the card is the shipped card's layered surface, as a list item", () => {
+    const card = ruleFor(SETTINGS_CARD_CSS, CARD);
+    assert.match(card, /border:\.5px solid var\(--dsw-alias-border-l4\)/);
+    assert.match(card, /background:var\(--dsw-alias-bg-layer-3\)/);
+    assert.match(card, /color:var\(--dsw-alias-label-primary\)/);
+    // The tab renders every card inside a <ul>, so ours is an <li>.
+    assert.match(card, /list-style:none/);
+    assert.match(
+      ruleFor(SETTINGS_CARD_CSS, `${CARD}[data-open="true"]`),
+      /background:var\(--dsw-alias-bg-layer-2\)/,
+    );
+  });
+
+  it("the text ladder and the controls are themed", () => {
+    assert.match(
+      ruleFor(SETTINGS_CARD_CSS, `${CARD}__name`),
+      /color:var\(--dsw-alias-label-primary\)/,
+    );
+    assert.match(
+      ruleFor(SETTINGS_CARD_CSS, `${CARD}__description`),
+      /color:var\(--dsw-alias-label-tertiary\)/,
+    );
+    assert.match(
+      ruleFor(SETTINGS_CARD_CSS, `${CARD}__input`),
+      /border:1px solid var\(--dsw-alias-border-l2\)/,
+    );
+    assert.match(
+      ruleFor(SETTINGS_CARD_CSS, `${CARD}__input`),
+      /background:var\(--dsw-alias-bg-layer-3\)/,
+    );
+    // The save button is the inverted label fill, exactly as shipped.
+    assert.match(
+      SETTINGS_CARD_CSS,
+      new RegExp(`${CARD}__save\\{background:var\\(--dsw-alias-label-primary\\);color:var\\(--dsw-alias-bg-layer-3\\)\\}`),
+    );
+    assert.match(
+      SETTINGS_CARD_CSS,
+      new RegExp(`${CARD}__discard\\{border-color:var\\(--dsw-alias-border-l2\\)`),
+    );
+  });
+
+  it("the failure line uses the DEFINED error token — the shipped card's is dead", () => {
+    // `dsh-client-ui-settings-plugins` paints its failure line with
+    // `var(--dsw-alias-label-error)`, which no theme stylesheet defines: we do
+    // not inherit that dead reference.
+    assert.ok(!SETTINGS_CARD_CSS.includes("label-error"));
+    assert.match(
+      ruleFor(SETTINGS_CARD_CSS, `${CARD}__failed`),
+      /color:var\(--dsw-alias-state-error-primary\)/,
+    );
+    assert.match(
+      ruleFor(SETTINGS_CARD_CSS, `${CARD}__hint[data-invalid="true"]`),
+      /color:var\(--dsw-alias-state-error-primary\)/,
+    );
   });
 });

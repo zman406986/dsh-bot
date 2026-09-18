@@ -119,6 +119,13 @@ export interface LocaleDictionary {
  * path is named and nothing navigates). No profile key exists: seam 5 found
  * no client-visible profile identity, and the segment is omitted rather
  * than invented from `$host.home`.
+ *
+ * Ticket 47 adds the `settings.card.*` block: the card's chrome (title,
+ * description, the expand/collapse accessible labels, the unsaved marker,
+ * the read-only note, save/discard, and the failed-save line) plus one
+ * label/hint pair per schema field and the shared overridden / reset /
+ * invalid copy. The title is the plugin's display name — the same name the
+ * ticket-42 footer hint tells the user to look for.
  */
 export const localeDictionary: LocaleDictionary = {
   en: {
@@ -212,6 +219,33 @@ export const localeDictionary: LocaleDictionary = {
       "Placed in the composer for {workerId} — review and send.",
     "roster.steer.copy-fallback":
       "Composer not reachable here — type /dispatcher-steer {workerId} followed by your instruction in this chat.",
+    // Ticket 47: the Settings → 插件配置 card. The title is the plugin's
+    // display name; the enabled hint states the ADR-0005 rule in the user's
+    // words (a saved change lands in NEW chats — the running chat keeps the
+    // flag it started with) so the control is never read as a live toggle.
+    "settings.card.title": "Multitask Dispatcher",
+    "settings.card.description":
+      "The dispatcher's feature flag and how long an unanswered permission request waits.",
+    "settings.card.expand": "Expand",
+    "settings.card.collapse": "Collapse",
+    "settings.card.unsaved": "Unsaved",
+    "settings.card.readonly":
+      "This deployment keeps settings in this browser only, so nothing here can be saved.",
+    "settings.card.save": "Save",
+    "settings.card.discard": "Discard",
+    "settings.card.failed":
+      "Not saved — the change did not land as written. Your edits are still here.",
+    "settings.card.overridden": "Set here",
+    "settings.card.reset": "Use default",
+    "settings.card.invalid":
+      "Enter a whole number of milliseconds, or leave it empty to use the default.",
+    "settings.card.field.enabled.label": "Enable the dispatcher",
+    "settings.card.field.enabled.hint":
+      "Saved as the dispatcher's setting: it applies to new chats. The chat you are in keeps the flag it started with.",
+    "settings.card.field.accessRequestTimeoutMs.label":
+      "Access-request timeout (ms)",
+    "settings.card.field.accessRequestTimeoutMs.hint":
+      "How long an unanswered permission request waits before it is denied. Leave empty to use the default.",
   },
   zh: {
     "roster.title": "工作者",
@@ -271,6 +305,30 @@ export const localeDictionary: LocaleDictionary = {
     "roster.steer.hint": "已为 {workerId} 填入输入框——请检查后发送。",
     "roster.steer.copy-fallback":
       "此处无法访问输入框——请在本聊天中输入 /dispatcher-steer {workerId} 加上你的指示。",
+    // Ticket 47：设置 → 插件配置 卡片。标题即插件显示名；启用项的说明用用户的话
+    // 说清 ADR-0005 规则（保存的更改对新会话生效——当前会话沿用启动时的开关值），
+    // 以免这个控件被读成实时开关。
+    "settings.card.title": "Multitask Dispatcher",
+    "settings.card.description":
+      "调度器的功能开关，以及未获答复的权限请求可等待的时长。",
+    "settings.card.expand": "展开",
+    "settings.card.collapse": "收起",
+    "settings.card.unsaved": "未保存",
+    "settings.card.readonly":
+      "此部署仅把设置保存在本浏览器中，因此此处无法保存。",
+    "settings.card.save": "保存",
+    "settings.card.discard": "放弃",
+    "settings.card.failed":
+      "未保存——更改没有按填写的内容生效。你的编辑仍在这里。",
+    "settings.card.overridden": "已在此设置",
+    "settings.card.reset": "使用默认值",
+    "settings.card.invalid": "请输入整数毫秒，或留空以使用默认值。",
+    "settings.card.field.enabled.label": "启用调度器",
+    "settings.card.field.enabled.hint":
+      "保存为调度器的设置：对新会话生效。当前所在会话仍沿用启动时的开关值。",
+    "settings.card.field.accessRequestTimeoutMs.label": "访问请求超时（毫秒）",
+    "settings.card.field.accessRequestTimeoutMs.hint":
+      "权限请求未获答复时可等待的时长，超时后按拒绝处理。留空以使用默认值。",
   },
 };
 

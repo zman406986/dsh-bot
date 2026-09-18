@@ -592,14 +592,16 @@ describe("composition polish — locale validation + literal sweep (§8)", () =>
 
   it("the client render path carries no hard-coded user-facing sentence", () => {
     // Sweep the copy-rendering components (panel, toolviews, and the
-    // ticket-38 capsule): any quoted literal containing a space (a plausible
-    // English sentence) that is not a dotted locale key is a dictionary
-    // bypass. Comments and the self-contained CSS strings are stripped first
-    // (both legitimately carry prose/spaces and neither is user-facing text).
+    // ticket-38 capsule, plus the ticket-47 settings card): any quoted literal
+    // containing a space (a plausible English sentence) that is not a dotted
+    // locale key is a dictionary bypass. Comments and the self-contained CSS
+    // strings are stripped first (both legitimately carry prose/spaces and
+    // neither is user-facing text).
     for (const file of [
       "../src/client/panel.tsx",
       "../src/client/toolview-panel.tsx",
       "../src/client/capsule.tsx",
+      "../src/client/settings-card.tsx",
     ]) {
       const raw = readFileSync(new URL(file, import.meta.url), "utf8");
       const withoutComments = raw

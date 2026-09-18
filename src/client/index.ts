@@ -27,7 +27,10 @@
  *    intents, the deliverables line, and the provenance footer);
  * 4. the per-tool call views (ticket 24): keyed `tool.call.toolview` entries
  *    for the five dispatcher wire tool names — unclaimed keys, so additive-
- *    safe against the shipped composition (research Finding 5).
+ *    safe against the shipped composition (research Finding 5);
+ * 5. the plugin's settings card (ticket 47): one keyed `settings.plugin.item`
+ *    entry whose `key` is our settings namespace, so the shipped
+ *    插件配置 tab pairs our card with the namespace the Host serves.
  *
  * Ticket 40 binds the capsule/panel intents to ticket 36's verified seams
  * at THIS composition point and nowhere else: the narrow CommandTransport
@@ -75,6 +78,13 @@ import {
   TOOL_CALL_TOOLVIEW_SLOT,
   toolviewRegistration,
 } from "./toolviews.js";
+import {
+  SETTINGS_PLUGIN_ITEM_SLOT,
+  createSettingsCardStore,
+  settingsCardRegistration,
+  type SettingsCardStore,
+} from "./settings-card-store.js";
+import { createPluginSettingsCard } from "./settings-card.js";
 
 /** Client services this module binds (vendored Cordis inject list). */
 export const inject: readonly string[] = ["slots", "locale"];
@@ -90,6 +100,7 @@ export function apply(ctx: ClientContext): void {
     createRosterStore(),
     createCapsuleStore(),
     createCapsuleFooterStore(),
+    createSettingsCardStore(),
   );
 }
 
@@ -107,6 +118,7 @@ export function applyClientModule(
   store: RosterStore,
   capsule: CapsuleStore = createCapsuleStore(),
   footer: CapsuleFooterStore = createCapsuleFooterStore(),
+  card: SettingsCardStore = createSettingsCardStore(),
 ): void {
   // Locale namespace (Finding 6 idiom): labeled effect; executes immediately,
   // the returned disposer is collected for unload.
@@ -127,19 +139,27 @@ export function applyClientModule(
   // unverified live push channel. The SAME snapshot feeds the ticket-42 footer
   // store (persisted flag provenance) — one channel, two honest readers, never
   // a second source.
+  //
+  // Ticket 47 attaches its settings card to this SAME bind: one namespace, one
+  // scope, and the card's writes (`set`/`unset`) leave through the transport
+  // that bind already owns. A second bind would be a second channel with its
+  // own revision view, which is exactly what the ticket forbids.
   ctx.effect(() => {
     let disposeWatch: (() => void) | undefined;
     if (typeof ctx.inject !== "function") {
       store.set({ kind: "channel-missing" });
+      card.attachUnavailable();
       return () => {};
     }
     ctx.inject(["settingsScope"], (child) => {
       const binder = child.settingsScope;
       if (binder === undefined || typeof binder.bind !== "function") {
         store.set({ kind: "channel-missing" });
+        card.attachUnavailable();
         return;
       }
       const scope = binder.bind({ namespace: LOCALE_NAMESPACE });
+      card.attach(scope);
       const readSnapshot = () => {
         const snapshot = scope.getSnapshot();
         if (snapshot.status === "unavailable") {
@@ -163,6 +183,7 @@ export function applyClientModule(
     });
     return () => {
       if (disposeWatch !== undefined) disposeWatch();
+      card.detach();
     };
   }, "multitask-dispatcher: roster settings watch");
 
@@ -233,5 +254,34 @@ export function applyClientModule(
         createToolviewComponent(toolName, t),
       );
     }
+  });
+
+  // Settings card (ticket 47): one keyed `settings.plugin.item` entry. The
+  // slot is declared at runtime by the shipped configurable-plugins tab
+  // (`dsh-client-ui-settings-plugins/lib/client.js:1773-1784`), which is why
+  // this rides the declaration wait like every other entry here — the tab
+  // dispatches `renderSlot("settings.plugin.item", {}, { entryKey: ns })` per
+  // served namespace and renders the intersection with the cards that claim
+  // them, so a served namespace without a card renders nothing at all. The key
+  // is our settings namespace (the whole pairing contract); the card reads and
+  // writes through the scope bound above, never a second channel.
+  //
+  // Deliberately no entry-level `inject`: the shipped cards pass one because
+  // their components read an injected controller face as props, while ours is a
+  // factory bound to its seats at composition time — the same pattern the
+  // capsule and toolviews already use.
+  //
+  // And a plain callback returning the registration's disposer, not the shipped
+  // generator: `SlotRegistry.inject` documents both forms ("callback effects
+  // are synchronous disposers; iterable effects install transactionally"), the
+  // return value is the declaration-lifetime disposer either way, and our
+  // offline fakes drive the callback form — a generator body would simply never
+  // run there, so the entry could not be pinned offline.
+  ctx.slots.inject(SETTINGS_PLUGIN_ITEM_SLOT, () => {
+    const t = ctx.locale.bind(LOCALE_NAMESPACE);
+    return ctx.slots.register(
+      settingsCardRegistration(),
+      createPluginSettingsCard(t, card),
+    );
   });
 }

@@ -204,7 +204,9 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
     // the ticket-39 activation-row copy, the ticket-40 action-wiring copy
     // (stop message, failure lines, per-row steer affordance), the
     // ticket-41 deliverables-line copy, and the ticket-42 footer copy
-    // (flag provenance + copy-only Settings hint).
+    // (flag provenance + copy-only Settings hint), and the ticket-47
+    // settings-card copy (chrome, save/discard, and one label/hint pair per
+    // schema field).
     assert.deepEqual(keys, [
       "activation.presence-hint",
       "capsule.action.no-channel",
@@ -246,6 +248,22 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
       "roster.steer.hint",
       "roster.title",
       "roster.unavailable",
+      "settings.card.collapse",
+      "settings.card.description",
+      "settings.card.discard",
+      "settings.card.expand",
+      "settings.card.failed",
+      "settings.card.field.accessRequestTimeoutMs.hint",
+      "settings.card.field.accessRequestTimeoutMs.label",
+      "settings.card.field.enabled.hint",
+      "settings.card.field.enabled.label",
+      "settings.card.invalid",
+      "settings.card.overridden",
+      "settings.card.readonly",
+      "settings.card.reset",
+      "settings.card.save",
+      "settings.card.title",
+      "settings.card.unsaved",
       "toolview.degraded",
       "toolview.field.attachments",
       "toolview.field.delivered",
@@ -297,8 +315,9 @@ describe("client face scaffold — apply over fake client seams", () => {
       [],
     );
 
-    // Ticket 24 adds a second inject (tool.call.toolview); this scaffold
-    // contract stays: exactly one shell.overlay entry, parented here.
+    // Ticket 24 adds a second inject (tool.call.toolview) and ticket 47 a
+    // third (settings.plugin.item); this scaffold contract stays: exactly one
+    // shell.overlay entry, parented here.
     const overlay = overlayInject(ctx);
     assert.equal(overlay.entries.length, 1);
     const entry = overlay.entries[0];
@@ -321,7 +340,9 @@ describe("client face scaffold — apply over fake client seams", () => {
   it("fiber teardown (HMR/unload) reverses the namespace and the entry; re-apply restores", () => {
     const ctx = createClientCtx();
     apply(ctx);
-    assert.equal(ctx.injects.length, 2);
+    // Three declaration waits: shell.overlay (ticket 38), tool.call.toolview
+    // (ticket 24), settings.plugin.item (ticket 47).
+    assert.equal(ctx.injects.length, 3);
     assert.equal(overlayInject(ctx).entries.length, 1);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
 
@@ -332,7 +353,7 @@ describe("client face scaffold — apply over fake client seams", () => {
 
     // A fresh fiber (post-HMR apply) registers everything again.
     apply(ctx);
-    assert.equal(ctx.injects.length, 2);
+    assert.equal(ctx.injects.length, 3);
     assert.equal(overlayInject(ctx).entries.length, 1);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
   });

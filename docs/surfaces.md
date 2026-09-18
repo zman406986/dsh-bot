@@ -145,22 +145,61 @@ honesty rules — these are decisions, not oversights:
   `tool.call.toolview` (ticket 24) where the calls happen; the seam research
   found no navigation path, so the capsule links to, embeds, and navigates
   nothing.
-- **No Settings card yet** — `Settings → 插件配置` renders the intersection of
-  the served namespaces and the cards registered into the keyed
-  `settings.plugin.item` slot, and this plugin registers no card, so the section
-  never appears even though the Host serves our namespace. Recorded gap, not a
-  decision: owned by ticket 47 (the card), independent of the ticket-46 watch.
 
 Nothing on the capsule is editable inline. The no-stop guard's final form
 (`test/restart-honesty.test.ts`) structurally covers every capsule view
 model; the composition close-out (`test/client-capsule-composition.test.ts`)
 assembles dormant and activated end-to-end offline.
 
+## The settings card (`Settings → 插件配置`, ticket 47)
+
+`Settings → 插件配置` renders the **intersection of two ledgers**: the settings
+namespaces the Host serves, and the cards registered into the keyed
+`settings.plugin.item` slot — dispatched as
+`renderSlot("settings.plugin.item", {}, { entryKey: ns })` per served namespace.
+The Host has always served our namespace; what was missing was the browser-side
+claim, so the section never appeared. `src/client/settings-card-store.ts` +
+`src/client/settings-card.tsx` are that claim: one keyed entry whose `key` is
+the plugin's settings namespace — the whole pairing contract, since the tab
+pairs namespace with card by key and never learns what the namespace means.
+
+Deliberate properties, each a decision:
+
+- **One channel.** Reads and writes ride the SAME `ctx.settingsScope` bind the
+  roster watch holds (`bind({namespace})` → `getSnapshot()`/`subscribe()`, and
+  `set`/`unset` for writes). A second bind would be a second revision view of
+  one document.
+- **Nothing renders while the namespace is not served.** `unavailable`, or a
+  section the Host has not accepted, yields an empty card — the shipped idiom
+  (`PluginCard` returns `null`) rather than a disabled control nobody can act
+  on.
+- **The rendered text is the draft.** A control stages; Save is the single
+  point where a draft becomes a document mutation, and a draft a field does not
+  accept blocks the save instead of being dropped.
+- **`overridden` is presence, not comparison.** A field's presence in the raw
+  user layer marks it overridden even when its value equals the composition
+  default, so an empty draft plans a clear (the field re-inherits the layer).
+- **A save is verified by read-back.** The scope's write resolves either way, so
+  a read-back that disagrees with what was staged keeps the drafts and reports
+  the failure rather than claiming a success the document does not carry.
+- **The flag is phrased as the SETTING.** The `enabled` control's hint states the
+  ADR-0005 rule: a saved change applies to new chats, and the running chat keeps
+  the flag it started with.
+- **No deep-link, still.** The capsule footer's copy-only Settings hint was
+  written before this card existed and stays copy-only; no navigation seam has
+  appeared, and none is invented here. The hint is now *accurate*, which is all
+  this ticket owed it.
+
 ## Theming: the surfaces ride the host's design tokens
 
 The capsule and panel take **every colour from the host's shared semantic token
 layer** (`--dsw-alias-*`), so they follow the shell's light/dark setting instead
-of painting a private palette. The tokens are plain CSS custom properties
+of painting a private palette. The ticket-47 settings card does the same, in the
+shipped card's own vocabulary (`bg-layer-3` → `bg-layer-2` when open, the
+`border-l4` hairline, the label ladder) — with one deliberate substitution: the
+shipped card's failure line paints `var(--dsw-alias-label-error)`, a token
+**defined nowhere** in `dsh-client-ui-theme`, so its text silently inherits; we
+use the defined `state-error-primary`. The tokens are plain CSS custom properties
 defined on `body` by the shipped theme stylesheet
 (`dsh-client-ui-theme/lib/client.js:1052–1060`); inheriting them needs no
 service, subscription, or boot-graph edge, so `ctx.theme` is deliberately **not**
@@ -194,6 +233,7 @@ For contrast, the surfaces that exist (design-17 §3.2, §4):
 | Workers panel (`shell.overlay`, app-wide) | `src/client/panel.tsx`, sections from `src/client/roster-store.ts` |
 | Capsule chip + expandable card (ADR-0013) | `src/client/capsule.tsx`, view models from `src/client/capsule-store.ts` |
 | Capsule footer (flag provenance + Settings hint) | `src/client/capsule.tsx` + `describeCapsuleFooter` |
+| Settings card (`Settings → 插件配置`) | `src/client/settings-card.tsx` + `src/client/settings-card-store.ts` |
 | Roster wire contract (snapshot v2) | `src/core/roster-snapshot.ts` |
 | Activation command + presence hint | `src/adapter/activation-command.ts` |
 | Steer command | `src/adapter/steer-command.ts` |
