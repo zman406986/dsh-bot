@@ -108,13 +108,23 @@ Implementation cautions: `persona` uses strict `{{…}}` template interpolation,
 
 ---
 
-## 7. What this audit does NOT establish (and must not be read as doing)
+## 7. Gaps — what has since been closed, and what this audit still does NOT establish
 
-1. **The exhaustive salvage classification is missing.** The `salvage-map` pass was killed by an API rate limit (HTTP 429) after 27 minutes and wrote nothing. §6 is the lead's provisional reading from the deviation surface, *not* the file-by-file keep/adapt/rewrite/delete survey ticket 52 Q3 asks for, and it has not been independently verified. **Treat §6 as a hypothesis to confirm, not a result.**
-2. **The test-suite deviation list is partially established** (team-lead head-start, recorded on ticket 54). **Four of the six deviations are pinned by the existing suite** — the suite is not silent, it is *complicit*: `adapter-cordis-dsh-host.test.ts:190-192` asserts the contract arrives as `request.prompt` (D-1); `restart-honesty.test.ts:305-308` reads the notice from `agent.injected` (D-4); `todo-reconciler.test.ts:526` asserts the landed-undelivered item is *unchanged across reconciles* (D-5); D-3 and D-6 have **zero** coverage. Also `persona` appears **nowhere** in `test/` — the seam this audit recommends is entirely unguarded. Consequence: **§6's "survives untouched" is wrong for the test suite** — these fixes will fail currently-passing tests, by design, and that is the intended work. The exhaustive per-file classification is still missing.
-3. **The exact text of the inherited child preset is unenumerated.** We know the child joins the dispatcher's preset; we have not listed its sections.
-4. **`{{…}}` interpolation failure mode** for a non-deployment persona is unconfirmed (plain text is safe; literal braces are the risk).
-5. **The reference's worker FSM cannot be matched** because it does not exist in the reconstruction (tree-shaken to `export {}`). Our 6-state FSM is designed from first principles and is **not** a fidelity claim.
+**Closed since this audit was written** (both were the reason §6 shipped as provisional):
+
+**The exhaustive salvage classification now exists** — `docs/research/dsh-core-loop-salvage-map.md` (ticket 54, resolved). §6 above has been reconciled with it. That pass closed both earlier gaps:
+
+- the **per-file keep/adapt/rewrite/delete survey** — 53 `src/` + 41 `test/` files, script-computed counts that reconcile to the file enumeration; and
+- the **test-suite deviation list**. **Four of the six deviations are pinned by currently-passing tests** — the suite is not silent, it is *complicit*. Corrected pin sites: `adapter-cordis-dsh-host.test.ts:190-192`/`:223-225` (D-1); `restart-honesty.test.ts:305-308` (D-4); `todo-reconciler.test.ts:454-487` (D-5 — **not** `:526`, which is a determinism assertion that survives). D-3 and D-6 have **zero** coverage.
+- **A third finding the survey added:** B-1 is not merely unguarded — it is **asserted as intended behaviour** at `durable-roster.test.ts:313-321` ("Stream key is free for a legitimate re-dispatch"), so ticket 59 must make the freed key *safe*, not refuse the re-dispatch.
+- Also: `persona` and `agentOptions` appear **nowhere** in `test/`, so ticket 55 wires a verified host seam that nothing currently watches. Write the assertion before the channel swap.
+
+**Still not established:**
+
+1. **The exact text of the inherited child preset is unenumerated.** We know the child joins the dispatcher's preset; we have not listed its sections.
+2. **`{{…}}` interpolation failure mode** for a non-deployment persona is unconfirmed (plain text is safe; literal braces are the risk).
+3. **The reference's worker FSM cannot be matched** because it does not exist in the reconstruction (tree-shaken to `export {}`). Our 6-state FSM is designed from first principles and is **not** a fidelity claim.
+4. **Suite health is asserted, not measured.** The ~700 passing cases are the repo's own claim; the survey read the tests, it did not run them. `npm test` is the precondition for the test-cost figure having teeth.
 
 ---
 
