@@ -83,14 +83,14 @@ A crude but argued split of the existing tree: **survives / adapts / gets scrapp
 
 ## Acceptance criteria
 
-- [ ] (offline, gate) `docs/research/dsh-core-loop-fidelity-audit.md` exists with Q1–Q5 answered, every reference-behaviour claim tied to a named note, every code claim tied to a `file:line`.
-- [ ] (offline, gate) ADR-0017's deviation table is re-verified line by line and either confirmed or corrected; new deviations are added; each existing entry gets a disposition.
-- [ ] (offline, gate) The deviation register exists as a durable file and is populated with a disposition per deviation (`approved` / `to-be-removed` / `undecided`), with blank `approved` fields rather than guessed ones.
-- [ ] (offline, gate) Q2's channel question is answered **empirically** against the installed bundle, with the three sub-questions each answered yes/no/unknown and evidence attached — "unknown" is an acceptable answer only with a statement of what would settle it.
-- [ ] (offline, gate) Q3's salvage table covers every module in `src/` with no "TBD" rows.
-- [ ] (offline, gate) The branch survey above is confirmed or corrected, and the "other branch" question is closed or handed back to the human with a specific question.
-- [ ] (offline, gate) A written recommendation states how much of the tree survives, with the counts Q5 asks for.
-- [ ] (no code changed) `git status` clean at the end of the pass: research notes and tracker files only.
+- [x] (offline, gate) `docs/research/dsh-core-loop-fidelity-audit.md` exists with Q1–Q5 answered, every reference-behaviour claim tied to a named note, every code claim tied to a `file:line`.
+- [x] (offline, gate) ADR-0017's deviation table is re-verified line by line and either confirmed or corrected; new deviations are added; each existing entry gets a disposition.
+- [x] (offline, gate) The deviation register exists as a durable file and is populated with a disposition per deviation (`approved` / `to-be-removed` / `undecided`), with blank `approved` fields rather than guessed ones. — `docs/research/dsh-core-loop-deviations.md`.
+- [x] (offline, gate) Q2's channel question is answered **empirically** against the installed bundle, with the three sub-questions each answered yes/no/unknown and evidence attached — "unknown" is an acceptable answer only with a statement of what would settle it. — Yes/Yes/Yes; the seam exists and is wired. Note the bundle is **0.1.5-rc.2**, not rc.1 as the ticket assumed.
+- [x] (offline, gate) Q3's salvage table covers every module in `src/` with no "TBD" rows. — Done by ticket 54 (`docs/research/dsh-core-loop-salvage-map.md`): 53 `src/` + 41 `test/` files, one file `unresolved — needs U-3` and counted separately.
+- [x] (offline, gate) The branch survey above is confirmed or corrected, and the "other branch" question is closed or handed back to the human with a specific question. — **Corrected and closed**: there is no divergent branch. `clone/always-on-dispatcher` was a strict subset of `main`, `master` a stale ancestor, the `dsh-live-*` folders have no `.git`. All pruned after ancestor verification, with recovery tag `archive/pre-core-loop-fidelity-2026-09-18`.
+- [x] (offline, gate) A written recommendation states how much of the tree survives, with the counts Q5 asks for. — 39 Keep / 13 Keep+adapt / 1 unresolved / 0 Rewrite / 0 Delete; 72% of `src` untouched, 25% adapts.
+- [x] (no code changed) `git status` clean at the end of the pass: research notes and tracker files only.
 
 ## Notes
 
@@ -103,7 +103,7 @@ A crude but argued split of the existing tree: **survives / adapts / gets scrapp
 
 ### 2026-09-18 — research pass: Q1/Q2/Q4/Q5 answered; Q3 deferred; ticket remains OPEN
 
-Four research passes were run as a team (`core-loop-fidelity`). Three delivered; one was killed by an API rate limit (HTTP 429) at 27 minutes having written nothing. **This ticket stays open because Q3's acceptance criterion is unmet** — see the gap list below.
+Four research passes were run as a team (`core-loop-fidelity`). Three delivered; one was killed by an API rate limit (HTTP 429) at 27 minutes having written nothing. **This ticket stayed open because Q3's acceptance criterion was unmet** — see the gap list below, and the closing comment at the end of this file for how Q3 was discharged (ticket 54).
 
 **Deliverables produced**
 
@@ -134,3 +134,24 @@ Four research passes were run as a team (`core-loop-fidelity`). Three delivered;
 - **The installed host is at `C:\Users\TZhen\.dsh\profiles\node_modules\@deepseek-ai\`, v0.1.5-rc.2** — not the path or version in `dsh-local-install.md`. That stale note derailed one pass into concluding the host was absent; the note now carries a correction block. Two further prior-note claims were corrected: `Agent.cancel` on the dispatcher parent is a no-op (our code was right, the note was wrong), and the `persona`/`agentOptions` seams were understated as "unverified".
 - **Implementation tickets were logged** from the register's `to-be-removed` items (55–59), since removing a deviation is compliance rather than a decision. The register's undecided items (U-1…U-4, R-1) need your ruling and are **not** ticketed.
 - **ADR-0017's D-1 row was updated** to the established facts, and now points here.
+
+### 2026-09-18 — Q3 discharged; ticket resolved
+
+Ticket 54 was the gap that kept this ticket open, and it is now done: `docs/research/dsh-core-loop-salvage-map.md`.
+
+**Q3's answer — 53 `src/` files / 12,754 lines, 41 `test/` files / 19,100 lines, every file classified:**
+
+| Bucket | src | test |
+|---|---|---|
+| Keep (survives untouched) | 39 files / 9,118 lines | 32 files / 14,549 lines |
+| Keep+adapt (named change) | 13 files / 3,513 lines | 8 files / 4,435 lines |
+| unresolved (needs U-3) | 1 file / 123 lines | 1 file / 116 lines |
+| **Rewrite / Delete** | **0 / 0** | **0 / 0** |
+
+**The audit's §6 hypothesis is confirmed in headline and corrected on two rows.** `core/types.ts` cannot "survive untouched" — the D-5/D-6 vocabulary lands there. `core/report-clamp.ts` is not untouched but `unresolved`, because it is the U-3 addition under review. The "wiring change" bucket is 13 modules, not 4: the obligation vocabulary reaches `durability.ts`, `todo-reconciler.ts`, `types.ts`, `policy/assembler.ts`, `policy/prompts.ts` and `multitask.ts`, and the activation/step-boundary surfaces reach `parent-agent.ts` and `activation-command.ts`.
+
+**So the rebuild question is answered: adapt, don't demolish.** Discarding a rebuild-sized share of the tree to fix four bounded, already-ticketed defects would throw away ~9,100 lines of correct, tested loop machinery. The genuine new work remains one subsystem — the obligation layer.
+
+**Two corrections to earlier comments on this ticket are now recorded on ticket 54**, because both would have misdirected implementers: the D-5 pin is `todo-reconciler.test.ts:454-487` (not `:526`, which is a determinism assertion that should be *kept*), and **B-1 is asserted as intended behaviour** at `durable-roster.test.ts:313-321`, so ticket 59 must not fix it by refusing the re-dispatch.
+
+**Remaining open items are human decisions, not work:** R-1's acknowledgment and U-1…U-4, all in `docs/research/dsh-core-loop-deviations.md` Part C/D. They are deliberately not ticketed, since logging a ticket would presume the ruling.
