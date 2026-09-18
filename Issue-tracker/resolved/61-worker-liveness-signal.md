@@ -1,6 +1,6 @@
 # 61 — A bounded worker-liveness signal (approved addition A-8)
 
-**Status:** open
+**Status:** resolved
 **Type:** task
 **Labels:** ready-for-agent
 **Blocked by:** none.
@@ -37,11 +37,23 @@ So the recommended shape is a **pure derivation over data we already have**, not
 
 ## Acceptance criteria
 
-- [ ] A pure liveness derivation exists with a named threshold constant and unit tests covering: advancing, quiet-but-fine, stalled, settled, aborted, and blocked-on-access.
-- [ ] Misclassification cases (R3) are each pinned by a test — this signal is only useful if it does not cry wolf.
-- [ ] If the verdict is surfaced, the existing roster/toolview tests still pass and the snapshot change is additive.
-- [ ] `npm test` 0 fail (baseline: 767 tests / 194 suites), `npm run typecheck` clean (both configs).
-- [ ] The register's A-8 row is referenced in the implementation's doc comments.
+- [x] A pure liveness derivation exists with a named threshold constant and unit tests covering: advancing, quiet-but-fine, stalled, settled, aborted, and blocked-on-access. — `deriveWorkerLiveness` in `src/core/liveness.ts` (R1: only clock is the passed-in `nowMs`), thresholds `WORKER_STALL_THRESHOLD_MS` + `WORKER_ACTIVE_WINDOW_MS` exported constants (R2); `test/liveness.test.ts` covers all six classes plus boundaries.
+- [x] Misclassification cases (R3) are each pinned by a test — settled/error/aborted/blocked-on-access pins exist both pure and end-to-end through `check_workers`; "counted-but-unstamped" advancement reads quiet, never a guessed stalled.
+- [x] If the verdict is surfaced, the existing roster/toolview tests still pass and the snapshot change is additive. — Surfaced on the check row only (`WorkerCheckRow.liveness` + `liveness:` segment in `formatCheckRowLine`, an existing result shape per R5); `roster-snapshot.ts` untouched (wire contract stays v3); full suite 0 fail.
+- [x] `npm test` 0 fail (baseline: 767 tests / 194 suites), `npm run typecheck` clean (both configs). — 803 tests / 205 suites, 0 fail (baseline plus this ticket's 20 and concurrent agents' work); `tsc` both configs clean.
+- [x] The register's A-8 row is referenced in the implementation's doc comments. — `src/core/liveness.ts` header cites register A-8 / ADR-0018 exception D22; same citation threaded through `tool-results.ts`, `tools.ts`, `cordis-dsh-host.ts`, `plugin.ts`.
+
+## Comments
+
+### 2026-09-19 — resolved (implementation)
+
+Shipped: `src/core/liveness.ts` (pure verdict: `active` / `quiet` / `stalled`), surfaced on the `check_workers` row via `toCheckRow` / `formatCheckRowLine`; the adapter's existing ticket-29 activity projection now records its observation moment (`lastActivityAtMs` on `CordisDshHost`) and feeds the verdict from `plugin.ts` through `registerDispatcherTools` into the check handler, which joins `listPendingAccess` for the blocked input. Semantics: terminal (completed/error/aborted) and blocked-on-access workers NEVER read stalled — they read `quiet` (the vocabulary is fixed at three; the row's own `status` field carries the distinct meaning). Exactly-at-threshold is quiet (same convention as `isRosterSnapshotStale`). No timers, no polling, no watchdog; nothing kills or redrives anything (the audit's §2 stage-4 finding stands). Register A-8/D22 reconciliation landed in the register file (follow-up commit).
+
+Friction noted, for the record:
+
+1. **The ticket's premise was slightly off.** The "Preferred" shape assumed `check_workers` already returns "time since last observed activity" — it did not; the adapter projection recorded only the activity *phrase* (ticket 29). Fixed by recording `Date.now()` in the SAME `session/event` `tool/call` subscription, exposed as one read-only accessor next to `recentActivity`. Judged within R4 (no new subscription, no new host API, no polling — the seam is unchanged), but flagged here because R4's stop-and-say-so clause would otherwise apply on a literal reading.
+2. **`tool_call_count` has no production caller** — `Multitask.noteToolCall` is exercised by tests only; production counts stay 0 (pre-existing gap, out of this ticket's scope). The derivation still uses the field defensively: counted-but-unstamped advancement → `quiet`, never a time-based claim from an unknown reference.
+3. **The "acceptable" roster-snapshot option was deliberately not taken** — keeps the v3 wire contract and the browser face untouched; the model-facing check row is the surface that needed the signal.
 
 ## Notes
 
