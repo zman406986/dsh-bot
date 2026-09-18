@@ -79,3 +79,24 @@ Boot per the ticket-43 recipe on a throwaway `multitask` profile at `c4a7f29` (b
 Green on this pass (zero-LLM): `commands/list` includes `dispatcher-start` + `dispatcher-steer`; composer slash menu shows both; `commands/execute` A/B — `/goal` matched, `/dispatcher-start` matched with the full success copy; settings namespace registered with our schema; dormant capsule renders (chip/panel/pitch, zh face). Red/blocked, recorded with root causes on ticket 44: Settings 插件配置 section absent (needs a client-side `settings.plugin.item` registration — shipped cards are explicit client registrations); footer flag `unknown` + capsule never flips (client `ctx.inject(["settings"])` watch never fires, even with a roster document present in the namespace); toolviews unrenderable (ticket 45). Ticket ACs touched this pass: only dated comments — 44 ACs 2/3 stay unchecked with split green/red evidence, 34 AC 4 and epic 35 AC 1 stay unchecked, smoke-level "live smoke observed" comments added on 09/10/11/32, new ticket 45 filed. Remaining before ANY closure: ticket 45 (schema fix) + the client watch/section defects, then ONE more live re-pass running this pass's exact probe chain (`rpc-*.json` technique, reusable driver in the evidence dir).
 
 ### 2026-09-18 — Session paused by human: remaining live-verification blockers are tickets 45 (fixed, 6fc92c4, live ACs unchecked) and 46 (client watch/settings card, needs-triage); next live re-pass covers 44(c), 45 live ACs, 46, epic 35 AC 1 activated side, 34 AC 4, smoke 09/10/11/32.
+
+### 2026-09-18 — offline blocker queue cleared one more step (ticket 46 watch half, `c91a937`)
+
+Ticket 46 is triaged (both root causes confirmed with citations) and its **watch
+half is fixed offline**: the client data path was waiting on a service that does
+not exist in the browser (`settings` — the host seam) instead of the shipped
+`ctx.settingsScope` bound per namespace, so the inject body never ran and the
+store never left `waiting`; that single fix is what kept the capsule dormant and
+the footer flag `unknown` in every live pass. Gates on the change: `npm test`
+711/0/186 suites (+5 pins, RED-verified against the old name: 7 failures),
+typecheck clean both configs, `build:client` OK. Its card half is split out as
+**ticket 47** (no `settings.plugin.item` registration), which is the remaining
+offline-actionable item for the next live pass.
+
+**Next live re-pass therefore covers, in this order:** (1) the ticket-46 watch —
+capsule flips client-side, footer flag reads a real value; (2) ticket 47 once
+implemented — the 插件配置 card renders; (3) ticket 45's live ACs (its offline fix
+landed at `6fc92c4`); (4) ticket 44 AC 3's token flow and AC 2's client-surface
+clauses; (5) epic 35 AC 1's activated side, 34 AC 4, smoke 09/10/11/32 — all with
+the same zero-LLM probe chain first (`rpc-*.json` technique in the re-pass #2
+evidence dir). No AC on this ticket is checked by this comment; no ticket moved.
