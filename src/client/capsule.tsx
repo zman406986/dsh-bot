@@ -110,37 +110,51 @@ const IDLE_FOOTER_BOX: CapsuleFooterBox = { flagEnabled: null, version: 0 };
 const noopFooterBox = (): CapsuleFooterBox => IDLE_FOOTER_BOX;
 
 /**
- * Capsule styles (ticket 38). The chip/card float top-right over the frame;
- * colors match the panel palette so no theme contract is assumed. No
- * animation — the skeleton is static (the only animation in the client face
- * remains the panel's running ring).
+ * Capsule styles (ticket 38, themed by ticket 49). The chip/card float
+ * top-right over the frame; every colour is a host design token
+ * (`--dsw-alias-*`), so the surface follows the shell's light/dark theme.
+ * The tokens are ordinary CSS custom properties defined on `body` by the
+ * shipped theme stylesheet (`dsh-client-ui-theme/lib/client.js:1052-1060`) —
+ * inherited here with no service, subscription, or boot-graph edge. Roles:
+ * `bg-layer-3` is the host's own floating-surface value (what
+ * `--dsw-specific-menu` resolves to); the accent is `state-business-primary`,
+ * deliberately NOT `brand-primary`, which is the high-contrast label colour
+ * despite its name.
+ *
+ * Text hierarchy stays opacity-based: alpha over a themed colour reads
+ * correctly in both schemes, whereas swapping to `label-secondary/tertiary`
+ * would silently change density. Type sizes stay px for the same reason —
+ * `--dsw-font-*` is the conversation-content scale, not a control scale.
+ *
+ * No animation — the skeleton is static (the only animation in the client
+ * face remains the panel's running ring).
  */
 export const CAPSULE_CSS = `
 .${CAPSULE_CLASS}{position:absolute;top:8px;right:8px;font-size:12px;line-height:1.5}
-.${CAPSULE_CLASS}__chip{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:12px;border:1px solid #30363d;background:#161b22;color:#c9d1d9;cursor:pointer;font:inherit}
-.${CAPSULE_CLASS}__dot{flex:none;width:8px;height:8px;border-radius:50%;background:#8b949e}
-.${CAPSULE_CLASS}__dot[data-dot="active"]{background:#2f81f7}
-.${CAPSULE_CLASS}__dot[data-dot="error"]{background:#f85149}
+.${CAPSULE_CLASS}__chip{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:12px;border:1px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);cursor:pointer;font:inherit}
+.${CAPSULE_CLASS}__dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--dsw-alias-label-tertiary)}
+.${CAPSULE_CLASS}__dot[data-dot="active"]{background:var(--dsw-alias-state-business-primary)}
+.${CAPSULE_CLASS}__dot[data-dot="error"]{background:var(--dsw-alias-state-error-primary)}
 .${CAPSULE_CLASS}__count{opacity:.75}
-.${CAPSULE_CLASS}__wake{padding:0 6px;border-radius:8px;border:1px solid currentColor;color:#2ea043}
-.${CAPSULE_CLASS}__card{width:320px;max-width:calc(100vw - 16px);max-height:60vh;overflow:auto;padding:10px;border:1px solid #30363d;border-radius:8px;background:#161b22;color:#c9d1d9;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+.${CAPSULE_CLASS}__wake{padding:0 6px;border-radius:8px;border:1px solid currentColor;color:var(--dsw-alias-state-success-primary)}
+.${CAPSULE_CLASS}__card{width:320px;max-width:calc(100vw - 16px);max-height:60vh;overflow:auto;padding:10px;border:1px solid var(--dsw-alias-border-l3);border-radius:8px;background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);box-shadow:var(--dsw-elevation-panel)}
 .${CAPSULE_CLASS}__card-bar{display:flex;justify-content:flex-end;margin-bottom:6px}
 .${CAPSULE_CLASS}__collapse{border:none;background:transparent;color:inherit;opacity:.6;cursor:pointer;font:inherit;font-size:11px;padding:0}
 .${CAPSULE_CLASS}__collapse:hover{opacity:1}
 .${CAPSULE_CLASS}__activation{display:flex;flex-direction:column;gap:8px}
-.${CAPSULE_CLASS}__activation[data-composition="activated"]{margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #30363d}
+.${CAPSULE_CLASS}__activation[data-composition="activated"]{margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid var(--dsw-alias-border-l2)}
 .${CAPSULE_CLASS}__activation-state{font-weight:600}
 .${CAPSULE_CLASS}__activation-pitch{opacity:.7}
-.${CAPSULE_CLASS}__activation-button{align-self:flex-start;padding:3px 10px;border-radius:6px;border:1px solid #30363d;background:#21262d;color:inherit;cursor:pointer;font:inherit}
-.${CAPSULE_CLASS}__activation-button:hover{border-color:#8b949e}
-.${CAPSULE_CLASS}__action-notice{opacity:.85;color:#f85149;font-size:11px}
-.${CAPSULE_CLASS}__deliverables{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px;margin-top:10px;padding-top:8px;border-top:1px solid #30363d}
+.${CAPSULE_CLASS}__activation-button{align-self:flex-start;padding:3px 10px;border-radius:6px;border:1px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-interactive-bg-hover);color:inherit;cursor:pointer;font:inherit}
+.${CAPSULE_CLASS}__activation-button:hover{border-color:var(--dsw-alias-label-tertiary)}
+.${CAPSULE_CLASS}__action-notice{opacity:.85;color:var(--dsw-alias-state-error-primary);font-size:11px}
+.${CAPSULE_CLASS}__deliverables{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px;margin-top:10px;padding-top:8px;border-top:1px solid var(--dsw-alias-border-l2)}
 .${CAPSULE_CLASS}__deliverables-label{font-weight:600}
 .${CAPSULE_CLASS}__deliverables-count{opacity:.75}
 .${CAPSULE_CLASS}__deliverables-toggle{border:none;background:transparent;color:inherit;opacity:.6;cursor:pointer;font:inherit;font-size:11px;padding:0}
 .${CAPSULE_CLASS}__deliverables-toggle:hover{opacity:1}
 .${CAPSULE_CLASS}__deliverables-excerpt{flex-basis:100%;white-space:pre-wrap;word-break:break-word;opacity:.85;font-size:11px}
-.${CAPSULE_CLASS}__footer{display:flex;flex-wrap:wrap;gap:2px 12px;margin-top:10px;padding-top:8px;border-top:1px solid #30363d;opacity:.7;font-size:11px}
+.${CAPSULE_CLASS}__footer{display:flex;flex-wrap:wrap;gap:2px 12px;margin-top:10px;padding-top:8px;border-top:1px solid var(--dsw-alias-border-l2);opacity:.7;font-size:11px}
 `;
 
 /**

@@ -156,6 +156,24 @@ Nothing on the capsule is editable inline. The no-stop guard's final form
 model; the composition close-out (`test/client-capsule-composition.test.ts`)
 assembles dormant and activated end-to-end offline.
 
+## Theming: the surfaces ride the host's design tokens
+
+The capsule and panel take **every colour from the host's shared semantic token
+layer** (`--dsw-alias-*`), so they follow the shell's light/dark setting instead
+of painting a private palette. The tokens are plain CSS custom properties
+defined on `body` by the shipped theme stylesheet
+(`dsh-client-ui-theme/lib/client.js:1052–1060`); inheriting them needs no
+service, subscription, or boot-graph edge, so `ctx.theme` is deliberately **not**
+bound (it owns preferences and theme registration, not styling).
+
+The mapping is semantic, and two near-misses are pinned shut: the accent is
+`--dsw-alias-state-business-primary`, **not** `--dsw-alias-brand-primary`
+(despite its name that is the high-contrast label colour — it would paint a
+white dot on dark and a black dot on light); and `--dsw-font-*` is the
+conversation-content scale, so control type stays in px. Text hierarchy stays
+opacity-based and no token gets a hex fallback, so the private palette cannot
+creep back. `test/client-theme-tokens.test.ts` holds the contract.
+
 ## Send journal is host-owned
 
 The composer's optimistic send / offline queue / reconnect-flush behavior

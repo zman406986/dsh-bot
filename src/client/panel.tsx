@@ -62,9 +62,14 @@ import type { TranslateFn } from "./overlay.js";
 const PANEL_CLASS = "multitask-dispatcher-roster-panel";
 
 /**
- * Panel styles (tickets 27 + 28). Presentation only — no layout promises
- * beyond this panel's own subtree; colors are self-contained so no theme
- * contract is assumed.
+ * Panel styles (tickets 27 + 28, themed by ticket 49). Presentation only — no
+ * layout promises beyond this panel's own subtree. Every colour is a host
+ * design token (`--dsw-alias-*`), inherited from the shell's theme stylesheet
+ * (`dsh-client-ui-theme/lib/client.js:1052-1060`); status dots use the
+ * `state-*` family, and the working ring keeps its translucency through
+ * `color-mix` — the same idiom the host's own stylesheets use over tokens.
+ * Text hierarchy and type sizes are deliberately left opacity-based / px
+ * (see `CAPSULE_CSS`).
  */
 export const ROSTER_PANEL_CSS = `
 .multitask-dispatcher-roster-panel{font-size:12px;line-height:1.5;min-width:0}
@@ -78,13 +83,13 @@ export const ROSTER_PANEL_CSS = `
 .multitask-dispatcher-roster-panel__row{display:flex;align-items:flex-start;gap:8px;min-width:0}
 .multitask-dispatcher-roster-panel__row[data-finished="true"] .multitask-dispatcher-roster-panel__row-title,
 .multitask-dispatcher-roster-panel__row[data-finished="true"] .multitask-dispatcher-roster-panel__row-status{opacity:.6}
-.multitask-dispatcher-roster-panel__dot{flex:none;position:relative;width:8px;height:8px;margin-top:4px;border-radius:50%;background:#8b949e}
-.multitask-dispatcher-roster-panel__dot[data-visual="working"]{background:#2f81f7}
-.multitask-dispatcher-roster-panel__dot[data-visual="starting"]{background:#d29922}
-.multitask-dispatcher-roster-panel__dot[data-visual="done"]{background:#2ea043}
-.multitask-dispatcher-roster-panel__dot[data-visual="failed"]{background:#f85149}
-.multitask-dispatcher-roster-panel__dot[data-visual="stopped"]{background:#8b949e}
-.multitask-dispatcher-roster-panel__dot[data-visual="working"]::after{content:"";position:absolute;inset:-3px;border-radius:50%;border:2px solid rgba(47,129,247,.55);animation:multitask-dispatcher-roster-ring 1.6s ease-out infinite}
+.multitask-dispatcher-roster-panel__dot{flex:none;position:relative;width:8px;height:8px;margin-top:4px;border-radius:50%;background:var(--dsw-alias-label-tertiary)}
+.multitask-dispatcher-roster-panel__dot[data-visual="working"]{background:var(--dsw-alias-state-business-primary)}
+.multitask-dispatcher-roster-panel__dot[data-visual="starting"]{background:var(--dsw-alias-state-warn-primary)}
+.multitask-dispatcher-roster-panel__dot[data-visual="done"]{background:var(--dsw-alias-state-success-primary)}
+.multitask-dispatcher-roster-panel__dot[data-visual="failed"]{background:var(--dsw-alias-state-error-primary)}
+.multitask-dispatcher-roster-panel__dot[data-visual="stopped"]{background:var(--dsw-alias-label-tertiary)}
+.multitask-dispatcher-roster-panel__dot[data-visual="working"]::after{content:"";position:absolute;inset:-3px;border-radius:50%;border:2px solid color-mix(in srgb,var(--dsw-alias-state-business-primary) 55%,transparent);animation:multitask-dispatcher-roster-ring 1.6s ease-out infinite}
 @keyframes multitask-dispatcher-roster-ring{0%{transform:scale(.6);opacity:.9}100%{transform:scale(1.5);opacity:0}}
 @media (prefers-reduced-motion: reduce){.multitask-dispatcher-roster-panel__dot[data-visual="working"]::after{animation:none;transform:none;opacity:.35}}
 .multitask-dispatcher-roster-panel__row-body{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
@@ -94,11 +99,11 @@ export const ROSTER_PANEL_CSS = `
 .multitask-dispatcher-roster-panel__row-activity{opacity:.55}
 .multitask-dispatcher-roster-panel__row-todo{opacity:.45;font-size:11px;max-width:16ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .multitask-dispatcher-roster-panel__row-marker{align-self:flex-start;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 6px;border-radius:8px;border:1px solid currentColor}
-.multitask-dispatcher-roster-panel__row-marker--blocked{color:#d29922}
-.multitask-dispatcher-roster-panel__row-marker--landed{color:#2ea043}
+.multitask-dispatcher-roster-panel__row-marker--blocked{color:var(--dsw-alias-state-warn-primary)}
+.multitask-dispatcher-roster-panel__row-marker--landed{color:var(--dsw-alias-state-success-primary)}
 .multitask-dispatcher-roster-panel__row-steer{display:flex;align-items:center;gap:6px;margin-top:2px;flex-wrap:wrap}
-.multitask-dispatcher-roster-panel__steer{align-self:flex-start;padding:1px 8px;border-radius:6px;border:1px solid #30363d;background:transparent;color:inherit;opacity:.75;cursor:pointer;font:inherit;font-size:11px}
-.multitask-dispatcher-roster-panel__steer:hover{opacity:1;border-color:#8b949e}
+.multitask-dispatcher-roster-panel__steer{align-self:flex-start;padding:1px 8px;border-radius:6px;border:1px solid var(--dsw-alias-border-l3);background:transparent;color:inherit;opacity:.75;cursor:pointer;font:inherit;font-size:11px}
+.multitask-dispatcher-roster-panel__steer:hover{opacity:1;border-color:var(--dsw-alias-label-tertiary)}
 .multitask-dispatcher-roster-panel__steer-hint{opacity:.6;font-size:11px;min-width:0}
 .multitask-dispatcher-roster-panel__finished-count{opacity:.5;font-size:11px}
 .multitask-dispatcher-roster-panel__finished-count > summary{opacity:1;cursor:default}
