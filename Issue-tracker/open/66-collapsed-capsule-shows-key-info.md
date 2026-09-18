@@ -31,3 +31,18 @@ The exact rendering (text, icon, dot color) is the implementer's call, but the t
 Two tickets were both numbered 64 (this one and the ADR-0018 re-base ticket). This file takes the
 next free number, 66; all references (ticket 65's Related line and collapsed-state AC) updated.
 Content unchanged by the renumber; triage against ADR-0018 follows separately.
+
+### 2026-09-19 — re-triaged against ADR-0018 (ticket 64)
+
+Split verdict:
+
+- **The ON/OFF half is voided.** ADR-0018 rules the dispatcher always-on with no mode — there is
+  no dispatcher state for a collapsed indicator to declare (only honest error states, if any).
+- **The running-count half survives as a need, re-based.** Glanceable presence (what is running,
+  how much) carries into the wrapper's presence surface at the imitation standard — it is not on
+  the exception list. Ticket 27's surviving view models (dots, precedence, counts) are the design
+  input; the wrapper shell ticket (67) owns the surface.
+
+**Stays needs-triage:** the chip as specified is not actionable (superseded vehicle + voided
+ON/OFF premise); the surviving half is tracked by 67. Moot-closure candidate after 67 confirms
+coverage.

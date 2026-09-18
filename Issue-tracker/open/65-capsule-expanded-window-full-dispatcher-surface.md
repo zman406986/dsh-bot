@@ -65,3 +65,24 @@ the background while we build essentially the reference's window UI, but as a
 - [ ] Workers remain non-chattable in the window (ticket 51 R3).
 - [ ] Collapsed state still meets tickets 63/66.
 - [ ] Offline unit tests; live browser pass with trivial tasks only (kill timers per AGENTS.md).
+
+### 2026-09-19 — re-triaged against ADR-0018 (ticket 64): substance absorbed; retraction noted
+
+- **Retraction noted:** this ticket cites ADR-0016 uncritically (Related line; tension 4's
+  front-desk routing) and tension 1 cites ADR-0009's conversational-delivery decision. ADR-0016
+  was **retracted** (its sign-off was given under a fabricated premise) and ADR-0009's activation
+  premise was retracted the same day; ADR-0018 supersedes both. The Related line's pointers to
+  50/51 are likewise to cancelled tickets.
+- **The substance is now the master rule.** What this ticket asked for — the dispatcher's whole
+  UI in our own window, with dsh's conversation box not used for our surface — is what ADR-0018
+  accepted ("we build the whole UI"; the wrapper window *is* the dispatcher). It is absorbed by
+  **ticket 67** (wrapper shell research/design, which inherits this ticket's seam tensions:
+  user→dispatcher input and dispatcher→user delivery rendered inside our own surface) and
+  **ticket 72** (per-dispatcher session scoping, which gates the conversation channel design).
+  This ticket's "pass S7 grep" AC is voided with S7 (ADR-0018).
+- The "Request (human, verbatim intent)" heading predates the day's retraction lesson; the quote's
+  gist is consistent with ADR-0018, but verbatim-intent framing is no longer trusted as a record —
+  the ADR is the authority.
+
+**Stays needs-triage:** kept open as the human-request record; not independently actionable
+without duplicating 67. Close as subsumed once 67's design confirms coverage of the seam tensions.
