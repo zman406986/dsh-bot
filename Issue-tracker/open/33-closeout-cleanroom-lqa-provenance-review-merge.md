@@ -117,3 +117,26 @@ inside an agent tool session is reaped with that session — the server never
 listens and it looks exactly like a product failure. Detach the boot
 (`([wmiclass]'Win32_Process').Create(...)` or a scheduled task) before concluding
 anything red, and keep the kill timer. Details in ticket 48's comment.
+
+### 2026-09-18 — one more offline blocker cleared (ticket 49) and a new pass assertion added
+
+Ticket 49 is implemented and verified offline: the capsule and panel no longer
+paint a private dark palette — all 23 colour literals are gone and both surfaces
+style entirely from the host's `--dsw-alias-*` token layer, so they follow the
+shell's light/dark theme (`75932da`; gates 726 pass / 0 fail / 188 suites, +15
+pins, typecheck clean both configs, `build:client` OK).
+
+**This adds one assertion to the pass plan below, and it is cheap:** the pass
+should read the chip/card colours under **both** schemes (toggle the host
+theme, or evaluate the resolved `--dsw-alias-*` on `body` and compare against
+the rendered element). It needs no session and no LLM, so it can ride the same
+zero-LLM probe chain — ideally *before* the activation-dependent items, since it
+is a dormant-side check that cannot be blocked by tickets 45/46/47.
+
+**Worktree state:** `dsh-bot-always-on` was 2 commits behind `main` (this
+ticket's earlier note plus ticket 49) and has been fast-forwarded via the
+launcher's `-Sync`; it now reads `clone/always-on-dispatcher, clean, = main`, so
+either launcher route serves the current surfaces.
+
+No AC on this ticket is checked by this comment; no ticket file moved.
+
