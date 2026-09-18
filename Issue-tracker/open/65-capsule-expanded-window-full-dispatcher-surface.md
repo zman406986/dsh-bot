@@ -3,7 +3,7 @@
 **Status:** open
 **Labels:** needs-triage
 **Blocked by:** none for research/design; implementation blocked by the open questions below
-**Related:** 51 (dedicated dispatcher-bots surface — this ticket extends and largely subsumes it), 35 (capsule epic), 63 (draggable), 66 (collapsed chip key info, renumbered from the duplicate 64), 50 (front-desk mode), ADR-0016, design-16
+**Related:** 51 (dedicated dispatcher-bots surface — this ticket extends and largely subsumes it), 35 (capsule epic), 73 (draggable, renumbered from the duplicate 63), 66 (collapsed chip key info, renumbered from the duplicate 64), 50 (front-desk mode), ADR-0016, design-16
 
 ## Request (human, verbatim intent)
 
@@ -15,7 +15,7 @@ the background while we build essentially the reference's window UI, but as a
 
 ## What this means concretely
 
-- The capsule's two states become: **collapsed chip** (tickets 63/66: draggable, shows
+- The capsule's two states become: **collapsed chip** (tickets 73/66: draggable, shows
   ON/OFF + running count) and **expanded = a large floating window** that is the
   dispatcher product's whole UI, not a small overlay card.
 - Inside the expanded window: selection of / conversation with **dispatcher bots**
@@ -50,7 +50,7 @@ the background while we build essentially the reference's window UI, but as a
 1. Research/verify the conversation-in-own-surface seam (user input + delivery render)
    — this is the make-or-break question. Record an ADR (extends/revises ADR-0009).
 2. Only then design the window: layout (rail + conversation), size/collapse behavior,
-   drag (ticket 63), state wiring to the roster snapshot.
+   drag (ticket 73), state wiring to the roster snapshot.
 3. Fold tickets 51 and 35's expanded-panel scope into the window design rather than
    building the small card first and rebuilding it.
 
@@ -63,7 +63,7 @@ the background while we build essentially the reference's window UI, but as a
 - [ ] Dispatcher bot conversations happen inside the window; the host conversation box
       is not required for dispatcher interaction.
 - [ ] Workers remain non-chattable in the window (ticket 51 R3).
-- [ ] Collapsed state still meets tickets 63/66.
+- [ ] Collapsed state still meets tickets 73/66.
 - [ ] Offline unit tests; live browser pass with trivial tasks only (kill timers per AGENTS.md).
 
 ### 2026-09-19 — re-triaged against ADR-0018 (ticket 64): substance absorbed; retraction noted

@@ -1,4 +1,4 @@
-# 63 — Capsule (chip and expanded panel) must be draggable so the user can move it out of the way
+# 73 — Capsule (chip and expanded panel) must be draggable so the user can move it out of the way
 
 **Status:** open
 **Labels:** needs-triage
@@ -39,3 +39,8 @@ build, and the shell.overlay stacking/click-through constraints this ticket desi
 no longer exist. **Stays needs-triage:** not actionable as written under the new model; a
 moot-closure candidate once ticket 67's wrapper design confirms no in-window floating surfaces
 need drag support. If the wrapper design does surface one, this ticket re-scopes onto it.
+
+### 2026-09-19 — renumbered
+
+Renumbered from 63 on 2026-09-19 — number collision with resolved/63-retune-wake-report-clamp.md
+(same defect class as the 64→66 fix). Ticket 65's references updated.
