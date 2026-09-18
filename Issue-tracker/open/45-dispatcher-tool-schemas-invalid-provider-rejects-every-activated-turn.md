@@ -2,8 +2,8 @@
 
 **Status:** open
 **Labels:** ready-for-agent
-**Blocked by:** none (discovered by the ticket-44 live re-pass #2, 2026-09-18)
-**Related:** 44 (live pass evidence), 11 (dispatcher tools), 09/10 (spawn path this blocks), 33 (live close-out)
+**Blocked by:** none for AC 1 (offline, green); live ACs 2–3 blocked by 83 (worker spawn refused by the host's depth check — discovered 2026-09-19, see comment)
+**Related:** 44 (live pass evidence), 11 (dispatcher tools), 09/10 (spawn path this blocks), 33 (live close-out), 83 (the spawn-depth defect this pass exposed)
 
 ## Symptom (live, cited)
 
@@ -132,3 +132,59 @@ tool uses the `ToolParameterNode` path, so no other serialization branch exists.
 receiving `ctx.tools.register` is structural and out of our tree; if the host re-validates or
 re-serializes differently live, that belongs to AC 2's zero-LLM probe. Live ACs 2–3 left
 unchecked (not run here).
+
+### 2026-09-19 — live pass (evidence: `C:\Users\TZhen\Desktop\dsh-live-ticket45-2026-09-19\`, outside the repo): THIS ticket's defect is confirmed FIXED live — the provider validated and executed every dispatcher tool, zero INVALID_REQUEST — but ACs 2–3 stay UNTICKED: the worker-appearance clause of AC 2 and all of AC 3 are blocked by a NEW downstream defect, filed as ticket 83 (host refuses the spawn: `SubagentDepthError: subagent depth 1 exceeds maxDepth 0`)
+
+Setup per the re-pass #2 recipe: fresh build at `d13fe0f` (`npm run build` + `build:client`,
+client bundle 141,609 bytes), throwaway `multitask` profile recreated
+(`--from-default-profile web`), `dsh plugin --profile multitask add
+file:C:/Users/TZhen/Desktop/dsh-bot` (forward slashes), insert row written into the profile's
+`cordis.patch.yml` BEFORE boot (`./node_modules/dsh-multitask-dispatcher/lib/index.js` —
+note the `./` is REQUIRED: `anchorInsertedPluginNames`, dsh-app-boot lib, only anchors names
+that are absolute or `./`/`../`-prefixed; a bare `node_modules/...` dies at boot with
+ERR_MODULE_NOT_FOUND). `--dump-config` composed the row at lines 541-542 exactly as re-pass #2
+recorded. Boot `dsh --profile multitask --port 8831 --no-open` (detached via WMI node-direct,
+repass3 pattern), host 0.1.5-rc.1 (no version drift), healthy, no activation error
+(`server.log`). Stock `web` profile byte-identical (never booted; mtimes unchanged); throwaway
+profile deleted after; port verified free.
+
+**Zero-LLM phase (all green):**
+- Running-tree proof: served HTML lists `dsh-multitask-dispatcher/client.js`, and
+  `/api/settings/describe` (client-request envelope `type/rpcId/method/payload{args:{}}`)
+  carries the `multitask-dispatcher` namespace with our exact schema (uid 561,
+  `enabled`/`accessRequestTimeoutMs`), `value = base = {enabled:true, accessRequestTimeoutMs:120000}`,
+  `applies: "live"` (`settings-describe-ours-live.clean.json`).
+- `commands/list` (args need `agentId`; discovered by watching the app's own
+  `subagents/list` call after clicking 新会话) includes `dispatcher-start` AND
+  `dispatcher-steer` with descriptions (`rpc-commands-list.json`); composer slash menu shows
+  both on "/dis", never submitted (`shots/02-slash-menu-dis.png`).
+- `commands/execute` A/B: `/goal` MATCHES (control, view-only — `rpc-execute-goal.json`);
+  `/dispatcher-start` MATCHES — `{ok:true, value:{commandId, result:{kind:"success",
+  text:"Dispatcher active in this chat. …"}}}` (`rpc-execute-dispatcher-start.json`).
+- Fetch-patch guard over the whole session: **zero** `settings/update|mutate|replace`
+  requests; the only settings traffic was our describes.
+
+**Token phase — ONE trivial flow, exactly one dispatcher round, no retries:**
+Spawn ask typed into the composer ("Spawn one worker and have it reply with just: ok",
+`shots/04-spawn-ask-typed.png`). The turn COMPLETED end-to-end against the real provider:
+trajectory (`shots/06-trajectory-tool-calls.png`, `rpc-trajectory-spawn-error.json`) shows the
+full dispatcher policy injection (session policy + ledger + standing rules — ticket 44's
+activation clauses re-confirmed), then `todo_write` (in_progress) → `spawn_worker` (schema
+ACCEPTED, call executed) → `todo_write` (reconciled back to pending), 3 tool calls, honest
+final text, no INVALID_REQUEST anywhere. **The exact failure this ticket names — provider
+rejects the turn on tool-schema validation — is gone live.**
+
+**Where it stopped (NOT this ticket's defect):** `spawn_worker → error` —
+`SubagentDepthError: subagent depth 1 exceeds maxDepth 0`. The adapter passes the worker's
+LEAF budget (`WORKER_MAX_DEPTH = 0`) in the spawn request's `maxDepth` slot, but the host's
+`resolveChildDepth` reads that slot as the absolute depth ceiling for the spawn (a depth-0
+parent's child needs ≥ 1). The model then behaved per policy: reconciled the todo honestly,
+reported plainly, no fabrication (`shots/05-spawn-refused-maxdepth.png`). No worker spawned,
+so the steer and stop legs were deliberately not attempted (guaranteed refusals; no retry of
+the rejected spawn). LLM contact for the whole pass: exactly ONE round, ~50.7K tok context
+(69% cache hit), 3 s. Root cause, host citations, fix direction, and the two offline pins
+asserting the wrong semantics → **ticket 83**.
+
+AC checkboxes unchanged (AC 2/3 unticked): AC 2's turn-completes-without-INVALID_REQUEST
+clause is proven by this pass, but its "worker appears" clause and all of AC 3 await
+ticket 83's fix — this ticket moves to resolved only when all its ACs pass.
