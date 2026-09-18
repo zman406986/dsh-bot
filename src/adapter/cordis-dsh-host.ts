@@ -217,6 +217,15 @@ export interface CordisDshHost extends DshHost {
    */
   lastActivityAtMs(workerId: string): number | null;
   /**
+   * Ticket 75: subscribe to firehose-observed tool calls on owned workers.
+   * The `session/event` handler already matches every `tool/call` for an
+   * owned session (the ticket-29 subscription); this notifies subscribers so
+   * the core's `noteToolCall` count advances on the same observation. Fired
+   * once per observed event, whether or not the payload was readable enough
+   * for an activity phrase. No new seam, no polling.
+   */
+  onWorkerToolCall(cb: (workerId: string) => void): void;
+  /**
    * Ticket 41: the bounded settle-report excerpt observed for an owned
    * worker when it settled (adapter-side projection of the same
    * `subagent/end` event the core receives), or `null` when nothing honest
@@ -380,6 +389,9 @@ export function createCordisDshHost(
   const settledCallbacks: Array<(event: SettledEvent) => void> = [];
   const stepBoundaryCallbacks: Array<(workerId: string) => void | Promise<void>> = [];
   const accessRequestCallbacks: Array<(event: AccessRequestEvent) => void> = [];
+  // Ticket 75: firehose-observed tool calls on owned workers, fanned out to
+  // subscribers (the plugin wires the core's noteToolCall onto this).
+  const toolCallCallbacks: Array<(workerId: string) => void> = [];
   // Ticket 29: latest activity phrase per owned worker, projected from the
   // host `session/event` firehose. Pure subscription — no polling, no timers.
   // Ticket 61: the entry also carries its observation moment (host clock at
@@ -439,6 +451,12 @@ export function createCordisDshHost(
     if (typeof session !== "object" || session === null) return;
     const workerId = String(session.id);
     if (!workers.has(workerId)) return;
+    // Ticket 75: an observed `tool/call` is a tool call whether or not the
+    // payload was readable — the count advances unconditionally, while the
+    // phrase stays null (never invented) for unreadable payloads.
+    for (const cb of [...toolCallCallbacks]) {
+      cb(workerId);
+    }
     const phrase = describeToolActivity(event.data);
     if (phrase !== null) {
       workerActivity.set(workerId, { phrase, atMs: Date.now() });
@@ -497,6 +515,15 @@ export function createCordisDshHost(
      */
     lastActivityAtMs(workerId: string): number | null {
       return workerActivity.get(workerId)?.atMs ?? null;
+    },
+
+    /**
+     * Ticket 75: subscribers hear every firehose-observed tool call on an
+     * owned worker — the same observation moment the activity phrase is
+     * recorded at. Fired from the ticket-29 `session/event` subscription.
+     */
+    onWorkerToolCall(cb: (workerId: string) => void): void {
+      toolCallCallbacks.push(cb);
     },
 
     recentResult(workerId: string): RosterRecentResultSource | null {
@@ -665,6 +692,7 @@ export function createCordisDshHost(
       settledCallbacks.length = 0;
       stepBoundaryCallbacks.length = 0;
       accessRequestCallbacks.length = 0;
+      toolCallCallbacks.length = 0;
       parent = null;
       parentSessionId = null;
     },

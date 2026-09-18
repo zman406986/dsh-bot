@@ -32,7 +32,8 @@ function createStubCtx(): AdapterContext & {
   };
   registeredCommands: CommandDefinitionLike[];
   registeredTools: Array<{ name: string }>;
-  fire(name: string, payload: unknown): void;
+  /** Variadic: some buses pass extra args (session/event is two-arg). */
+  fire(name: string, ...payloads: unknown[]): void;
   runCommand(inv: { commandId: string; agent: AgentLike }): void;
 } {
   const disposers: Array<() => void> = [];
@@ -43,9 +44,9 @@ function createStubCtx(): AdapterContext & {
     execute: (args: unknown, exec?: unknown) => Promise<unknown>;
   }> = [];
 
-  const fire = (name: string, payload: unknown) => {
+  const fire = (name: string, ...payloads: unknown[]) => {
     for (const cb of listeners.get(name) ?? []) {
-      cb(payload as never);
+      (cb as (...args: unknown[]) => void)(...payloads);
     }
   };
 
@@ -321,5 +322,50 @@ describe("plugin scaffold", () => {
     }
     // A later session-start still captures nothing.
     ctx.fire("agent/session-start", { agent: createAgent("session-2") });
+  });
+
+  it("a firehose tool/call advances the count check_workers shows (ticket 75)", async () => {
+    const ctx = createStubCtx();
+    apply(ctx, { enabled: true });
+
+    const agent = createAgent("session-1");
+    ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const spawn = ctx.registeredTools.find((t) => t.name === "spawn_worker");
+    assert.ok(spawn);
+    const spawned = (await spawn.execute(
+      { stream_key: "s", title: "T", prompt: "P" },
+      { agent: { session: { id: "session-1" } } },
+    )) as { ok: boolean };
+    assert.equal(spawned.ok, true);
+
+    // Synthetic `session/event` firehose delivery, two-arg like the live bus.
+    const toolCall = (name: string) => ({
+      type: "tool/call",
+      data: { name, arguments: JSON.stringify({ command: "npm test" }) },
+    });
+    ctx.fire("session/event", { id: "child-stub" }, toolCall("bash"));
+    ctx.fire("session/event", { id: "child-stub" }, toolCall("grep"));
+    // Unowned and non-tool deliveries must not move the count.
+    ctx.fire("session/event", { id: "stranger" }, toolCall("bash"));
+    ctx.fire("session/event", { id: "child-stub" }, { type: "turn/start" });
+
+    const check = ctx.registeredTools.find((t) => t.name === "check_workers");
+    assert.ok(check);
+    const value = (await check.execute(
+      {},
+      { agent: { session: { id: "session-1" } } },
+    )) as {
+      ok: boolean;
+      rows: Array<{ worker_id: string; tool_call_count: number; liveness: string | null }>;
+    };
+    assert.equal(value.ok, true);
+    assert.equal(value.rows.length, 1);
+    assert.equal(value.rows[0]?.worker_id, "child-stub");
+    assert.equal(value.rows[0]?.tool_call_count, 2);
+    // Fresh observed activity reads active — the quiet→active flip the
+    // count wiring enables (previously the count could never advance).
+    assert.equal(value.rows[0]?.liveness, "active");
   });
 });

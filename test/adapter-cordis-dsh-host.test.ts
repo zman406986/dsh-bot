@@ -14,6 +14,10 @@ import {
 } from "../src/adapter/cordis-dsh-host.js";
 import { bindDispatcherLifecycle, isTopLevel } from "../src/adapter/parent-agent.js";
 import { createMultitask } from "../src/core/multitask.js";
+import {
+  deriveWorkerLiveness,
+  WORKER_STALL_THRESHOLD_MS,
+} from "../src/core/liveness.js";
 import { CHECK_ACTIVITY_CHARS, RECENT_RESULT_EXCERPT_CHARS } from "../src/core/report-clamp.js";
 import type { SettledEvent } from "../src/core/types.js";
 import { createWorkerAgentDef } from "../src/worker/agent-def.js";
@@ -800,5 +804,85 @@ describe("CordisDshHost session/event activity feed (ticket 29)", () => {
     assert.equal(describeToolActivity({}), null);
     assert.equal(describeToolActivity({ name: 7, arguments: "{}" }), null);
     assert.equal(describeToolActivity({ name: "bash" }), "bash");
+  });
+});
+
+describe("CordisDshHost tool-call feed (ticket 75)", () => {
+  it("every owned tool/call event notifies subscribers; unreadable payloads count without a phrase", async () => {
+    const ctx = createStubCtx();
+    const { host, workerId } = await spawnOneWorker(ctx);
+    const seen: string[] = [];
+    host.onWorkerToolCall((id) => seen.push(id));
+
+    fireSessionEvent(ctx, workerId, toolCallEvent("bash", { command: "go" }));
+    // Unreadable payload: no activity phrase, but the call still happened.
+    fireSessionEvent(ctx, workerId, { type: "tool/call", data: null });
+    assert.deepEqual(seen, [workerId, workerId]);
+    assert.equal(host.recentActivity(workerId), "bash: go");
+
+    // Non-tool events and unowned sessions never notify.
+    fireSessionEvent(ctx, workerId, { type: "turn/start", data: {} });
+    fireSessionEvent(ctx, "stranger-session", toolCallEvent("bash", { command: "x" }));
+    assert.deepEqual(seen, [workerId, workerId]);
+  });
+
+  it("dispose stops the notifications", async () => {
+    const ctx = createStubCtx();
+    const { host, workerId } = await spawnOneWorker(ctx);
+    let calls = 0;
+    host.onWorkerToolCall(() => {
+      calls += 1;
+    });
+    host.dispose();
+    fireSessionEvent(ctx, workerId, toolCallEvent("bash", { command: "go" }));
+    assert.equal(calls, 0);
+  });
+
+  it("wired to the core, the count advances and the unknown-reference liveness state becomes reachable", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    // The plugin's glue line (plugin.ts), replicated at this layer; the
+    // end-to-end glue itself is covered in plugin-scaffold.test.ts.
+    const multitask = createMultitask(host);
+    host.onWorkerToolCall((id) => multitask.noteToolCall(id));
+    host.bindParent(createAgent("disp-1"), "disp-1");
+
+    const spawn = await multitask.spawnWorker({
+      parentSessionId: "disp-1",
+      streamKey: "s1",
+      title: "T",
+      prompt: "go",
+    });
+    assert.ok(spawn.ok);
+    if (!spawn.ok) return;
+    const workerId = spawn.workerId;
+
+    // Unreadable payload: the count advances with no observation moment.
+    fireSessionEvent(ctx, workerId, { type: "tool/call", data: null });
+
+    const summary = multitask.listWorkers("disp-1")[0];
+    assert.equal(summary?.toolCallCount, 1);
+    assert.equal(host.lastActivityAtMs(workerId), null);
+    assert.equal(summary?.startedAtMs, multitask.getWorker(workerId)?.startedAtMs);
+
+    // The stalled-vs-quiet flip (ticket 75): past the stall threshold with
+    // no observed activity, a worker whose count stayed 0 was measured from
+    // start and read `stalled`; now that the count advanced, the advancement
+    // moment is unknown and the honest verdict is `quiet`.
+    const now = (summary?.startedAtMs ?? 0) + WORKER_STALL_THRESHOLD_MS + 1;
+    const base = {
+      status: summary?.status ?? "spawned",
+      startedAtMs: summary?.startedAtMs ?? 0,
+      lastActivityAtMs: host.lastActivityAtMs(workerId),
+      blocked: false,
+    };
+    assert.equal(deriveWorkerLiveness({ ...base, toolCallCount: 0 }, now), "stalled");
+    assert.equal(
+      deriveWorkerLiveness(
+        { ...base, toolCallCount: summary?.toolCallCount ?? 0 },
+        now,
+      ),
+      "quiet",
+    );
   });
 });

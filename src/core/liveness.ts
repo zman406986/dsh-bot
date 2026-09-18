@@ -81,6 +81,13 @@ export interface WorkerLivenessInput {
  * honest verdict is `quiet`. Only a worker with no observed advancement AT
  * ALL (no timestamp, zero counted calls) can be measured from
  * `startedAtMs`.
+ *
+ * Ticket 75: the counted-calls/unknown-moment state below is now REACHABLE
+ * in production, not just in tests — the adapter firehose advances the
+ * count on every owned `tool/call` (including unreadable payloads, which
+ * record no activity timestamp). Before that wiring the count was
+ * structurally stuck at 0, so such a worker was measured from
+ * `startedAtMs` and could read `stalled`; it now honestly reads `quiet`.
  */
 export function deriveWorkerLiveness(
   input: WorkerLivenessInput,
@@ -94,6 +101,8 @@ export function deriveWorkerLiveness(
     (input.toolCallCount > 0 ? null : input.startedAtMs);
   // Unknown reference (advancement happened, moment unobserved): cannot
   // claim silence, cannot claim freshness — quiet, never guessed.
+  // Reachable in production since ticket 75 (firehose counts calls whose
+  // payloads record no activity timestamp).
   if (referenceMs === null) return "quiet";
   const quietForMs = Math.max(0, nowMs - referenceMs);
   if (quietForMs > WORKER_STALL_THRESHOLD_MS) return "stalled";

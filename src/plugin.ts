@@ -254,6 +254,13 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   });
   multitaskRef = multitask;
 
+  // Ticket 75: the ticket-29 firehose subscription already observes every
+  // owned worker `tool/call`; route that observation into the core's existing
+  // counter so `WorkerSummary.toolCallCount` advances in live wiring (it was
+  // test-only before, structurally stuck at 0). Same subscription as the
+  // activity phrase — no new seam, no polling.
+  host.onWorkerToolCall((workerId) => multitask.noteToolCall(workerId));
+
   // Roster snapshot projection (tickets 21 + 27). Pure projection of the
   // core roster — never a second source of truth. The core observer fires on
   // every roster-affecting transition (including access-ask park/resolve and
