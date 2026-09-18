@@ -46,7 +46,7 @@ Inputs to the decision, not an exhaustive register — ticket 52 must re-derive 
 
 | # | Deviation | Where (as read) | Reference behaviour |
 |---|---|---|---|
-| D-1 | The worker contract is delivered as conversation-role turn content; the base system prompt a spawned child carries is **unverified** | `src/adapter/cordis-dsh-host.ts` (`assembleWorkerPrompt` → `textBlocks` → `startContinuable`), `src/worker/prompt.ts` | Contract built as a system prompt by a dedicated subagent runner; `canSendMessage: false` in the assembled prompt |
+| D-1 | The worker contract is delivered as conversation-role turn content — as the child's **first user turn** — rather than in a system position | `src/adapter/cordis-dsh-host.ts:534-544`, `src/worker/prompt.ts` | Contract built as a system prompt by a dedicated subagent runner; `canSendMessage: false` in the assembled prompt |
 | D-2 | A steer restates only the correction frame, never the contract | `src/core/steer-queue.ts`, `wrapParentCorrection` | The subagent prompt is re-composed every turn |
 | D-3 | No shared safety section in the worker contract | `src/worker/prompt.ts` | One shared safety section constant appended to every subagent prompt |
 | D-4 | No boot redrive — activation rebuilds and injects a notice but opens no turn | `src/plugin.ts:414–432` (`rebuildFromDurability` → `injectNotice`) | Recovery work is actively driven on boot |
@@ -54,6 +54,8 @@ Inputs to the decision, not an exhaustive register — ticket 52 must re-derive 
 | D-6 | No delivery-path telemetry (`delivered` / `superseded` / `dropped` + reason) | doc comments only | Records the disposition and the reason |
 
 **Separately flagged, not a fidelity deviation:** `rebuildFromDurability` frees a live-at-crash worker's stream key while that worker may still be alive on the host with no retained interrupt handle (`src/core/multitask.ts:640–654`). Re-dispatching the freed key yields **two live workers on one logical stream** — the exact condition one-worker-per-stream exists to prevent. This is a bug, not a deviation; it needs its own ticket either way.
+
+> **Register now live (2026-09-18).** The table above was written as *inputs* to this decision. The maintained register — with a disposition and an approval field per item, plus the items this table missed (additions we have and the reference lacks, and the unreachable-by-necessity residuals) — now lives at **`docs/research/dsh-core-loop-deviations.md`**, alongside the audit that justifies each row: **`docs/research/dsh-core-loop-fidelity-audit.md`**. Two findings already changed this table's content rather than its decision: D-1 is an **unused seam** (`persona`), not a structural impossibility — so it is `to-be-removed`, not a deviation to approve — and D-2 is **subsumed by D-1**, because a system-prompt section is recomputed every turn. The deviations that genuinely need the human are the unreachable residuals and the activation boundary (register Part C/D).
 
 ## Considered options
 
