@@ -17,6 +17,10 @@ import {
   type AccessRelay,
 } from "./access-relay.js";
 import {
+  createReviewPostureTable,
+  type ReviewPostureTable,
+} from "./review-posture.js";
+import {
   createSteerQueue,
   type SteerQueue,
   wrapParentCorrection,
@@ -260,6 +264,14 @@ export interface Multitask {
   clearSessionAccessPolicy(sessionId?: string): void;
   /** Stored policy table (session/profile). No hit → ask. */
   readonly accessPolicy: AccessPolicyTable;
+  /**
+   * Review-posture table (ticket 69, chunk A). Session-scoped deterministic
+   * auto-answer consulted only on a consent "ask" miss; shipped posture is
+   * EMPTY (un-configured behavior is byte-identical). Rows enter only
+   * through this API (tests; any real seeder is a human decision) and never
+   * outlive their session — clearance rides `clearSessionAccessPolicy`.
+   */
+  readonly reviewPosture: ReviewPostureTable;
 }
 
 export function createMultitask(
@@ -313,6 +325,12 @@ export function createMultitask(
     },
   });
   const accessPolicy: AccessPolicyTable = createAccessPolicyTable();
+  // Ticket 69 (chunk A): the review posture is composed AFTER the consent
+  // table at this lookupPolicy wiring — consent (allow or deny) wins; only
+  // a consent "ask" miss falls through to the posture; a posture miss is
+  // still "ask" and lands on the shipped park/wake/timeout path. Shipped
+  // posture is EMPTY, so with no rows the lookup is byte-identical.
+  const reviewPosture: ReviewPostureTable = createReviewPostureTable();
   const accessRelay: AccessRelay = createAccessRelay({
     ...(options?.access?.timeoutMs !== undefined
       ? { timeoutMs: options.access.timeoutMs }
@@ -321,7 +339,11 @@ export function createMultitask(
     ...(options?.access?.schedule !== undefined
       ? { schedule: options.access.schedule }
       : {}),
-    lookupPolicy: (req, ctx) => accessPolicy.lookup(req, ctx),
+    lookupPolicy: (req, ctx) => {
+      const consent = accessPolicy.lookup(req, ctx);
+      if (consent !== "ask") return consent;
+      return reviewPosture.lookup(req, ctx);
+    },
     deliver: (workerId, message) => host.sendMessage(workerId, message),
     wakeForAsk: (notice) => {
       wakeBus.enqueueAccessRequest({
@@ -978,8 +1000,12 @@ export function createMultitask(
       // outlive their session. Deactivation clears only that session's rows;
       // plugin unload clears every session-scope row.
       accessPolicy.clearSession(sessionId);
+      // Ticket 69 (chunk A): posture rows never outlive their session either
+      // — same attribution rules, same call sites.
+      reviewPosture.clearSession(sessionId);
     },
     accessPolicy,
+    reviewPosture,
   };
 }
 
@@ -992,6 +1018,7 @@ export type {
   PeerInboxOptions,
   PeerSendAck,
   ReconcileReport,
+  ReviewPostureTable,
   SpawnRequest,
   SpawnResult,
   SteerResult,
