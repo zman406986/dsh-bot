@@ -246,6 +246,21 @@ export const localeDictionary: LocaleDictionary = {
       "Access-request timeout (ms)",
     "settings.card.field.accessRequestTimeoutMs.hint":
       "How long an unanswered permission request waits before it is denied. Leave empty to use the default.",
+    // Ticket 77 (ADR-0020 slice 1): the wrapper shell's chrome copy. The
+    // main-surface line is the honest skeleton state — the conversation
+    // surface lands with ticket 80, and the copy says exactly that (never a
+    // fake composer or a fake transcript). All names and phrasing are ours
+    // (exception B9: no verbatim reference text).
+    "shell.title": "Dispatchers",
+    "shell.sidebar.label": "Dispatcher sessions",
+    "shell.empty": "No dispatcher sessions yet.",
+    "shell.noselection": "Select a dispatcher to see its work.",
+    "shell.conversation.pending":
+      "The conversation surface is not wired into this shell yet.",
+    "shell.row.working": "{count} working",
+    "shell.row.needs-you": "{count} need you",
+    "shell.row.finished": "{count} finished",
+    "shell.row.presence-unavailable": "presence unavailable",
   },
   zh: {
     "roster.title": "工作者",
@@ -329,6 +344,18 @@ export const localeDictionary: LocaleDictionary = {
     "settings.card.field.accessRequestTimeoutMs.label": "访问请求超时（毫秒）",
     "settings.card.field.accessRequestTimeoutMs.hint":
       "权限请求未获答复时可等待的时长，超时后按拒绝处理。留空以使用默认值。",
+    // Ticket 77（ADR-0020 切片 1）：外壳的界面文案。主 surface 的一行是
+    // 诚实的骨架状态——会话表面随 ticket 80 接入，文案如实说明。命名与措辞
+    // 均为自创（例外 B9：不逐字复制参考文本）。
+    "shell.title": "调度台",
+    "shell.sidebar.label": "调度会话",
+    "shell.empty": "暂无调度会话。",
+    "shell.noselection": "选择一个调度会话以查看其工作。",
+    "shell.conversation.pending": "会话表面尚未接入此外壳。",
+    "shell.row.working": "{count} 个进行中",
+    "shell.row.needs-you": "{count} 个需要你",
+    "shell.row.finished": "{count} 个已完成",
+    "shell.row.presence-unavailable": "状态不可用",
   },
 };
 
