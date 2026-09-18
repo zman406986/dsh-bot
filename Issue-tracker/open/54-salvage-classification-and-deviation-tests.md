@@ -66,3 +66,26 @@ Product-code side only. Do **not** open `reference material-NOT LICENSE SAFE DON
 - [ ] Counts and the survives/adapts/scrapped split stated with method.
 - [ ] §5's hypothesis explicitly confirmed or refuted.
 - [ ] `git status` clean apart from the new note.
+
+## Comments
+
+### 2026-09-18 — head start from team-lead: the deviation-encoding tests
+
+The research team hit the platform rate limit (resets **18:59:25**), so the assigned worker could not start. Rather than idle, the team lead ran a **targeted search** for exactly the output this ticket calls its most important — the tests that encode a deviation. **This is not the exhaustive survey** and it is not the per-module classification. Verify and extend it; do not treat it as complete, and do not re-derive it from scratch.
+
+**Four of the six deviations are pinned by the existing suite.** That is the finding: the suite is not silent, it is *complicit* — it asserts the deviating behaviour, so any fidelity fix will fail tests that currently pass. Budget for updating them.
+
+| Deviation | The test that encodes it | What it pins |
+|---|---|---|
+| **D-1** contract channel | `test/adapter-cordis-dsh-host.test.ts:190-192` (and `:223`) | Asserts the worker contract arrives as `spec.request.prompt[0].text`. **This is the conversation channel.** Ticket 55 must update it, not work around it |
+| **D-3** safety section | *none* | Search for `safety` across `test/` returns **zero hits** — the section is absent *and* unguarded. Ticket 56 adds the first coverage |
+| **D-4** restart notice queued | `test/restart-honesty.test.ts:305-308` | Collects the notice from **`agent.injected`** and asserts exactly one. This pins the *queueing* primitive — the exact defect. **Ticket 57 will break this test**, and that is correct: the assertion must move to the waking path. The surrounding assertions (content, exactly-one, rebuild-before-publish, unknown rows off-roster) are all sound and should be kept |
+| **D-5** unbounded undelivered persistence | `test/todo-reconciler.test.ts:486` (`landedUndelivered.length === 1`) and **`:526`** (`assert.deepEqual(first.landedUndelivered, second.landedUndelivered)`) | `:526` is the sharp one — it asserts the landed-undelivered item is **unchanged across successive reconciles**, i.e. that nothing ever escalates it. That is D-5 stated as a requirement. Also `test/durable-roster.test.ts:272-273`, `:481-482`. Ticket 58 must update these |
+| **D-6** delivery telemetry | *none* | `disposition`, `superseded`, `lost`, `redrive` return **zero hits** across `test/` — no coverage, consistent with the subsystem not existing |
+| **B-1** freed stream key | not yet searched | **Not covered by this head start.** Search the restart suites specifically: `test/durable-roster.test.ts` "restart rebuild" block (`:233-486`) is the likely home |
+
+**Second finding — the seam we are about to adopt is completely unguarded.** `persona` appears **nowhere** in `test/`. Neither does `agentOptions`. So ticket 55 wires a verified host seam that no test currently watches: write the assertion *before* the change, or a regression in the channel swap is invisible.
+
+**Method, so it is reproducible:** `Grep` over `test/` for each deviation's vocabulary — `request\.prompt|persona|agentOptions`, `safety`, `restart|injectNotice`, `landedUndelivered|markDelivered`, `lost|redrive|disposition|superseded`. Absence of hits is reported as a finding, per the ticket.
+
+**Still yours to do:** the per-module classification of all 54 `src/` files and 41 `test/` files with verdict + loop stage + reason; the counts; the orthogonality check on tickets 43–49; and the explicit confirm-or-refute of the audit's §6 hypothesis. Also confirm this head start by re-running each search.
