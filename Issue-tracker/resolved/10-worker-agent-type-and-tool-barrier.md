@@ -71,3 +71,7 @@ Human review of the live smoke checklist is **deferred, not done**: the human ha
 ## Comments
 
 - Moved to resolved by overnight sweep 2026-09-18: all ACs checked; verified via implementing commits and artifact spot-check on main.
+
+## 2026-09-18 — live smoke observed (re-pass #2): BLOCKED — no worker spawn possible until ticket 45 lands; barrier live-verification still deferred
+
+Per the deferral note above: the ticket-44 re-pass #2 activated the dispatcher live (RPC A/B matched, policy injected) but the first spawn ask failed at the provider — `Invalid schema for function 'check_workers': false is not of type "array"` (ticket 45; every activated turn is rejected, so no worker is ever created). The three live checks (denied-tool absence on a real child, hallucinated-call refusal, empty-report placeholder) therefore remain live-unverified; nothing contradicts them offline (149+ suites green through the current 702). Recorded for the next pass; evidence `C:\Users\TZhen\Desktop\dsh-live-repass2-2026-09-18\shots\09/10`.

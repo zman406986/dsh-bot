@@ -173,3 +173,7 @@ activated, epic AC 1) — plus its LQA/provenance close-out and the merge to
 `main`. AC 4's independent-verification requirement is satisfied per-ticket
 by each sub-ticket's verification comment; AC 5's hash listing is ticket 33's
 close-out comment.
+
+### 2026-09-18 — re-pass #2 vs AC 1: dormant composition green in a real browser; activated composition NOT exercisable — AC 1 stays unchecked
+
+Evidence: `C:\Users\TZhen\Desktop\dsh-live-repass2-2026-09-18\`. Dormant half of this AC is green on a launcher-profile boot: exactly one capsule entry, collapsed chip `data-dot="dormant"`, expand → dormant pitch + single start affordance, footer present (`shots/01–03`, `07`). The activated half is blocked by two defects recorded on ticket 44 (re-pass #2 comment): (a) the client roster/flag watch never fires live, so the capsule cannot flip to the activated composition even though activation IS real host-side (`/dispatcher-start` matched via RPC A/B, policy injections visible in the next turn); (b) ticket 45's tool-schema defect fails every activated turn at the provider, so no worker/roster/deliverables state can ever be produced to mirror. Both are product-code fixes → out of a no-product-change pass. AC 1 remains open pending ticket 45 + the client-watch fix, then one re-pass.

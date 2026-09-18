@@ -63,3 +63,9 @@ Human review of the live smoke checklist is **deferred, not done**: the human ha
 ## Comments
 
 - Moved to resolved by overnight sweep 2026-09-18: all ACs checked; verified via implementing commits and artifact spot-check on main.
+
+## 2026-09-18 — live smoke observed (re-pass #2, partial): item 1 GREEN — apply runs live, no inject-missing, all seven services resolve; items 2–6 BLOCKED by ticket 45 (no worker can spawn)
+
+Per the deferred-smoke note above (human review deferred until the client UI surfaces were done), the ticket-44 re-pass #2 executed the smoke-level checks that were reachable — evidence `C:\Users\TZhen\Desktop\dsh-live-repass2-2026-09-18\`, throwaway `multitask` profile, healthy boot, zero-LLM probes plus ONE trivial flow attempt:
+- **Item 1 (plugin loads, no inject-missing) GREEN**, stronger than asked: apply runs (settings namespace installed — `/api/settings/describe` carries `multitask-dispatcher` with our schema), all seven injects resolve on 0.1.5-rc.1 (subagents/agents/jobs/storageDomain/tools/commands/userQuestions — ticket 43's probe + this pass's clean boot), commands register (`commands/list` includes `dispatcher-start`/`dispatcher-steer`), activation executes (success result + policy context injections in the next turn), and the durable-marker/storage stack loads without error.
+- **Items 2–6 (spawn → running status, interrupt, settle/wake, restart markers, listLiveJobs) BLOCKED**, not skipped: ticket 45's tool-schema defect makes the provider reject every activated session's turns (`Invalid schema for function 'check_workers'`), so no worker can exist live yet. Unverified live; the fake-host ACs above stand as written.

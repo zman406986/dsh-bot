@@ -66,3 +66,7 @@ Human review of the live dsh demo (D1–D8, S1–S5) is **deferred, not done**: 
 ## Comments
 
 - Moved to resolved by overnight sweep 2026-09-18: all ACs checked; verified via implementing commits and artifact spot-check on main.
+
+## 2026-09-18 — live smoke observed (re-pass #2): registration + policy injection GREEN; tool EXECUTION blocked by ticket 45 (schemas invalid); D1–D8 demo still deferred
+
+Live facts from the ticket-44 re-pass #2 (`C:\Users\TZhen\Desktop\dsh-live-repass2-2026-09-18\`): the five dispatcher tools (a) register on activation — the activated turn's payload carried them, which is exactly what the provider's schema validator rejected (`Invalid schema for function 'check_workers'`, ticket 45); (b) the policy surface is live — two `上下文注入 · multitask-dispatcher` rows (session policy + per-turn reminder) appear on the activated session's turn (`shots/09`), and the dormant state registers exactly the two commands (dormant-registration matrix confirmed live via `commands/list`). The D1–D8 manual demo (S1–S5) remains deferred until ticket 45 makes turns executable; no live tool result, steer, wake, or delivery has been observed yet.
