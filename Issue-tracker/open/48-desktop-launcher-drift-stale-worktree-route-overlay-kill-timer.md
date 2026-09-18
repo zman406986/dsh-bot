@@ -147,3 +147,15 @@ has no history of its own).
 
 **Residual:** the two unchecked ACs — the `Ahead > 0` refusal (needs a synthetic
 commit to exercise) and the browser-level capsule assertion (ticket 33's pass).
+
+### 2026-09-19 — live pass 2 observation (not this ticket's route; no AC ticked)
+
+Pass 2 booted the `multitask` profile route, not the synced-worktree launcher route, so the
+last open AC stays with ticket 33's browser pass. Two signals relevant to it: (1) the
+dormant capsule chip + card render fine on a real profile boot (`shots/01/04/07/08`); (2)
+`/dispatcher-start` flipped the capsule FOOTER FLAG to `data-flag="on"` but the expanded
+card composition stayed the dormant pitch — whoever ticks the "flips on /dispatcher-start"
+clause should decide whether the flag flip satisfies it or the roster-keyed card behavior
+(ticket 44's pass-2 comment) is the honest reading. Also confirmed again this pass: WMI
+`powershell -Command "& timer.ps1"` processes never execute; all kill timers were node-internal
+(verified in tasklist at launch).
