@@ -140,3 +140,80 @@ either launcher route serves the current surfaces.
 
 No AC on this ticket is checked by this comment; no ticket file moved.
 
+### 2026-09-18 — live re-pass #3 complete (evidence: `C:\Users\TZhen\Desktop\dsh-live-repass3-2026-09-18\`): pass-order items (2) and the first clause of (1) are GREEN — ticket 47 RESOLVED, ticket 46's footer flag now real; the activation-dependent set is unchanged and still waits on ticket 45
+
+Booted from a fresh build of `9743330` on the committed-overlay web route
+(`dsh --profile web --patch dev/cordis.web.patch.yml --port 8823 --no-open`,
+started directly rather than through `dsh-bot.ps1`), detached via WMI node-direct
+with kill timers armed at launch on BOTH wrappers. **Zero LLM calls** (no composer
+input was ever submitted; the only `/api/llm/*` traffic is the two provider
+catalogs) and **zero writes to the settings document** — a live
+`settings/update|mutate|replace` was specifically looked for, via a patched
+`window.fetch`, across every interaction and never appeared. Full write-up, probe
+chain and screenshots in the evidence dir's `README.md`.
+
+**(2) Ticket 47 — the 插件配置 card renders. RESOLVED.** `Settings → 插件 → 插件配置`
+now shows, as its FIRST card, `Multitask Dispatcher` with our zh copy, a
+`启用调度器` checkbox reading `true`, an `访问请求超时（毫秒）` field reading
+`120000`, and 放弃/保存 disabled (nothing staged) — above the host's unchanged
+终端 / Agent 循环 / Subagent / 网页搜索 rows (`shots/01`–`03`). A live
+`POST /api/settings/describe` on the same boot returns our namespace `uid: 561`,
+`value = base = {enabled: true, accessRequestTimeoutMs: 120000}`,
+`applies: "live"`, `revision: 0`, and **no `user` key** — and the controls read
+exactly that, with the per-field "已在此设置"/reset affordances correctly ABSENT
+because `overridden` is presence in the user layer, not a value comparison. The
+staging/degrade paths were exercised live without writing: a checkbox click
+surfaced `未保存`, enabled Save + Discard and followed the draft, with no settings
+write on the wire; 放弃 restored the clean state. On reload the card re-mounts and
+still reads the document. That closes ticket 47's live AC, and the before/after
+pair is exact — re-pass #2's `shots/05` shows the same tab with only the host's
+four rows while the namespace was already served. Ticket 47's four ACs are all
+green: file moved `open/` → `resolved/`, Status set.
+
+Route caveat, stated rather than glossed: this was the committed-overlay **web**
+route, not the `multitask` profile and not through the launcher script. The
+launcher passes this same committed patch, the profile route's namespace presence
+was proven in re-pass #2 (`rpc-settings-describe2.json`, same `uid: 561`), and the
+card half is client-side and route-independent — so the AC's substance is met; a
+single boot carrying both is not what was run.
+
+**(1a) Ticket 46's footer flag is now REAL — the "unknown" symptom is gone.** On
+the same boot the capsule renders once, collapsed chip empty with
+`data-dot="dormant"`, and expanding it gives a footer with `data-flag="on"` and the
+visible segment `调度器设置：已启用` — the client mirror reading `enabled: true` from
+the served document, i.e. the `ctx.settingsScope` bind fix (`c91a937`) proven live
+rather than only offline (`shots/04`). This is the exact attribute re-pass #2
+recorded as `unknown`.
+
+**(1b) The rest of ticket 46's live AC could not be reached and was not forced.**
+"the capsule flips client-side" needs an activated roster; the roster key is
+mirrored under `roster` in our namespace (`src/client/index.ts:21-22`) and the
+dormant served schema carries exactly `enabled` + `accessRequestTimeoutMs`, so the
+host half only publishes it on activation — and activation's turns are still
+rejected by the provider (ticket 45), so no worker state can exist to mirror either
+way. Forcing the question would have meant activating the dispatcher over RPC on
+the human's live `web` profile, which writes durable host-side state; the wrong
+trade for a bonus check, so it was deliberately not done and is recorded on ticket
+46 instead. AC 3's first clause green, second clause blocked upstream; no box
+moved, ticket 46 open.
+
+**Not done, recorded rather than implied:** the ticket-49 request in the previous
+comment — reading the chip/card colours under both schemes — was not run in this
+pass. The card rendered under the host's light scheme with only `--dsw-alias-*`
+tokens, which shows it follows the host theme rather than a private palette, but
+that is not the two-scheme comparison that was asked for; it stays on the list.
+
+**Still deferred, unchanged:** (3) ticket 45's live ACs, (4) ticket 44 AC 3's token
+flow and AC 2's client-surface clauses, (5) epic 35 AC 1's activated side, 34 AC 4,
+smoke 09/10/11/32 — all need an executable activated turn. Newly cheap for the next
+pass: the probe chain, the detached-boot wrappers, and the RPC envelope shape are
+all reusable in the re-pass #3 evidence dir (`tools/driver.mjs` + `tools/dcmd.sh`;
+the typert gateway wants exactly one plain-object `args` field, so
+`payload: {args:{}}` is the working shape for a no-arg method).
+
+Pass hygiene: the ticket-48 caveat was honored (both wrappers detached with nothing
+but quoted paths in the command line — `-File` does not run through WMI and
+`-Command` mangles metacharacters), kill timers armed at launch, and the human's
+`web` profile settings document left byte-identical.
+
+

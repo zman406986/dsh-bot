@@ -166,3 +166,49 @@ gains a note that the implementation had diverged from it.
 flips and the footer flag reads a real value) — it belongs to the next live
 re-pass, per the pass split the repo has used throughout. The card AC moved to
 ticket 47. No ticket file moved; ticket 46 stays open on its one live AC.
+
+### 2026-09-18 — live re-pass #3: the footer-flag clause is GREEN; the "capsule flips" clause is still unverifiable zero-LLM
+
+Evidence: `C:\Users\TZhen\Desktop\dsh-live-repass3-2026-09-18\` (write-up in its
+`README.md`; `shots/04-capsule-expanded-footer-flag-on.png`), from a fresh build of
+`9743330` on the committed-overlay web route, detached with kill timers armed at
+launch. Zero LLM calls; no writes anywhere.
+
+**The expected AC 3 failure is gone.** re-pass #2 recorded the footer flag as
+`data-flag="unknown"` with the flag segment honestly omitted ("the settings-mirror
+watch never delivered"). On this boot the capsule is present exactly once, the
+collapsed chip is empty with `data-dot="dormant"`, and expanding it gives a footer
+whose flag segment is present and real:
+
+- `data-flag="on"`
+- visible footer text: `调度器设置：已启用` followed by
+  `可在 设置 → Multitask Dispatcher 中更改——对新会话生效。`
+
+That is the client mirror reading `enabled: true` out of the served document — the
+`ctx.settingsScope` bind fix (`c91a937`) is now **proven live**, not just offline.
+The same boot also proves ticket 47's card, which is what makes that hint accurate
+rather than copy-only.
+
+**What is NOT verified, and why it cannot be, in a zero-LLM pass:** the AC's other
+clause — "the capsule flips client-side". The activated composition needs a roster
+snapshot, and the roster is mirrored into our settings namespace under the `roster`
+key (`src/client/index.ts:21-22` — the documented config-channel fallback), which
+the served schema does not carry while dormant: live `/api/settings/describe` on
+this boot returns `uid: 561` with a dict of exactly `enabled` + `
+accessRequestTimeoutMs` and no roster key. The host half only grows that key on
+activation, and a roster with no workers would not settle the question anyway —
+workers need a turn, and ticket 45 still rejects every activated turn at the
+provider. re-pass #2 reached the same wall from the other side (a roster document
+placed by hand still did not flip the capsule — because the watch was dead; that
+watch is now fixed, but the roster still cannot be produced).
+
+This pass deliberately did **not** activate the dispatcher over RPC to force the
+question. Activation writes durable host-side state, and this boot is the human's
+live `web` profile rather than a throwaway one — the wrong trade for a bonus check
+that is not this ticket's frontier. When the next pass activates (ticket 45
+unblocking, or an explicitly consented RPC activation on a throwaway profile), the
+flip assertion is the one to re-run: same probe, read `data-dot` / the panel's
+`data-composition` after activation.
+
+AC 3 therefore stays **unchecked** with its first clause green and its second
+clause blocked upstream (ticket 45). No AC box moved; ticket 46 stays open.
