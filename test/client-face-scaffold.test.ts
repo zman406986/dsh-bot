@@ -204,9 +204,10 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
     // the ticket-39 activation-row copy, the ticket-40 action-wiring copy
     // (stop message, failure lines, per-row steer affordance), the
     // ticket-41 deliverables-line copy, and the ticket-42 footer copy
-    // (flag provenance + copy-only Settings hint), and the ticket-47
+    // (flag provenance + copy-only Settings hint), the ticket-47
     // settings-card copy (chrome, save/discard, and one label/hint pair per
-    // schema field).
+    // schema field), and the ticket-68 onboarding beat copy (five beats +
+    // the step/next/done/skip/save-failed chrome).
     assert.deepEqual(keys, [
       "activation.presence-hint",
       "capsule.action.no-channel",
@@ -284,6 +285,22 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
       "shell.conversation.pending",
       "shell.empty",
       "shell.noselection",
+      // Ticket 68 (ADR-0018 in-scope area): the first-run onboarding beats.
+      "shell.onboard.background.body",
+      "shell.onboard.background.title",
+      "shell.onboard.done",
+      "shell.onboard.first.body",
+      "shell.onboard.first.title",
+      "shell.onboard.handoff.body",
+      "shell.onboard.handoff.title",
+      "shell.onboard.intro.body",
+      "shell.onboard.intro.title",
+      "shell.onboard.next",
+      "shell.onboard.save-failed",
+      "shell.onboard.skip",
+      "shell.onboard.step",
+      "shell.onboard.tools.body",
+      "shell.onboard.tools.title",
       "shell.row.finished",
       "shell.row.needs-you",
       "shell.row.presence-unavailable",

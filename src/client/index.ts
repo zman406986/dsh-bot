@@ -48,6 +48,14 @@
  *    Finding 7) reduced by `conversation-store.ts`, older pages through the
  *    scoped `loadOlder()`, sends through ticket 40's plain-prompt sink. No
  *    cancel affordance exists (area 7 conformity).
+ * 9. the onboarding first-run seat (ticket 68, ADR-0018 in-scope area): the
+ *    shell's no-selection main state hosts the beat walk when the flow is
+ *    unsuppressed — IN-SHELL, so it survives the ticket-78 cutover (never
+ *    the staging-only shipped `settings.onboarding` slot). Suppression rides
+ *    the SAME settings-namespace bind as the roster/card (A5): a well-formed
+ *    `onboarding` seen record OR ≥1 dispatcher mirror key (`roster.<id>`,
+ *    tickets 76/79) suppresses; a corrupt/unreadable record FAILS OPEN — the
+ *    flow shows, it is never silently hidden.
  *
  * Ticket 40 binds the capsule/panel intents to ticket 36's verified seams
  * at THIS composition point and nowhere else: the narrow CommandTransport
@@ -62,7 +70,10 @@
  * via `src/client/actions.ts`.
  */
 
-import type { ClientContext } from "./context.js";
+import type {
+  ClientContext,
+  ClientSettingsScopeLike,
+} from "./context.js";
 import {
   LOCALE_NAMESPACE,
   localeDictionary,
@@ -134,6 +145,12 @@ import {
   createConversationPane,
   type ConversationSendOutcome,
 } from "./conversation.js";
+import {
+  createOnboardingStore,
+  writeOnboardingSeenRecord,
+  type OnboardingStore,
+} from "./onboarding.js";
+import { createOnboardingPane } from "./onboarding-pane.js";
 
 /** Client services this module binds (vendored Cordis inject list). */
 export const inject: readonly string[] = ["slots", "locale"];
@@ -160,7 +177,10 @@ export function apply(ctx: ClientContext): void {
  * loader registers. The capsule store (ticket 38) is the entry's own
  * expansion state; the footer store (ticket 42) holds the persisted flag
  * provenance read from the SAME watch; defaulting either keeps older
- * callers working and gives a fresh fiber a collapsed capsule.
+ * callers working and gives a fresh fiber a collapsed capsule. The
+ * onboarding store (ticket 68) holds the first-run beat walk plus the seen
+ * input read from that same watch; defaulting it starts a fresh fiber at
+ * beat one.
  */
 export function applyClientModule(
   ctx: ClientContext,
@@ -168,6 +188,7 @@ export function applyClientModule(
   capsule: CapsuleStore = createCapsuleStore(),
   footer: CapsuleFooterStore = createCapsuleFooterStore(),
   card: SettingsCardStore = createSettingsCardStore(),
+  onboarding: OnboardingStore = createOnboardingStore(),
 ): void {
   // Locale namespace (Finding 6 idiom): labeled effect; executes immediately,
   // the returned disposer is collected for unload.
@@ -193,6 +214,13 @@ export function applyClientModule(
   // scope, and the card's writes (`set`/`unset`) leave through the transport
   // that bind already owns. A second bind would be a second channel with its
   // own revision view, which is exactly what the ticket forbids.
+  //
+  // Ticket 68 rides this SAME bind for the onboarding suppression input: each
+  // accepted document feeds the store's seen extraction, and an unavailable
+  // namespace feeds an explicit `undefined` — fail-open (the flow shows when
+  // the record cannot be read; it is never silently hidden). The bound scope
+  // is also kept for the seen WRITE hand-off below.
+  let seenScope: ClientSettingsScopeLike | null = null;
   ctx.effect(() => {
     let disposeWatch: (() => void) | undefined;
     if (typeof ctx.inject !== "function") {
@@ -208,6 +236,7 @@ export function applyClientModule(
         return;
       }
       const scope = binder.bind({ namespace: LOCALE_NAMESPACE });
+      seenScope = scope;
       card.attach(scope);
       const readSnapshot = () => {
         const snapshot = scope.getSnapshot();
@@ -215,8 +244,12 @@ export function applyClientModule(
           // Namespace not exposed to this client (or preferences are
           // process-local): no honest feed exists at all.
           store.set({ kind: "channel-missing" });
+          // Ticket 68: no readable document = no seen record — the
+          // fail-open reset so first-run can never be stranded.
+          onboarding.applyDocument(undefined);
           return;
         }
+        onboarding.applyDocument(snapshot.value);
         // `loading` (or a first-section-less `ready`) means the namespace's
         // document has not been accepted yet: stay `waiting` — the feed is
         // alive, the roster simply is not in it.
@@ -232,9 +265,23 @@ export function applyClientModule(
     });
     return () => {
       if (disposeWatch !== undefined) disposeWatch();
+      seenScope = null;
       card.detach();
     };
   }, "multitask-dispatcher: roster settings watch");
+
+  // The onboarding seen-write hand-off (ticket 68): a best-effort write of
+  // the seen record through the ONE bound scope (A5 — never a second
+  // channel), factored as the pure `writeOnboardingSeenRecord` (offline
+  // pinned). A resolved write stays silent — the watch re-delivers the
+  // document and the suppression decision closes the flow (no fake success
+  // surface; the capsule's discipline). A missing write path or a rejected
+  // write sets the honest save-failed notice instead: the flow closes for
+  // this visit and simply shows again next launch — fail-open, so nothing
+  // strands either way.
+  const writeOnboardingSeen = (): void => {
+    writeOnboardingSeenRecord(seenScope, () => onboarding.markSaveFailed());
+  };
 
   // Capsule overlay entry (ticket 38, ADR-0013; Finding 5 universal idiom):
   // inject waits for the shipped `shell.overlay` declaration, then registers
@@ -359,7 +406,10 @@ export function applyClientModule(
   // registration, the feed subscription, and the seat projection together.
   ctx.slots.inject(MAIN_PAGE_SLOT, () => {
     const t = ctx.locale.bind(LOCALE_NAMESPACE);
-    const mount = mountShellPage(ctx);
+    const mount = mountShellPage(ctx, {
+      store: onboarding,
+      onSeen: writeOnboardingSeen,
+    });
     return ctx.slots.register(
       shellPageRegistration(),
       createDispatcherShell(t, mount.store, mount.hosts),
@@ -398,7 +448,21 @@ export interface ShellPageMount {
   readonly hosts: ShellHosts;
 }
 
-export function mountShellPage(ctx: ClientContext): ShellPageMount {
+/**
+ * The first-run onboarding wiring (ticket 68): the store the settings watch
+ * feeds and the composition's seen-write hand-off. Optional so a composition
+ * (or a test) can mount the shell without the flow — the no-selection state
+ * keeps its bare copy.
+ */
+export interface ShellOnboardingWiring {
+  readonly store: OnboardingStore;
+  readonly onSeen: () => void;
+}
+
+export function mountShellPage(
+  ctx: ClientContext,
+  onboarding?: ShellOnboardingWiring,
+): ShellPageMount {
   const store = createDispatcherShellStore();
   const seat = createRosterStore();
   const conversation = createConversationStore();
@@ -493,6 +557,20 @@ export function mountShellPage(ctx: ClientContext): ShellPageMount {
     return store.subscribe(syncSeat);
   }, "multitask-dispatcher: shell roster seat projection");
 
+  // The first-run onboarding seat (ticket 68): bound to the wired store and
+  // the seen-write hand-off, reading the dispatcher mirrors from THIS mount's
+  // shell store (the "≥1 dispatcher session" suppression input). Without the
+  // wiring the seat stays absent and the shell keeps its bare no-selection
+  // copy.
+  const onboardingPane = onboarding
+    ? createOnboardingPane(
+        ctx.locale.bind(LOCALE_NAMESPACE),
+        onboarding.store,
+        store,
+        { onSeen: onboarding.onSeen },
+      )
+    : undefined;
+
   const hosts: ShellHosts = {
     // Host the panel ONLY for a session our mirrors vouch for (a parsed or
     // corrupt dispatcher snapshot); anything else renders an empty pane —
@@ -515,6 +593,10 @@ export function mountShellPage(ctx: ClientContext): ShellPageMount {
     onSelectSession: (sessionId) => {
       binding?.open(sessionId);
     },
+    // The no-selection main state hosts the first-run flow when the wiring
+    // provides it (ticket 68); the seat itself settles to the no-selection
+    // copy once suppressed.
+    onboarding: onboardingPane,
   };
 
   return { store, seat, conversation, hosts };

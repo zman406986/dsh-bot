@@ -288,6 +288,35 @@ export const localeDictionary: LocaleDictionary = {
     "shell.conv.sending": "Sending…",
     "shell.conv.no-channel": "No send channel is reachable in this runtime.",
     "shell.conv.send-failed": "The send failed — the message was not delivered.",
+    // Ticket 68 (ADR-0018 in-scope area): the first-run onboarding beats.
+    // Five beats, all new/adapted copy (exception B9) mapping the reference's
+    // sequence onto dsh honestly: no sign-in or account beat (U-A gap), no
+    // computer-readiness beat (ticket 71's capability gate), the
+    // background-jobs beat narrowed to our single worker kind (C15), and the
+    // first-agent beat kept user-driven (U-G). Failure copy is the one honest
+    // save-failed line — retry-less (U-A); the suppression read itself fails
+    // open, so unreadable never hides this flow.
+    "shell.onboard.intro.title": "Your dispatchers live here",
+    "shell.onboard.intro.body":
+      "This window is the dispatch shell. Each sidebar entry is a dispatcher session — a chat that can plan work and run background workers for you.",
+    "shell.onboard.background.title": "Work continues without you",
+    "shell.onboard.background.body":
+      "When a dispatcher starts a worker, the worker runs on its own. You can keep using the window; results arrive in the conversation as ordinary replies, and the sidebar shows what is still in flight.",
+    "shell.onboard.tools.title": "You approve what workers may do",
+    "shell.onboard.tools.body":
+      "Workers act through tools under your control. When something sensitive comes up — a command, a file, network access — the dispatcher asks you first and waits for your answer.",
+    "shell.onboard.first.title": "Create your first dispatcher",
+    "shell.onboard.first.body":
+      "A dispatcher starts as an ordinary chat. Create a new chat and ask it to start dispatching — once it activates, it appears in the sidebar with its own worker status.",
+    "shell.onboard.handoff.title": "You are set",
+    "shell.onboard.handoff.body":
+      "Select a dispatcher in the sidebar to open its conversation; its workers' progress shows in the panel beside it. This introduction does not repeat.",
+    "shell.onboard.next": "Next",
+    "shell.onboard.done": "Get started",
+    "shell.onboard.skip": "Skip",
+    "shell.onboard.step": "Step {current} of {total}",
+    "shell.onboard.save-failed":
+      "Couldn't save that you have seen this introduction — it may appear again next time.",
   },
   zh: {
     "roster.title": "工作者",
@@ -401,6 +430,33 @@ export const localeDictionary: LocaleDictionary = {
     "shell.conv.sending": "发送中…",
     "shell.conv.no-channel": "当前运行时没有可用的发送通道。",
     "shell.conv.send-failed": "发送失败——消息未送达。",
+    // Ticket 68（ADR-0018 纳管范围）：首次运行引导。五拍均为自创/改写文案
+    // （例外 B9），把参考的顺序诚实地映射到 dsh：没有登录或账户节拍
+    // （U-A 缺口），没有电脑就绪演示（ticket 71 的能力门），后台任务节拍
+    // 收窄到我们的单一工作者类别（C15），首个代理节拍保持用户主动（U-G）。
+    // 失败文案只有一句诚实的保存失败——不设重试（U-A）；抑制读取本身
+    // 失败开放，读不到时绝不会隐藏此流程。
+    "shell.onboard.intro.title": "调度会话都在这里",
+    "shell.onboard.intro.body":
+      "这个窗口就是调度外壳。侧栏中的每一项都是一个调度会话——可以规划工作并为你运行后台工作者的聊天。",
+    "shell.onboard.background.title": "工作在后台继续",
+    "shell.onboard.background.body":
+      "调度器启动工作者后，工作者会独立运行。你可以继续使用窗口；结果会以普通回复的形式送达对话，侧栏会显示仍在进行的工作。",
+    "shell.onboard.tools.title": "工作者能做什么由你批准",
+    "shell.onboard.tools.body":
+      "工作者通过工具行事，并受你的控制。当涉及敏感操作——命令、文件、网络访问——调度器会先征求你的同意并等待答复。",
+    "shell.onboard.first.title": "创建你的第一个调度器",
+    "shell.onboard.first.body":
+      "调度器从普通聊天开始。新建一个聊天并让它开始调度——激活后，它会出现在侧栏，并带有自己的工作者状态。",
+    "shell.onboard.handoff.title": "一切就绪",
+    "shell.onboard.handoff.body":
+      "在侧栏选择一个调度器即可打开其对话；其工作者的进度会显示在旁边的面板中。本引导不会再次出现。",
+    "shell.onboard.next": "下一步",
+    "shell.onboard.done": "开始使用",
+    "shell.onboard.skip": "跳过",
+    "shell.onboard.step": "第 {current} 步，共 {total} 步",
+    "shell.onboard.save-failed":
+      "未能保存“已完成引导”的记录——下次可能会再次显示。",
   },
 };
 

@@ -162,6 +162,16 @@ export interface ShellHosts {
    * component itself never touches the sessions service.
    */
   readonly onSelectSession?: (sessionId: string) => void;
+  /**
+   * The first-run onboarding seat (ticket 68): rendered in the no-selection
+   * main state in place of the bare copy. The seat itself decides between
+   * the beats and the settled no-selection copy from the suppression state
+   * (settings-namespace seen record / dispatcher mirrors), so the shell
+   * stays presentation-only. IN-SHELL by construction — the seat lives in
+   * this frame, never in a staging-only slot, so it survives the ticket-78
+   * cutover.
+   */
+  readonly onboarding?: (() => JSX.Element) | undefined;
 }
 
 /** Sidebar row as a button (selection is a plain click, no router yet). */
@@ -348,9 +358,16 @@ export function createDispatcherShell(
         </aside>
         <section className={`${SHELL_CLASS}__main`}>
           {panes.main.kind === "no-selection" ? (
-            <div className={`${SHELL_CLASS}__noselection`}>
-              {t("shell.noselection")}
-            </div>
+            hosts.onboarding ? (
+              // Ticket 68: the onboarding seat replaces the bare no-selection
+              // copy while the first-run flow is unsuppressed; it degrades to
+              // the same copy itself once suppressed (one vocabulary).
+              hosts.onboarding()
+            ) : (
+              <div className={`${SHELL_CLASS}__noselection`}>
+                {t("shell.noselection")}
+              </div>
+            )
           ) : (
             <>
               <div className={`${SHELL_CLASS}__main-header`}>
