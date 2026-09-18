@@ -188,6 +188,8 @@ Nulls are **dropped**, never emitted as empty sections; a section that renders t
 - **Agent-profile snapshot** — freezes the profile section text plus a system-identity and an announced-identity pair, so an identity change is announced exactly once per epoch and then folded into the section after the next summary.
 - **Memory snapshot** — either renders live (agent + user + project memory recall, each with its own limits) or replays a frozen render, gated by a memory-freeze flag.
 
+> **2026-09-19 update (ticket 62):** this appendix's subagent claims are now verified at file:line level with evidence grades in `reference-subagent-inherited-sections.md`. Composition-order reading confirmed (memory and user-identity render for subagent runners; no subagent early return); one correction-in-detail: the profile section a child carries is the **parent's**, freshly rendered — children decline the profile-snapshot lifecycle.
+
 ---
 
 # Appendix C — role catalogs

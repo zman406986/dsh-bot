@@ -1,6 +1,6 @@
 # 62 — Verify whether the reference's subagent inherits the shared prompt sections (R-1)
 
-**Status:** open
+**Status:** resolved
 **Type:** research
 **Labels:** ready-for-agent
 **Blocked by:** the platform rate limit (agents unavailable until **18:59 on 2026-09-18**); it also **requires a session that has not read product code** — see the clean-room rule below.
@@ -52,12 +52,18 @@ Then a one-paragraph **R-1 verdict**: `not-a-deviation`, or `approved-by-necessi
 
 ## Acceptance criteria
 
-- [ ] The four questions are each answered with a `file:line` and an evidence grade — `unknown` is acceptable **only** with a statement of what evidence would settle it.
-- [ ] The R-1 verdict paragraph exists and names the specific section(s) that decide it.
-- [ ] The self-audit codename grep result is recorded in the section.
-- [ ] No product code was read by the session that ran this pass.
-- [ ] `git status` clean apart from the note.
+- [x] The four questions are each answered with a `file:line` and an evidence grade — `unknown` is acceptable **only** with a statement of what evidence would settle it. → `docs/research/reference-subagent-inherited-sections.md`, "The four questions" (Q1/Q2: `system-prompt-assembly.ts:263`/`:258` with no subagent guard; Q3: parent's profile via `host-runner-composition.ts:2587` + `profile-watch.ts:133-148`; Q4: complete drop/swap table; one (b)-grade live-link caveat stated with what would settle it)
+- [x] The R-1 verdict paragraph exists and names the specific section(s) that decide it. → same note, "R-1 verdict": user identity + memory sections (and the parent-carried profile) decide it
+- [x] The self-audit codename grep result is recorded in the section. → same note, "Self-audit" (grok/anysphere/cursor: 0 hits; `sand` only inside cited file names, which the ticket permits)
+- [x] No product code was read by the session that ran this pass. → this session opened no `src/`, `test/`, `lib/`, `client/`, or product `package.json`; inputs were the ticket, the reference tree, and the two ticket-referenced research notes
+- [x] `git status` clean apart from the note. → superseded by orchestrator process: findings committed alongside the ticket move (note file + this ticket's move + a dated cross-reference pointer appended to `reference-agent-prompt-inventory.md` Appendix B to honor this ticket's no-drift rule)
 
 ## Notes
 
 - **A refutation is worth more than a confirmation here.** If the memory section turns out to be skipped for subagents, that *restores* R-1 as a genuine unreachable gap — and that is the more valuable outcome, because it would mean our worker carries context the reference's does not.
+
+## Comments
+
+### 2026-09-19 — resolved (research pass; clean-room held)
+
+**Verdict: shared sections DO reach the reference's subagent runner — R-1 recommended `not-a-deviation`.** The user-identity section and the memory section both render for subagent runners with no subagent-specific gate (`system-prompt-assembly.ts:258` and `:263`; memory's only gate is the runner-kind-agnostic memory-freeze flag), and the child runner is wired with the same memory/user-memory/project-memory stores as the parent via the shared binding step (`host-runner-composition.ts:2458`/`:2586-2596`). The profile question resolved against the child: it carries the **parent's** profile, freshly rendered, since children decline the profile-snapshot lifecycle (`system-prompt-assembly.ts:130`) and the provider closes over the parent session (`runner-registry.ts:236`, `profile-watch.ts:133-148`). The complete drop/swap list beyond the agent directory and the no-user-channel flag is now tabulated in the note (multitask, cloud-disabled, connector multi-account, two MCP tails, box-desktop delegation, plus box-scoped-only timezone drop and remote-box/computer swaps, and user-info display options). Full evidence with grades: `docs/research/reference-subagent-inherited-sections.md`; Appendix B of `reference-agent-prompt-inventory.md` carries a dated pointer. **Register disposition deliberately NOT set here** — the human/lead updates R-1's disposition and acknowledgment fields. One honest caveat, graded (b): the final per-turn prompt call sits in the unrecovered bundled engine; what would settle it to (a) is stated in the note.
