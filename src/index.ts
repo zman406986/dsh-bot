@@ -246,6 +246,7 @@ export {
 export {
   buildTurnReminderForSession,
   createDispatcherTools,
+  toToolParametersSchema,
 } from "./core/tools.js";
 export type {
   DeliverToUserFn,

@@ -54,7 +54,7 @@ failure to the next tool.
 
 ## Acceptance criteria
 
-- [ ] (offline, gate) `npm test`, `npm run typecheck`, `npm run build:client` green including
+- [x] (offline, gate) `npm test`, `npm run typecheck`, `npm run build:client` green including
       the new schema-shape pin over all five dispatcher tools.
 - [ ] (live, ZERO LLM calls) an activated session's dispatcher turn completes without
       INVALID_REQUEST — provable cheapest by re-running the ticket-44 re-pass #2 probe chain:
@@ -73,3 +73,62 @@ failure to the next tool.
   registrations), and the client roster/flag watch (`ctx.inject(["settings"])` in
   `src/client/index.ts:128`) never fires in the browser, so the capsule composition and footer
   flag stay dormant/`unknown` even with a roster document present in the namespace.
+
+## Comments
+
+### 2026-09-18 — offline fix landed (AC 1 green); live ACs 2–3 await the separate pass
+
+Fix at the serialization boundary, per the ticket's minimal direction. The authoring model is
+UNCHANGED (per-field `required` booleans stay in `ToolParameterNode`); only the emitted schema
+changed:
+
+- `src/core/tools.ts`: new pure `toToolParametersSchema(node)` — walks the node tree, drops
+  `required` from every property schema, and derives the parent object's
+  `required: ["field", ...]` from children with `required: true` (emitted only when
+  non-empty, so `check_workers` carries no `required` key at all). `description`, `enum`,
+  `items`, `properties`, `additionalProperties` pass through recursively.
+- `src/adapter/dispatcher-tools.ts`: `toRegisterableTool` now registers
+  `parameters: toToolParametersSchema(def.parameters)` instead of the verbatim node tree —
+  the single serialization site for all five dispatcher tools. `request_access`
+  (`src/adapter/worker-access-tool.ts`) was audited in the same pass: its hand-written schema
+  already uses the correct object-level array and is untouched, but it is now covered by the
+  same pin.
+- `test/tool-schema-shape.test.ts` (new): the offline regression pin AC 1 asked for. It
+  registers all five tools through `registerDispatcherTools`, structurally walks every
+  emitted `parameters` tree (anywhere `required` appears it must be an array of strings;
+  booleans fail; `type` must be a valid JSON-Schema type string; properties/items recurse),
+  pins each tool's required array, and walks the worker-side `request_access` schema with the
+  same validator. Verified RED before the fix (e.g. `deliver_result.properties.text still
+  carries required`, `spawn_worker.parameters.required` was `undefined`), GREEN after.
+  No existing test asserted on parameter shapes, so none needed updating.
+
+Before/after for `check_workers` (the tool the provider validated first):
+
+```jsonc
+// BEFORE (verbatim ToolParameterNode — INVALID, provider: INVALID_REQUEST)
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "worker_id": { "type": "string", "required": false, "description": "…" }
+  }
+}
+
+// AFTER (toToolParametersSchema — valid JSON Schema)
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "worker_id": { "type": "string", "description": "…" }
+  }
+}
+// required fields, e.g. steer_worker: "required": ["worker_id", "message"] at object level
+```
+
+Gates: `npm test` 706/0 across 186 suites (was 702/0 — +4 pins), `npm run typecheck` clean,
+`npm run build:client` clean. Audit scope note: `grep` over `src/` found exactly two
+`ctx.tools.register` call sites (dispatcher five + worker `request_access`); no worker-side
+tool uses the `ToolParameterNode` path, so no other serialization branch exists. The dsh host
+receiving `ctx.tools.register` is structural and out of our tree; if the host re-validates or
+re-serializes differently live, that belongs to AC 2's zero-LLM probe. Live ACs 2–3 left
+unchecked (not run here).

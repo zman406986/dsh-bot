@@ -50,6 +50,46 @@ export interface DispatcherToolDef {
   readonly execute: (args: Record<string, unknown>) => Promise<unknown>;
 }
 
+/**
+ * Serialize a ToolParameterNode tree into a provider-valid JSON Schema
+ * (ticket 45). Authoring keeps the ergonomic per-field `required` boolean;
+ * at the serialization boundary it becomes the PARENT object's
+ * `required: ["field", ...]` array. A boolean `required` inside a property
+ * schema is invalid JSON Schema and the provider's strict function-schema
+ * validator rejects the whole request ("false is not of type \"array\""),
+ * so `required` never appears on a property node. Optional (or absent)
+ * flags are equivalent to being absent from the array; an object with no
+ * mandatory fields emits no `required` key at all.
+ */
+export function toToolParametersSchema(
+  node: ToolParameterNode,
+): Record<string, unknown> {
+  const schema: Record<string, unknown> = { type: node.type };
+  if (node.description !== undefined) {
+    schema.description = node.description;
+  }
+  if (node.enum !== undefined) {
+    schema.enum = [...node.enum];
+  }
+  if (node.additionalProperties !== undefined) {
+    schema.additionalProperties = node.additionalProperties;
+  }
+  if (node.items !== undefined) {
+    schema.items = toToolParametersSchema(node.items);
+  }
+  if (node.properties !== undefined) {
+    const properties: Record<string, unknown> = {};
+    const required: string[] = [];
+    for (const [name, child] of Object.entries(node.properties)) {
+      properties[name] = toToolParametersSchema(child);
+      if (child.required === true) required.push(name);
+    }
+    schema.properties = properties;
+    if (required.length > 0) schema.required = required;
+  }
+  return schema;
+}
+
 /** Optional user-facing send used by deliver_result (wake turns). */
 export type DeliverToUserFn = (
   text: string,

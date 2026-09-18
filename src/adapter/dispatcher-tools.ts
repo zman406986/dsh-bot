@@ -7,6 +7,7 @@
 import type { Multitask } from "../core/multitask.js";
 import {
   createDispatcherTools,
+  toToolParametersSchema,
   type DeliverToUserFn,
   type DispatcherToolDef,
   type RecentActivityFn,
@@ -93,7 +94,10 @@ export function toRegisterableTool(
   return {
     name: def.name,
     description: def.description,
-    parameters: def.parameters,
+    // Serialize the authored node tree into provider-valid JSON Schema
+    // (ticket 45): per-field required booleans become the parent object's
+    // required array; the provider rejects boolean `required` outright.
+    parameters: toToolParametersSchema(def.parameters),
     output: {
       // Loose schema: the registry validates shape; we return JSON objects.
       schema: { type: "object" },
