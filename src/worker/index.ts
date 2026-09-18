@@ -1,6 +1,7 @@
 export {
   createWorkerAgentDef,
   WORKER_MAX_DEPTH,
+  workerSpawnMaxDepth,
   type WorkerAgentDef,
 } from "./agent-def.js";
 export { buildWorkerSystemPrompt } from "./prompt.js";

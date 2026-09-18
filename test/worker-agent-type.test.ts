@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   createWorkerAgentDef,
   WORKER_MAX_DEPTH,
+  workerSpawnMaxDepth,
   type WorkerAgentDef,
 } from "../src/worker/agent-def.js";
 import { buildWorkerSystemPrompt } from "../src/worker/prompt.js";
@@ -240,15 +241,29 @@ describe("worker report normalization", () => {
 });
 
 describe("createWorkerAgentDef", () => {
-  it("exposes the contract persona, leaf maxDepth, and resolving filter", () => {
+  it("exposes the contract persona, leaf delegation budget, and resolving filter", () => {
     const def: WorkerAgentDef = createWorkerAgentDef();
     // Ticket 55: the contract is named `persona` because that is the channel it
     // travels on. It must be the same text `buildWorkerSystemPrompt` produces.
     assert.equal(def.persona, buildWorkerSystemPrompt());
     assert.ok(def.persona.includes("## Role"));
+    // Ticket 83: `maxDepth` is the worker's OWN delegation BUDGET below
+    // itself (0 = leaf, ADR-0003), never the spawn request's `maxDepth`
+    // slot — the host reads that slot as the child's absolute ceiling.
     assert.equal(def.maxDepth, WORKER_MAX_DEPTH);
     assert.equal(def.maxDepth, 0);
     const filter = def.resolveToolFilter(new Set(["present", "bash"]));
     assert.deepEqual([...filter.deny], ["present"]);
+  });
+
+  it("derives the spawn request ceiling from the one leaf-budget constant (ticket 83)", () => {
+    // The request slot value = parent depth + 1 hop + WORKER_MAX_DEPTH, so
+    // the "0 = leaf" budget cannot silently reappear in the request slot.
+    assert.equal(workerSpawnMaxDepth(0), 0 + 1 + WORKER_MAX_DEPTH);
+    assert.equal(workerSpawnMaxDepth(0), 1);
+    assert.equal(workerSpawnMaxDepth(2), 3);
+    assert.equal(workerSpawnMaxDepth(5), 6);
+    // An explicit non-default budget stays derivable from the same formula.
+    assert.equal(workerSpawnMaxDepth(0, 1), 2);
   });
 });

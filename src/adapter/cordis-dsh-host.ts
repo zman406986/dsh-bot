@@ -9,7 +9,11 @@ import {
   normalizeWorkerErrorReport,
   normalizeWorkerReport as normalizeWorkerTextReport,
 } from "../worker/report.js";
-import type { WorkerAgentDef } from "../worker/agent-def.js";
+import {
+  WORKER_MAX_DEPTH,
+  workerSpawnMaxDepth,
+  type WorkerAgentDef,
+} from "../worker/agent-def.js";
 import { blocksToText, textBlocks, type ContentBlock } from "./content-blocks.js";
 import type { StorageDomainLike } from "./durable-marker.js";
 import { wakeUserMessage } from "./wake-copy.js";
@@ -60,6 +64,13 @@ export interface ContinuableStartSpecLike {
     readonly prompt: ContentBlock[];
     readonly parent: AgentLike;
     readonly signal: AbortSignal;
+    /**
+     * Ticket 83: the CHILD'S ABSOLUTE delegation-depth ceiling. The host's
+     * `resolveChildDepth` (dsh-subagent/lib/index.js:432-437) refuses the
+     * spawn when `parentDepth + 1 > maxDepth` — it is NOT the worker's own
+     * budget. Derive with `workerSpawnMaxDepth`; never send `WORKER_MAX_DEPTH`
+     * (0) here raw.
+     */
     readonly maxDepth?: number;
     readonly toolFilter?: unknown;
     /**
@@ -625,12 +636,30 @@ export function createCordisDshHost(
         workerAgentDef === undefined
           ? undefined
           : workerAgentDef.resolveToolFilter(listGlobalToolNames(ctx));
-      const maxDepth = workerAgentDef?.maxDepth ?? 0;
+      // Ticket 83 (live pass 2026-09-19): `request.maxDepth` is the child's
+      // ABSOLUTE delegation-depth ceiling, NOT the worker's leaf budget. The
+      // host's `resolveChildDepth` (dsh-subagent/lib/index.js:432-437)
+      // computes `childDepth = delegationDepthOf(parent) + 1` and throws
+      // `SubagentDepthError` when `childDepth > maxDepth`, so shipping the
+      // leaf budget 0 in this slot refused every live spawn ("subagent depth
+      // 1 exceeds maxDepth 0"). Derive the ceiling from the parent's real
+      // depth (the seam exposes the same persisted header the host floors
+      // with — `delegationDepthOf`, :144-147) + one hop + the worker's own
+      // budget. The `?? 0` fallback assumes the bound dispatcher is
+      // top-level, which holds today because activation is isTopLevel-gated
+      // (parent-agent.ts; the gate also fails open on an unreadable header);
+      // multi-level nesting is deferred by ADR-0003 and would need a revisit
+      // if a deeper parent is ever bound here.
+      const parentDelegationDepth = parent.session.header?.delegationDepth ?? 0;
+      const maxDepth = workerSpawnMaxDepth(
+        parentDelegationDepth,
+        workerAgentDef?.maxDepth ?? WORKER_MAX_DEPTH,
+      );
       const request: ContinuableStartSpecLike["request"] = {
         prompt: textBlocks(prompt),
         parent,
         signal: controller.signal,
-        // Leaf: never spawn descendants.
+        // Child's absolute ceiling: parent depth + 1 hop + leaf budget.
         maxDepth,
       };
       if (persona !== undefined && persona.length > 0) {

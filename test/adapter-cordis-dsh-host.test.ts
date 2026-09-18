@@ -171,6 +171,97 @@ describe("isTopLevel", () => {
   });
 });
 
+/**
+ * The host's acceptance rule, replicated offline from the installed
+ * dsh-subagent lib (READ-ONLY reference): `resolveChildDepth`
+ * (dsh-subagent/lib/index.js:432-437) computes `childDepth =
+ * delegationDepthOf(parent) + 1` and throws `SubagentDepthError`
+ * (:412-420) when `childDepth > request.maxDepth`; `delegationDepthOf`
+ * (:144-147) floors the parent's depth at the persisted session header.
+ * Keep in sync with the lib; this is the spec our request slot must satisfy.
+ */
+function hostResolveChildDepth(
+  parentDelegationDepth: number,
+  requestMaxDepth: number,
+): number {
+  const childDepth = parentDelegationDepth + 1;
+  if (childDepth > requestMaxDepth) {
+    throw new Error(
+      `subagent depth ${childDepth} exceeds maxDepth ${requestMaxDepth}`,
+    );
+  }
+  return childDepth;
+}
+
+describe("ticket 83 regression: spawn maxDepth is the child's ABSOLUTE ceiling", () => {
+  it("accepts a depth-1 child of a depth-0 dispatcher (the exact live 2026-09-19 failure shape)", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx, { workerAgentDef: createWorkerAgentDef() });
+    // createAgent(...) binds a top-level parent: header delegationDepth 0,
+    // exactly what activation isTopLevel-gates to.
+    host.bindParent(createAgent("disp-1"), "disp-1");
+
+    await host.spawnWorker("ok?", { parentSessionId: "disp-1", streamKey: "s", title: "t" });
+
+    const spec = ctx.startContinuableCalls[0] as unknown as ContinuableStartSpecLike;
+    assert.equal(spec.request.maxDepth, 1);
+    // The host must ACCEPT the child (before the fix this threw
+    // "subagent depth 1 exceeds maxDepth 0" live).
+    assert.equal(hostResolveChildDepth(0, spec.request.maxDepth as number), 1);
+  });
+
+  it("refuses a hypothetical depth-2 grandchild through the same ceiling (worker stays a leaf at the host layer)", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx, { workerAgentDef: createWorkerAgentDef() });
+    host.bindParent(createAgent("disp-1"), "disp-1");
+
+    await host.spawnWorker("ok?", { parentSessionId: "disp-1", streamKey: "s", title: "t" });
+
+    const spec = ctx.startContinuableCalls[0] as unknown as ContinuableStartSpecLike;
+    const ceiling = spec.request.maxDepth as number;
+    assert.throws(
+      () => hostResolveChildDepth(ceiling, ceiling),
+      /exceeds maxDepth 1/,
+    );
+  });
+
+  it("derives the ceiling from the parent's real seam depth, not a hardcoded 1", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx, { workerAgentDef: createWorkerAgentDef() });
+    const deeperParent: AgentLike = {
+      session: {
+        id: "disp-deep",
+        header: { parentSession: "up", delegationDepth: 2 },
+      },
+      followup() {},
+    };
+    host.bindParent(deeperParent, "disp-deep");
+
+    await host.spawnWorker("x", { parentSessionId: "disp-deep", streamKey: "s", title: "t" });
+
+    const spec = ctx.startContinuableCalls[0] as unknown as ContinuableStartSpecLike;
+    // 2 (parent) + 1 (hop) + 0 (leaf budget) — a depth-3 child is accepted.
+    assert.equal(spec.request.maxDepth, 3);
+    assert.equal(hostResolveChildDepth(2, spec.request.maxDepth as number), 3);
+  });
+
+  it("falls back to the top-level assumption when the header is unreadable (isTopLevel fails open)", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx, { workerAgentDef: createWorkerAgentDef() });
+    const opaqueParent: AgentLike = {
+      session: { id: "disp-opaque" },
+      followup() {},
+    };
+    host.bindParent(opaqueParent, "disp-opaque");
+
+    await host.spawnWorker("x", { parentSessionId: "disp-opaque", streamKey: "s", title: "t" });
+
+    const spec = ctx.startContinuableCalls[0] as unknown as ContinuableStartSpecLike;
+    assert.equal(spec.request.maxDepth, 1);
+    assert.equal(hostResolveChildDepth(0, spec.request.maxDepth as number), 1);
+  });
+});
+
 describe("CordisDshHost spawn / interrupt / send", () => {
   it("spawn calls startContinuable with provider spawn and returns workerId string", async () => {
     const ctx = createStubCtx();
@@ -196,7 +287,11 @@ describe("CordisDshHost spawn / interrupt / send", () => {
     assert.equal((spec.request.prompt[0] as { text: string }).text, "Do the thing.");
     // Ticket 55: with no worker def there is no contract, so no persona.
     assert.equal("persona" in spec.request, false);
-    assert.equal(spec.request.maxDepth, 0);
+    // Ticket 83: the slot is the CHILD'S ABSOLUTE depth ceiling — for a
+    // depth-0 dispatcher parent, 1 (the host computes childDepth = 0 + 1 and
+    // needs childDepth <= maxDepth). Sending the leaf budget 0 refused every
+    // live spawn.
+    assert.equal(spec.request.maxDepth, 1);
     // T09 without a def omits toolFilter.
     assert.equal("toolFilter" in spec.request && spec.request.toolFilter, false);
   });
@@ -243,7 +338,9 @@ describe("CordisDshHost spawn / interrupt / send", () => {
     assert.ok(!brief.includes("## Role"));
     assert.ok(!brief.includes("Task:\n"));
 
-    assert.equal(spec.request.maxDepth, 0);
+    // Ticket 83: depth-0 parent → absolute ceiling 1 (child of a depth-0
+    // session is depth 1; `maxDepth: 0` was the live-refused leaf budget).
+    assert.equal(spec.request.maxDepth, 1);
     const filter = spec.request.toolFilter as { deny: readonly string[] };
     assert.ok(filter);
     assert.deepEqual(

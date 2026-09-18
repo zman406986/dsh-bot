@@ -6,7 +6,8 @@ import {
 
 /**
  * Worker agent type: composition of (contract persona + tool barrier + leaf
- * maxDepth). Applied on every spawn by the adapter. Not a host registry object.
+ * delegation budget). Applied on every spawn by the adapter. Not a host
+ * registry object.
  */
 export interface WorkerAgentDef {
   /**
@@ -23,12 +24,50 @@ export interface WorkerAgentDef {
    * Never invents names the host does not know.
    */
   resolveToolFilter(knownGlobalToolNames: ReadonlySet<string>): WorkerToolFilter;
-  /** Host maxDepth for leaf workers (0 = no children). */
+  /**
+   * How many delegation levels the worker may open BELOW itself — a budget
+   * relative to the worker's own depth. This is NOT the value for the spawn
+   * request's `maxDepth` slot (the host reads that slot as the child's
+   * ABSOLUTE ceiling; derive it with `workerSpawnMaxDepth`). Belt and
+   * suspenders: the tool barrier already denies the host `subagent` tool.
+   */
   readonly maxDepth: number;
 }
 
-/** Leaf-worker depth: a worker never spawns descendants. */
+/**
+ * Leaf-worker delegation BUDGET: a worker opens zero levels below itself
+ * (ADR-0003, dispatcher-only spawning). Deliberately named as a budget: it
+ * must never be shipped raw in the spawn request's `maxDepth` slot — the
+ * host reads that slot as the CHILD'S ABSOLUTE delegation-depth ceiling
+ * (`resolveChildDepth`, dsh-subagent/lib/index.js:432-437 computes
+ * `childDepth = delegationDepthOf(parent) + 1` and throws SubagentDepthError
+ * when `childDepth > maxDepth`), so sending this 0 there refused every live
+ * spawn with "subagent depth 1 exceeds maxDepth 0" (ticket 83, live pass
+ * 2026-09-19). The request value is derived by `workerSpawnMaxDepth`.
+ * Leaf-ness does not depend on this number: `resolveToolFilter` denies the
+ * host `subagent` tool regardless.
+ */
 export const WORKER_MAX_DEPTH = 0;
+
+/**
+ * Ticket 83: the ABSOLUTE delegation-depth ceiling to send in the spawn
+ * request's `maxDepth` slot for the dispatcher→worker hop. The host accepts
+ * the spawn iff `parentDepth + 1 <= maxDepth` (dsh-subagent
+ * `resolveChildDepth`, lib/index.js:432-437; parent depth is the monotone
+ * floor of the persisted session header and the runtime option,
+ * `delegationDepthOf` :144-147 — our `AgentLike` seam exposes the header
+ * side). The worker lands one hop below its parent and carries
+ * `WORKER_MAX_DEPTH` levels of its own budget, hence
+ * `parentDepth + 1 + budget`: for the depth-0 dispatcher chat this is
+ * exactly 1 — the depth-1 child is accepted and any deeper spawn is refused
+ * at the host, before the tool barrier is even consulted.
+ */
+export function workerSpawnMaxDepth(
+  parentDelegationDepth: number,
+  budget: number = WORKER_MAX_DEPTH,
+): number {
+  return parentDelegationDepth + 1 + budget;
+}
 
 /** Create the default worker agent definition. */
 export function createWorkerAgentDef(): WorkerAgentDef {

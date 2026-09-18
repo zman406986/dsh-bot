@@ -71,6 +71,7 @@ export {
   normalizeWorkerReport,
   WORKER_DENIED_TOOL_CANDIDATES,
   WORKER_MAX_DEPTH,
+  workerSpawnMaxDepth,
 } from "./worker/index.js";
 export type { WorkerToolFilter } from "./worker/index.js";
 export type { DshHost } from "./core/dsh-host.js";
