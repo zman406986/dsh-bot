@@ -27,6 +27,77 @@ classifier; ADR-0018 brings the area in scope.
       always-on model (no activation step). — Design 2026-09-19, §4.
 - [x] Draft implementation ACs once 67's vehicle is decided. — Design 2026-09-19, §5 (ADR-0020 vehicle).
 
+## Implementation ACs (chunked — from Design 2026-09-19 §5)
+
+### Chunk A — core (offline, S8; fake host/seam)
+
+- [x] A1. Review-posture table: match semantics + ADR-0019 keying; posture consulted only
+      on consent miss; consent deny is never overridden by posture allow (test all three
+      orders).
+      Evidence: `src/core/review-posture.ts` (`matchTargetPattern` reuse; row keying and
+      session attribution mirror `access-relay.ts`); composed after the consent table at
+      the `lookupPolicy` wiring (`src/core/multitask.ts`); `test/review-posture.test.ts` —
+      "consent deny beats posture allow", "consent allow beats posture deny" (the
+      consent-wins orders), "posture allow/deny answers on a miss", "empty posture always
+      asks".
+- [x] A2. Empty-posture invariance: with no rows, park/wake/prompt ordering identical to
+      shipped. Evidence: "empty posture: park, wake, and armed timeout are byte-identical
+      to shipped"; the shipped `test/access-relay.test.ts` suite passes untouched
+      (posture miss returns "ask" into the unchanged relay path).
+- [x] A3. Posture auto-answer rides the shipped branch: allow → delivered, no wake; deny →
+      `onResolved` notice with posture-naming detail; timeout deny still armed on
+      escalation. Evidence: "posture allow rides the shipped silent auto-answer branch
+      (no wake, no ticket)", "posture deny produces the self-naming policy-denied notice",
+      the A2 test's armed-timeout assertions. The relay's auto-answer branch and ADR-0008
+      timeout are reused verbatim (`access-relay.ts` and `access-types.ts` untouched).
+- [x] A4. Clearance: session and whole-table clears drop posture rows; sibling sessions
+      unaffected. Evidence: `Multitask.clearSessionAccessPolicy` also calls
+      `reviewPosture.clearSession` (same deactivate/unload call sites); tests
+      "clearSessionAccessPolicy(id) drops that session's posture rows; sibling's survive",
+      "whole-table clearance (no id) drops every session-scope posture row", "an un-owned
+      posture row behaves as shipped".
+- [x] A5. Wildcard fence on the posture sink. Evidence: `ReviewPostureTable.set` refuses
+      any `*`-bearing targetPattern (bare, prefix, inner) without writing; dispatch-side
+      test "wildcard fence covers the dispatch sink too".
+- [x] A6. Dispatch hook: miss → `spawnWorker` untouched; hit + fake seam → allowed
+      proceeds / refused returns honest error; absent seam + hit → refused (fail-closed).
+      Evidence: `src/core/tools.ts` spawn-handler gate with the injected
+      `requestDispatchApproval` seam; `test/review-posture.test.ts` "worker-dispatch gate"
+      suite (miss, allowed-once, rejected/cancelled/unavailable, absent seam, deny row,
+      session-keyed rows, fence). Interpretation (2026-09-19): §4's "posture hit → seam"
+      is read through §2's decision model — an allow row marks the dispatch class gated
+      (the seam decides); a deny row auto-denies without asking a human to confirm what
+      policy already decided. Documented at the gate.
+- [ ] A7. Card projections (§3 shapes): pure-function unit tests. — 2026-09-19: handed to
+      chunk B; the projection module itself is the 81 contract (B1 freezes the shapes), so
+      its tests land with that module, not in this chunk.
+
+### Chunk B — 81-contract (offline; rendering itself is 81)
+
+- [ ] B1. Projection module exported with the §3 shapes frozen as the 81 contract.
+      (2026-09-19: pending — chunk B / ticket 81.)
+- [ ] B2. `locationFor` hook documented as 71's re-base point. (2026-09-19: pending —
+      chunk B.)
+- [ ] B3. No `access-types.ts` / relay-semantics diff (grep-level review assertion).
+      (2026-09-19: pending — chunk B; chunk A already kept both untouched, so B3 starts
+      from a clean base.)
+
+### Live-only ACs (45/33 lane)
+
+- [ ] L1. Pending card renders inline in the wrapper conversation and resolves through
+      `Multitask.resolveAccess`. (2026-09-19: pending — live lane.)
+- [ ] L2. Blocked-marker-with-reason appears on the session row while a card waits.
+      (2026-09-19: pending — live lane.)
+- [ ] L3. Dispatch approval pauses and surfaces through the real `ctx.approval` waterfall.
+      (2026-09-19: pending — live lane. The seam is deliberately NOT wired in
+      `src/plugin.ts` yet: `requestDispatchApproval` is an injected dep that is absent
+      live, and an absent seam + posture hit refuses fail-closed. Shipped posture is
+      EMPTY, so live behavior is unchanged until wiring + a posture seeder exist. Wiring
+      will need the approval service added to `inject` — see
+      `dsh-adapter-api-notes.md:390`.)
+- [ ] L4. Posture auto-answer verified live (no card; honest deny notice).
+      (2026-09-19: pending — live lane.)
+
 ## Constraints
 
 - Relay semantics that survive (timeout ADR-0008, deny-by-default, dedupe) are not re-litigated
@@ -92,6 +163,61 @@ names this area in scope, and this is its sanctioned design ticket.
   narrow — session-scoped auto-answer (the existing row mechanism) and honest presentation
   typing; "silently allow unasked classes" is out of bounds by construction.
 - **Size:** M (design); implementation L → decompose at dispatch time.
+
+### 2026-09-19 — agent (chunk A implemented: core posture table + dispatch gate; chunk B pending)
+
+Landed in two commits: **61dd7bf** (review-posture table + `lookupPolicy` composition +
+clearance) and **1a337fa** (worker-dispatch gate in the spawn tool). Gates: `npm run
+typecheck` green; `npm test` **1009 pass / 0 fail** (1002 at the table commit; +7 dispatch
+gate tests), fully offline (FakeDshHost, manual scheduler — no real timers armed).
+
+**What landed**
+
+- `src/core/review-posture.ts` (new): `ReviewPostureEntry` = `{ class: AccessClass |
+  "worker-dispatch", targetPattern, decision, scope, session? }`; `lookup` returns
+  `AccessDecision | "ask"`; `lookupDispatch(title, ctx)` returns the row decision or
+  undefined (ungated); `set` returns boolean and REFUSES any `*`-bearing targetPattern
+  (fence lives in the sink — deny-on-ambiguity); `clearSession(sessionId?)` with the
+  consent table's attribution rules; no seed parameter (shipped posture is EMPTY; rows
+  enter only through Multitask APIs). Deny detail is self-naming:
+  `auto-review posture denied <class> "<target>"` with reason `policy-denied` (renders
+  through the shipped `wrapAccessDecision` deny path and `onResolved` notice).
+- `src/core/multitask.ts`: posture composed AFTER the consent table at the `lookupPolicy`
+  wiring — consent (allow **or** deny) wins; only a consent `"ask"` miss falls through;
+  a posture miss stays `"ask"` → shipped park/wake/ADR-0008 timeout, byte-identical.
+  `clearSessionAccessPolicy` clears posture rows too (deactivate + unload sites).
+  `Multitask.reviewPosture` exposed.
+- `src/core/tools.ts` + `tool-results.ts`: spawn handler gates on `lookupDispatch(title,
+  ctx)`; injected `requestDispatchApproval` seam (outcomes `allowed-once | rejected |
+  cancelled | unavailable`, fail-closed); new refusal reason `auto-review-refused`.
+- Untouched by design: `src/core/access-relay.ts`, `src/core/access-types.ts`,
+  `src/plugin.ts` (zero delta — no overlap with the concurrent client-side ticket).
+
+**Interpretations / reconciliations with the design (documented, none blocking)**
+
+1. Dispatch deny rows refuse outright without calling the seam (see A6 note) — §2's
+   decision model applied to §4's "hit → seam" wording.
+2. §4's "rows keyed on a literal dispatch class + optional title prefix" is implemented
+   as class `"worker-dispatch"` + `targetPattern` matched against the spawn title; the
+   fenced write path admits exact titles only (prefix machinery is reused in matching
+   but `*` is unwritable through `set`).
+3. A7 (projection tests) presupposes the chunk-B projection module; handed to 81 (see the
+   ticked-AC section above).
+
+**Hazards for the 81 implementer and the live lane**
+
+- 81/B1: posture denies surface as `policy-denied` with the self-naming detail above —
+  freeze that copy in the §3 shape contract; decision provenance renders from the
+  shipped `AccessDecision.reason` labels (no new reason kind was added).
+- Live/45-33: `requestDispatchApproval` is NOT yet wired to `ctx.approval.request`;
+  wiring needs the approval service in `inject` and is L3's work. Absent seam + hit
+  refuses fail-closed, so a future non-empty posture cannot silently spawn before the
+  answerer exists — but verify Q2 (a gated dispatch with no live answerer must not wedge
+  the dispatcher turn) when wiring lands.
+- Q1 stays ready-for-human: no posture seeder shipped; posture content is a human
+  decision.
+
+Ticket stays **open**: chunk B (B1–B3, the 81 contract) pending.
 
 ### 2026-09-19 — agent (Design: classifier-gated auto-review — unblocks 81)
 
