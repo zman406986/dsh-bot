@@ -35,7 +35,7 @@ The dispatcher capsule chip and its expanded panel are fixed-position overlays r
 The capsule chip/panel this ticket drags are the vehicle ADR-0018 voided (ADR-0013 superseded;
 the wrapper window is the dispatcher's surface). The underlying need — "move it out of the way" —
 is met natively by an OS window in the wrapper: dragging is platform behavior, not a feature to
-build, and the shell.overlay stacking/click-through constraints this ticket designed around no
- longer exist. **Stays needs-triage:** not actionable as written under the new model; a
+build, and the shell.overlay stacking/click-through constraints this ticket designed around
+no longer exist. **Stays needs-triage:** not actionable as written under the new model; a
 moot-closure candidate once ticket 67's wrapper design confirms no in-window floating surfaces
 need drag support. If the wrapper design does surface one, this ticket re-scopes onto it.
