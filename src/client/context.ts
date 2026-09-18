@@ -23,6 +23,7 @@
 import type { LocaleDictionary, SlotRegistrationOptions } from "./overlay.js";
 import type { ToolviewRegistrationOptions } from "./toolviews.js";
 import type { SettingsCardRegistrationOptions } from "./settings-card-store.js";
+import type { ConversationSourceLike } from "./conversation-store.js";
 
 /** Any slot entry this module registers: list entries (id/order) or keyed
  * entries such as the `tool.call.toolview` toolviews (key) and the
@@ -165,6 +166,14 @@ export interface ScopedAgentContextLike {
   conversation?: {
     /** Send a prompt into the scoped session (queued user turn). */
     send(text: string): Promise<void>;
+    /**
+     * Pull one older history page for the scoped session (ticket 80; the
+     * scope-addressed pagination verb — `IConversation.loadOlder`,
+     * dsh-client-ui-conversation `client/service.d.ts:52-55`). Optional: a
+     * runtime without it degrades to a transcript without the older-pages
+     * affordance, never to a fabricated one.
+     */
+    loadOlder?(): Promise<void>;
   };
 }
 
@@ -200,8 +209,17 @@ export interface ClientSessionsFeedSnapshotLike {
  * Agent-scoped context view (`undefined` for a session neither listed nor
  * already scoped). `open` (ticket 79) is the host's selection verb — the
  * shell sidebar rides it on row selection; optional because the shell
- * composition degrades to store-only selection without it.
+ * composition degrades to store-only selection without it. `binding`
+ * (ticket 80) is the scope-addressed assembly feed whose `eventSource` is
+ * the verified history-replay face (`wrapper-vehicle-seams.md` Finding 7;
+ * `ISessions.binding`, dsh-api-session-controller
+ * `client/contract/sessions.d.ts:118-123`); optional because a runtime
+ * without it degrades the conversation pane to honest unavailability.
  */
+export interface ClientSessionBindingLike {
+  readonly eventSource?: ConversationSourceLike;
+}
+
 export interface ClientSessionsLike {
   list: {
     getSnapshot(): ClientSessionsFeedSnapshotLike;
@@ -209,6 +227,7 @@ export interface ClientSessionsLike {
   };
   scope(id: string): ScopedAgentContextLike | undefined;
   open?(id: string): void;
+  binding?(id: string): ClientSessionBindingLike | undefined;
 }
 
 /**

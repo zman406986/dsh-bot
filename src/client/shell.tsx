@@ -148,6 +148,14 @@ export interface ShellHosts {
    */
   readonly rosterPanel?: (sessionId: string) => JSX.Element | null;
   /**
+   * The main-seat conversation pane (ticket 80): given the selected session
+   * id, render the text-only conversation surface bound to that session's
+   * event window and composer actions. The shell itself never touches the
+   * conversation services — the seat is the composition's (same discipline
+   * as `rosterPanel`). When absent the pane stays the honest pending copy.
+   */
+  readonly conversation?: (sessionId: string) => JSX.Element | null;
+  /**
    * Selection ride-along (ticket 79): called AFTER the store accepted a
    * row selection, with the same id — the composition wires this to the
    * host's `sessions.open(id)` ("selection via open(id) semantics"). The
@@ -304,7 +312,7 @@ export function createDispatcherShell(
     const panes = describeShellPanes(box.state);
 
     const selectedTitle = (() => {
-      if (panes.main.kind !== "conversation-pending") return null;
+      if (panes.main.kind !== "conversation") return null;
       const sessionId = panes.main.sessionId;
       if (sidebar.kind !== "ready") return null;
       return sidebar.rows.find((row) => row.sessionId === sessionId)?.title ?? null;
@@ -348,11 +356,17 @@ export function createDispatcherShell(
               <div className={`${SHELL_CLASS}__main-header`}>
                 {selectedTitle ?? panes.main.sessionId}
               </div>
-              {/* Honest skeleton state (ticket 77): the conversation surface
-                  lands with ticket 80 — this copy says exactly that. */}
-              <div className={`${SHELL_CLASS}__conversation-pending`}>
-                {t("shell.conversation.pending")}
-              </div>
+              {/* Ticket 80: the conversation pane is a HOST seat — the
+                  composition binds it to the session's event window and the
+                  send/older actions. Without a seat the pane keeps the
+                  honest pending copy instead of an invented surface. */}
+              {hosts.conversation ? (
+                hosts.conversation(panes.main.sessionId)
+              ) : (
+                <div className={`${SHELL_CLASS}__conversation-pending`}>
+                  {t("shell.conversation.pending")}
+                </div>
+              )}
             </>
           )}
         </section>

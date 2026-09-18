@@ -46,6 +46,7 @@ import {
   type ShellCellEntry,
 } from "../src/client/shell-mount.js";
 import { createDispatcherShellStore } from "../src/client/shell-store.js";
+import type { ConversationWindowLike } from "../src/client/conversation-store.js";
 import type { ShellFeedSnapshotLike } from "../src/client/shell-feed.js";
 import type { RosterSnapshot } from "../src/core/roster-snapshot.js";
 import type { WorkerStatus } from "../src/core/types.js";
@@ -572,5 +573,94 @@ describe("root fail-safe — the cutover's election contract (pinned, not regist
       ]),
       null,
     );
+  });
+});
+
+describe("shell conversation surface mount (ticket 80, Finding 7 seam)", () => {
+  /** Sessions face with binding-capable event windows (the verified seam). */
+  function createBindingSessionsFake(windows: Map<string, ConversationWindowLike>) {
+    const subscriptions: string[] = [];
+    const unsubscriptions: string[] = [];
+    const openCalls: string[] = [];
+    const sessions: ClientSessionsLike = {
+      list: {
+        getSnapshot: () => ({
+          ids: [...windows.keys()],
+          // The ticket-79 projection skips ids without a delivered summary,
+          // so the fake delivers rows for every windowed session.
+          byId: Object.fromEntries(
+            [...windows.keys()].map((id) => [id, { id, displayTitle: id }]),
+          ),
+        }),
+        subscribe: () => () => {},
+      },
+      scope: () => undefined,
+      open(id) {
+        openCalls.push(id);
+      },
+      binding(id) {
+        if (!windows.has(id)) return undefined;
+        return {
+          eventSource: {
+            getSnapshot: () => windows.get(id) ?? {},
+            subscribe() {
+              subscriptions.push(id);
+              return () => {
+                unsubscriptions.push(id);
+              };
+            },
+          },
+        };
+      },
+    };
+    return { sessions, openCalls, subscriptions, unsubscriptions };
+  }
+
+  it("the mount exposes the conversation store and the pane host seat", () => {
+    const ctx = createMountCtx();
+    const mount = mountShellPage(ctx);
+    assert.equal(typeof mount.conversation.subscribe, "function");
+    assert.equal(typeof mount.hosts.conversation, "function");
+    // Never invoked offline (hooks need a renderer; S8 discipline).
+    assert.deepEqual(mount.conversation.stateFor("s-1"), { kind: "waiting" });
+  });
+
+  it("selecting a session feeds its event window into the conversation store", () => {
+    const windows = new Map<string, ConversationWindowLike>([
+      ["s-1", { entries: [] }],
+    ]);
+    const fake = createBindingSessionsFake(windows);
+    const ctx = createMountCtx({ sessions: fake.sessions });
+    const mount = mountShellPage(ctx);
+
+    mount.hosts.onSelectSession!("s-1");
+    assert.deepEqual(fake.openCalls, ["s-1"]); // staging (ticket 79's ride-along)
+    assert.deepEqual(fake.subscriptions, ["s-1"]);
+    assert.equal(mount.conversation.stateFor("s-1").kind, "ready");
+
+    ctx.runFiberTeardown();
+    assert.deepEqual(fake.unsubscriptions, ["s-1"]);
+  });
+
+  it("a runtime whose sessions face has no binding degrades to honest unavailability", () => {
+    const feed = createSessionsFake({
+      ids: ["s-1"],
+      byId: { "s-1": { id: "s-1", displayTitle: "One" } },
+    });
+    const ctx = createMountCtx({ sessions: feed.sessions });
+    const mount = mountShellPage(ctx);
+    mount.hosts.onSelectSession!("s-1");
+    assert.deepEqual(mount.conversation.stateFor("s-1"), {
+      kind: "unavailable",
+    });
+    assert.doesNotThrow(() => ctx.runFiberTeardown());
+  });
+
+  it("without the sessions service at all, the pane stays waiting and teardown is clean", () => {
+    const ctx = createMountCtx();
+    const mount = mountShellPage(ctx);
+    mount.hosts.onSelectSession!("s-1");
+    assert.deepEqual(mount.conversation.stateFor("s-1"), { kind: "waiting" });
+    assert.doesNotThrow(() => ctx.runFiberTeardown());
   });
 });

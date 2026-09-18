@@ -283,14 +283,15 @@ export function describeRowPreview(
 
 /**
  * The pane view (pure; the component maps it to seats). The main surface is
- * an honest placeholder until ticket 80 wires the conversation surface; the
- * right pane hosts the EXISTING roster panel component for the selected
- * session (ADR-0020: hosted, not rebuilt).
+ * the conversation pane for the selected session (ticket 80; the component
+ * renders the honest waiting/unavailable/empty states when no readable
+ * window has arrived); the right pane hosts the EXISTING roster panel
+ * component for the selected session (ADR-0020: hosted, not rebuilt).
  */
 export interface ShellPaneView {
   readonly main:
     | { readonly kind: "no-selection" }
-    | { readonly kind: "conversation-pending"; readonly sessionId: string };
+    | { readonly kind: "conversation"; readonly sessionId: string };
   readonly right:
     | { readonly kind: "none" }
     | { readonly kind: "hosted-roster"; readonly sessionId: string };
@@ -302,7 +303,7 @@ export function describeShellPanes(state: ShellState): ShellPaneView {
   }
   const sessionId = state.selection.sessionId;
   return {
-    main: { kind: "conversation-pending", sessionId },
+    main: { kind: "conversation", sessionId },
     right: { kind: "hosted-roster", sessionId },
   };
 }

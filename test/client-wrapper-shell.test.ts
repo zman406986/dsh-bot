@@ -260,12 +260,12 @@ describe("wrapper shell panes (ticket 77)", () => {
     });
   });
 
-  it("selected session: honest pending main surface + hosted-roster right seat", () => {
+  it("selected session: conversation main surface + hosted-roster right seat", () => {
     const store = createDispatcherShellStore();
     store.upsertSessions([{ sessionId: "s-1", title: "One", dispatcher: true }]);
     store.select("s-1");
     assert.deepEqual(describeShellPanes(store.getBox().state), {
-      main: { kind: "conversation-pending", sessionId: "s-1" },
+      main: { kind: "conversation", sessionId: "s-1" },
       right: { kind: "hosted-roster", sessionId: "s-1" },
     });
   });

@@ -41,6 +41,13 @@
  *    capsule retirement are the CUTOVER slice — deliberately absent until
  *    ticket 80's conversation surface has landed (nothing here registers
  *    into `root`; pinned by test).
+ * 8. the wrapper conversation pane (ticket 80, ADR-0020 slice 4): the main
+ *    seat renders the selected session's text-only conversation — replay +
+ *    live turns from the session's verified event window
+ *    (`sessions.binding(id).eventSource`, `wrapper-vehicle-seams.md`
+ *    Finding 7) reduced by `conversation-store.ts`, older pages through the
+ *    scoped `loadOlder()`, sends through ticket 40's plain-prompt sink. No
+ *    cancel affordance exists (area 7 conformity).
  *
  * Ticket 40 binds the capsule/panel intents to ticket 36's verified seams
  * at THIS composition point and nowhere else: the narrow CommandTransport
@@ -118,6 +125,15 @@ import {
   bindShellSessionsFeed,
   type ShellFeedBinding,
 } from "./shell-feed.js";
+import {
+  createConversationStore,
+  type ConversationStore,
+} from "./conversation-store.js";
+import { bindConversationFeed, requestOlder } from "./conversation-feed.js";
+import {
+  createConversationPane,
+  type ConversationSendOutcome,
+} from "./conversation.js";
 
 /** Client services this module binds (vendored Cordis inject list). */
 export const inject: readonly string[] = ["slots", "locale"];
@@ -376,6 +392,8 @@ export interface ShellPageMount {
   readonly store: DispatcherShellStore;
   /** The hosted roster panel's store (projected; see `shellSeatPanelState`). */
   readonly seat: RosterStore;
+  /** The conversation store feeding the main seat (ticket 80). */
+  readonly conversation: ConversationStore;
   /** Host seats handed to `createDispatcherShell`. */
   readonly hosts: ShellHosts;
 }
@@ -383,6 +401,7 @@ export interface ShellPageMount {
 export function mountShellPage(ctx: ClientContext): ShellPageMount {
   const store = createDispatcherShellStore();
   const seat = createRosterStore();
+  const conversation = createConversationStore();
   let binding: ShellFeedBinding | undefined;
 
   // Feed binding (ticket 79's projection, wired at THIS composition point —
@@ -397,6 +416,48 @@ export function mountShellPage(ctx: ClientContext): ShellPageMount {
     binding = bound;
     return bound.dispose;
   }, "multitask-dispatcher: shell sessions feed binding");
+
+  // Conversation window binding (ticket 80, Finding 7): the SELECTED
+  // session's event window feeds the conversation store; the window opens
+  // because the selection above stages the session via `open`. Without the
+  // binding face the pane degrades to honest unavailability — never a
+  // fabricated transcript.
+  ctx.effect(() => {
+    if (ctx.sessions === undefined) return () => {};
+    const bound = bindConversationFeed(conversation, ctx.sessions, store);
+    return bound.dispose;
+  }, "multitask-dispatcher: shell conversation window binding");
+
+  // The conversation send transport: ticket 40's verified plain-prompt sink
+  // (the SAME one the capsule's stop ask uses), resolved lazily at send
+  // time. One sink for the whole module — the composer never builds a
+  // parallel channel (A4).
+  const sendTransport = bindCommandTransport({
+    remote: () => ctx.remote,
+    sessions: () => ctx.sessions,
+  });
+
+  // The pane factory: bound once to the translate seat, the conversation
+  // store, and the two verified actions. Called per render with the selected
+  // session id (the shell's main seat), the same seat pattern as the hosted
+  // roster panel.
+  const conversationPane = createConversationPane(
+    ctx.locale.bind(LOCALE_NAMESPACE),
+    conversation,
+    {
+      onSend: async (sessionId, text): Promise<ConversationSendOutcome> => {
+        try {
+          const result = await sendTransport.sendPrompt(sessionId, text);
+          return result.kind === "no-channel"
+            ? { kind: "no-channel" }
+            : { kind: "sent" };
+        } catch {
+          return { kind: "failed" };
+        }
+      },
+      onLoadOlder: (sessionId) => requestOlder(ctx.sessions, sessionId),
+    },
+  );
 
   // The hosted panel's per-row steer affordance uses the same verified
   // prefill seam as the capsule (lazily resolved at click time).
@@ -440,6 +501,15 @@ export function mountShellPage(ctx: ClientContext): ShellPageMount {
       shellSeatHostsPanel(store.getBox().state.mirrors.get(sessionId))
         ? seatPanel()
         : null,
+    // The main seat: the text-only conversation surface (ticket 80), bound
+    // to the reduced event-window store and the two verified host actions.
+    // Send rides the capsule's OWN verified plain-prompt sink (ticket 40's
+    // transport: `sessions.scope(id).conversation.send` — one sink, never a
+    // parallel channel, A4: the host owns the journal); older pages ride the
+    // scoped `loadOlder()` (Finding 7). NO cancel affordance exists — the
+    // ticket's area-7 rule; the scoped cancel verb stays deliberately
+    // unused (recorded on the ticket).
+    conversation: (sessionId) => conversationPane({ sessionId }),
     // Called AFTER the store accepted the row selection; the binding re-runs
     // its guarded select (no-op) and rides the host's `open` verb.
     onSelectSession: (sessionId) => {
@@ -447,5 +517,5 @@ export function mountShellPage(ctx: ClientContext): ShellPageMount {
     },
   };
 
-  return { store, seat, hosts };
+  return { store, seat, conversation, hosts };
 }

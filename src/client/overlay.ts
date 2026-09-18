@@ -253,10 +253,11 @@ export const localeDictionary: LocaleDictionary = {
     "settings.card.field.accessRequestTimeoutMs.hint":
       "How long an unanswered permission request waits before it is denied. Leave empty to use the default.",
     // Ticket 77 (ADR-0020 slice 1): the wrapper shell's chrome copy. The
-    // main-surface line is the honest skeleton state — the conversation
-    // surface lands with ticket 80, and the copy says exactly that (never a
-    // fake composer or a fake transcript). All names and phrasing are ours
-    // (exception B9: no verbatim reference text).
+    // main-surface line survives as the no-seat fallback: since ticket 80
+    // the pane is a host seat, and this copy shows only when a composition
+    // mounts the shell without it (never a fake composer or a fake
+    // transcript). All names and phrasing are ours (exception B9: no
+    // verbatim reference text).
     "shell.title": "Dispatchers",
     "shell.sidebar.label": "Dispatcher sessions",
     "shell.empty": "No dispatcher sessions yet.",
@@ -267,6 +268,26 @@ export const localeDictionary: LocaleDictionary = {
     "shell.row.needs-you": "{count} need you",
     "shell.row.finished": "{count} finished",
     "shell.row.presence-unavailable": "presence unavailable",
+    // Ticket 80 (ADR-0020 slice 4): the conversation pane's copy. Text-only
+    // surface, honest states (waiting / unavailable / empty are different
+    // facts), send-only composer (area 7: no stop affordance anywhere).
+    // All names and phrasing are ours (exception B9).
+    "shell.conv.waiting": "History has not arrived for this session yet.",
+    "shell.conv.unavailable":
+      "Conversation history is unavailable for this session.",
+    "shell.conv.empty": "No messages yet.",
+    "shell.conv.more": "Load older messages",
+    "shell.conv.role-user": "You",
+    "shell.conv.role-assistant": "Dispatcher",
+    "shell.conv.working": "working…",
+    "shell.conv.interrupted": "(interrupted)",
+    "shell.conv.attachment-only": "(no text content)",
+    "shell.conv.tool-running": "running",
+    "shell.conv.tool-failed": "failed",
+    "shell.conv.send": "Send",
+    "shell.conv.sending": "Sending…",
+    "shell.conv.no-channel": "No send channel is reachable in this runtime.",
+    "shell.conv.send-failed": "The send failed — the message was not delivered.",
   },
   zh: {
     "roster.title": "工作者",
@@ -362,6 +383,24 @@ export const localeDictionary: LocaleDictionary = {
     "shell.row.needs-you": "{count} 个需要你",
     "shell.row.finished": "{count} 个已完成",
     "shell.row.presence-unavailable": "状态不可用",
+    // Ticket 80（ADR-0020 切片 4）：对话面板文案。纯文本表面，状态如实区分
+    // （等待 / 不可用 / 空是三种不同的事实）；输入框只发不停（领域 7：任何
+    // 位置都不设停止控件）。命名与措辞均为自创（例外 B9）。
+    "shell.conv.waiting": "此会话的历史尚未到达。",
+    "shell.conv.unavailable": "此会话的对话历史不可用。",
+    "shell.conv.empty": "暂无消息。",
+    "shell.conv.more": "载入更早的消息",
+    "shell.conv.role-user": "你",
+    "shell.conv.role-assistant": "调度",
+    "shell.conv.working": "输出中…",
+    "shell.conv.interrupted": "（已中断）",
+    "shell.conv.attachment-only": "（无文本内容）",
+    "shell.conv.tool-running": "进行中",
+    "shell.conv.tool-failed": "失败",
+    "shell.conv.send": "发送",
+    "shell.conv.sending": "发送中…",
+    "shell.conv.no-channel": "当前运行时没有可用的发送通道。",
+    "shell.conv.send-failed": "发送失败——消息未送达。",
   },
 };
 
