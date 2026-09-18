@@ -1,8 +1,8 @@
 # 53 — Re-spec and re-log the implementation tickets from the salvage audit's answer
 
-**Status:** open — **PLACEHOLDER. Do not start. Do not claim.**
+**Status:** resolved (2026-09-19 — closing comment below maps each AC to evidence)
 **Type:** task (planning / re-specification)
-**Labels:** ready-for-human — this ticket is only *claimable* once ticket 52 is resolved, and its body must first be filled in by whoever resolves 52.
+**Labels:** resolved — was ready-for-human; the human-approval items it carried were discharged by the human's own ADR-0018 ruling, so no outstanding human input remains.
 **Blocked by:** 52. Nothing here may be written, planned, or started before 52 has an `## Answer` and is moved to `Issue-tracker/resolved/`.
 **Related:** ADR-0017 (the standard), 17 (the umbrella this re-specs), 33 (the merge record — closure state that may need amending), 50/51 (in-flight work whose validity depends on 52's answer)
 
@@ -14,7 +14,7 @@ The human's instruction was to log a ticket **for the agent that completes ticke
 
 ## Fill-in contract
 
-> **ANSWERED 2026-09-18** — see **"Re-spec (§1–§7 answered)"** below. The scaffold is kept because it is the checklist the answer was written against, and because §1 is still partially open (ticket 54). The original instruction stands: the agent that completes ticket 52 fills this in.
+> **ANSWERED 2026-09-18** — see **"Re-spec (§1–§7 answered)"** below. The scaffold is kept because it is the checklist the answer was written against. §1 was completed 2026-09-19 when ticket 54 landed (dated fill-in in §1). The original instruction stands: the agent that completes ticket 52 fills this in.
 
 The agent that resolves ticket 52 must, in the same pass, replace the scaffold below with real content. Each section is required; leave a section present and marked `NOT YET KNOWN — needs <what>` rather than deleting it, so the gap stays visible.
 
@@ -82,6 +82,17 @@ Written from `docs/research/dsh-core-loop-fidelity-audit.md` and the register `d
 
 **This is a hypothesis.** Ticket 54 exists to confirm or destroy it, and its most important output — the list of tests that encode a deviation — is what makes "nothing gets scrapped" testable. Do not treat the above as a result.
 
+**§1 filled 2026-09-19 — ticket 54 landed** (`docs/research/dsh-core-loop-salvage-map.md`, commit `3287c4d`, which also closed tickets 52 and 54). Survey scope: 53 `src/` files / 12,754 lines and 41 `test/` files / 19,100 lines.
+
+| Bucket | Files | Detail |
+|---|---|---|
+| Survives untouched | 39 | The loop spine, roster/presence, all of `client/`, tickets 43–49 fixes — ~72% of `src` |
+| Survives with a named change | 13 | ~25%; larger than §6's provisional 4 — the obligation vocabulary also touches `core/types.ts` |
+| Unresolved | 1 | `core/report-clamp.ts` (123 lines, the U-3 addition) — since settled: kept and re-tuned by ticket 63 (A-7, 4000/1200/200/300) |
+| Rewrite / Delete | 0 | **Nothing scrapped.** "Adapt, don't demolish" is now supported by numbers, not a reading |
+
+The audit's §6 hypothesis was **confirmed in headline, refuted on two rows**: `types.ts` is not untouched, and `report-clamp.ts` is unresolved rather than surviving. Deviation-encoding tests: four of six deviations pinned by the suite, two silent. Two corrections to the head-start reading: the real D-5 pin is `todo-reconciler.test.ts:454-487` (`:526` is a determinism test a bounded implementation still passes), and B-1 is asserted as intended at `durable-roster.test.ts:313-321` — which is why ticket 59's fix made the freed key safe rather than refusing re-dispatch.
+
 ### §2 — Deviation dispositions
 
 | Deviation | Audit verdict | Action | Needs human approval? |
@@ -102,6 +113,16 @@ Written from `docs/research/dsh-core-loop-fidelity-audit.md` and the register `d
 | **B-1** freed stream key | A **bug**, not a deviation | Fix → ticket 59 | No (but the divergence must be logged) |
 
 **Four items need you.** They are collected as explicit questions in the register's Part C/D — deliberately not decided here.
+
+**2026-09-19 — settled; no question remains open.** Each was discharged by landed work, none re-opened:
+
+- **R-1** → **not-a-deviation (verified, ticket 62)** — the reference's subagent runner inherits the shared sections too (`docs/research/reference-subagent-inherited-sections.md`); independently carried as ADR-0018 exception A2 since 2026-09-18.
+- **U-1** → **closed by ADR-0018** (accepted 2026-09-18): no mode, no toggle, always-on; ADR-0009's premise retracted, ADR-0016 retracted; the removal is carried by the re-base (ticket 64, resolved) and the wrapper re-scope.
+- **U-2** → **approved as an addition** — register A-8 / ADR-0018 exception D22; shipped by ticket 61 (commit `4465561`).
+- **U-3** → **approved as an addition, re-tuned** — register A-7 / ADR-0018 exception D21, 4000/1200/200/300; shipped by ticket 63.
+- **U-4** → **NOT approved as a deviation**; reclassified as D-7, then closed **not-a-deviation (verified, ticket 60)** — the reference's steering is itself interrupt-then-resume-next-turn, so our turn-end delivery is the fidelity target, not a superset.
+
+The removal rows all landed: 55/56 (commit `2c50e87`), 57 (`adda8bc`), 58 (`7c463ec`); B-1 fixed by 59 (`b097b92`). The register (`docs/research/dsh-core-loop-deviations.md`) is the item-level authority and is current.
 
 ### §3 — The new ticket set
 
@@ -146,6 +167,8 @@ Retired instead: **ADR-0004's behavioural latitude** for core-loop items (ADR-00
 
 Met: §2–§7 are filled, tickets 54–59 are logged, and the four approval questions are presented to the human via the register. §1 remains partial pending ticket 54, which is why this ticket stays open.
 
+**Complete 2026-09-19:** ticket 54 landed and §1 is filled above; tickets 52 and 54 closed in commit `3287c4d`. This ticket is resolved — see the closing comment for the AC-by-AC mapping.
+
 ## Constraints (inherited, not optional)
 
 - **Scribe/planner only.** This ticket produces tickets and decisions, never code.
@@ -156,13 +179,13 @@ Met: §2–§7 are filled, tickets 54–59 are logged, and the four approval que
 
 ## Acceptance criteria
 
-- [ ] All seven sections filled — no `NOT YET KNOWN` left except where the gap is explicitly escalated to the human.
-- [ ] Every deviation in ticket 52's register has a disposition row and, where needed, a written approval question.
-- [ ] New implementation tickets are logged under `Issue-tracker/open/` with numbers, blockers, loop stage, fidelity evidence, and an offline test each.
-- [ ] The scrap list names paths, tests, and tracker tickets, and states how ticket 33's merge record is reconciled.
-- [ ] §6 names a concrete recovery point and the restore command, and confirms `main` is either pushed or tagged before any destructive step.
-- [ ] Ticket 33's record and any invalidated ticket (50/51 in particular) are either amended or explicitly flagged as superseded.
-- [ ] Nothing was implemented: `git status` shows tracker and research files only.
+- [x] All seven sections filled — §1 filled 2026-09-19 from ticket 54's salvage map; §2–§7 filled 2026-09-18. No `NOT YET KNOWN` remains.
+- [x] Every deviation in ticket 52's register has a disposition row and, where needed, a written approval question. — §2 table complete; the four human questions + R-1 since settled (ADR-0018; tickets 60/61/62/63) — see the §2 update.
+- [x] New implementation tickets are logged under `Issue-tracker/open/` with numbers, blockers, loop stage, fidelity evidence, and an offline test each. — Tickets 54–59 logged per §3; all since resolved (54: `3287c4d`; 55/56: `2c50e87`; 57: `adda8bc`; 58: `7c463ec`; 59: `b097b92`).
+- [x] The scrap list names paths, tests, and tracker tickets, and states how ticket 33's merge record is reconciled. — §4: nothing scrapped; ticket 33 amended, not rewritten (its 2026-09-19 ADR-0018 re-scope comment plus a pointer to ADR-0017's discipline and this re-spec).
+- [x] §6 names a concrete recovery point and the restore command, and confirms `main` is either pushed or tagged before any destructive step. — Tag `archive/pre-core-loop-fidelity-2026-09-18` created and pushed (verified present in this repo); restore: `git switch -c rescue archive/pre-core-loop-fidelity-2026-09-18`. Moot in the best way: no destructive step was ever needed (ticket 54 confirmed adapt-don't-demolish).
+- [x] Ticket 33's record and any invalidated ticket (50/51 in particular) are either amended or explicitly flagged as superseded. — 50/51 moved to `cancelled/` as superseded by ADR-0018 (commit `62a6849`); ticket 33 amended 2026-09-19 (see above).
+- [x] Nothing was implemented: `git status` shows tracker and research files only. — Held: this ticket's own passes are scribe/planner-only (tracker + `docs/research/` commits); all code landed under tickets 55–59's own numbers.
 
 ## Comments
 
@@ -176,3 +199,19 @@ Judgement calls recorded so the filling agent need not re-derive them:
 2. **Blocked by 52, hard.** Not "related to" — blocked. This ticket's body is unwritable until the audit lands.
 3. **§6 exists because the human's framing included "stash main and rebuild".** That is a destructive instruction attached to a repo whose `main` is 7 commits ahead of its remote. Requiring a named, pushed recovery point before any removal is the one guard this ticket adds to the instruction rather than deriving from it.
 4. **§4 forces the ticket-33 reconciliation** so a rebuild does not quietly leave the merge record asserting a fidelity we then undo — the same class of problem as the design-17 `revisit-before-merge` markers that ticket 33 exists to close.
+
+### 2026-09-19 — resolved: the re-spec is discharged; every spawned ticket landed
+
+Tickets 52 and 54 closed in commit `3287c4d`; 55–59 shipped (`2c50e87`, `adda8bc`, `7c463ec`, `b097b92`); 60–64, 74, 75 also resolved. AC-by-AC:
+
+| AC | Evidence |
+|---|---|
+| 1. Seven sections filled | §1 filled from ticket 54's `docs/research/dsh-core-loop-salvage-map.md`: 39 Keep / 13 Keep+adapt / 1 unresolved / 0 Rewrite / 0 Delete (53 `src` files, 12,754 lines; 41 `test` files, 19,100 lines); nothing scrapped. §2–§7 were filled 2026-09-18 |
+| 2. Register dispositions | §2 complete at write time; the four human questions + R-1 are settled (see the §2 update): R-1 not-a-deviation (ticket 62), U-1 closed by ADR-0018, U-2 → A-8/D22 shipped (61), U-3 → A-7/D21 shipped (63), U-4 → D-7 not-a-deviation (60) |
+| 3. New tickets logged | 54–59 logged under `open/` per §3 with numbers, blockers, loop stage, fidelity evidence, and offline tests; all now in `resolved/` |
+| 4. Scrap list + ticket-33 reconciliation | §4: nothing to scrap; ticket 33 amended, not rewritten — its 2026-09-19 re-scope comment plus today's pointer to ADR-0017's discipline and this re-spec |
+| 5. Recovery point | Tag `archive/pre-core-loop-fidelity-2026-09-18` created and pushed (verified present); restore: `git switch -c rescue archive/pre-core-loop-fidelity-2026-09-18`; no destructive step ever needed |
+| 6. Tickets 33/50/51 | 50/51 → `cancelled/`, superseded by ADR-0018 (commit `62a6849`); ticket 33 amended (see AC 4) |
+| 7. Nothing implemented by this ticket | Scribe/planner-only held: this ticket's own commits touch tracker + `docs/research/` files only; all code landed under tickets 55–59's own numbers |
+
+**No outstanding human input remains.** The approval questions this ticket carried were discharged by the human's own ruling — **ADR-0018, "imitate the reference in its entirety, except an enumerated exception list" (accepted 2026-09-18, `docs/adr/0018-imitate-reference-in-entirety-exception-list.md`)** — which closed U-1 directly, enumerated U-2/U-3 as exceptions D22/D21, and re-based the register (ticket 64). R-1 was then verified not-a-deviation (ticket 62) and U-4's premise was refuted on the reference side (ticket 60). Re-asking them would re-litigate a settled ADR. Per §7, this ticket implemented nothing; it only re-specced, and the work it specced is done.

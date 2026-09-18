@@ -228,3 +228,7 @@ so the no-verbatim re-review over the shipped diff is still owed before close-ou
 live-pass chain (tickets 44/45/46/47 defects, epic 35 AC 1) targeted the capsule vehicle that
 ADR-0018 supersedes — the pass plan re-scopes to the offline gates plus live assertions only for
 surfaces that survive the wrapper re-base. Blocked-by list unchanged; Status stays open.
+
+### 2026-09-19 — pointer recorded per ticket 53 §4 (re-spec); no rewrite of the merge record
+
+Ticket 53's re-spec records that this merge (`400450f`) was judged under ADR-0004's behavioural latitude — a standard since superseded for core-loop items: ADR-0017 supplies the deviation discipline, and **ADR-0018** (accepted 2026-09-18, imitate-the-reference exception-list model) is the governing standard, which the re-scope comment above already reflects. Ticket 54's salvage pass scrapped nothing, so the merge record needs no fidelity amendment — this pointer stands in place of a rewrite. Cross-ref: `Issue-tracker/resolved/53-respec-implementation-tickets-post-salvage-audit.md`.
