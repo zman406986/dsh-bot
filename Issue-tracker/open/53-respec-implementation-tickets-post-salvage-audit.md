@@ -14,6 +14,8 @@ The human's instruction was to log a ticket **for the agent that completes ticke
 
 ## Fill-in contract
 
+> **ANSWERED 2026-09-18** — see **"Re-spec (§1–§7 answered)"** below. The scaffold is kept because it is the checklist the answer was written against, and because §1 is still partially open (ticket 54). The original instruction stands: the agent that completes ticket 52 fills this in.
+
 The agent that resolves ticket 52 must, in the same pass, replace the scaffold below with real content. Each section is required; leave a section present and marked `NOT YET KNOWN — needs <what>` rather than deleting it, so the gap stays visible.
 
 ### 1. Salvage verdict (from ticket 52 Q3/Q5)
@@ -62,6 +64,87 @@ The human floated "stash main and rebuild". Any step that removes or rewrites ex
 ### 7. Definition of done for this ticket
 
 This ticket is done when the sections above are filled, the new tickets are logged, and the human has been given the approval questions from §2. **It does not implement anything.** Code changes belong to the tickets it creates.
+
+## Re-spec (§1–§7 answered, 2026-09-18)
+
+Written from `docs/research/dsh-core-loop-fidelity-audit.md` and the register `docs/research/dsh-core-loop-deviations.md`. Ticket 52 is **still open** (its Q3 salvage pass died on an API rate limit), so §1 is partial by construction.
+
+### §1 — Salvage verdict
+
+**Partial — the exhaustive numbers do not exist yet (ticket 54).** The provisional, explicitly-unverified reading from the audit §6:
+
+| Bucket | Contents |
+|---|---|
+| Survives untouched | `worker-fsm`, `wake-bus`, `steer-queue`, `report-clamp`, `types`, `dsh-host`/`fake-host`, `tool-barrier`, the roster/presence stack, all of `client/`, and tickets 43–49's infrastructure fixes |
+| Survives with a wiring change | `cordis-dsh-host.ts` (add `persona`), `worker/prompt.ts` (re-channel + safety), `plugin.ts` + `restart-notice.ts` (inject → followup) |
+| Genuine new work | The obligation layer over `durability.ts` / `todo-reconciler.ts` markers |
+| Scrapped | **Nothing identified** |
+
+**This is a hypothesis.** Ticket 54 exists to confirm or destroy it, and its most important output — the list of tests that encode a deviation — is what makes "nothing gets scrapped" testable. Do not treat the above as a result.
+
+### §2 — Deviation dispositions
+
+| Deviation | Audit verdict | Action | Needs human approval? |
+|---|---|---|---|
+| **D-1** contract channel | Unused seam — `persona` is verified present and wired | **Revert to reference** → ticket 55 | **No** — removing a deviation *is* ADR-0017 compliance |
+| **D-2** steer restates no contract | **Subsumed by D-1** (a system section recomputes every turn) | No separate work; explicitly *do not* add per-steer restatement | No |
+| **D-3** no safety section | Real omission | Add → ticket 56 | No |
+| **D-4** restart queues, opens no turn | Real; wrong primitive (`inject` vs `followup`) | Swap primitive → ticket 57 | No |
+| **D-5** unbounded obligation, no `lost` | Real — the one new subsystem | Build → ticket 58 | No |
+| **D-6** no delivery telemetry | Real | Build with D-5 → ticket 58 | No |
+| **A-3 … A-6** relay, delivered-criterion, ledger, leaf topology | Already written decisions | No action | Already approved (ADR-0003/0007/0008) |
+| **R-1** inherited child base prompt | **Unreachable** — needs a host preset change | Nothing to build | **YES — acknowledgment pending** |
+| **R-2** worker FSM unmatched | The reference FSM does not exist in the reconstruction | No action; must not be claimed as fidelity | No |
+| **U-1** activation model | Boundary case | **Defer to ADR-0016's sign-off** | **YES** |
+| **U-2** no worker-health probe | We match the reference (which calls it its own gap) | Confirm match, or approve an addition | **YES** |
+| **U-3** 2000-char report clamp | An addition that changes behaviour | Keep / drop / re-tune | **YES** |
+| **U-4** steer timing (waits for idle, not nearest step) | Same guarantee, slower | Accept, or tighten | **YES** |
+| **B-1** freed stream key | A **bug**, not a deviation | Fix → ticket 59 | No (but the divergence must be logged) |
+
+**Four items need you.** They are collected as explicit questions in the register's Part C/D — deliberately not decided here.
+
+### §3 — The new ticket set
+
+All logged under `Issue-tracker/open/`:
+
+| # | Slug | Loop stage | Blocked by |
+|---|---|---|---|
+| 54 | `salvage-classification-and-deviation-tests` | — (audit) | none (rate limit resets 18:59) |
+| 55 | `worker-contract-system-position-persona` | 3, 5 | none |
+| 56 | `worker-contract-safety-section` | 3 | 55 |
+| 57 | `restart-recovery-opens-a-turn` | 10 | none |
+| 58 | `delivery-obligation-bound-lost-telemetry` | 9 | none (57 recommended first) |
+| 59 | `freed-stream-key-double-worker-risk` | 10 | none |
+
+Each carries the behaviour note it matches, the `file:line` it changes, an offline test, and a clean-room identifier-grep gate.
+
+**Not ticketed, on purpose:** every `undecided` register item (U-1…U-4) and R-1. Logging a ticket for them would presume the ruling.
+
+### §4 — What gets scrapped
+
+**Nothing.** No source file, test, or shipped ticket was identified as needing deletion. Ticket 33's merge record therefore does **not** need amending on fidelity grounds — but note that ticket 33's merge was performed under ADR-0004's latitude, and this re-spec supersedes the *standard* it was judged against. Ticket 33 should add a pointer to ADR-0017 and this re-spec rather than be rewritten.
+
+Retired instead: **ADR-0004's behavioural latitude** for core-loop items (ADR-0017 amends it), and design-17 §5's PRD-first conflict framework (suspended for core-loop items). Neither is a code artifact.
+
+### §5 — Sequencing
+
+1. **Now, unblocked:** 55 (channel), 57 (recovery primitive), 59 (bug). These are independent.
+2. **Then:** 56 (needs 55's channel), 58 (recommended after 57).
+3. **In parallel, after 18:59:** 54 (the salvage survey) — it must not gate the code work, which is why it was spun out of 52 rather than left blocking it.
+4. **Pause check:** tickets **50 and 51** ride ADR-0016, an unsigned draft reversing ADR-0009. They are **not** blocked by this re-spec, but they sit on an unresolved activation model (U-1), so do not treat their implementation as settled. Ticket 32's dormant composition and ticket 33's close-out remain valid.
+5. **Closure:** 52 closes when 54 lands; then this ticket closes.
+
+### §6 — Tree protection before any destruction
+
+**No destruction is now planned** — §4 scraps nothing, so the "stash main and rebuild" question is answered in the negative by evidence rather than by preference. If that changes:
+
+- **The recovery point already exists and is pushed:** tag **`archive/pre-core-loop-fidelity-2026-09-18`** (annotated, created and verified on `origin` at the scribe-pass tip). Restore with `git switch -c rescue archive/pre-core-loop-fidelity-2026-09-18`.
+- `main` and `origin/main` are in sync, so the tree is not currently at risk. **Keep them in sync before any destructive step.**
+- **Stop rule:** branches were pruned on 2026-09-18 (`clone/always-on-dispatcher`, `master`) after verifying each tip was an ancestor of `main`; the same verification (`git merge-base --is-ancestor`) is the precondition for any future deletion.
+
+### §7 — Definition of done for this ticket
+
+Met: §2–§7 are filled, tickets 54–59 are logged, and the four approval questions are presented to the human via the register. §1 remains partial pending ticket 54, which is why this ticket stays open.
 
 ## Constraints (inherited, not optional)
 

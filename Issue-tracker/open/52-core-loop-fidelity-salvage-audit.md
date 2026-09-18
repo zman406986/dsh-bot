@@ -98,3 +98,39 @@ A crude but argued split of the existing tree: **survives / adapts / gets scrapp
 - **Do not re-litigate design-17's decisions in this ticket.** The audit reports what a stage does relative to the reference; deciding whether to revert it is ticket 53's job, and the *approval* to keep it is the human's.
 - **Watch for the trap in the framing.** "How much is salvageable" invites motivated reasoning in both directions — a team that just shipped 700 tests will find everything salvageable, and a team told to rebuild will find nothing is. Q3's per-stage grouping and Q1's citations exist to keep the answer honest.
 - **Sequence after this ticket:** ticket 53 fills in from the audit's answer, then the human decides on the rebuild.
+
+## Comments
+
+### 2026-09-18 — research pass: Q1/Q2/Q4/Q5 answered; Q3 deferred; ticket remains OPEN
+
+Four research passes were run as a team (`core-loop-fidelity`). Three delivered; one was killed by an API rate limit (HTTP 429) at 27 minutes having written nothing. **This ticket stays open because Q3's acceptance criterion is unmet** — see the gap list below.
+
+**Deliverables produced**
+
+| Note | What it establishes |
+|---|---|
+| `docs/research/dsh-core-loop-fidelity-audit.md` | **The answer.** Q1 fidelity map (10 stages), Q2, Q4 rulings, Q5 provisional effort shape, and what it does *not* establish |
+| `docs/research/dsh-core-loop-deviations.md` | The deviation register: a disposition and an approval field per item, plus 3 items awaiting your ruling |
+| `docs/research/reference-core-loop-spec.md` | The reference side. Closes all four previously-open gaps in `reference-agent-lifecycle.md` |
+| `docs/research/dsh-loop-capability-map.md` | dsh's capability per stage, asserted against the installed host |
+| `docs/research/dsh-child-system-prompt-seam.md` | **Q2 — the load-bearing one. Settled: the seam exists and is wired.** |
+
+**The three findings that changed the picture**
+
+1. **Q2 is answered and it is good news.** The worker contract can be delivered in a real system position via the spawn request's `persona` field, which renders into a `deployment:persona-prefix` system-prompt section (`dsh-subagent/lib/index.js:549-553`) and is recomputed every turn. Our adapter simply omits it (`src/adapter/cordis-dsh-host.ts:534-544`). So **D-1 is an unused seam, not a structural impossibility** — and because a system section is recomputed each turn, **D-2 is subsumed by the D-1 fix**. The rebuild premise holds; it is "adapt the channel", not "the requirement is impossible".
+2. **Both fatal-if-false assumptions are CONFIRMED against host source.** `startContinuable` resolves on **inbox acceptance**, not completion — so the dispatcher never blocks and S1 is structural. `agent.followup` **opens a turn** — so delivery works; it is `agent.inject` that is queue-only, which is precisely D-4's defect. Neither was ever verified before; both now are.
+3. **Nothing was found that must be scrapped.** Every mechanism the reference uses has a working counterpart. That is a finding, not a rounding-down — but it is **provisional**, because the exhaustive survey that would test it is the pass that died (see gap 1).
+
+**Gaps — this ticket is not resolvable yet**
+
+1. **Q3 is not done.** The `salvage-map` pass died on the 429 and wrote nothing. The audit's §6 effort shape is the team lead's provisional reading of the *deviation surface*, explicitly flagged as an unverified hypothesis. Spun out as ticket 54.
+2. **The test-suite deviation list is missing** — which tests assert our current behaviour where the reference differs. This was the most decision-relevant output of that pass, because it is what makes "nothing gets scrapped" testable. Folded into ticket 54.
+3. **Q2's residual is unenumerated.** We know the child joins the dispatcher's preset; the exact section list of that inherited preset was not listed.
+4. **The `{{…}}` interpolation failure mode** for a non-deployment `persona` is unconfirmed (plain text is safe; literal braces are the risk).
+
+**Process notes**
+
+- **The clean-room boundary was mapped onto agent boundaries**: the reference-observation pass ran in a session with no product code open; the two comparison passes never opened the reference tree; no agent had both. Recorded because it is the mechanism that made parallel reference research safe.
+- **The installed host is at `C:\Users\TZhen\.dsh\profiles\node_modules\@deepseek-ai\`, v0.1.5-rc.2** — not the path or version in `dsh-local-install.md`. That stale note derailed one pass into concluding the host was absent; the note now carries a correction block. Two further prior-note claims were corrected: `Agent.cancel` on the dispatcher parent is a no-op (our code was right, the note was wrong), and the `persona`/`agentOptions` seams were understated as "unverified".
+- **Implementation tickets were logged** from the register's `to-be-removed` items (55–59), since removing a deviation is compliance rather than a decision. The register's undecided items (U-1…U-4, R-1) need your ruling and are **not** ticketed.
+- **ADR-0017's D-1 row was updated** to the established facts, and now points here.
