@@ -1,4 +1,4 @@
-# 64 — Collapsed capsule must surface key info at a glance: dispatcher ON/OFF + running subagent count
+# 66 — Collapsed capsule must surface key info at a glance: dispatcher ON/OFF + running subagent count
 
 **Status:** open
 **Labels:** needs-triage
@@ -25,3 +25,9 @@ The exact rendering (text, icon, dot color) is the implementer's call, but the t
 - [ ] Dormant/never-activated composition still matches ticket 32 (chip shows the dormant state honestly).
 - [ ] Chip remains small; nothing in it is clickable except expand/collapse and the activation affordance already specified in epic 35.
 - [ ] Unit tests offline; live browser pass uses trivial tasks only.
+
+### 2026-09-19 — renumbered 64 → 66 (ticket 64's duplicate-number fix)
+
+Two tickets were both numbered 64 (this one and the ADR-0018 re-base ticket). This file takes the
+next free number, 66; all references (ticket 65's Related line and collapsed-state AC) updated.
+Content unchanged by the renumber; triage against ADR-0018 follows separately.

@@ -3,7 +3,7 @@
 **Status:** open
 **Labels:** needs-triage
 **Blocked by:** none for research/design; implementation blocked by the open questions below
-**Related:** 51 (dedicated dispatcher-bots surface — this ticket extends and largely subsumes it), 35 (capsule epic), 63 (draggable), 64 (collapsed chip key info), 50 (front-desk mode), ADR-0016, design-16
+**Related:** 51 (dedicated dispatcher-bots surface — this ticket extends and largely subsumes it), 35 (capsule epic), 63 (draggable), 66 (collapsed chip key info, renumbered from the duplicate 64), 50 (front-desk mode), ADR-0016, design-16
 
 ## Request (human, verbatim intent)
 
@@ -15,7 +15,7 @@ the background while we build essentially the reference's window UI, but as a
 
 ## What this means concretely
 
-- The capsule's two states become: **collapsed chip** (tickets 63/64: draggable, shows
+- The capsule's two states become: **collapsed chip** (tickets 63/66: draggable, shows
   ON/OFF + running count) and **expanded = a large floating window** that is the
   dispatcher product's whole UI, not a small overlay card.
 - Inside the expanded window: selection of / conversation with **dispatcher bots**
@@ -63,5 +63,5 @@ the background while we build essentially the reference's window UI, but as a
 - [ ] Dispatcher bot conversations happen inside the window; the host conversation box
       is not required for dispatcher interaction.
 - [ ] Workers remain non-chattable in the window (ticket 51 R3).
-- [ ] Collapsed state still meets tickets 63/64.
+- [ ] Collapsed state still meets tickets 63/66.
 - [ ] Offline unit tests; live browser pass with trivial tasks only (kill timers per AGENTS.md).
