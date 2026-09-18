@@ -1,5 +1,7 @@
 # Core-loop deviation register
 
+> **2026-09-19 (ticket 74):** this register's row **A-5** (todo list stays the dispatcher's private ledger) and ADR-0018's exception-list item **A5** (persistence stays in dsh's session/job store) are distinct identifiers that happen to collide — they name different items; the register remains authoritative for deviations.
+
 > **2026-09-18 (late):** ADR-0018 now holds the master rule — *imitate the reference in its entirety, except an enumerated exception list* — ruled directly by the human. This register remains the item-level tracker **and has been reclassified under ADR-0018 (ticket 64, same day)**: A-4 is **superseded** (completion = first-visible-ack; the "delivered" criterion is dropped), A-5/A-6 are **conformances** (verified shared with the reference, `reference-behavior-notes.md:60`), A-7/A-8 survive as ADR-0018's D21/D22, R-1 is carried as ADR-0018's A2, and U-1 is closed by the ADR (no mode, always-on). Part A rows stay closed. B-1 stays a bug and its ticket-59 fix is unaffected by the re-base (stream-key durability is untouched by the completion-semantics and UI changes).
 
 **Authority:** ADR-0018 — the master rule: imitate the reference in its entirety except its enumerated exception list (the list is exhaustive and the fidelity bar). ADR-0017 supplies the discipline: a deviation may exist only with explicit written human approval; anything not on ADR-0018's list is held to the imitation standard.

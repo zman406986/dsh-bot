@@ -46,3 +46,10 @@ conflict, voids the PRD's feature-flag and clean-room-grep requirements (PRD ame
 ticket 64), re-scopes the UI epic onto a wrapper the project builds itself, and makes
 multiple dispatchers real (per-dispatcher dsh sessions; tool-scoping verification in
 `docs/research/dsh-tool-scoping-seam.md`, design ticketed as 72).
+
+**2026-09-19 — identifier note (ticket 74):** ADR-0018's exception-list item "**A5**"
+(persistence stays in dsh's session/job store) and the deviations register's row
+"**A-5**" (todo list stays the dispatcher's private ledger, reclassified a conformance)
+are **distinct identifiers that happen to collide** — they name different items in
+different documents. The register (`docs/research/dsh-core-loop-deviations.md`) remains
+authoritative for deviations. ADR-0018's accepted text is left untouched.
