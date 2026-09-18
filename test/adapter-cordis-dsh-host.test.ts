@@ -190,6 +190,8 @@ describe("CordisDshHost spawn / interrupt / send", () => {
     assert.equal(spec.request.prompt.length, 1);
     assert.equal(spec.request.prompt[0]?.type, "text");
     assert.equal((spec.request.prompt[0] as { text: string }).text, "Do the thing.");
+    // Ticket 55: with no worker def there is no contract, so no persona.
+    assert.equal("persona" in spec.request, false);
     assert.equal(spec.request.maxDepth, 0);
     // T09 without a def omits toolFilter.
     assert.equal("toolFilter" in spec.request && spec.request.toolFilter, false);
@@ -220,9 +222,23 @@ describe("CordisDshHost spawn / interrupt / send", () => {
 
     assert.equal(workerId, "child-1");
     const spec = ctx.startContinuableCalls[0] as unknown as ContinuableStartSpecLike;
-    const text = (spec.request.prompt[0] as { text: string }).text;
-    assert.ok(text.includes("## Role"));
-    assert.ok(text.includes("Task:\nDo the thing."));
+
+    // Ticket 55 (register D-1): the contract travels in the `persona` field,
+    // which the host renders into a system-prompt section — recomputed every
+    // turn, so it survives compaction and needs no per-steer restatement (D-2).
+    assert.equal(typeof spec.request.persona, "string");
+    const persona = spec.request.persona as string;
+    assert.ok(persona.includes("## Role"), "contract reaches the system position");
+    assert.ok(persona.includes("## Final answer"));
+
+    // ...and the task is the child's first user turn, ALONE. Putting the
+    // contract back into this channel is the regression this pins.
+    assert.equal(spec.request.prompt.length, 1);
+    const brief = (spec.request.prompt[0] as { text: string }).text;
+    assert.equal(brief, "Do the thing.");
+    assert.ok(!brief.includes("## Role"));
+    assert.ok(!brief.includes("Task:\n"));
+
     assert.equal(spec.request.maxDepth, 0);
     const filter = spec.request.toolFilter as { deny: readonly string[] };
     assert.ok(filter);
@@ -451,7 +467,9 @@ describe("CordisDshHost recentResult — deliverables excerpt source (ticket 41)
     ctx.fire("subagent/end", {
       id: "child-1",
       stopReason: "completed",
-      lastAssistantMessage: [{ type: "text", text: "y".repeat(5_000) }],
+      lastAssistantMessage: [
+        { type: "text", text: "y".repeat(RECENT_RESULT_EXCERPT_CHARS + 1_000) },
+      ],
     });
     const clamped = host.recentResult("child-1");
     assert.equal(clamped?.text.length, RECENT_RESULT_EXCERPT_CHARS);
@@ -734,7 +752,9 @@ describe("CordisDshHost session/event activity feed (ticket 29)", () => {
     const ctx = createStubCtx();
     const { host, workerId } = await spawnOneWorker(ctx);
 
-    const longName = "tool_".padEnd(150, "x");
+    // Ticket 63 / A-7: build past the constant, not past a hardcoded 150 —
+    // otherwise re-tuning CHECK_ACTIVITY_CHARS quietly un-tests this clamp.
+    const longName = "tool_".padEnd(CHECK_ACTIVITY_CHARS + 30, "x");
     fireSessionEvent(ctx, workerId, toolCallEvent(longName, { command: "go" }));
     const phrase = host.recentActivity(workerId);
     assert.ok(phrase !== null);

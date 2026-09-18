@@ -5,10 +5,7 @@ import {
   WORKER_MAX_DEPTH,
   type WorkerAgentDef,
 } from "../src/worker/agent-def.js";
-import {
-  assembleWorkerPrompt,
-  buildWorkerSystemPrompt,
-} from "../src/worker/prompt.js";
+import { buildWorkerSystemPrompt } from "../src/worker/prompt.js";
 import {
   EMPTY_WORKER_ERROR_REPORT,
   EMPTY_WORKER_REPORT_PLACEHOLDER,
@@ -127,9 +124,37 @@ describe("worker prompt assembly", () => {
       "## Todo ledger",
       "## Work style",
       "## Final answer",
+      "## Safety",
     ]) {
       assert.ok(prompt.includes(heading), `missing section: ${heading}`);
     }
+  });
+
+  // Ticket 56 (register D-3): the reference appends one shared safety section to
+  // every subagent prompt, unconditionally. This is the structural pin, so the
+  // section cannot be silently dropped later.
+  it("appends the safety section last, and does not restate the host's guarantee", () => {
+    const prompt = buildWorkerSystemPrompt();
+    assert.ok(prompt.includes("## Safety"));
+    assert.equal(
+      prompt.lastIndexOf("## "),
+      prompt.indexOf("## Safety"),
+      "safety is appended as the final section",
+    );
+
+    // The host already injects the fixed delegation-scope statement into every
+    // child ("subagent:delegation"): scope is fixed at start, cannot be widened,
+    // and approval-requiring operations are rejected automatically. Restating it
+    // spends tokens on every turn of every worker, so ours must complement it.
+    const lowered = prompt.toLowerCase();
+    assert.ok(
+      !lowered.includes("permission scope"),
+      "must not restate the host's fixed-scope statement",
+    );
+    assert.ok(
+      !lowered.includes("approval"),
+      "must not restate the host's approval-rejection statement",
+    );
   });
 
   it("orders Role before Limits before Final answer", () => {
@@ -160,11 +185,28 @@ describe("worker prompt assembly", () => {
     }
   });
 
-  it("assembleWorkerPrompt places system first and task after a separator", () => {
-    const system = buildWorkerSystemPrompt();
-    const assembled = assembleWorkerPrompt(system, "Do the research.");
-    assert.ok(assembled.startsWith(system));
-    assert.ok(assembled.includes("Task:\nDo the research."));
+  // Ticket 55 (register D-1/D-2): the contract is delivered in a system
+  // position via the spawn request's `persona`, not concatenated into the
+  // first user turn. The adapter-side separation is asserted in
+  // `adapter-cordis-dsh-host.test.ts`; these cases pin the contract text's
+  // own constraints.
+  it("contains no unescaped {{…}} — persona interpolation is strict", () => {
+    const contract = buildWorkerSystemPrompt();
+    assert.ok(
+      !contract.includes("{{"),
+      "contract must not contain a literal '{{' (persona template syntax)",
+    );
+    assert.ok(
+      !contract.includes("}}"),
+      "contract must not contain a literal '}}' (persona template syntax)",
+    );
+  });
+
+  it("does not smuggle the task into the contract text", () => {
+    const contract = buildWorkerSystemPrompt();
+    // The old single-blob shape put "Task:" + the brief inside the prompt.
+    // That is exactly what D-1 removed, so guard against it coming back.
+    assert.ok(!contract.includes("Task:\n"));
   });
 });
 
@@ -198,9 +240,12 @@ describe("worker report normalization", () => {
 });
 
 describe("createWorkerAgentDef", () => {
-  it("exposes system prompt, leaf maxDepth, and resolving filter", () => {
+  it("exposes the contract persona, leaf maxDepth, and resolving filter", () => {
     const def: WorkerAgentDef = createWorkerAgentDef();
-    assert.ok(def.systemPrompt.includes("## Role"));
+    // Ticket 55: the contract is named `persona` because that is the channel it
+    // travels on. It must be the same text `buildWorkerSystemPrompt` produces.
+    assert.equal(def.persona, buildWorkerSystemPrompt());
+    assert.ok(def.persona.includes("## Role"));
     assert.equal(def.maxDepth, WORKER_MAX_DEPTH);
     assert.equal(def.maxDepth, 0);
     const filter = def.resolveToolFilter(new Set(["present", "bash"]));

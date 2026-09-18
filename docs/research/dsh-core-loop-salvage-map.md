@@ -115,7 +115,7 @@
 | `peer-inbox.test.ts` | Keep | not core-loop (Phase 2) | Accept/dedupe/cap. |
 | `plugin-scaffold.test.ts` | Keep | not core-loop (43/44) | Cordis effect contract + command registration — the ticket-44 fix's pin. |
 | `policy-assembler.test.ts` | **Keep+adapt** | 7/9 | Pins wake-turn section order and the clamp-at-wake behaviour. Gains the obligation/redrive sections (D-5) — additive assertions, but the "sections appear in order" assertion must change. |
-| `report-clamp.test.ts` | **unresolved — needs U-3** | 7 | Pins the clamp's exact behaviour. If U-3 rules "drop", 12 cases disappear with the module; if "keep", it stands unchanged. Cannot be classified before the ruling. |
+| `report-clamp.test.ts` | Keep | 7 | Pins the clamp's exact behaviour, **deriving every boundary from the constants** rather than hardcoding a length — so re-tuning the bound cannot silently un-test it. U-3 was ruled on 2026-09-18 (ticket 63); the file needed no edit. |
 | `restart-honesty.test.ts` | **Keep+adapt** | 10 (D-4) | **Pins D-4**: `:305-308` reads the notice out of `agent.injected` and asserts exactly one. Ticket 57 breaks this **correctly** — the assertion moves to the waking path. The surrounding assertions (content, exactly-once, rebuild-before-publish, unknown rows off-roster, no-stop-affordance) are all sound and must be kept. |
 | `roster-snapshot.test.ts` | Keep | not core-loop | Snapshot projection + observer. |
 | `steer-command.test.ts` | Keep | 5 | Command routing into the same queue. |
@@ -258,8 +258,8 @@ The honest counterweight, so this is not read as optimism: (1) the one file in t
 
 ## 7. What this survey does NOT establish
 
-1. **Suite health is asserted, not measured.** This pass read the tests; it did not run them. ~700 passing cases is the repo's own claim. Run `npm test` before relying on the "green suite" baseline — that is the precondition for the §4 test-cost figure having teeth.
+1. **Suite baseline: MEASURED, not asserted.** `npm test` on 2026-09-18 at `3287c4d`: **767 tests / 194 suites / 0 fail / 121s**. The repo's "~700" claim understated it. This matters because the §4 test-cost figure only has teeth against a known-green baseline — it now does.
 2. **No deviation was closed, no code was changed.** Read-only pass, per ticket 54.
-3. **`unresolved` is real, not rounded.** `report-clamp.ts` + `report-clamp.test.ts` (239 lines total) wait on U-3. Anything else in §4 that looks like a hidden `TBD` is not — every other row carries a named reason.
+3. **`unresolved` closed to zero.** `report-clamp.ts` + `report-clamp.test.ts` were the only unresolved rows; U-3 was ruled on 2026-09-18 ("copy the reference, or the roomier option if there is nothing to imitate" — and there is nothing, so the clamp stays, re-tuned), and ticket 63 landed the change. Both files are now `Keep`. No row in §1 or §2 is left unclassified.
 4. **The reference's worker FSM remains unavailable** (R-2). Our kept `worker-fsm.ts` is *correct*, not *faithful*, and must not be scored as a fidelity match.
 5. **Live behaviour is unverified.** Every verdict is a reading of source and tests. Tickets 43–46/48–49 are still open precisely because reading the tree was not enough to confirm live behaviour — the same caution applies to every "Keep" above that depends on host behaviour rather than pure logic.

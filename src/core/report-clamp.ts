@@ -4,22 +4,32 @@
  * it is not a rewrite of what the user finally sees.
  */
 
-/** Max characters of a completed worker report body in a wake notice. */
-export const REPORT_CLAMP_CHARS = 2000;
+/**
+ * Max characters of a completed worker report body in a wake notice.
+ *
+ * Ticket 63 / register A-7: the reference has **no** equivalent bound — it
+ * substitutes only for empty/aborted/error settles, never truncates — so there
+ * is nothing to imitate and the protective addition is kept, re-tuned from 2000.
+ * The body is the bound that matters most: the wake notice is the dispatcher's
+ * only source for the user's answer, so clamping too low silently destroys a
+ * real deliverable mid-sentence.
+ */
+export const REPORT_CLAMP_CHARS = 4000;
 
-/** Max characters of an error message body. */
-export const ERROR_CLAMP_CHARS = 800;
+/** Max characters of an error message body. Re-tuned from 800 (ticket 63 / A-7). */
+export const ERROR_CLAMP_CHARS = 1200;
 
-/** Max characters of a check-row activity line. */
-export const CHECK_ACTIVITY_CHARS = 120;
+/** Max characters of a check-row activity line. Re-tuned from 120 (ticket 63 / A-7). */
+export const CHECK_ACTIVITY_CHARS = 200;
 
 /**
  * Max characters of the roster snapshot's recent-result excerpt (ticket 41).
- * The bound applies to the WHOLE kept string — the truncation ellipsis
- * included — so the wire field and its defensive parse agree on
- * `text.length <= RECENT_RESULT_EXCERPT_CHARS` exactly.
+ * Re-tuned from 200 (ticket 63 / A-7). The bound applies to the WHOLE kept
+ * string — the truncation ellipsis included — so the wire field and its
+ * defensive parse agree on `text.length <= RECENT_RESULT_EXCERPT_CHARS`
+ * exactly.
  */
-export const RECENT_RESULT_EXCERPT_CHARS = 200;
+export const RECENT_RESULT_EXCERPT_CHARS = 300;
 
 /** Check roster rows before head/tail fold. */
 export const TOOL_RESULT_SUMMARY_MAX_ROWS = 20;

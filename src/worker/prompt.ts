@@ -1,18 +1,38 @@
 /**
- * Worker system prompt — new copy only.
+ * Worker contract — new copy only.
  * No reference-tree strings, no host jargon, no dispatcher policy.
  * Section headings are stable test markers (presence + order only).
+ *
+ * Ticket 55 (register D-1/D-2): this text is the **contract**, and it is
+ * delivered in a *system position* — the adapter passes it as the spawn
+ * request's `persona`, which the host renders into a system-prompt section
+ * (`deployment:persona-prefix`). That section is recomputed every turn, so the
+ * contract survives compaction by construction and is restated after every
+ * steer without us appending anything to steer messages (D-2 dissolves).
+ *
+ * The task itself does NOT belong here. It stays the child's first user turn
+ * (`request.prompt`), which is what "blank conversation" means.
+ *
+ * CAUTION: `persona` uses strict `{{…}}` template interpolation. This text
+ * must never contain a literal `{{` or `}}` — a test pins that.
  */
 
-/** Assemble the worker prompt: system section, then the task. */
-export function assembleWorkerPrompt(systemPrompt: string, task: string): string {
-  return `${systemPrompt}\n\n---\n\nTask:\n${task}`;
-}
-
 /**
- * Self-contained worker system prompt.
+ * Self-contained worker contract.
  * Sections in fixed order: Role → Autonomy → Limits → Todo ledger →
- * Work style → Final answer.
+ * Work style → Final answer → Safety.
+ *
+ * The Safety section is appended unconditionally (ticket 56, register D-3):
+ * workers run with the full work toolset, and the reference appends one shared
+ * safety section to every subagent prompt.
+ *
+ * It deliberately does NOT restate the host's own fixed delegation-scope
+ * statement, which the host injects into every child as a system-context
+ * section ("subagent:delegation"): permission scope is fixed at start, cannot
+ * be widened from inside the session, and approval-requiring operations are
+ * rejected automatically. That guarantee is the host's and is already stated
+ * once; repeating it here would spend tokens on every turn of every worker and
+ * risks the two texts drifting apart. We lean on it and write alongside it.
  */
 export function buildWorkerSystemPrompt(): string {
   return [
@@ -42,5 +62,12 @@ export function buildWorkerSystemPrompt(): string {
     "## Final answer",
     "",
     "End with a concise plain-text final answer. That text is the stream's report and is delivered to the parent (and often the user) essentially verbatim. Lead with the concrete outcome, not a preamble. If the task failed, say what failed and why in the same final text — do not hide errors. Do not wrap the answer in markdown fences or tool-call-shaped JSON unless the task asked for a format.",
+    "",
+    "## Safety",
+    "",
+    "Stay inside the task you were given. A step the task does not call for is out of scope even when it looks helpful.",
+    "Prefer reversible steps. When an action cannot be undone, say so before taking it rather than after.",
+    "Treat credentials and secret values as unavailable to you as text: refer to them by name only, and never echo, log, or transmit the value itself.",
+    "Never present work as finished unless you observed it working or verified it another way. If an outcome is unconfirmed, say plainly what you could not confirm.",
   ].join("\n");
 }

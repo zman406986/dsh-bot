@@ -99,7 +99,7 @@ Implementation cautions: `persona` uses strict `{{…}}` template interpolation,
 
 | Bucket | Assessment |
 |---|---|
-| **Survives untouched** | The loop's structural spine: `worker-fsm.ts`, `wake-bus.ts`, `steer-queue.ts`, `report-clamp.ts`, `types.ts`, `dsh-host.ts`/`fake-host.ts`, `tool-barrier.ts`, the roster/presence stack, the whole `client/` surface, and tickets 43–49's infrastructure fixes (overlay, settings card, tool JSON Schema, `--dsw-*` tokens, command registration) |
+| **Survives untouched** | The loop's structural spine: `worker-fsm.ts`, `wake-bus.ts`, `steer-queue.ts`, `report-clamp.ts`, `dsh-host.ts`/`fake-host.ts`, `tool-barrier.ts`, the roster/presence stack, the whole `client/` surface, and tickets 43–49's infrastructure fixes (overlay, settings card, tool JSON Schema, `--dsw-*` tokens, command registration). **Two corrections from the survey (§7):** `types.ts` does **not** survive untouched — the D-5/D-6 obligation vocabulary lands there; and `report-clamp.ts` was `unresolved` pending the U-3/A-7 ruling, which ticket 63 has now settled as **Keep** |
 | **Survives with a wiring change** | `src/adapter/cordis-dsh-host.ts` (add `persona`), `src/worker/prompt.ts` (re-channel + safety section), `src/plugin.ts` + `restart-notice.ts` (inject → followup) |
 | **Genuine new work** | The obligation layer over `durability.ts` / `todo-reconciler.ts` markers: attempts, `lost`, disposition telemetry, escalation instead of infinite persistence |
 | **Scrapped** | Nothing identified so far. That is a real finding, not a rounding-down — the mechanisms all have counterparts |
@@ -124,7 +124,7 @@ Implementation cautions: `persona` uses strict `{{…}}` template interpolation,
 1. **The exact text of the inherited child preset is unenumerated.** We know the child joins the dispatcher's preset; we have not listed its sections.
 2. **`{{…}}` interpolation failure mode** for a non-deployment persona is unconfirmed (plain text is safe; literal braces are the risk).
 3. **The reference's worker FSM cannot be matched** because it does not exist in the reconstruction (tree-shaken to `export {}`). Our 6-state FSM is designed from first principles and is **not** a fidelity claim.
-4. **Suite health is asserted, not measured.** The ~700 passing cases are the repo's own claim; the survey read the tests, it did not run them. `npm test` is the precondition for the test-cost figure having teeth.
+4. **Suite baseline is now measured:** `npm test` at `3287c4d` → **767 tests / 194 suites / 0 fail / 121s**. The earlier "~700 passing" was the repo's own claim; it understated the count rather than overstating it.
 
 ---
 

@@ -64,7 +64,6 @@ export type {
   WorkerAgentDef,
 } from "./adapter/index.js";
 export {
-  assembleWorkerPrompt,
   buildWorkerSystemPrompt,
   buildWorkerToolFilter,
   createWorkerAgentDef,

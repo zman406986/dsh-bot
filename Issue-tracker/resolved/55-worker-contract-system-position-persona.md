@@ -1,6 +1,6 @@
 # 55 — Deliver the worker contract in a system position (deviations D-1 and D-2)
 
-**Status:** open
+**Status:** resolved
 **Type:** task
 **Labels:** ready-for-agent
 **Blocked by:** none for implementation. Reads as a *fidelity restoration*, so ADR-0017 does not require new human approval — removing a deviation is compliance.
@@ -48,12 +48,31 @@ Pass the contract through the spawn request's **`persona`** field. Verified agai
 
 ## Acceptance criteria
 
-- [ ] `spawnWorker` passes a `persona` composed from the contract half of `assembleWorkerPrompt`; brief and contract are demonstrably separate in the assembled request.
-- [ ] A unit test asserts the spawn request carries `persona` and that the brief remains in `request.prompt`.
-- [ ] A test asserts the persona text contains no unescaped `{{`/`}}`.
-- [ ] No per-steer contract restatement was added (assert the steer path is unchanged).
-- [ ] `npm test` 0 fail, `npm run typecheck` clean (both configs).
-- [ ] Clean-room identifier grep over the shipped tree: zero product-tree hits.
+- [x] `spawnWorker` passes a `persona` composed from the contract half of `assembleWorkerPrompt`; brief and contract are demonstrably separate in the assembled request. — `assembleWorkerPrompt` is **deleted** rather than split: it was the thing that created the single blob. The contract is `buildWorkerSystemPrompt()`, exposed on the agent def as `persona`; the task passes through to `request.prompt` verbatim.
+- [x] A unit test asserts the spawn request carries `persona` and that the brief remains in `request.prompt`. — `adapter-cordis-dsh-host.test.ts`, the with-def spawn case: asserts `persona` carries `## Role`/`## Final answer`, and that `prompt[0].text === "Do the thing."` with no `## Role` and no `Task:\n` — the regression guard.
+- [x] A test asserts the persona text contains no unescaped `{{`/`}}`. — `worker-agent-type.test.ts`.
+- [x] No per-steer contract restatement was added (assert the steer path is unchanged). — `steer-queue.ts`, `parent-agent.ts` and the steer tests were **not touched**; the suite re-ran green, which is the assertion. No restatement is needed now: a system section is recomputed every turn, so D-2 dissolves.
+- [x] `npm test` 0 fail, `npm run typecheck` clean (both configs). — **769 tests / 194 suites / 0 fail**; both tsconfigs clean.
+- [x] Clean-room identifier grep over the shipped tree: zero product-tree hits. — Word-boundary grep for `\b(sand|executor)\b`, `MessageSubagent`, `SAND_MULTITASK` over both `src/` and the rebuilt `lib/`: **zero hits** in each.
+
+## Comments
+
+### 2026-09-18 — implemented
+
+**What actually changed.** Three source files, and one deletion that is the point of the ticket:
+
+| File | Change |
+|---|---|
+| `src/worker/prompt.ts` | `assembleWorkerPrompt` **deleted** — it *was* the defect: the function whose entire job was concatenating the contract into the message. `buildWorkerSystemPrompt` gains a header stating it is delivered as `persona`. |
+| `src/worker/agent-def.ts` | `WorkerAgentDef.systemPrompt` → **`persona`**, so the field name cannot drift back into the message channel unnoticed. |
+| `src/adapter/cordis-dsh-host.ts` | `persona` added to the structural spawn-request type and set from the def; `request.prompt = textBlocks(prompt)` — the brief only. |
+
+**Two limits of what this proves, stated so they are not mistaken for more:**
+
+1. **The offline test pins our call shape, not the host's rendering.** It asserts the spawn request carries `persona`; that the host turns that field into the `deployment:persona-prefix` system section is established by the `file:line` cites in `dsh-child-system-prompt-seam.md`, not by this test. Live confirmation belongs to ticket 33's lane, as the Notes below say.
+2. **`persona` is only set when a worker agent def is injected.** The no-def spawn path is unchanged and now asserts `persona` absent — deliberate, since the adapter must not invent a contract the caller did not supply. The guarantee is therefore conditional on the plugin injecting the def, which `src/plugin.ts:227` does.
+
+**The residual is unchanged and still pending.** The child still inherits the dispatcher's preset, so the contract is a prefix on shared sections rather than a blank-slate swap. That is **R-1**, whose ruling on 2026-09-18 was to verify before reclassifying (ticket 62). This ticket does not solve it and must not be read as having done so.
 
 ## Notes
 

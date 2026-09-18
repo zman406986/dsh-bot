@@ -42,6 +42,8 @@ These need **no approval**: ADR-0017 mandates the reference behaviour, so removi
 | **A-4** | `completed` means **delivered to the user**, not merely worker exit — a *stricter* criterion than the reference's first-visible-ack | **ADR-0007** (accepted) | — |
 | **A-5** | Todo list stays the dispatcher's private ledger; never passed into a worker's context | **ADR-0007** (accepted) | — |
 | **A-6** | Workers are leaves; only the dispatcher spawns (reference has no such flat-topology rule) | **ADR-0003** (accepted) | — |
+| **A-7** | The wake report body is **clamped**; the reference has no equivalent bound. Re-tuned on ruling from 2000/800/120/200 to **4000/1200/200/300** (body/error/activity/excerpt, 20 rows unchanged) | **Human ruling 2026-09-18** — the reference has nothing to imitate here, so the protective addition is kept with roomier bounds, because the wake notice is the dispatcher's only source for the user's answer | 2026-09-18 |
+| **A-8** | An approved **addition**: a bounded worker-liveness signal, so a wedged worker can be noticed. The reference has none — we matched it by absence | **Human ruling 2026-09-18** — fidelity is the wrong target here; a user may reasonably expect the dispatcher to notice a stuck worker | 2026-09-18 |
 
 ---
 
@@ -49,7 +51,7 @@ These need **no approval**: ADR-0017 mandates the reference behaviour, so removi
 
 | ID | Deviation | Why it is unreachable | Disposition | Acknowledgment |
 |---|---|---|---|---|
-| **R-1** | A worker still inherits the dispatcher's composed preset; we cannot give it a truly minimal system prompt | `persona` is a prefix/**shadow of one section**, not a blank-slate swap. Stripping the inherited base needs a parent-light **agent preset** — a host change outside this plugin's reach | `approved-by-necessity` | **pending** |
+| **R-1** | A worker still inherits the dispatcher's composed preset; we cannot give it a truly minimal system prompt | `persona` is a prefix/**shadow of one section**, not a blank-slate swap. Stripping the inherited base needs a parent-light **agent preset** — a host change outside this plugin's reach | `approved-by-necessity` — **but see the reframing below; verification commissioned first** | **pending** |
 | **R-2** | Our worker FSM is designed from first principles rather than matched | The reference's worker FSM is **not evidenced in the reconstruction** — tree-shaken to `export {}` stubs. There is nothing to match | `not-a-deviation` | — |
 
 ---
@@ -59,9 +61,24 @@ These need **no approval**: ADR-0017 mandates the reference behaviour, so removi
 | ID | Question | Our behaviour | The reference | Why it needs you |
 |---|---|---|---|---|
 | **U-1** | **Is our activation model a core-loop deviation?** | Dormant plugin; explicit `/dispatcher-start`; never captures the user's chat (ADR-0009) | Always-on property of the agent; no activation step, no opt-in | Ruling this here would pre-empt **ADR-0016**, which is already an unsigned draft reversing ADR-0009's matrix. Fold into that sign-off. Note ADR-0009's rejection of silent capture exists for a *consent* reason the reference never had to weigh |
-| **U-2** | **Does our worker-liveness posture deviate?** | No worker-health probe; a wedged worker is invisible | Also no worker-health probe (`reference-agent-lifecycle.md` §4 calls it "a design gap we inherit") | We match the reference by *not* having one. But this is a place where fidelity may be the wrong target — a user might reasonably expect the dispatcher to notice a stuck worker. Confirm "match the reference" or approve an addition |
-| **U-3** | **Is our 2000-char report clamp an approved addition?** | Truncates the worker's report to the dispatcher | No equivalent | ADR-0017 Q5 says an addition that changes behaviour is a deviation. It changes the payload the dispatcher sees. Keep, drop, or re-tune? |
-| **U-4** | **Does the steering *timing* deviate?** | We interrupt, then deliver the steer on the worker's `agent/status` **idle** (whole-turn quiescence) | Interrupt-then-resume on the same session | Host supports steer at the **nearest step** (`dsh-subagent/lib/index.js:3028-3029`), so ours is a conservative superset that waits longer than necessary. Same guarantee, slower. Acceptable as-is, or tighten to step granularity? |
+
+### Rulings received 2026-09-18
+
+U-2, U-3 and U-4 were put to the human with the surrounding evidence and are now closed. Recorded here so the reasoning survives, not just the outcome.
+
+- **U-2 → approved as an addition (`A-8`).** Fidelity was rejected as the target: we match the reference by *not* having a worker-health probe, and the human ruled that an addition is warranted so a wedged worker can be noticed. It is bounded and must not become polling. Ticket **61**.
+- **U-3 → approved as an addition, re-tuned (`A-7`).** The ruling was "copy the reference, or take the roomier option if there is nothing to imitate". Our notes establish the reference has **no** equivalent bound, so there is nothing to imitate: the clamp stays, re-tuned from 2000/800/120/200 to **4000/1200/200/300**. Rationale: the wake notice is the dispatcher's only source for the user's answer, so the body bound is the one that can silently destroy a deliverable. Ticket **63**.
+- **U-4 → NOT approved as a deviation; it becomes `D-7`, `to-be-removed`.** The human ruled to tighten steer delivery to the host's nearest-step path. Our turn-idle timing is a conservative superset, not a fidelity claim — so the correct disposition is to close the difference rather than to approve it. **The design constraint is that last-wins must survive the tightening**, which needs a host-event check before implementation. Ticket **60**.
+
+### R-1 reframed — pending one verification pass
+
+R-1 assumed our inability to blank a worker's system prompt was a fidelity gap. Reading the notes again, that assumption now looks **wrong**, and R-1 may be `not-a-deviation`:
+
+- The reference's subagent gets **no** parent conversation — "blank context" means a blank *conversation*. That much is settled.
+- But its **system prompt is not blank either**. The reference has *one* prompt assembler shared by the main runner and the subagent runner, driven by a single subagent boolean. Composition is: base → a section carrying the no-user-channel flag for subagent runners → agent profile → *(early return only for a shared-room runner)* → user identity → … → memory → automations/workflows/channels/**agent directory (null for subagent runners)** → host tails. And the role text itself comes from a constructor whose only inputs are the type name and a readonly flag, so **every built-in role kind receives byte-identical prompt text apart from its own name**.
+- In other words: the reference layers role text onto **shared, inherited sections** too, and enforces the no-user-channel contract through a flag and its capability wiring — which is structurally what `persona` + our tool barrier now do.
+
+**What is not settled** (and will not be inferred past the notes): whether the memory and user-identity sections actually reach a subagent runner, and whether the profile section on a child is the child's own or the parent's. The composition order shows no subagent early-return except the shared-room case, which *implies* they do — but that is a grade-(b) inference, and this repo has been burned twice by exactly that. Ticket **62** commissions one narrow observation pass to settle it. Until then R-1 stays `approved-by-necessity` with the acknowledgment field **pending** — a conservative holding position, not a hidden approval.
 
 ---
 

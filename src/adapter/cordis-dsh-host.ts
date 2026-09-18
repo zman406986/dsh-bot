@@ -5,7 +5,6 @@ import { clampActivity, clampRecentResultExcerpt } from "../core/report-clamp.js
 import type { UserQuestionsLike } from "./access-prompt.js";
 import type { SettledEvent, SpawnOptions, TerminalWorkerStatus } from "../core/types.js";
 import type { RosterRecentResultSource } from "../core/roster-snapshot.js";
-import { assembleWorkerPrompt } from "../worker/prompt.js";
 import {
   normalizeWorkerErrorReport,
   normalizeWorkerReport as normalizeWorkerTextReport,
@@ -48,6 +47,14 @@ export interface ContinuableStartSpecLike {
     readonly signal: AbortSignal;
     readonly maxDepth?: number;
     readonly toolFilter?: unknown;
+    /**
+     * Ticket 55 (register D-1): the child's worker contract, rendered by the
+     * host into the `deployment:persona-prefix` **system-prompt section** —
+     * recomputed every turn, so it survives compaction and is restated after
+     * every steer. Do not put contract text in `prompt` instead; that channel
+     * is the child's first user turn.
+     */
+    readonly persona?: string;
   };
   readonly signal: AbortSignal;
 }
@@ -520,11 +527,15 @@ export function createCordisDshHost(
       }
       const controller = new AbortController();
       // Blank context is free with the in-process spawn provider.
-      // Assemble self-contained worker prompt when a def is injected.
-      const assembled =
-        workerAgentDef === undefined
-          ? prompt
-          : assembleWorkerPrompt(workerAgentDef.systemPrompt, prompt);
+      //
+      // Ticket 55 (register D-1/D-2) — two channels, deliberately:
+      //   - the worker CONTRACT goes in `persona`, so the host places it in a
+      //     system position. A system section is recomputed every turn, so the
+      //     contract cannot be compacted away and needs no per-steer restatement.
+      //   - the TASK stays in `prompt`, i.e. the child's first user turn. That
+      //     is what "blank conversation" means, and it matches the reference:
+      //     blank conversation, not blank system prompt.
+      const persona = workerAgentDef?.persona;
       // Re-resolve against live global names every spawn (no cache across HMR).
       const toolFilter =
         workerAgentDef === undefined
@@ -532,12 +543,15 @@ export function createCordisDshHost(
           : workerAgentDef.resolveToolFilter(listGlobalToolNames(ctx));
       const maxDepth = workerAgentDef?.maxDepth ?? 0;
       const request: ContinuableStartSpecLike["request"] = {
-        prompt: textBlocks(assembled),
+        prompt: textBlocks(prompt),
         parent,
         signal: controller.signal,
         // Leaf: never spawn descendants.
         maxDepth,
       };
+      if (persona !== undefined && persona.length > 0) {
+        (request as { persona?: string }).persona = persona;
+      }
       // Host rejects empty filters and unknown names — omit when deny is empty.
       if (toolFilter !== undefined && toolFilter.deny.length > 0) {
         (request as { toolFilter?: unknown }).toolFilter = { deny: toolFilter.deny };

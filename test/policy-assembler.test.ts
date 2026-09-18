@@ -18,7 +18,7 @@ import {
   buildStandingRulesBlock,
   buildWakeInstructionsBlock,
 } from "../src/core/policy/prompts.js";
-import { emptyReportPlaceholder } from "../src/core/report-clamp.js";
+import { emptyReportPlaceholder, REPORT_CLAMP_CHARS } from "../src/core/report-clamp.js";
 import {
   formatSpawnAck,
   formatSteerNote,
@@ -166,7 +166,10 @@ describe("wake-turn assembler", () => {
   });
 
   it("clamps the report body and attaches the transcript pointer", () => {
-    const long = "R".repeat(2500);
+    // Ticket 63 / A-7: derive the fixture from the constant rather than
+    // hardcoding a length, so re-tuning the bound cannot silently turn this
+    // into a test of nothing.
+    const long = "R".repeat(REPORT_CLAMP_CHARS + 500);
     const wake = assembleWakeTurn([notice({ report: long })]);
     assert.ok(wake.includes("Transcript: child-1"));
     assert.ok(wake.includes("report truncated"));
