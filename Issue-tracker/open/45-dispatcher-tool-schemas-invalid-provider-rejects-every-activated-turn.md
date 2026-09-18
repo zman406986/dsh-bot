@@ -188,3 +188,5 @@ asserting the wrong semantics → **ticket 83**.
 AC checkboxes unchanged (AC 2/3 unticked): AC 2's turn-completes-without-INVALID_REQUEST
 clause is proven by this pass, but its "worker appears" clause and all of AC 3 await
 ticket 83's fix — this ticket moves to resolved only when all its ACs pass.
+
+### 2026-09-19 — 83 landed (`1f04727`) — ready for live re-pass
