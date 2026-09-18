@@ -373,6 +373,10 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       // Ticket 29: live activity phrases for check rows, projected from the
       // host session/event firehose (host-observed truth; no polling).
       recentActivity: (workerId) => host.recentActivity(workerId),
+      // Ticket 61 (register A-8, ADR-0018 exception D22): the same
+      // projection's observation moments, feeding the check-row liveness
+      // verdict — visibility only, no watchdog, no polling.
+      lastActivityAtMs: (workerId) => host.lastActivityAtMs(workerId),
     });
     // T13: worker-only request_access tool. Emits structured asks into the core.
     const disposeAccessTool = registerWorkerAccessTool({

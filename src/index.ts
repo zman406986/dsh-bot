@@ -208,6 +208,15 @@ export {
   truncationMarker,
 } from "./core/report-clamp.js";
 export {
+  deriveWorkerLiveness,
+  WORKER_ACTIVE_WINDOW_MS,
+  WORKER_STALL_THRESHOLD_MS,
+} from "./core/liveness.js";
+export type {
+  WorkerLiveness,
+  WorkerLivenessInput,
+} from "./core/liveness.js";
+export {
   formatCheckRowLine,
   formatCheckSummary,
   formatElapsedMs,

@@ -160,6 +160,8 @@ export interface RegisterDispatcherToolsOptions {
   readonly getSessionId: () => string | null;
   readonly deliverToUser?: DeliverToUserFn;
   readonly recentActivity?: RecentActivityFn;
+  /** Ticket 61: activity observation moments for the check-row liveness verdict. */
+  readonly lastActivityAtMs?: (workerId: string) => number | null;
   /**
    * Activation gate (ticket 19): resolve the calling session from the tool
    * exec context. When provided, every handler refuses sessions other than
@@ -187,6 +189,9 @@ export function registerDispatcherTools(
       : {}),
     ...(options.recentActivity !== undefined
       ? { recentActivity: options.recentActivity }
+      : {}),
+    ...(options.lastActivityAtMs !== undefined
+      ? { lastActivityAtMs: options.lastActivityAtMs }
       : {}),
   });
   const resolve = options.resolveCallerSessionId;

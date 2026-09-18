@@ -7,6 +7,10 @@
 
 import type { Multitask } from "./multitask.js";
 import {
+  deriveWorkerLiveness,
+  type WorkerLiveness,
+} from "./liveness.js";
+import {
   assembleTurnReminder,
 } from "./policy/assembler.js";
 import {
@@ -31,6 +35,7 @@ import {
   type StopWorkerToolResult,
   type WorkerCheckRow,
 } from "./tool-results.js";
+import type { WorkerSummary } from "./types.js";
 
 /** Structural JSON-Schema-ish parameter node (host-agnostic). */
 export interface ToolParameterNode {
@@ -112,6 +117,14 @@ export interface DispatcherToolDeps {
   readonly deliverToUser?: DeliverToUserFn;
   /** Optional recent-activity resolver for check rows. */
   readonly recentActivity?: RecentActivityFn;
+  /**
+   * Ticket 61 (register A-8, ADR-0018 exception D22): host-clock ms of the
+   * last firehose-observed activity per worker — the observation moment of
+   * `recentActivity`'s phrase, from the same `session/event` projection (no
+   * new seam, no polling). Optional: absent → check rows carry
+   * `liveness: null` rather than a guessed verdict.
+   */
+  readonly lastActivityAtMs?: (workerId: string) => number | null;
 }
 
 function requireString(args: Record<string, unknown>, key: string): string {
@@ -268,6 +281,34 @@ export function createDispatcherTools(
       const parentSessionId = requireSessionId();
       const workerId = optionalString(args, "worker_id");
       const activity = deps.recentActivity;
+      const lastActivityAtMs = deps.lastActivityAtMs;
+      // Ticket 61 (R3): a worker parked on a pending access ask is blocked
+      // by design and must never read `stalled` — the same join the roster
+      // projection's blocked marker uses.
+      const blockedWorkerIds = new Set(
+        multitask
+          .listPendingAccess(parentSessionId)
+          .map((ticket) => ticket.workerId),
+      );
+      /**
+       * Ticket 61: liveness verdict over the row's own fields. Only when
+       * the activity-time seam exists; otherwise `null` (honest absence).
+       * The one `Date.now()` here is the check boundary — the derivation
+       * itself is pure and takes the clock as an argument.
+       */
+      const livenessOf = (summary: WorkerSummary): WorkerLiveness | null => {
+        if (lastActivityAtMs === undefined) return null;
+        return deriveWorkerLiveness(
+          {
+            status: summary.status,
+            startedAtMs: summary.startedAtMs,
+            toolCallCount: summary.toolCallCount,
+            lastActivityAtMs: lastActivityAtMs(summary.workerId) ?? null,
+            blocked: blockedWorkerIds.has(summary.workerId),
+          },
+          Date.now(),
+        );
+      };
 
       if (workerId !== undefined) {
         const record = multitask.getWorker(workerId);
@@ -293,6 +334,7 @@ export function createDispatcherTools(
         const row = toCheckRow(
           summary,
           activity?.(workerId) ?? null,
+          livenessOf(summary),
         );
         return {
           ok: true,
@@ -303,7 +345,11 @@ export function createDispatcherTools(
 
       const summaries = multitask.listWorkers(parentSessionId);
       const rows: WorkerCheckRow[] = summaries.map((summary) =>
-        toCheckRow(summary, activity?.(summary.workerId) ?? null),
+        toCheckRow(
+          summary,
+          activity?.(summary.workerId) ?? null,
+          livenessOf(summary),
+        ),
       );
       return {
         ok: true,

@@ -8,6 +8,7 @@ import {
   clampActivity,
   TOOL_RESULT_SUMMARY_MAX_ROWS,
 } from "./report-clamp.js";
+import type { WorkerLiveness } from "./liveness.js";
 import type { WorkerStatus, WorkerSummary } from "./types.js";
 
 /** One check row the model sees from `check_workers`. */
@@ -22,6 +23,14 @@ export interface WorkerCheckRow {
   readonly todo_id: string | null;
   /** Last known activity phrase; null when none recorded yet. */
   readonly recent_activity: string | null;
+  /**
+   * Ticket 61 (register A-8, ADR-0018 exception D22): derived liveness
+   * verdict over this row's own fields. Visibility only — no remedy rides
+   * on it, and nothing is killed or redriven from it. `null` when the
+   * activity-time seam is absent: absence is honest ("not derivable
+   * here"), never a guessed verdict.
+   */
+  readonly liveness: WorkerLiveness | null;
 }
 
 export type SpawnWorkerToolResult =
@@ -91,6 +100,7 @@ export function formatElapsedMs(elapsedMs: number): string {
 export function toCheckRow(
   summary: WorkerSummary,
   recentActivity: string | null = null,
+  liveness: WorkerLiveness | null = null,
 ): WorkerCheckRow {
   return {
     worker_id: summary.workerId,
@@ -102,13 +112,14 @@ export function toCheckRow(
     transcript_ref: summary.transcriptRef,
     todo_id: summary.todoId,
     recent_activity: clampActivity(recentActivity),
+    liveness,
   };
 }
 
 /**
  * Compact one-line (or two-line) row — never a JSON dump.
  *
- * running · "Rewrite auth docs" · 4m12s · 7 tool calls · todo t-3 · transcript: <ref>
+ * running · "Rewrite auth docs" · 4m12s · 7 tool calls · todo t-3 · transcript: <ref> · liveness: quiet
  *   activity: reading src/auth/session.ts
  */
 export function formatCheckRowLine(row: WorkerCheckRow): string {
@@ -124,6 +135,8 @@ export function formatCheckRowLine(row: WorkerCheckRow): string {
       ? `transcript: ${row.transcript_ref}`
       : "transcript: (none)",
   );
+  // Ticket 61: the liveness verdict rides the existing row shape (R5).
+  if (row.liveness !== null) parts.push(`liveness: ${row.liveness}`);
   let line = parts.join(" · ");
   if (row.recent_activity !== null) {
     line += `\n  activity: ${row.recent_activity}`;

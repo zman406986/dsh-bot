@@ -210,6 +210,13 @@ export interface CordisDshHost extends DshHost {
    */
   recentActivity(workerId: string): string | null;
   /**
+   * Ticket 61: host-clock ms of the last firehose-observed activity for an
+   * owned worker — the observation moment of `recentActivity`'s phrase.
+   * Null when nothing has been observed or the worker settled. Same
+   * subscription as `recentActivity` — no new seam, no polling.
+   */
+  lastActivityAtMs(workerId: string): number | null;
+  /**
    * Ticket 41: the bounded settle-report excerpt observed for an owned
    * worker when it settled (adapter-side projection of the same
    * `subagent/end` event the core receives), or `null` when nothing honest
@@ -375,7 +382,10 @@ export function createCordisDshHost(
   const accessRequestCallbacks: Array<(event: AccessRequestEvent) => void> = [];
   // Ticket 29: latest activity phrase per owned worker, projected from the
   // host `session/event` firehose. Pure subscription — no polling, no timers.
-  const workerActivity = new Map<string, string>();
+  // Ticket 61: the entry also carries its observation moment (host clock at
+  // event arrival) so the liveness verdict is derivable over existing truth
+  // — no new subscription, no new seam, no background machinery.
+  const workerActivity = new Map<string, { phrase: string; atMs: number }>();
   // Ticket 41: latest bounded settle-report excerpt per settled worker,
   // clamped once at observation. Same subscription discipline as
   // `workerActivity`: adapter-side projection of host-observed truth —
@@ -430,7 +440,9 @@ export function createCordisDshHost(
     const workerId = String(session.id);
     if (!workers.has(workerId)) return;
     const phrase = describeToolActivity(event.data);
-    if (phrase !== null) workerActivity.set(workerId, phrase);
+    if (phrase !== null) {
+      workerActivity.set(workerId, { phrase, atMs: Date.now() });
+    }
   });
 
   const host: CordisDshHost = {
@@ -473,7 +485,18 @@ export function createCordisDshHost(
     },
 
     recentActivity(workerId: string): string | null {
-      return workerActivity.get(workerId) ?? null;
+      return workerActivity.get(workerId)?.phrase ?? null;
+    },
+
+    /**
+     * Ticket 61: host-clock ms of the last firehose-observed activity for an
+     * owned worker — the observation moment of `recentActivity`'s phrase,
+     * recorded at the same event arrival. Null when nothing has been
+     * observed or the worker settled. Same subscription as
+     * `recentActivity` — no new seam, no polling.
+     */
+    lastActivityAtMs(workerId: string): number | null {
+      return workerActivity.get(workerId)?.atMs ?? null;
     },
 
     recentResult(workerId: string): RosterRecentResultSource | null {
