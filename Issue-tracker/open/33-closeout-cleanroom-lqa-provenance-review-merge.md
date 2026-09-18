@@ -100,3 +100,20 @@ landed at `6fc92c4`); (4) ticket 44 AC 3's token flow and AC 2's client-surface
 clauses; (5) epic 35 AC 1's activated side, 34 AC 4, smoke 09/10/11/32 — all with
 the same zero-LLM probe chain first (`rpc-*.json` technique in the re-pass #2
 evidence dir). No AC on this ticket is checked by this comment; no ticket moved.
+
+### 2026-09-18 — launcher precondition for the next pass: ticket 48
+
+Before that pass, note two things it depends on, both landed today (`fc02eeb` +
+the Desktop launcher rewrite): the web route's overlay is now the **committed**
+`dev/cordis.web.patch.yml` (ticket 43 Requirement 1's repo half), and the
+launcher **refuses a behind-`main` checkout** instead of silently serving one —
+`dsh-bot-always-on` had been 39 commits behind since this ticket's merge and is
+now fast-forwarded to `main` (`-Sync`). Both routes were booted and serve the
+identical boot-graph row and byte-identical client bundle (65,320 bytes,
+carrying ticket 46's `settingsScope` and confirming ticket 47's absent card).
+
+**Pass-runner caveat (cost me three dead boots):** a launcher window started from
+inside an agent tool session is reaped with that session — the server never
+listens and it looks exactly like a product failure. Detach the boot
+(`([wmiclass]'Win32_Process').Create(...)` or a scheduled task) before concluding
+anything red, and keep the kill timer. Details in ticket 48's comment.
