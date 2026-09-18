@@ -1,5 +1,7 @@
 # Core-loop deviation register
 
+> **2026-09-18 (late):** ADR-0018 now holds the master rule — *imitate the reference in its entirety, except an enumerated exception list* — ruled directly by the human. This register remains the item-level tracker but its Part B/C/D rows await reclassification under ADR-0018 (ticket 64). Notably: A-4 is **superseded** (completion = first-visible-ack; the "delivered" criterion is dropped), A-5/A-6 are **conformances** (verified shared with the reference), A-7/A-8 survive as ADR-0018's D21/D22, and the B9 copy-policy context changed (no-verbatim rule replaced the clean-room rule — see AGENTS.md).
+
 **Authority:** ADR-0017 — the reference's core loop is binding specification; a deviation may exist only with explicit written human approval.
 
 **Maintained by:** the implementing team, per ADR-0017's consequence 1. Update this file whenever a deviation is added, removed, or approved — never edit ADR-0017's table instead.

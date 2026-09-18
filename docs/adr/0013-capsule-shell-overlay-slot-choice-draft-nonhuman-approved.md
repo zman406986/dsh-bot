@@ -1,6 +1,6 @@
 # The dispatcher capsule is one additive `shell.overlay` entry — not a sidebar takeover or a keyed claim
 
-**Status:** draft
+**Status:** SUPERSEDED by ADR-0018 (2026-09-18) — the capsule-as-one-overlay-slot decision is voided by the wrapper-UI decision; its seam research remains valid
 
 **Approval:** non-human — agent-drafted, pending human sign-off
 

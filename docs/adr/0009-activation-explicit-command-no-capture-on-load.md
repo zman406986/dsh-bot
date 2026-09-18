@@ -30,3 +30,11 @@ The dispatcher is **not** bound to any chat when the plugin loads. With the feat
 - **Command activation is not the forbidden live toggle.** ADR-0005 forbids flipping the dispatcher OFF while it runs. Activation creates a session-scoped state that lives exactly as long as the session and is never flipped off while running: there is no deactivate command, session end unbinds (workers keep running to completion per ADR-0005's superseded-but-spiritually-retained rule), and re-activation after a session ends is a fresh, explicit `/dispatcher-start`.
 - **HMR/unload reverses everything.** The plugin registers the command through `ctx.commands` and tears down via its effect dispose: listeners detached, lifecycle unbound (refusing later activation), tool surface unregistered, host disposed, marker domain released. ADR-0006 durable markers survive so the next activation re-attaches the roster and queued wake material flushes normally.
 - Plugin `inject` now also declares `commands` (the host command registry), matching how `tools` was declared for the tool surface.
+
+---
+
+## RETRACTION NOTE (2026-09-18, later the same day)
+
+The human has corrected the record: the premise attributed to them in the Context section — that activation must be an **explicit user command** — is a **hallucinated understanding, not what the human said**. The human's actual instruction was: **"human can toggle activation."**
+
+This ADR's *mechanics* (deferred parent binding, process-global tool gating) may survive into whatever replaces it, but its **consent story and activation matrix are void**. SUPERSEDED (2026-09-18): **ADR-0018** — "imitate the reference in its entirety, except an enumerated exception list" — replaces the activation model wholesale: no command, no mode, no dormant state; the wrapper surface is the dispatcher.

@@ -1,6 +1,6 @@
 # Feature flag is session-scoped, not a live toggle
 
-**Status:** accepted
+**Status:** SUPERSEDED by ADR-0018 (2026-09-18) — flag/toggle semantics voided; the dispatcher is always-on with no mode
 
 The `multitask_dispatcher` flag ships **ON by default in the dedicated multitask profile and OFF in stock/default profiles**. The kill switch is a **user-facing config-profile/UI control, but it is not live-applied to a running session**: a change takes effect at the **start of the next session with the dispatcher**. There is therefore **no "dispatcher OFF while workers run" state**, and no held-result semantics to define.
 

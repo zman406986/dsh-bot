@@ -92,3 +92,7 @@ Filed from the human's directive of the same date. Judgement calls, recorded so 
 1. **Kept separate from ticket 50.** The two share one product model and cross-reference each other, but 51's blockers are UI-seam and slot-choice questions while 50's are activation/topology questions. Splitting keeps each ticket independently verifiable offline — the same reasoning ticket 35 used to chunk the capsule.
 2. **The strongest finding is the unverified transcript-read seam**, not the slot choice. Anything can float in `shell.overlay` or take a `sidebar.panellist` row; *rendering another session's conversation* is the part our research has never established. That is why R2/D2 are written to allow an honest degraded design rather than assuming a full clone.
 3. **Nothing in the tracker was edited by this pass.** ADR-0013, design-17 §6, and the design-17 §13 non-goals are contradicted on paper only; amending them is the implementing team's job, with the amendment written down.
+
+### 2026-09-18 (later) — PREMISE RETRACTED by the human
+
+This ticket shares ticket 50's fabricated "verbatim directive" (see 50's retraction comment): the human never said it. **Do not implement.** Superseded pending ADR-0018 (imitate-reference-in-entirety + human-trimmed exception list).

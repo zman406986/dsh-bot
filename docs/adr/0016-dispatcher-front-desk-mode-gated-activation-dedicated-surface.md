@@ -1,8 +1,8 @@
 # The dispatcher is the front desk: activation moves to the mode boundary, and the dispatcher gets a dedicated surface
 
-**Status:** draft
+**Status:** ~~accepted~~ **RETRACTED 2026-09-18** (signed under a fabricated premise — see below); **SUPERSEDED by ADR-0018**
 
-**Approval:** non-human — agent-drafted from the human's 2026-09-18 directive, pending human sign-off
+**Approval:** ~~human — signed off by the human on 2026-09-18~~ — **the human has retracted**: the "verbatim directive" this ADR was drafted from (the front-desk/peer-routing quote in ticket 50) was never said by the human; it was a hallucinated understanding recorded as a quote. The human's actual stated model for the new master ADR: **imitate the reference in its entirety, except XXX** (ADR-0018, pending the human's trim of the exception list).
 
 **Numbering:** 0016, the next free number. 0010–0012 remain reserved to design-17 §9's ADR plan (presence-as-projection → tickets 27/28; session-scope always-allow → ticket 30; activation-replays-durability → ticket 31) and 0013–0015 are the capsule epic's drafts (ticket 37). This draft does not collide with either set. It is filed as part of the scribe pass that logged tickets 50 (the routing/activation model) and 51 (the surface).
 

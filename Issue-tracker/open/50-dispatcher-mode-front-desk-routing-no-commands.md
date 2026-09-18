@@ -75,9 +75,19 @@
 
 ## Comments
 
+### 2026-09-18 — ADR-0016 signed off
+
+The human signed off ADR-0016 on 2026-09-18; the file is renamed out of `-draft-nonhuman-approved` and its status is `accepted`. This discharges the AC's ADR sign-off item and unblocks the activation-model half of this ticket and of 51. D1–D5 remain open decisions for the design note; D2 (multi-dispatcher concurrency) and D3 (peer directory/transport) are the ones the signed ADR does not itself settle.
+
 ### 2026-09-18 — scribe pass (filed, not implemented)
 
 Filed from the human's directive of the same date. Two judgement calls recorded here so the implementing team does not have to re-derive them:
 
 1. **Split as two tickets, plus one ADR.** The routing/activation model (this ticket) and the conversation surface (51) are one coherent product model — "the dispatcher is the front desk" — but they are implementable and verifiable separately, and they collide with *different* ADRs (0009/0005/0003 here; 0013 + design-17 §6/§13 there). Draft ADR-0016 records the single load-bearing reversal both depend on: activation moves to the mode boundary and the dispatcher becomes an addressable bot. It is filed `-draft-nonhuman-approved`, consistent with the ADR-0013–0015 convention from ticket 37.
 2. **No ticket was closed or re-scoped by this pass.** design-17's conflict-4 `revisit-before-merge` marker is *triggered*, not satisfied — the merge ticket (33) must still record that default-activation was adopted as a decision, now in the other direction. Likewise ADR-0003's peer spawn authority and the design-17 §13 non-goals are reopened on paper only; none of them is edited here.
+
+### 2026-09-18 (later) — PREMISE RETRACTED by the human
+
+The "what the human asked for (verbatim intent)" quote at the top of this ticket **was never said by the human** — it is a hallucinated understanding recorded as a quotation. The same applies to ADR-0009's premise: the human's actual instruction was "human can toggle activation", not "activation is an explicit user command". ADR-0016's sign-off (given earlier today) is retracted as having been given under this fabricated premise.
+
+Everything below is retained as record only. **Do not implement this ticket.** The human has ruled the master model instead: **imitate the reference in its entirety, except an exception list the human is about to trim** — to be recorded as ADR-0018, which supersedes this ticket, ADR-0009's activation matrix, and ADR-0016 wholesale wherever they conflict.
