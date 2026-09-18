@@ -56,9 +56,11 @@ failure to the next tool.
 
 - [x] (offline, gate) `npm test`, `npm run typecheck`, `npm run build:client` green including
       the new schema-shape pin over all five dispatcher tools.
-- [ ] (live, ZERO LLM calls) an activated session's dispatcher turn completes without
+- [x] (live, ZERO LLM calls) an activated session's dispatcher turn completes without
       INVALID_REQUEST — provable cheapest by re-running the ticket-44 re-pass #2 probe chain:
-      `/dispatcher-start` via `commands/execute`, one trivial spawn ask, worker appears.
+      `/dispatcher-start` via `commands/execute`, one trivial spawn ask, worker appears. —
+      **2026-09-19 live pass 2: both clauses proven (activation via composer interception AND
+      RPC re-confirmed; spawn ask completed; worker appeared in `subagents/list`); see comment.**
 - [ ] (live, BURNS tokens — same single trivial flow per AGENTS.md) the ticket-44 AC 3 flow
       (start → one trivial worker → one mid-run steer → stop) executes and is recorded there.
 
@@ -190,3 +192,44 @@ clause is proven by this pass, but its "worker appears" clause and all of AC 3 a
 ticket 83's fix — this ticket moves to resolved only when all its ACs pass.
 
 ### 2026-09-19 — 83 landed (`1f04727`) — ready for live re-pass
+
+### 2026-09-19 — live pass 2 (`C:\Users\TZhen\Desktop\dsh-live-pass2-2026-09-19\`, outside the repo): AC 2 TICKED — the full spawn chain works against the real host; AC 3's flow executed but its mid-run steer clause stays open (honest refusal; window missed, not a product defect)
+
+Setup: commit `c56e69d` tree, rebuilt in place (`npm run build` + `build:client`, client
+bundle 157,823 bytes), throwaway `multitask` profile recreated per the recipe (plugin added
+with forward slashes; insert row `./node_modules/dsh-multitask-dispatcher/lib/index.js`
+BEFORE boot — dump composes at lines 540-543), boot `dsh --profile multitask --port 8875
+--no-open` detached via WMI node-direct, host 0.1.5-rc.1 (no drift), no activation error
+(`server.log`). Stock `web` profile byte-identical after (md5 + mtimes diffed); profile
+deleted after; port free.
+
+**AC 2 — TICKED, both clauses:**
+- Activation: composer-typed `/dispatcher-start` was intercepted by the host command path
+  (the app's own traffic shows `/api/commands/execute`, no plain-text LLM send) and rendered
+  "Dispatcher active in this chat. …" in the conversation; the same RPC re-confirmed
+  post-flow (`rpc-execute-dispatcher-start.json`: "The dispatcher is already active in this
+  chat."). Control `/goal` matches (`rpc-execute-goal.json`).
+- ONE trivial spawn ask ("Spawn one worker. Have it reply with the numbers 1 to 60, comma
+  separated, nothing else.") completed end-to-end: trajectory (`trajectory.txt`,
+  `shots/14-trajectory.png`) shows the policy injection, `todo_write` (in_progress) accepted,
+  then `spawn_worker` EXECUTED — "Started "Reply with numbers 1 to 60" (worker
+  `8e7d5dc6-e25e-4ceb-8cde-c05ded840646`, stream numbers-1-to-60)" — zero INVALID_REQUEST.
+  The provider validated every tool schema.
+- **Worker appears** (the clause pass 1 could not reach): `subagents/list` returned
+  `entries:[{kind:"child", id:"8e7d5dc6-…", label:"Reply with numbers 1 to 60",
+  activity:"running"}]` ~20 s after submit (`rpc-subagents-worker-running.json`), later
+  `activity:"inactive"`. Ticket 83's depth fix is confirmed live.
+
+**AC 3 — flow executed; ONE clause honestly not met, so it stays unticked:** start ✓ → one
+trivial worker ✓ (spawned, delivered its reply into the chat — "That's the lot — 1 through
+60, comma separated, delivered above" — and went inactive) → steer: `/dispatcher-steer`
+MATCHED and executed but returned the HONEST refusal "Worker 8e7d5dc6-… is not running; it
+may already be done." (`rpc-execute-dispatcher-steer.json`, rendered as a failed command card
+in the conversation) — the worker's ~2 s turn beat the poll loop, so no mid-run delivery was
+observed; per the never-retry rule no second spawn was attempted → stop: the conversational
+"Stop the worker now." produced an honest no-op ("Nothing is running — that job had already
+finished…", no stop_worker call — nothing to stop). LLM traffic for the whole pass: 4 rounds,
+one flow (dispatcher spawn round 33.5K tok/29 s; worker 53.2K tok/3 s; wake-settle ack 18.6K;
+stop round 18.9K), 124K tok total, 86% cache hit, no retries. The ONLY unproven words in AC 3
+are "mid-run steer reaches a running worker" — a timing matter for the next token-budgeted
+pass, not a known defect.
