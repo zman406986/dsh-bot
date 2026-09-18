@@ -583,6 +583,93 @@ describe("access policy table", () => {
     assert.ok(typeof profile !== "string" && profile.kind === "allow");
   });
 
+  it("an attributed session row answers only its own session (ADR-0019)", () => {
+    const table = createAccessPolicyTable();
+    table.set({
+      class: "tool",
+      targetPattern: "write_file",
+      decision: "allow",
+      scope: "session",
+      session: "s-1",
+    });
+    const owner = table.lookup(body({ target: "write_file" }), {
+      parentSessionId: "s-1",
+    });
+    assert.ok(typeof owner !== "string" && owner.kind === "allow");
+    // A sibling dispatcher's ask is NOT auto-answered by s-1's consent.
+    const sibling = table.lookup(body({ target: "write_file" }), {
+      parentSessionId: "s-2",
+    });
+    assert.equal(sibling, "ask");
+  });
+
+  it("clearSession(id) clears only that session's rows; a sibling's survive (ADR-0019)", () => {
+    const table = createAccessPolicyTable();
+    table.set({
+      class: "tool",
+      targetPattern: "write_file",
+      decision: "allow",
+      scope: "session",
+      session: "s-1",
+    });
+    table.set({
+      class: "tool",
+      targetPattern: "write_file",
+      decision: "allow",
+      scope: "session",
+      session: "s-2",
+    });
+    table.set({
+      class: "network",
+      targetPattern: "example.com",
+      decision: "allow",
+      scope: "profile",
+    });
+
+    // Deactivating session A clears only A's policy rows.
+    table.clearSession("s-1");
+
+    assert.equal(
+      table.lookup(body({ target: "write_file" }), { parentSessionId: "s-1" }),
+      "ask",
+    );
+    const sibling = table.lookup(body({ target: "write_file" }), {
+      parentSessionId: "s-2",
+    });
+    assert.ok(typeof sibling !== "string" && sibling.kind === "allow");
+    const profile = table.lookup(
+      body({ class: "network", target: "example.com", reason: "r" }),
+      { parentSessionId: "s-1" },
+    );
+    assert.ok(typeof profile !== "string" && profile.kind === "allow");
+  });
+
+  it("two sessions may each remember the same class+pattern without evicting the other (ADR-0019)", () => {
+    const table = createAccessPolicyTable();
+    table.set({
+      class: "tool",
+      targetPattern: "write_file",
+      decision: "allow",
+      scope: "session",
+      session: "s-1",
+    });
+    // Same class+pattern from the sibling session: an insert, not an eviction.
+    table.set({
+      class: "tool",
+      targetPattern: "write_file",
+      decision: "allow",
+      scope: "session",
+      session: "s-2",
+    });
+    assert.equal(table.list().length, 2);
+    for (const sessionId of ["s-1", "s-2"]) {
+      const hit = table.lookup(body({ target: "write_file" }), {
+        parentSessionId: sessionId,
+      });
+      assert.ok(typeof hit !== "string" && hit.kind === "allow");
+    }
+  });
+
   it("Multitask.clearSessionAccessPolicy: a remembered ask prompts again after clearance", async () => {
     const host = new FakeDshHost();
     const scheduler = createManualScheduler();

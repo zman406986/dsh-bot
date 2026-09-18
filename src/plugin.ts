@@ -322,6 +322,10 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
         targetPattern: ticket.body.target,
         decision: "allow",
         scope: "session",
+        // ADR-0019: the row belongs to the asking dispatcher session — a
+        // sibling session's asks never auto-answer from it, and clearing the
+        // session's rows on deactivation removes exactly this row.
+        session: ticket.parentSessionId,
       });
     },
     // Ticket 30: an answer for a ticket the relay already resolved (ADR-0008

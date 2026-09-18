@@ -96,6 +96,15 @@ export interface PolicyEntry {
   readonly decision: "allow" | "deny";
   /** "session" = this dispatcher session only; "profile" = durable profile default. */
   readonly scope: "session" | "profile";
+  /**
+   * Owning dispatcher session id for session-scope rows (ADR-0019 keying
+   * table): a row auto-answers only asks from its own session, and
+   * deactivation clears only that session's rows — never a sibling's.
+   * Optional for backward compatibility: an un-owned session row behaves as
+   * the shipped single-session row (applies to any session, cleared by any
+   * session-scope clear).
+   */
+  readonly session?: string;
 }
 
 /** Context passed to policy lookup. */

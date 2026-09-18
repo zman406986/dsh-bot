@@ -38,18 +38,37 @@ export function matchTargetPattern(pattern: string, target: string): boolean {
 /** Session/profile policy table. No hit → "ask". */
 export interface AccessPolicyTable {
   lookup(req: AccessRequestBody, ctx: PolicyLookupCtx): AccessDecision | "ask";
-  /** Insert or replace a row (same class+pattern+scope). */
+  /** Insert or replace a row (same class+pattern+scope, and owning session). */
   set(entry: PolicyEntry): void;
   list(): readonly PolicyEntry[];
   /**
-   * Drop every session-scope row (ticket 30: "always allow (this session)"
+   * Drop session-scope rows (ticket 30: "always allow (this session)"
    * clearance on deactivation/unload). Profile rows are untouched.
+   * ADR-0019: WITH a session id, only that session's rows are dropped
+   * (plus un-owned legacy rows, which belong to whichever session clears) —
+   * a sibling dispatcher's remembered "always allow" must survive. Without
+   * an id, every session-scope row is dropped (the shipped whole-table
+   * clearance, used at plugin unload).
    */
-  clearSession(): void;
+  clearSession(sessionId?: string): void;
 }
 
 function rowKey(entry: PolicyEntry): string {
-  return `${entry.scope}\u0000${entry.class}\u0000${entry.targetPattern}`;
+  // The owning session joins the key (ADR-0019): two dispatcher sessions may
+  // each remember a row for the same class+pattern without evicting the
+  // other's. Un-owned rows keep the legacy single-slot key.
+  return `${entry.scope}\u0000${entry.session ?? ""}\u0000${entry.class}\u0000${entry.targetPattern}`;
+}
+
+/**
+ * Whether a session-scope row applies to `parentSessionId`. Attributed rows
+ * answer only their own session; un-owned (legacy) rows apply to any.
+ */
+function sessionRowApplies(
+  entry: PolicyEntry,
+  parentSessionId: string,
+): boolean {
+  return entry.session === undefined || entry.session === parentSessionId;
 }
 
 /**
@@ -67,10 +86,17 @@ export function createAccessPolicyTable(
   function hit(
     req: AccessRequestBody,
     scope: PolicyEntry["scope"],
+    parentSessionId: string,
   ): AccessDecision | undefined {
     for (const entry of rows.values()) {
       if (entry.scope !== scope) continue;
       if (entry.class !== req.class) continue;
+      if (
+        scope === "session" &&
+        !sessionRowApplies(entry, parentSessionId)
+      ) {
+        continue;
+      }
       if (!matchTargetPattern(entry.targetPattern, req.target)) continue;
       if (entry.decision === "allow") return { kind: "allow" };
       return {
@@ -83,8 +109,12 @@ export function createAccessPolicyTable(
   }
 
   return {
-    lookup(req, _ctx): AccessDecision | "ask" {
-      return hit(req, "session") ?? hit(req, "profile") ?? "ask";
+    lookup(req, ctx): AccessDecision | "ask" {
+      return (
+        hit(req, "session", ctx.parentSessionId) ??
+        hit(req, "profile", ctx.parentSessionId) ??
+        "ask"
+      );
     },
     set(entry: PolicyEntry): void {
       rows.set(rowKey(entry), entry);
@@ -92,9 +122,15 @@ export function createAccessPolicyTable(
     list(): readonly PolicyEntry[] {
       return [...rows.values()];
     },
-    clearSession(): void {
+    clearSession(sessionId?: string): void {
       for (const [key, entry] of [...rows]) {
-        if (entry.scope === "session") rows.delete(key);
+        if (entry.scope !== "session") continue;
+        // No id: the shipped whole-table clearance. With an id: only the
+        // clearing session's rows (un-owned legacy rows go too — they never
+        // outlive a session-scope clear, ticket 30's leak rule).
+        if (sessionId === undefined || sessionRowApplies(entry, sessionId)) {
+          rows.delete(key);
+        }
       }
     },
   };
