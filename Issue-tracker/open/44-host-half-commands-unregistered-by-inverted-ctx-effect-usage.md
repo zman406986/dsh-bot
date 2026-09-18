@@ -94,12 +94,13 @@ UNDONE at apply time, because our `ctx.effect(...)` calls invert the cordis effe
       would expose a regression to the old shape). — **2026-09-18: `npm test` 702/0 (185
       suites; +1 new contract-pin test), typecheck clean (both configs), build:client OK;
       see comment below.**
-- [ ] (live, ZERO LLM calls) `commands/list` includes `dispatcher-start` and
+- [x] (live, ZERO LLM calls) `commands/list` includes `dispatcher-start` and
       `dispatcher-steer`; the composer slash menu shows the command; RPC A/B
       `commands/execute`: `/dispatcher-start` MATCHES (`value` with `commandId`+result),
       `/goal` still matches as control; the `multitask-dispatcher` settings section is
-      visible in the Settings UI (插件配置), and the client footer flag mirror reads a real
-      value (no `unknown`).
+      visible in the Settings UI (插件配置)， and the client footer flag mirror reads a real
+      value (no `unknown`). — **2026-09-19 live pass 2: every clause green on one boot; see
+      comment.**
 - [ ] (live, BURNS tokens — last, separate pass, single trivial task per AGENTS.md)
       `/dispatcher-start` intercepts composer input (no plain-text leak) → activation flips
       dormant→activated → one trivial worker spawns, delivers, completes →
@@ -180,3 +181,48 @@ Setup per ticket 43's recipe: throwaway `multitask` profile recreated (`--from-d
 **BLOCKED — AC 3 (the one trivial token flow):** activation (via the A/B probe above, counting as the flow start) + ONE plain-text spawn ask → the dispatcher turn FAILED at the provider: `本轮运行失败 Invalid schema for function 'check_workers': false is not of type "array"` (INVALID_REQUEST, `shots/09`, `shots/10`). Root cause (product): `ToolParameterNode.required` (`src/core/tools.ts:38`) is a boolean that is serialized verbatim into each property schema (`required: true/false` inside `properties`, e.g. `src/core/tools.ts:168,220,285,349,355,361`) — invalid JSON Schema (the keyword is an object-level string array), so the provider rejects the request payload for ANY turn of an activated session. All five dispatcher tools carry the pattern; no worker spawned; the steer and stop legs were therefore not attempted (no worker exists; further sends would be guaranteed-rejected requests). LLM contact for the whole pass: exactly ONE turn attempt, refused at request validation (no completion). **Follow-up filed: ticket 45.**
 
 No AC checkbox is ticked by this comment (AC 2's section+flag clauses and AC 3 are red/blocked as recorded); no ticket files moved.
+
+### 2026-09-19 — live pass 2 (`C:\Users\TZhen\Desktop\dsh-live-pass2-2026-09-19\`, outside the repo): AC 2 TICKED — every clause green on one boot; AC 3 executed end-to-end but two of its words stay unproven (mid-run steer delivery; the dormant return), so it stays unticked
+
+Boot: throwaway `multitask` profile, commit `c56e69d` tree rebuilt, port 8875, host
+0.1.5-rc.1, WMI node-direct, timers armed in the node wrappers and verified via tasklist at
+launch (the PowerShell-via-WMI timer layer from re-pass #2 is confirmed dead and was not
+used). Zero-LLM phase first; the ONE token flow last.
+
+**AC 2 clauses (all green this boot):**
+- `commands/list` (agentId from the app's own `subagents/list` call, captured via a fetch
+  logger after clicking 新会话) includes `dispatcher-start` AND `dispatcher-steer` with
+  descriptions (`rpc-commands-list.json`).
+- Composer slash menu on "/dis" lists both, never submitted (`shots/02-slash-menu-dis.png`).
+- RPC A/B: `/goal` MATCHES (`rpc-execute-goal.json`); `/dispatcher-start` MATCHES —
+  post-flow it returns "The dispatcher is already active in this chat."
+  (`rpc-execute-dispatcher-start.json`), proving the composer-submitted activation was real
+  host-side.
+- Settings → 插件配置 renders `li.multitask-dispatcher-settings-card` as the FIRST card
+  ("Multitask Dispatcher / 调度器的功能开关…"), above the host's four (`shots/03-settings-plugin-card.png`)
+  — now proven on the PROFILE route too (ticket 47 proved the web+overlay route).
+- Footer flag mirror reads a REAL value: `data-flag="on"` on
+  `multitask-dispatcher-capsule__footer` after activation (prior passes: stuck `unknown` —
+  ticket 46's fixed watch delivers). Settings-write guard over the session: the only
+  `settings/mutate` calls were TWO `ui-theme` preference writes caused by the pass's own
+  deliberate light/dark toggles (ticket 49); zero writes to our namespace.
+
+**AC 3 (the token flow): start ✓ → activation flipped dormant→activated ✓ (composer
+`/dispatcher-start` intercepted — the app called `/api/commands/execute`, no plain-text
+send, activation message rendered, flag flipped) → one trivial worker spawned, delivered,
+completed ✓ (worker `8e7d5dc6-…` seen running in `subagents/list`; reply delivered into the
+chat: "That's the lot — 1 through 60, comma separated, delivered above") → steer: the
+command MATCHED and executed but honestly refused — "Worker 8e7d5dc6-… is not running; it
+may already be done." — because the ~2 s worker turn beat the poll loop; per the
+never-retry rule no second spawn was attempted → stop ✓ (conversational "Stop the worker
+now." → honest no-op, no tool call, nothing running) → dormant: NOT observed — the session
+stays activated (`data-flag="on"`; there is no deactivate path by design, ticket 31).
+LLM traffic: 4 rounds, one flow, 124K tok, 86% cache hit, zero retries.
+
+Observations for triage (no product change this pass): (1) the expanded capsule card keeps
+the dormant pitch ("调度器未启动" + a start button) while the footer flag reads `on` — the
+composition appears roster-keyed, which reads as misleading while the dispatcher is active;
+(2) the honest steer refusal surfaced as a `失败` command card in the conversation — good
+honesty; (3) NEW defect found on this boot, unrelated to this ticket's fix: the shell
+launcher chip cannot open the `main` page (uninjected `ctx.layout`/`ctx.sessions` reads
+throw) — filed as ticket 84.
