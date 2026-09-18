@@ -112,8 +112,10 @@ capsule stops being a foreign object.
 - [ ] (offline) `docs/research/dsh-plugin-ui-patterns.md` Finding 6 carries the
       token-layer finding with citations, so the next implementer does not
       re-derive "no theme contract" from its silence.
-- [ ] (live, ZERO LLM calls — ticket 33's pass) the chip and card follow the host
-      theme: legible light **and** dark, on a real launcher/profile boot.
+- [x] (live, ZERO LLM calls — ticket 33's pass) the chip and card follow the host
+      theme: legible light **and** dark, on a real launcher/profile boot. — **2026-09-19
+      live pass 2: both schemes on one profile boot; resolved token values recorded; see
+      comment.**
 
 ## Notes
 
@@ -210,3 +212,34 @@ The token-layer finding (368 `--dsw-*` tokens, per-scheme alias layers defined o
 knowledge that survives any vehicle. The open live AC (chip/card legible in both schemes) is a
 capsule-vehicle assertion — moot; the two-scheme check re-applies to whatever wrapper surfaces
 consume host tokens. Kept open with this note; moot-closure proposed for the next triage.
+
+
+### 2026-09-19 — live pass 2: live AC TICKED — chip and card follow the host theme in BOTH schemes on one profile boot (token values + screenshots)
+
+Evidence root: `C:\Users\TZhen\Desktop\dsh-live-pass2-2026-09-19\` (throwaway `multitask`
+profile, host 0.1.5-rc.1, commit `c56e69d` tree, zero LLM calls for this AC). Theme switched
+through the host's own Settings → 通用设置 → 外观 (浅色/深色); `body[data-ds-dark-theme]`
+observed toggling; the two `settings/mutate` calls this generated are `ui-theme` preference
+writes made deliberately by the pass (throwaway profile), not plugin traffic.
+
+Resolved values read on the wrapper surfaces (`theme-light-tokens.json`,
+`theme-dark-tokens.json`, shots 04/06/07/08):
+
+| Token | Light | Dark |
+|---|---|---|
+| `--dsw-alias-bg-layer-3` (chip/card surface) | `#fff` | `#353638` |
+| `--dsw-alias-border-l3` | `#0000001f` | `#ffffff29` |
+| `--dsw-alias-label-primary` | `#0f1115` | `#f9fafb` |
+| `--dsw-alias-label-tertiary` | `#81858c` | `#adb2b8` |
+| `--dsw-alias-state-business-primary` | `#4176e6` | `#679efe` |
+
+Computed surfaces invert correctly with the scheme: capsule chip and launcher chip paint
+`rgb(255,255,255)` bg / `rgb(15,17,21)` label in light and `rgb(53,54,56)` / `rgb(249,250,251)`
+in dark — ~17:1 and ~13:1 contrast pairs, both legible; the dormant capsule card
+(`multitask-dispatcher-capsule__card`) reads the same pairs (`shots/07-dark-card.png`,
+`shots/08-light-card.png`). No raw literals observed on any wrapper surface.
+
+Note per the 2026-09-19 re-base: the shell sidebar surface could not be read — the shell
+`main` page cannot open on this boot (ticket 84, uninjected service reads throw). The AC's
+own words ("the chip and card") are fully proven; the offline AC boxes 1–3 stay for the
+implementer to tick from the 2026-09-18 offline comment's evidence.
