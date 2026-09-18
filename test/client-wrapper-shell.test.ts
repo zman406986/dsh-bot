@@ -13,11 +13,23 @@ import { describe, it } from "node:test";
 import {
   createDispatcherShellStore,
   describePresence,
+  describeRowPreview,
   describeShellPanes,
   describeShellSidebar,
+  describeWaiting,
 } from "../src/client/shell-store.js";
-import { SHELL_CSS, SHELL_CLASS } from "../src/client/shell.js";
-import { createDispatcherShell } from "../src/client/shell.js";
+import {
+  SHELL_CSS,
+  SHELL_CLASS,
+  createDispatcherShell,
+  describePresenceDot,
+  waitingPhrase,
+} from "../src/client/shell.js";
+import {
+  bindShellSessionsFeed,
+  sessionsFeedInputs,
+  type ShellFeedSnapshotLike,
+} from "../src/client/shell-feed.js";
 import {
   LOCALE_NAMESPACE,
   localeDictionary,
@@ -149,11 +161,18 @@ describe("wrapper shell store — presence (ticket 77)", () => {
     assert.equal(state.rows.get("s-b")?.presence, null);
   });
 
-  it("refuses presence for an unknown session instead of attaching it", () => {
+  it("a mirror for an unknown session touches no sibling row and applies when the feed delivers it", () => {
     const store = createDispatcherShellStore();
     store.upsertSessions([{ sessionId: "s-a", title: "A", dispatcher: true }]);
     store.applyPresence(snapshot([worker("w-1", "running")], "s-ghost"));
+    // The sibling is untouched — presence for a ghost never leaks sideways.
     assert.equal(store.getBox().state.rows.get("s-a")?.presence, null);
+    // The mirror is recorded (inert — mirrors never invent rows) and lands
+    // the moment the feed delivers the named session.
+    store.upsertSessions([{ sessionId: "s-ghost", title: "Ghost" }]);
+    const ghost = store.getBox().state.rows.get("s-ghost");
+    assert.equal(ghost?.dispatcher, true);
+    assert.deepEqual(ghost?.presence, { working: 1, needsYou: 0, finished: 0 });
   });
 
   it("markPresenceUnavailable degrades honestly back to null", () => {
@@ -322,5 +341,393 @@ describe("wrapper shell locale + wiring (ticket 77)", () => {
       { rosterPanel: () => null },
     );
     assert.equal(typeof component, "function");
+  });
+});
+
+describe("wrapper shell per-session mirrors (ticket 79, ADR-0019 keying)", () => {
+  it("applySessionMirror flags the session and derives presence from the raw value", () => {
+    const store = createDispatcherShellStore();
+    store.upsertSessions([{ sessionId: "s-a", title: "A" }]);
+    store.applySessionMirror(
+      "s-a",
+      snapshot(
+        [
+          worker("w-1", "running"),
+          worker("w-2", "completed", { delivered: false }),
+        ],
+        "s-a",
+      ),
+    );
+    const row = store.getBox().state.rows.get("s-a");
+    assert.equal(row?.dispatcher, true);
+    assert.deepEqual(row?.presence, { working: 1, needsYou: 1, finished: 0 });
+    assert.equal(row?.waiting?.kind, "landed");
+  });
+
+  it("per-session isolation: each mirror lands only on its own session", () => {
+    const store = createDispatcherShellStore();
+    store.upsertSessions([
+      { sessionId: "s-a", title: "A" },
+      { sessionId: "s-b", title: "B" },
+    ]);
+    store.applySessionMirror("s-a", snapshot([worker("w-1", "running")], "s-a"));
+    store.applySessionMirror(
+      "s-b",
+      snapshot(
+        [worker("w-2", "error", { delivered: true })],
+        "s-b",
+      ),
+    );
+    const state = store.getBox().state;
+    assert.deepEqual(state.rows.get("s-a")?.presence, {
+      working: 1,
+      needsYou: 0,
+      finished: 0,
+    });
+    assert.deepEqual(state.rows.get("s-b")?.presence, {
+      working: 0,
+      needsYou: 0,
+      finished: 1,
+    });
+    assert.equal(state.mirrors.get("s-a")?.kind, "snapshot");
+    assert.equal(state.mirrors.get("s-b")?.kind, "snapshot");
+  });
+
+  it("a cleared mirror (null) drops the dispatcher flag — deactivation honesty", () => {
+    const store = createDispatcherShellStore();
+    store.upsertSessions([{ sessionId: "s-a", title: "A" }]);
+    store.applySessionMirror("s-a", snapshot([worker("w-1", "running")], "s-a"));
+    assert.equal(store.getBox().state.rows.get("s-a")?.dispatcher, true);
+    store.applySessionMirror("s-a", null);
+    const row = store.getBox().state.rows.get("s-a");
+    assert.equal(row?.dispatcher, false);
+    assert.equal(row?.presence, null);
+  });
+
+  it("a corrupt mirror value flags the session but degrades presence, never a wrong roster", () => {
+    const store = createDispatcherShellStore();
+    store.upsertSessions([{ sessionId: "s-a", title: "A" }]);
+    store.applySessionMirror("s-a", { schemaVersion: 2, junk: true });
+    const row = store.getBox().state.rows.get("s-a");
+    // The key EXISTS, so the session is ours — but the payload failed
+    // fail-closed parse: "unavailable", never fabricated counters.
+    assert.equal(row?.dispatcher, true);
+    assert.equal(row?.presence, null);
+    assert.equal(store.getBox().state.mirrors.get("s-a")?.kind, "unavailable");
+  });
+
+  it("a mirror signal outranks the feed's dispatcher claim in both directions", () => {
+    const store = createDispatcherShellStore();
+    // Feed claims true before any mirror: the claim stands.
+    store.upsertSessions([
+      { sessionId: "s-claim", title: "Claim", dispatcher: true },
+      { sessionId: "s-plain", title: "Plain" },
+    ]);
+    assert.equal(store.getBox().state.rows.get("s-claim")?.dispatcher, true);
+    // A cleared mirror overrides the claim.
+    store.applySessionMirror("s-claim", null);
+    assert.equal(store.getBox().state.rows.get("s-claim")?.dispatcher, false);
+    // A snapshot mirror overrides plain.
+    store.applySessionMirror("s-plain", snapshot([worker("w-1", "running")], "s-plain"));
+    assert.equal(store.getBox().state.rows.get("s-plain")?.dispatcher, true);
+  });
+
+  it("describeWaiting follows the marker precedence: blocked outranks landed", () => {
+    const blocked = describeWaiting(
+      snapshot([
+        worker("w-1", "completed", { delivered: false }),
+        worker("w-2", "running", {
+          blocked: { class: "tool", target: "shell" },
+        }),
+      ]),
+    );
+    assert.equal(blocked?.kind, "blocked");
+    if (blocked?.kind !== "blocked") return;
+    assert.deepEqual(blocked.blocked, { class: "tool", target: "shell" });
+    // Landed alone still marks.
+    assert.equal(
+      describeWaiting(snapshot([worker("w-3", "completed", { delivered: false })]))
+        ?.kind,
+      "landed",
+    );
+    // Nothing owed: no marker.
+    assert.equal(describeWaiting(snapshot([worker("w-4", "running")])), null);
+  });
+
+  it("junk mirror ids are refused", () => {
+    const store = createDispatcherShellStore();
+    store.applySessionMirror("", snapshot([], "s-x"));
+    assert.equal(store.getBox().state.mirrors.size, 0);
+  });
+});
+
+describe("wrapper shell staleness + failure states (ticket 79)", () => {
+  it("an aged snapshot renders presence-unavailable at view time, without a push", () => {
+    const store = createDispatcherShellStore();
+    store.upsertSessions([{ sessionId: "s-a", title: "A" }]);
+    store.applySessionMirror("s-a", snapshot([worker("w-1", "running")], "s-a"));
+    // Exactly at the window counts as fresh; beyond it is stale (the panel's
+    // one stale rule, shared window).
+    const fresh = describeShellSidebar(store.getBox().state, 61_000);
+    if (fresh.kind !== "ready") return assert.fail("expected ready");
+    assert.equal(fresh.rows[0]?.presenceAvailable, true);
+    const stale = describeShellSidebar(store.getBox().state, 61_001);
+    if (stale.kind !== "ready") return assert.fail("expected ready");
+    assert.equal(stale.rows[0]?.presenceAvailable, false);
+    // The dispatcher flag is NOT freshness-dependent.
+    assert.equal(stale.rows[0]?.dispatcher, true);
+  });
+
+  it("without a render clock nothing is declared stale (offline view models)", () => {
+    const store = createDispatcherShellStore();
+    store.upsertSessions([{ sessionId: "s-a", title: "A" }]);
+    store.applySessionMirror("s-a", snapshot([worker("w-1", "running")], "s-a"));
+    const view = describeShellSidebar(store.getBox().state);
+    if (view.kind !== "ready") return assert.fail("expected ready");
+    assert.equal(view.rows[0]?.presenceAvailable, true);
+  });
+
+  it("failure states are retry-less: the CSS ships no retry control and no banner", () => {
+    // The only interactive element class in the shell CSS is the row button
+    // itself — no retry/refresh control exists to offer (U-A: no reconnect
+    // model; see ticket 82 for the ADR-0020 row tension).
+    const buttonClasses = [
+      ...SHELL_CSS.matchAll(/\.multitask-dispatcher-shell__[a-z-]+(?=\{)/g),
+    ]
+      .map((m) => m[0])
+      .filter((cls) => /retry|refresh|reconnect|banner/.test(cls));
+    assert.deepEqual(buttonClasses, []);
+    // And the copy vocabulary has no retry beat.
+    for (const key of Object.keys(localeDictionary.en)) {
+      if (!key.startsWith("shell.")) continue;
+      const copy = localeDictionary.en[key]?.toLowerCase() ?? "";
+      assert.doesNotMatch(copy, /retry|reconnect/, `${key} suggests a retry`);
+    }
+  });
+
+  it("attention markers stay pull-only: the shell vocabulary has no push surface", () => {
+    for (const key of Object.keys(localeDictionary.en)) {
+      if (!key.startsWith("shell.")) continue;
+      const copy = localeDictionary.en[key]?.toLowerCase() ?? "";
+      assert.doesNotMatch(
+        copy,
+        /notif|toast|alert|push/,
+        `${key} simulates a push channel`,
+      );
+    }
+  });
+});
+
+describe("wrapper shell row presence + preview (ticket 79)", () => {
+  it("describePresenceDot aggregates the session to one dot state", () => {
+    assert.equal(describePresenceDot({ presence: null, presenceAvailable: false }), "unavailable");
+    assert.equal(
+      describePresenceDot({
+        presence: { working: 1, needsYou: 0, finished: 0 },
+        presenceAvailable: true,
+      }),
+      "working",
+    );
+    // Needs-you outranks finished (the user is on the hook first).
+    assert.equal(
+      describePresenceDot({
+        presence: { working: 0, needsYou: 1, finished: 2 },
+        presenceAvailable: true,
+      }),
+      "needs-you",
+    );
+    assert.equal(
+      describePresenceDot({
+        presence: { working: 0, needsYou: 0, finished: 2 },
+        presenceAvailable: true,
+      }),
+      "finished",
+    );
+    // A live snapshot with nothing in any section is idle, not unavailable.
+    assert.equal(
+      describePresenceDot({
+        presence: { working: 0, needsYou: 0, finished: 0 },
+        presenceAvailable: true,
+      }),
+      "idle",
+    );
+  });
+
+  it("waitingPhrase reuses the shared roster copy (one vocabulary, not a second)", () => {
+    const t = (key: string) => localeDictionary.en[key] ?? key;
+    const phrase = waitingPhrase(t, {
+      kind: "blocked",
+      blocked: { class: "tool", target: "shell" },
+    });
+    assert.equal(phrase, 'Waiting for your approval: use the tool "shell"');
+    assert.equal(waitingPhrase(t, { kind: "landed" }), "Result ready — not delivered yet");
+  });
+
+  it("describeRowPreview follows waiting > last entry, and the draft tier is a recorded gap", () => {
+    // Waiting reason wins over the excerpt.
+    const waiting = describeRowPreview(
+      {
+        waiting: { kind: "blocked", blocked: { class: "tool", target: "sh" } },
+        recentResult: { workerId: "w-1", title: "W", text: "done text" },
+      },
+      true,
+    );
+    assert.equal(waiting?.kind, "waiting");
+    // No waiting marker: the last-entry tier renders the wire-truth excerpt.
+    const excerpt = describeRowPreview(
+      { waiting: null, recentResult: { workerId: "w-1", title: "W", text: "done text" } },
+      true,
+    );
+    assert.deepEqual(excerpt, { kind: "excerpt", text: "done text" });
+    // Neither tier has data: no preview (and no invented draft tier —
+    // per-agent drafts are U-B-excluded, so the tier is skipped, not faked).
+    assert.equal(describeRowPreview({ waiting: null, recentResult: null }, true), null);
+    // A stale/corrupt feed must not keep previewing old content.
+    assert.equal(
+      describeRowPreview(
+        { waiting: null, recentResult: { workerId: "w", title: "W", text: "x" } },
+        false,
+      ),
+      null,
+    );
+  });
+});
+
+describe("wrapper shell sessions-feed projection + binding (ticket 79)", () => {
+  const feedRow = (
+    id: string,
+    overrides: Partial<{ displayTitle: string; title: string; origin: string }> = {},
+  ) => ({ id, ...overrides });
+
+  it("projects ids+byId into store inputs with the host's displayTitle", () => {
+    const feed: ShellFeedSnapshotLike = {
+      ids: ["s-1", "s-2", "s-3"],
+      byId: {
+        "s-1": feedRow("s-1", { displayTitle: "Build the thing" }),
+        "s-2": feedRow("s-2", { title: "fallback title" }),
+        // s-3 deliberately has no row yet (host stream lag).
+      },
+    };
+    assert.deepEqual(sessionsFeedInputs(feed), [
+      { sessionId: "s-1", title: "Build the thing" },
+      { sessionId: "s-2", title: "fallback title" },
+    ]);
+  });
+
+  it("falls back to the raw id for the title and excludes subagent (worker) rows", () => {
+    const feed: ShellFeedSnapshotLike = {
+      ids: ["s-plain", "w-child"],
+      byId: {
+        "s-plain": feedRow("s-plain"),
+        "w-child": feedRow("w-child", { displayTitle: "worker run", origin: "subagent" }),
+      },
+    };
+    assert.deepEqual(sessionsFeedInputs(feed), [
+      { sessionId: "s-plain", title: "s-plain" },
+    ]);
+  });
+
+  it("projects nothing from a malformed snapshot (no ids array)", () => {
+    assert.deepEqual(sessionsFeedInputs({}), []);
+    assert.deepEqual(sessionsFeedInputs({ ids: "not-an-array" as never }), []);
+  });
+
+  function fakeFeed(initial: ShellFeedSnapshotLike) {
+    const listeners = new Set<() => void>();
+    let snapshotValue = initial;
+    return {
+      sessions: {
+        list: {
+          getSnapshot: () => snapshotValue,
+          subscribe: (listener: () => void) => {
+            listeners.add(listener);
+            return () => listeners.delete(listener);
+          },
+        },
+      },
+      set(next: ShellFeedSnapshotLike) {
+        snapshotValue = next;
+        for (const listener of [...listeners]) listener();
+      },
+      listenerCount: () => listeners.size,
+    };
+  }
+
+  it("binds the feed: initial sync, live upserts, and removal syncs", () => {
+    const fake = fakeFeed({
+      ids: ["s-1"],
+      byId: { "s-1": feedRow("s-1", { displayTitle: "One" }) },
+    });
+    const store = createDispatcherShellStore();
+    const binding = bindShellSessionsFeed(store, fake.sessions);
+    assert.deepEqual(store.getBox().state.order, ["s-1"]);
+
+    // Live upsert.
+    fake.set({
+      ids: ["s-1", "s-2"],
+      byId: {
+        "s-1": feedRow("s-1", { displayTitle: "One" }),
+        "s-2": feedRow("s-2", { displayTitle: "Two" }),
+      },
+    });
+    assert.deepEqual(store.getBox().state.order, ["s-1", "s-2"]);
+
+    // Feed removal: the row the host dropped leaves the store, and a
+    // selected dangling row resets the selection.
+    store.select("s-2");
+    fake.set({ ids: ["s-1"], byId: { "s-1": feedRow("s-1", { displayTitle: "One" }) } });
+    assert.deepEqual(store.getBox().state.order, ["s-1"]);
+    assert.equal(store.getBox().state.selection.kind, "none");
+
+    binding.dispose();
+    assert.equal(fake.listenerCount(), 0);
+  });
+
+  it("a malformed feed snapshot never wipes the roster", () => {
+    const fake = fakeFeed({
+      ids: ["s-1"],
+      byId: { "s-1": feedRow("s-1", { displayTitle: "One" }) },
+    });
+    const store = createDispatcherShellStore();
+    const binding = bindShellSessionsFeed(store, fake.sessions);
+    fake.set({ ids: undefined, byId: undefined });
+    assert.deepEqual(store.getBox().state.order, ["s-1"]);
+    binding.dispose();
+  });
+
+  it("open() rides the store guard: known ids select + notify, unknown ids do neither", () => {
+    const fake = fakeFeed({
+      ids: ["s-1"],
+      byId: { "s-1": feedRow("s-1", { displayTitle: "One" }) },
+    });
+    const store = createDispatcherShellStore();
+    const opened: string[] = [];
+    const binding = bindShellSessionsFeed(store, fake.sessions, {
+      onOpen: (id) => opened.push(id),
+    });
+    binding.open("s-unknown");
+    assert.deepEqual(opened, []);
+    assert.equal(store.getBox().state.selection.kind, "none");
+    binding.open("s-1");
+    assert.deepEqual(store.getBox().state.selection, {
+      kind: "session",
+      sessionId: "s-1",
+    });
+    assert.deepEqual(opened, ["s-1"]);
+    binding.dispose();
+  });
+
+  it("binds a feed without subscribe (sync once, degrade honestly)", () => {
+    const store = createDispatcherShellStore();
+    const binding = bindShellSessionsFeed(store, {
+      list: {
+        getSnapshot: () => ({
+          ids: ["s-9"],
+          byId: { "s-9": feedRow("s-9", { displayTitle: "Nine" }) },
+        }),
+      },
+    });
+    assert.deepEqual(store.getBox().state.order, ["s-9"]);
+    binding.dispose();
   });
 });

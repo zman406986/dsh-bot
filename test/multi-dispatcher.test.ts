@@ -421,6 +421,48 @@ describe("multi-dispatcher — scoped surfaces (ADR-0019)", () => {
     assert.ok(publishedSessions.has("s-a"));
     assert.ok(publishedSessions.has("s-b"));
   });
+
+  it("deactivating session A clears only A's per-session mirror key (ticket 79)", async () => {
+    const multi = createMultiCtx();
+    apply(multi.ctx, { enabled: true });
+    const a = createScopedAgent("s-a");
+    const b = createScopedAgent("s-b");
+    await activate(multi, a);
+    await activate(multi, b);
+    await spawnVia(a, "k-a");
+    await spawnVia(b, "k-b");
+
+    // Both sessions' snapshots ride their own mirror keys.
+    const mirrorA = multi.ctx.updates.filter(
+      (update) => "roster.s-a" in update,
+    );
+    assert.ok(mirrorA.length > 0);
+
+    // Deactivate A: its mirror key is nulled — the wrapper sidebar's
+    // dispatcher flag must fall — and ONLY its key; B keeps publishing.
+    multi.ctx.fire("agent/disposed", { agent: a });
+    await tick();
+    await tick();
+    const clearedA = multi.ctx.updates.filter(
+      (update) =>
+        "roster.s-a" in update && update["roster.s-a"] === null,
+    );
+    assert.ok(clearedA.length > 0, "A's mirror key was cleared");
+    const clearedB = multi.ctx.updates.filter(
+      (update) =>
+        "roster.s-b" in update && update["roster.s-b"] === null,
+    );
+    assert.deepEqual(clearedB, [], "B's mirror key must survive");
+
+    // A transition in B still publishes under B's own key afterward.
+    await spawnVia(b, "k-b2");
+    const mirrorB = multi.ctx.updates.filter(
+      (update) =>
+        typeof update["roster.s-b"] === "object" &&
+        update["roster.s-b"] !== null,
+    );
+    assert.ok(mirrorB.length > 0, "B's mirror keeps publishing");
+  });
 });
 
 describe("multi-dispatcher — per-session prompts and policy rows (ADR-0019)", () => {

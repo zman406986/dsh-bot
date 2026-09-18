@@ -31,6 +31,8 @@ import {
 } from "../src/core/roster-snapshot.js";
 import {
   createSettingsRosterChannel,
+  rosterSessionKey,
+  sessionOfRosterKey,
 } from "../src/adapter/roster-channel.js";
 import {
   DISPATCHER_START_COMMAND,
@@ -874,7 +876,10 @@ describe("roster snapshot — settings-namespace channel (adapter)", () => {
     assert.equal(channel.stats.attached, true);
     // Catch-up: the scope appeared after transitions were projected.
     assert.equal(updates.length, 1);
-    assert.deepEqual(updates[0], { [ROSTER_SETTINGS_KEY]: snapshot });
+    assert.deepEqual(updates[0], {
+      [ROSTER_SETTINGS_KEY]: snapshot,
+      [`roster.s-1`]: snapshot,
+    });
   });
 
   it("writes each publish under the roster key and counts failures without throwing", () => {
@@ -887,8 +892,8 @@ describe("roster snapshot — settings-namespace channel (adapter)", () => {
     channel.publish(one);
     channel.publish(two);
     assert.deepEqual(updates, [
-      { [ROSTER_SETTINGS_KEY]: one },
-      { [ROSTER_SETTINGS_KEY]: two },
+      { [ROSTER_SETTINGS_KEY]: one, "roster.s-1": one },
+      { [ROSTER_SETTINGS_KEY]: two, "roster.s-1": two },
     ]);
 
     scope.setFailing(true);
@@ -897,6 +902,78 @@ describe("roster snapshot — settings-namespace channel (adapter)", () => {
     assert.equal(channel.stats.failures, 1);
     // The retained snapshot stays the latest even when the write failed.
     assert.equal(channel.lastSnapshot, three);
+  });
+});
+
+describe("roster snapshot — per-session mirror keys (ticket 79, ADR-0019 keying)", () => {
+  function fakeScope() {
+    const updates: Array<Record<string, unknown>> = [];
+    return {
+      updates,
+      scope: {
+        update(value: unknown) {
+          updates.push(value as Record<string, unknown>);
+        },
+      },
+    };
+  }
+
+  it("names session mirror keys unambiguously (dots in ids stay parseable)", () => {
+    assert.equal(rosterSessionKey("s-abc"), "roster.s-abc");
+    // The legacy whole-snapshot key is NOT a session key.
+    assert.equal(sessionOfRosterKey("roster"), null);
+    // The remainder is taken WHOLE, so dotted ids round-trip.
+    assert.equal(sessionOfRosterKey("roster.s.a.b"), "s.a.b");
+    assert.equal(rosterSessionKey("s.a.b"), "roster.s.a.b");
+  });
+
+  it("writes the per-session mirror alongside the legacy key on every publish", () => {
+    const channel = createSettingsRosterChannel();
+    const { updates, scope } = fakeScope();
+    channel.attach(scope);
+
+    const a = projectRosterSnapshot("s-a", [], 1);
+    const b = projectRosterSnapshot("s-b", [], 2);
+    channel.publish(a);
+    channel.publish(b);
+    // Each publish carries BOTH families: the legacy key (the shipped
+    // single-dispatcher panel's read-side, last-write-wins) and the named
+    // session's mirror (the wrapper sidebar's read-side).
+    assert.deepEqual(updates, [
+      { [ROSTER_SETTINGS_KEY]: a, "roster.s-a": a },
+      { [ROSTER_SETTINGS_KEY]: b, "roster.s-b": b },
+    ]);
+  });
+
+  it("clearSession writes null under the session's mirror key only", () => {
+    const channel = createSettingsRosterChannel();
+    const { updates, scope } = fakeScope();
+    channel.attach(scope);
+    channel.publish(projectRosterSnapshot("s-a", [], 1));
+    channel.publish(projectRosterSnapshot("s-b", [], 2));
+    updates.length = 0;
+
+    channel.clearSession("s-a");
+    assert.deepEqual(updates, [{ "roster.s-a": null }]);
+    // A junk id is refused rather than written.
+    updates.length = 0;
+    channel.clearSession("");
+    assert.deepEqual(updates, []);
+  });
+
+  it("clearAllSessions clears every mirror this process published", () => {
+    const channel = createSettingsRosterChannel();
+    const { updates, scope } = fakeScope();
+    channel.attach(scope);
+    // Nothing published yet: nothing to clear.
+    channel.clearAllSessions();
+    assert.deepEqual(updates, []);
+
+    channel.publish(projectRosterSnapshot("s-a", [], 1));
+    channel.publish(projectRosterSnapshot("s-b", [], 2));
+    updates.length = 0;
+    channel.clearAllSessions();
+    assert.deepEqual(updates, [{ "roster.s-a": null }, { "roster.s-b": null }]);
   });
 });
 

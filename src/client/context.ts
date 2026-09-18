@@ -169,14 +169,46 @@ export interface ScopedAgentContextLike {
 }
 
 /**
+ * One row of the standard sessions feed (`SessionSummary`, structural
+ * minimal — ticket 79). `displayTitle` is the host's human-facing label
+ * (durable title, project basename, then session id); `origin:
+ * "subagent"` marks worker runs, which are leaves and never sidebar rows.
+ */
+export interface ClientSessionSummaryLike {
+  readonly id: string;
+  readonly displayTitle?: string;
+  readonly title?: string;
+  readonly origin?: string;
+}
+
+/**
+ * The standard sessions-feed snapshot (`SessionListState`, structural
+ * minimal — ticket 79). The sidebar projects its rows; `current` is the
+ * selection the capsule actions already read. Fields stay optional so a
+ * runtime serving an older face degrades instead of lying.
+ */
+export interface ClientSessionsFeedSnapshotLike {
+  readonly ids?: readonly string[];
+  readonly byId?: Readonly<Record<string, ClientSessionSummaryLike>>;
+  readonly current?: string;
+}
+
+/**
  * The sessions service face the action wiring needs (ticket 36 seams 2/3):
- * the current session selection off the standard list snapshot (shipped
- * read idiom `list.getSnapshot().current`) and the Agent-scoped context
- * view (`undefined` for a session neither listed nor already scoped).
+ * the standard list snapshot (rows + current selection — widened to the
+ * full feed face in ticket 79 for the wrapper sidebar's rows) and the
+ * Agent-scoped context view (`undefined` for a session neither listed nor
+ * already scoped). `open` (ticket 79) is the host's selection verb — the
+ * shell sidebar rides it on row selection; optional because the shell
+ * composition degrades to store-only selection without it.
  */
 export interface ClientSessionsLike {
-  list: { getSnapshot(): { current?: string } };
+  list: {
+    getSnapshot(): ClientSessionsFeedSnapshotLike;
+    subscribe?(listener: () => void): () => void;
+  };
   scope(id: string): ScopedAgentContextLike | undefined;
+  open?(id: string): void;
 }
 
 /**

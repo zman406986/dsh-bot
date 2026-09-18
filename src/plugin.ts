@@ -547,6 +547,10 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       // outstanding ones. Their tickets keep the armed relay timeouts
       // (ADR-0008 deny-by-default); nothing waits indefinitely.
       accessPumps.get(sessionId)?.reset();
+      // Ticket 79: the session's roster mirror key goes too — the wrapper
+      // sidebar reads `roster.<sessionId>` for the dispatcher flag, so a
+      // deactivated session must not keep rendering as a live dispatcher.
+      rosterChannel.clearSession(sessionId);
     },
   });
 
@@ -611,6 +615,10 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       for (const pump of accessPumps.values()) {
         pump.reset();
       }
+      // Ticket 79: no per-session roster mirror key outlives the plugin —
+      // a stale `roster.<id>` would re-flag a dead session as a dispatcher
+      // on the next enable.
+      rosterChannel.clearAllSessions();
       host.dispose();
       void markers.dispose();
     },
