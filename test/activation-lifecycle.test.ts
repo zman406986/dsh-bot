@@ -9,23 +9,58 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { apply } from "../src/plugin.js";
 import {
-  DISPATCHER_START_ALREADY_ELSEWHERE,
   DISPATCHER_START_ALREADY_HERE,
   DISPATCHER_START_COMMAND,
   DISPATCHER_START_DESCRIPTION,
   DISPATCHER_START_NOT_TOP_LEVEL,
   DISPATCHER_START_SUCCESS,
   DISPATCHER_START_UNRESOLVED,
-  DISPATCHER_TOOL_GATE_REFUSAL,
   DISPATCHER_STEER_COMMAND,
   type AdapterContext,
   type AgentLike,
   type CommandDefinitionLike,
   type CommandResultLike,
+  type ToolsLike,
 } from "../src/adapter/index.js";
 
 interface TestAgent extends AgentLike {
   readonly injected: unknown[];
+}
+
+/**
+ * A per-agent scoped tool surface (ADR-0019): what the live host mints per
+ * agent loop. Registrations here are visible only to THIS agent.
+ */
+interface ScopedAgent extends TestAgent {
+  readonly ctx?: {
+    readonly tools: ToolsLike & {
+      registeredNames(): string[];
+    };
+  };
+}
+
+function createScopedAgent(id: string): ScopedAgent {
+  const agent = createAgent(id) as ScopedAgent;
+  const scoped = new Map<
+    string,
+    { execute: (args: unknown, exec?: unknown) => Promise<unknown> }
+  >();
+  agent.ctx = {
+    tools: {
+      schemas: () => [...scoped.keys()].map((name) => ({ name })),
+      register(definition: {
+        name: string;
+        execute: (args: unknown, exec?: unknown) => Promise<unknown>;
+      }) {
+        scoped.set(definition.name, definition);
+        return () => {
+          scoped.delete(definition.name);
+        };
+      },
+      registeredNames: () => [...scoped.keys()],
+    },
+  };
+  return agent;
 }
 
 function createAgent(
@@ -298,23 +333,28 @@ describe("activation lifecycle — command behavior", () => {
     assert.equal(ctx.toolNames().length, 6);
   });
 
-  it("activation while active elsewhere is refused with error copy", () => {
+  it("a second chat activates as its own dispatcher (ADR-0019: no single slot)", () => {
     const ctx = createFullCtx();
     apply(ctx, { enabled: true });
     const first = createAgent("s-1");
     const second = createAgent("s-2");
 
-    ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent: first });
+    assert.deepEqual(ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent: first }), {
+      kind: "success",
+      text: DISPATCHER_START_SUCCESS,
+    });
+    // ADR-0019 retired the `already-active-elsewhere` refusal: each chat
+    // activates its own dispatcher session with its own policy inject.
     const result = ctx.runCommand({
       commandId: DISPATCHER_START_COMMAND,
       agent: second,
     });
 
     assert.deepEqual(result, {
-      kind: "error",
-      text: DISPATCHER_START_ALREADY_ELSEWHERE,
+      kind: "success",
+      text: DISPATCHER_START_SUCCESS,
     });
-    assert.equal(second.injected.length, 0);
+    assert.equal(second.injected.length, 1);
     assert.equal(first.injected.length, 1);
   });
 
@@ -416,8 +456,66 @@ describe("activation lifecycle — deactivation and HMR", () => {
   });
 });
 
-describe("activation lifecycle — dispatcher tool gate", () => {
-  it("tools accept the activated chat and refuse other chats", async () => {
+describe("activation lifecycle — dispatcher tool surface (ADR-0019)", () => {
+  it("activation registers the five tools in the agent's SCOPED surface; request_access stays global", () => {
+    const ctx = createFullCtx();
+    apply(ctx, { enabled: true });
+    const agent = createScopedAgent("s-1");
+
+    const result = ctx.runCommand({
+      commandId: DISPATCHER_START_COMMAND,
+      agent,
+    });
+    assert.deepEqual(result, { kind: "success", text: DISPATCHER_START_SUCCESS });
+
+    // Five dispatcher tools live in THIS agent's scope only…
+    assert.deepEqual(
+      agent.ctx?.tools.registeredNames().sort(),
+      [
+        "check_workers",
+        "deliver_result",
+        "spawn_worker",
+        "steer_worker",
+        "stop_worker",
+      ],
+    );
+    // …and only request_access claims a global name (its callers are workers).
+    assert.deepEqual(ctx.toolNames(), ["request_access"]);
+  });
+
+  it("a scoped dispatcher's tools never appear in a sibling chat's surface", () => {
+    const ctx = createFullCtx();
+    apply(ctx, { enabled: true });
+    const first = createScopedAgent("s-1");
+    const second = createScopedAgent("s-2");
+    ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent: first });
+    ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent: second });
+
+    // Two dispatcher sessions, two disjoint scoped surfaces.
+    assert.equal(first.ctx?.tools.registeredNames().length, 5);
+    assert.equal(second.ctx?.tools.registeredNames().length, 5);
+    assert.deepEqual(ctx.toolNames(), ["request_access"]);
+  });
+
+  it("disposing one session unregisters its scoped set, not the sibling's", () => {
+    const ctx = createFullCtx();
+    apply(ctx, { enabled: true });
+    const first = createScopedAgent("s-1");
+    const second = createScopedAgent("s-2");
+    ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent: first });
+    ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent: second });
+
+    ctx.fire("agent/disposed", { agent: first });
+
+    assert.deepEqual(first.ctx?.tools.registeredNames(), []);
+    assert.equal(second.ctx?.tools.registeredNames().length, 5);
+    // request_access stays until the LAST dispatcher session ends.
+    assert.deepEqual(ctx.toolNames(), ["request_access"]);
+    ctx.fire("agent/disposed", { agent: second });
+    assert.deepEqual(ctx.toolNames(), []);
+  });
+
+  it("the retired execute-time gate no longer refuses other chats (fallback surface)", async () => {
     const ctx = createFullCtx();
     apply(ctx, { enabled: true });
     const agent = createAgent("s-1");
@@ -426,22 +524,23 @@ describe("activation lifecycle — dispatcher tool gate", () => {
     const spawn = ctx.tool("spawn_worker");
     assert.ok(spawn);
 
-    const refused = (await spawn.execute(
+    // ADR-0019 retired the gate: this ctx-less agent fell back to the global
+    // surface, and execution routes to the session that registered the tool
+    // (s-1). The per-agent scope is the live host's visibility fence.
+    const routed = (await spawn.execute(
       { stream_key: "k", title: "T", prompt: "P" },
       { agent: { session: { id: "other-chat" } } },
-    )) as { ok: boolean; reason: string; detail: string };
-    assert.equal(refused.ok, false);
-    assert.equal(refused.reason, "not-activated");
-    assert.equal(refused.detail, DISPATCHER_TOOL_GATE_REFUSAL);
+    )) as { ok: boolean };
+    assert.equal(routed.ok, true);
 
     const accepted = (await spawn.execute(
-      { stream_key: "k", title: "T", prompt: "P" },
+      { stream_key: "k2", title: "T", prompt: "P" },
       { agent: { session: { id: "s-1" } } },
     )) as { ok: boolean };
     assert.equal(accepted.ok, true);
   });
 
-  it("an unresolvable exec falls back to the activation-exists gate", async () => {
+  it("an unresolvable exec still reaches the core", async () => {
     const ctx = createFullCtx();
     apply(ctx, { enabled: true });
     const agent = createAgent("s-1");
@@ -450,13 +549,11 @@ describe("activation lifecycle — dispatcher tool gate", () => {
     const check = ctx.tool("check_workers");
     assert.ok(check);
 
-    // No exec shape at all: the weaker documented gate applies — an
-    // activation exists, so the call is not refused on shape grounds.
     const allowed = (await check.execute({}, undefined)) as { ok: boolean };
     assert.equal(allowed.ok, true);
   });
 
-  it("workers spawned through the gate are host children of the activated chat", async () => {
+  it("workers spawned through the surface are host children of the activated chat", async () => {
     const ctx = createFullCtx();
     apply(ctx, { enabled: true });
     const agent = createAgent("s-1");

@@ -31,6 +31,21 @@ export interface AgentLike {
   followup(message: unknown): void;
   /** Queue context without opening a turn (optional; policy inject). */
   inject?(message: unknown): void;
+  /**
+   * ADR-0019: the host's own per-agent scoped context (structural view of
+   * `agent.ctx` — every agent loop mints one; `tools.register` addressed
+   * through it registers in THIS agent's scope only, so a second dispatcher
+   * never sees the first's tools and worker children never see any of them).
+   * Verified against installed @deepseek-ai/* 0.1.5-rc.2
+   * (docs/research/dsh-tool-scoping-seam.md; dsh-tools/lib/index.js:2781 —
+   * `layers.effect(this.ctx, …)` picks the layer from the calling ctx's
+   * scope). Optional so stub agents stay minimal; when absent the adapter
+   * falls back to the plugin-level global registration — the shipped
+   * single-dispatcher shape, with no per-agent visibility fence.
+   */
+  readonly ctx?: {
+    readonly tools?: ToolsLike;
+  };
 }
 
 export interface ContinuableStartLike {
@@ -186,14 +201,23 @@ export interface CordisDshHostOptions {
  * Core stays pure; this is the only place that knows subagents/agents/jobs.
  */
 export interface CordisDshHost extends DshHost {
-  /** Bind the exact live dispatcher Agent (explicit activation, ticket 19). */
+  /** Bind the exact live dispatcher Agent (explicit activation, ticket 19).
+   *  ADR-0019: per dispatcher session — a map of live parents, not one slot. */
   bindParent(agent: AgentLike, sessionId: string): void;
-  /** Clear the parent Agent (dispose / replace). */
-  unbindParent(): void;
-  /** Whether a parent Agent is currently bound. */
+  /**
+   * Clear parent binding(s) (dispose / replace). ADR-0019: WITH a session id
+   * only that session's binding is cleared (a sibling dispatcher stays
+   * bound); without one, every binding is cleared (plugin unload).
+   */
+  unbindParent(sessionId?: string): void;
+  /** Whether any parent Agent is currently bound. */
   hasParent(): boolean;
-  /** Live parent Agent, if bound. */
-  readonly parentAgent: AgentLike | null;
+  /**
+   * The live parent Agent bound for one dispatcher session, if any
+   * (ADR-0019: authority is per session — spawn, interrupt, send, and the
+   * access prompts resolve their agent from the session they serve).
+   */
+  parentAgentOf(sessionId: string): AgentLike | undefined;
   /** Live job snapshots for the check surface. Process-local; not durable. */
   listLiveJobs(): readonly JobSnapshotLike[];
   /** Durable markers (ADR-0006). */
@@ -382,8 +406,14 @@ export function createCordisDshHost(
   const markers = options?.markers;
   const composeWakeText = options?.composeWakeText;
 
-  let parent: AgentLike | null = null;
-  let parentSessionId: string | null = null;
+  /**
+   * ADR-0019: live dispatcher parents, keyed by dispatcher session id —
+   * a map of sessions, not one slot. Spawn, interrupt, and sendMessage
+   * resolve the authority agent from the session they serve (spawn from the
+   * request's `parentSessionId`; interrupt/send from the worker's recorded
+   * parent).
+   */
+  const parents = new Map<string, AgentLike>();
   const workers = new Map<string, WorkerEntry>();
   const spawnControllers = new Map<string, AbortController>();
   const settledCallbacks: Array<(event: SettledEvent) => void> = [];
@@ -465,21 +495,23 @@ export function createCordisDshHost(
 
   const host: CordisDshHost = {
     bindParent(agent: AgentLike, sessionId: string): void {
-      parent = agent;
-      parentSessionId = sessionId;
+      parents.set(sessionId, agent);
     },
 
-    unbindParent(): void {
-      parent = null;
-      parentSessionId = null;
+    unbindParent(sessionId?: string): void {
+      if (sessionId === undefined) {
+        parents.clear();
+        return;
+      }
+      parents.delete(sessionId);
     },
 
     hasParent(): boolean {
-      return parent !== null;
+      return parents.size > 0;
     },
 
-    get parentAgent(): AgentLike | null {
-      return parent;
+    parentAgentOf(sessionId: string): AgentLike | undefined {
+      return parents.get(sessionId);
     },
 
     get markers(): DurabilityPort | undefined {
@@ -570,9 +602,11 @@ export function createCordisDshHost(
     },
 
     async spawnWorker(prompt: string, opts: SpawnOptions): Promise<string> {
-      if (parent === null) {
+      // ADR-0019: the authority agent is the worker's OWN dispatcher session.
+      const parent = parents.get(opts.parentSessionId);
+      if (parent === undefined) {
         throw new Error(
-          "CordisDshHost: no parent agent bound; cannot spawn before dispatcher activation",
+          `CordisDshHost: no parent agent bound for session ${opts.parentSessionId}; cannot spawn before that dispatcher activation`,
         );
       }
       const controller = new AbortController();
@@ -623,7 +657,12 @@ export function createCordisDshHost(
     },
 
     async interruptWorker(workerId: string): Promise<void> {
-      if (parent === null) return;
+      // ADR-0019: interrupt authority resolves from the worker's recorded
+      // parent — one dispatcher's unbinding never strands another's worker.
+      const entry = workers.get(workerId);
+      const parent =
+        entry !== undefined ? parents.get(entry.parentSessionId) : undefined;
+      if (parent === undefined) return;
       // Fire-and-return: cancel signal issued before return.
       ctx.subagents.interrupt(workerId, {
         kind: "ancestor",
@@ -632,7 +671,12 @@ export function createCordisDshHost(
     },
 
     async sendMessage(workerId: string, message: string): Promise<void> {
-      if (parent === null) {
+      // ADR-0019: delivery authority resolves from the worker's recorded
+      // parent — the answer reaches the worker through ITS dispatcher.
+      const entry = workers.get(workerId);
+      const parent =
+        entry !== undefined ? parents.get(entry.parentSessionId) : undefined;
+      if (parent === undefined) {
         throw new Error("CordisDshHost: no parent agent bound; cannot send");
       }
       const controller = new AbortController();
@@ -693,8 +737,7 @@ export function createCordisDshHost(
       stepBoundaryCallbacks.length = 0;
       accessRequestCallbacks.length = 0;
       toolCallCallbacks.length = 0;
-      parent = null;
-      parentSessionId = null;
+      parents.clear();
     },
   };
 

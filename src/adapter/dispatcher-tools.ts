@@ -1,5 +1,13 @@
 /**
- * Adapter registration of the five dispatcher tools on `ctx.tools`.
+ * Adapter registration of the five dispatcher tools (design-16 §3.8).
+ * ADR-0019: registration addresses a tool surface — the plugin passes the
+ * ACTIVATED agent's own scoped `ctx.tools` (per-agent visibility: the model
+ * only ever sees its own dispatcher's tools) or, when the agent carries no
+ * scoped context, the plugin-level surface (documented fallback, the shipped
+ * single-dispatcher shape). Handlers close over their own session id, so an
+ * execution always routes to the session that registered the tool; there is
+ * no execute-time gate — an out-of-scope caller cannot see the tool at all
+ * (host `UNKNOWN_TOOL`).
  * Structural — no import of `@deepseek-ai/dsh-tools` (peer surface).
  * FakeDshHost / unit tests exercise core handlers without this module.
  */
@@ -12,8 +20,7 @@ import {
   type DispatcherToolDef,
   type RecentActivityFn,
 } from "../core/tools.js";
-import type { AdapterContext } from "./cordis-dsh-host.js";
-import { DISPATCHER_TOOL_GATE_REFUSAL } from "./activation-command.js";
+import type { ToolsLike } from "./cordis-dsh-host.js";
 
 /** Structural tool registration shape (mirrors dsh ToolRuntime.register). */
 export interface RegisterableTool {
@@ -116,63 +123,31 @@ export function toRegisterableTool(
   };
 }
 
-/**
- * Structured refusal for a session that is not the activated dispatcher
- * (ticket 19). Renders as model-facing text via the shared formatter.
- */
-function toolGateRefusal(): unknown {
-  return { ok: false, reason: "not-activated", detail: DISPATCHER_TOOL_GATE_REFUSAL };
-}
-
-/**
- * Activation gate (design-16 §3.8, primary): resolve the calling session
- * from the exec shape and refuse anything that is not the activated
- * dispatcher chat. When the exec shape cannot be resolved, fall back to the
- * weaker "an activation exists" gate and document it — a shaped but
- * different session id still refuses, so the gate only opens for callers
- * we cannot see at all.
- */
-function gatedExecute(
-  def: DispatcherToolDef,
-  getSessionId: () => string | null,
-  resolveCallerSessionId: (exec: unknown) => string | null,
-): (args: unknown, exec?: unknown) => Promise<unknown> {
-  return async (args: unknown, exec?: unknown) => {
-    const record =
-      args !== null && typeof args === "object"
-        ? (args as Record<string, unknown>)
-        : {};
-    const active = getSessionId();
-    const caller = resolveCallerSessionId(exec);
-    if (caller !== null) {
-      if (caller === active) return def.execute(record);
-      return toolGateRefusal();
-    }
-    // Unresolvable exec → weaker documented guarantee (ticket 19).
-    if (active !== null) return def.execute(record);
-    return toolGateRefusal();
-  };
-}
-
 export interface RegisterDispatcherToolsOptions {
-  readonly ctx: AdapterContext;
+  /**
+   * The tool surface to register on: the activated agent's scoped
+   * `agent.ctx.tools` (ADR-0019 per-agent visibility) or the plugin-level
+   * `ctx.tools` (fallback). Only `tools` is read.
+   */
+  readonly ctx: {
+    readonly tools?: ToolsLike;
+  };
   readonly multitask: Multitask;
+  /**
+   * The dispatcher session this registration serves. Handlers route to it
+   * unconditionally (ADR-0019: per-session routing replaced the execute-time
+   * gate — visibility is the fence, not a refusal copy).
+   */
   readonly getSessionId: () => string | null;
   readonly deliverToUser?: DeliverToUserFn;
   readonly recentActivity?: RecentActivityFn;
   /** Ticket 61: activity observation moments for the check-row liveness verdict. */
   readonly lastActivityAtMs?: (workerId: string) => number | null;
-  /**
-   * Activation gate (ticket 19): resolve the calling session from the tool
-   * exec context. When provided, every handler refuses sessions other than
-   * the activated dispatcher chat with structured copy.
-   */
-  readonly resolveCallerSessionId?: (exec: unknown) => string | null;
 }
 
 /**
- * Register the five dispatcher tools. Returns disposers.
- * No-op (empty list) when `ctx.tools` or `register` is unavailable.
+ * Register the five dispatcher tools on the given surface. Returns disposers.
+ * No-op (empty list) when `tools` or `register` is unavailable.
  */
 export function registerDispatcherTools(
   options: RegisterDispatcherToolsOptions,
@@ -194,16 +169,9 @@ export function registerDispatcherTools(
       ? { lastActivityAtMs: options.lastActivityAtMs }
       : {}),
   });
-  const resolve = options.resolveCallerSessionId;
   const disposers: Array<() => void> = [];
   for (const def of defs) {
-    const registerable = toRegisterableTool(
-      def,
-      resolve !== undefined
-        ? gatedExecute(def, options.getSessionId, resolve)
-        : undefined,
-    );
-    const dispose = tools.register(registerable);
+    const dispose = tools.register(toRegisterableTool(def));
     disposers.push(dispose);
   }
   return disposers;

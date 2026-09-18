@@ -104,7 +104,6 @@ function createHostStub(): CordisDshHost & {
 } {
   const bound: Array<{ agent: AgentLike; sessionId: string }> = [];
   const wakeups: string[] = [];
-  let parent: AgentLike | null = null;
   const settledCallbacks: Array<(event: never) => void> = [];
   const stepCallbacks: Array<(workerId: string) => void | Promise<void>> = [];
 
@@ -131,19 +130,23 @@ function createHostStub(): CordisDshHost & {
     fireSettled(event: unknown): void {
       for (const cb of [...settledCallbacks]) cb(event as never);
     },
+    // ADR-0019: per-session parent map semantics.
     bindParent(agent: AgentLike, sessionId: string): void {
       bound.push({ agent, sessionId });
-      parent = agent;
     },
-    unbindParent(): void {
-      bound.length = 0;
-      parent = null;
+    unbindParent(sessionId?: string): void {
+      if (sessionId === undefined) {
+        bound.length = 0;
+        return;
+      }
+      const at = bound.findIndex((entry) => entry.sessionId === sessionId);
+      if (at >= 0) bound.splice(at, 1);
     },
     hasParent(): boolean {
-      return parent !== null;
+      return bound.length > 0;
     },
-    get parentAgent(): AgentLike | null {
-      return parent;
+    parentAgentOf(sessionId: string): AgentLike | undefined {
+      return bound.find((entry) => entry.sessionId === sessionId)?.agent;
     },
     listLiveJobs: () => [],
     markers: undefined,
@@ -234,7 +237,7 @@ describe("dispatcher activation lifecycle (ticket 19)", () => {
     assert.equal(agent.injected.length, 1);
   });
 
-  it("refuses activation while another chat holds the dispatcher slot", () => {
+  it("activates a second chat as its own dispatcher (ADR-0019: no single slot)", () => {
     const ctx = createCtx();
     const host = createHostStub();
     const multitask = createMultitask(host);
@@ -243,12 +246,32 @@ describe("dispatcher activation lifecycle (ticket 19)", () => {
     const second = createAgent("session-2");
 
     assert.deepEqual(lifecycle.activate(first), { ok: true });
+    // ADR-0019 retired the `already-active-elsewhere` refusal: each chat
+    // activates its own dispatcher session, with its own parent binding and
+    // its own policy inject.
     const outcome = lifecycle.activate(second);
 
-    assert.deepEqual(outcome, { ok: false, reason: "already-active-elsewhere" });
-    assert.equal(lifecycle.dispatcherSessionId(), "session-1");
-    assert.equal(host.bound.length, 1);
-    assert.equal(second.injected.length, 0);
+    assert.deepEqual(outcome, { ok: true });
+    assert.equal(lifecycle.dispatcherSessionId(), "session-2");
+    assert.ok(lifecycle.isDispatcherSession("session-1"));
+    assert.ok(lifecycle.isDispatcherSession("session-2"));
+    assert.deepEqual(lifecycle.dispatcherSessionIds(), [
+      "session-1",
+      "session-2",
+    ]);
+    assert.deepEqual(host.bound, [
+      { agent: first, sessionId: "session-1" },
+      { agent: second, sessionId: "session-2" },
+    ]);
+    assert.equal(first.injected.length, 1);
+    assert.equal(second.injected.length, 1);
+
+    // Disposing the first deactivates exactly that session.
+    ctx.emit("agent/disposed", { agent: first });
+    assert.equal(lifecycle.isDispatcherSession("session-1"), false);
+    assert.equal(lifecycle.isDispatcherSession("session-2"), true);
+    assert.equal(lifecycle.dispatcherSessionId(), "session-2");
+    assert.deepEqual(host.bound, [{ agent: second, sessionId: "session-2" }]);
   });
 
   it("activation with policy disabled binds but does not inject", () => {

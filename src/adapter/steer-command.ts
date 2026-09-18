@@ -114,8 +114,12 @@ export function parseSteerInput(
 
 export interface RegisterDispatcherSteerCommandOptions {
   readonly ctx: AdapterContext;
-  /** Current dispatcher session id, or null while dormant. */
-  readonly activeSessionId: () => string | null;
+  /**
+   * Every activated dispatcher session id (ADR-0019: there may be several —
+   * the handler gates on the INVOKING chat's own activation, not a single
+   * slot). Empty while dormant.
+   */
+  readonly activeSessionIds: () => readonly string[];
   /**
    * Enqueue a steer through the core's existing last-wins queue path —
    * the same `Multitask.steerWorker` call the `steer_worker` tool makes.
@@ -125,9 +129,9 @@ export interface RegisterDispatcherSteerCommandOptions {
 
 /**
  * Build the `dispatcher-steer` command definition. The handler gates on the
- * activated dispatcher session, parses the payload, validates worker and
- * steerability through the core's own refusals, and never re-implements
- * steer semantics.
+ * invoking chat's own dispatcher activation (per session, ADR-0019), parses
+ * the payload, validates worker and steerability through the core's own
+ * refusals, and never re-implements steer semantics.
  */
 export function createDispatcherSteerCommand(
   options: RegisterDispatcherSteerCommandOptions,
@@ -138,13 +142,13 @@ export function createDispatcherSteerCommand(
     input: { hint: DISPATCHER_STEER_INPUT_HINT },
     handler(invocation) {
       const agent: AgentLike | undefined = invocation?.agent;
-      const active = options.activeSessionId();
+      const active = options.activeSessionIds();
       const sessionId =
         agent?.session == null ? undefined : String(agent.session.id);
-      if (active === null || sessionId === undefined) {
+      if (active.length === 0 || sessionId === undefined) {
         return { kind: "error", text: DISPATCHER_STEER_NOT_ACTIVE };
       }
-      if (sessionId !== active) {
+      if (!active.includes(sessionId)) {
         return { kind: "error", text: DISPATCHER_STEER_NOT_DISPATCHER };
       }
       const parsed = parseSteerInput(invocation.rawInput);

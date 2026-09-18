@@ -277,7 +277,7 @@ describe("plugin scaffold", () => {
     assert.equal(ctx.registeredTools.length, 6);
   });
 
-  it("dispatcher tools refuse non-activated calling sessions", async () => {
+  it("tool executions route to the registering session (ADR-0019: gate retired)", async () => {
     const ctx = createStubCtx();
     apply(ctx, { enabled: true });
 
@@ -288,17 +288,19 @@ describe("plugin scaffold", () => {
     const spawn = ctx.registeredTools.find((t) => t.name === "spawn_worker");
     assert.ok(spawn);
 
-    // A different chat's exec shape is refused with structured copy.
-    const refused = (await spawn.execute(
+    // ADR-0019 retired the execute-time gate: there is no refusal copy. This
+    // agent carries no scoped ctx, so the tools registered through the
+    // plugin-level fallback and every execution routes to the registering
+    // session's state (live hosts fence visibility per agent scope instead).
+    const routed = (await spawn.execute(
       { stream_key: "s", title: "T", prompt: "P" },
       { agent: { session: { id: "session-2" } } },
-    )) as { ok: boolean; detail: string };
-    assert.equal(refused.ok, false);
-    assert.match(refused.detail, /dispatcher-start/);
+    )) as { ok: boolean };
+    assert.equal(routed.ok, true);
 
-    // The activated chat's exec shape passes through to the core.
+    // The activated chat's exec shape reaches the core identically.
     const ok = (await spawn.execute(
-      { stream_key: "s", title: "T", prompt: "P" },
+      { stream_key: "s2", title: "T", prompt: "P" },
       { agent: { session: { id: "session-1" } } },
     )) as { ok: boolean };
     assert.equal(ok.ok, true);

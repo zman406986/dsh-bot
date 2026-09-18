@@ -46,10 +46,11 @@ export const DISPATCHER_START_SUCCESS =
 export const DISPATCHER_START_ALREADY_HERE =
   "The dispatcher is already active in this chat.";
 
-/** Another chat holds the single dispatcher slot for this session. */
-export const DISPATCHER_START_ALREADY_ELSEWHERE =
-  "The dispatcher is already active in another chat. Finish or clear that " +
-  "session first.";
+/**
+ * Retired with the single-activation slot (ADR-0019): multiple dispatchers
+ * are real — each chat activates its own dispatcher session, so there is no
+ * "active elsewhere" refusal to word.
+ */
 
 /** Invoked in a child/delegated chat. */
 export const DISPATCHER_START_NOT_TOP_LEVEL =
@@ -60,10 +61,12 @@ export const DISPATCHER_START_UNRESOLVED =
   "Could not resolve the current chat for activation. Re-run this command " +
   "from the chat you want to use as the dispatcher.";
 
-/** Structured refusal for dispatcher tools called outside the activated chat. */
-export const DISPATCHER_TOOL_GATE_REFUSAL =
-  "Dispatcher tools are only available in the activated dispatcher chat. " +
-  "Run /dispatcher-start there first.";
+/**
+ * Retired with the execute-time gate (ADR-0019): the five dispatcher tools
+ * register through the activated agent's own scoped context, so an
+ * out-of-scope caller cannot see them at all — the host's `UNKNOWN_TOOL` is
+ * the strictly stronger behavior and no refusal copy is needed.
+ */
 
 export interface RegisterDispatcherStartCommandOptions {
   readonly ctx: AdapterContext;
@@ -83,8 +86,6 @@ export function activationResultCopy(
   switch (outcome.reason) {
     case "not-top-level":
       return { kind: "error", text: DISPATCHER_START_NOT_TOP_LEVEL };
-    case "already-active-elsewhere":
-      return { kind: "error", text: DISPATCHER_START_ALREADY_ELSEWHERE };
     case "already-active-here":
       return { kind: "success", text: DISPATCHER_START_ALREADY_HERE };
     case "unbound":

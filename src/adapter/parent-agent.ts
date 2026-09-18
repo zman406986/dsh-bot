@@ -82,40 +82,50 @@ function tryWake(agent: AgentLike, text: string): void {
 /**
  * Result of an activation attempt (ticket 19). Activation is explicit,
  * once per session, and refused with a reason the command handler maps
- * to user-facing copy.
+ * to user-facing copy. ADR-0019: multiple dispatchers are real — a second
+ * chat's activation succeeds (no `already-active-elsewhere` refusal exists
+ * anymore); only re-activating an ALREADY active chat and child chats
+ * refuse.
  */
 export type ActivationOutcome =
   | { readonly ok: true }
   | {
       readonly ok: false;
-      readonly reason:
-        | "not-top-level"
-        | "already-active-here"
-        | "already-active-elsewhere"
-        | "unbound";
+      readonly reason: "not-top-level" | "already-active-here" | "unbound";
     };
 
 export interface BindDispatcherLifecycleResult {
   /**
-   * Activate this chat as the dispatcher (ADR-0009): bind the parent,
-   * inject policy once. Idempotent-refusing — never re-binds while a
-   * dispatcher session is live.
+   * Activate this chat as a dispatcher (ADR-0009): bind its parent,
+   * inject policy once. Idempotent-refusing per session — never re-binds a
+   * chat that is already the dispatcher. ADR-0019: activating a DIFFERENT
+   * chat succeeds; each dispatcher session owns its own surface and state.
    */
   activate(agent: AgentLike): ActivationOutcome;
   /**
-   * Best-effort one-shot **waking** delivery into the activated chat
-   * (ticket 57, register D-4): opens a recovery turn rather than waiting for
-   * one. Used at activation for the restart-honesty notice, so recovery is
-   * driven by us exactly as the reference drives it on boot.
+   * Best-effort one-shot **waking** delivery into ONE activated dispatcher
+   * chat (ticket 57, register D-4): opens a recovery turn rather than
+   * waiting for one. Used at activation for that session's restart-honesty
+   * notice. No-op when the session is not an activated dispatcher.
    *
    * Named for activation, not boot: activation is our only trigger today
    * (ADR-0009). If ADR-0016 is signed into a boot hook, that hook calls this
    * same primitive — the trigger model is a separate decision (item U-1).
    */
-  wakeNotice(text: string): void;
-  /** Current dispatcher session id, once activated. */
+  wakeNotice(sessionId: string, text: string): void;
+  /**
+   * The most recently activated dispatcher session id, or null while
+   * dormant. ADR-0019 map-of-one compatibility accessor: with a single
+   * dispatcher this is the dispatcher session; with several, prefer
+   * {@link isDispatcherSession} / {@link dispatcherSessionIds} — this slot
+   * carries no authority.
+   */
   dispatcherSessionId(): string | null;
-  /** Tear down listeners and the activation, if any. */
+  /** Whether this session is an activated dispatcher (ADR-0019). */
+  isDispatcherSession(sessionId: string): boolean;
+  /** Every activated dispatcher session id (ADR-0019). */
+  dispatcherSessionIds(): readonly string[];
+  /** Tear down listeners and every activation, if any. */
   unbind(): void;
 }
 
@@ -127,25 +137,29 @@ export interface BindDispatcherLifecycleOptions {
   readonly policyEnabled?: boolean;
   /**
    * Fired after a successful activation (parent bound + policy injected).
-   * The plugin registers the deferred dispatcher tool surface here.
+   * The plugin registers that session's dispatcher tool surface here.
    */
   readonly onActivated?: (sessionId: string) => void;
   /**
-   * Fired when the activation ends: dispatcher session disposed, or the
-   * lifecycle itself is unbound (unload/HMR). The plugin unregisters the
-   * dispatcher tool surface here.
+   * Fired when ONE activation ends (ADR-0019): that dispatcher session
+   * disposed, or the lifecycle is unbound (unload/HMR — fired per session).
+   * The plugin unregisters that session's tool surface, clears that
+   * session's access-policy rows, and abandons that session's prompts here.
    */
-  readonly onDeactivated?: () => void;
+  readonly onDeactivated?: (sessionId: string) => void;
 }
 
 /**
- * Activation lifecycle for the dispatcher parent agent (ticket 19, ADR-0009).
+ * Activation lifecycle for dispatcher parent agents (ticket 19, ADR-0009;
+ * generalized per session by ADR-0019).
  *
  * Nothing is captured on load or on `agent/session-start` — the plugin boots
  * dormant and stock. An explicit command handler calls {@link activate} in
- * the chat the user chose; that binds the live Agent as the host's single
- * parent and injects the session policy once. `agent/disposed` and `unbind`
- * reverse the activation; the passive `agent/status` listener wires:
+ * the chat the user chose; that binds the live Agent as THAT session's
+ * dispatcher parent and injects the session policy once. Multiple chats may
+ * each be dispatchers; `agent/disposed` deactivates only the disposed
+ * session and `unbind` reverses every activation. The passive
+ * `agent/status` listener wires, per session:
  * - wakeBus session turn bounds (dispatcher running/idle)
  * - worker FSM first turn (child running → multitask.noteTurnStarted)
  * - step-boundary (child idle → host.emitStepBoundary)
@@ -166,24 +180,32 @@ export function bindDispatcherLifecycle(
   const policyEnabled = options?.policyEnabled ?? true;
   const onActivated = options?.onActivated;
   const onDeactivated = options?.onDeactivated;
-  let dispatcherSessionId: string | null = null;
-  let parentAgentRef: AgentLike | null = null;
+  /**
+   * Activated dispatcher sessions: insertion-ordered sessionId → live agent.
+   * The LAST entry is the most recently activated session (the map-of-one
+   * compatibility slot).
+   */
+  const sessions = new Map<string, AgentLike>();
   let unbound = false;
   const disposers: Array<() => void> = [];
 
-  function deactivate(): void {
-    if (parentAgentRef === null && dispatcherSessionId === null) return;
-    parentAgentRef = null;
-    dispatcherSessionId = null;
-    host.unbindParent();
-    onDeactivated?.();
+  function deactivateSession(sessionId: string): void {
+    if (!sessions.has(sessionId)) return;
+    sessions.delete(sessionId);
+    host.unbindParent(sessionId);
+    onDeactivated?.(sessionId);
   }
 
   disposers.push(
     ctx.on("agent/disposed", (payload: never) => {
       const { agent } = payload as { agent: AgentLike };
-      if (parentAgentRef === agent) {
-        deactivate();
+      // Identity match, then deactivate exactly that session — a sibling
+      // dispatcher's activation is untouched.
+      for (const [sessionId, bound] of sessions) {
+        if (bound === agent) {
+          deactivateSession(sessionId);
+          return;
+        }
       }
     }),
   );
@@ -197,28 +219,29 @@ export function bindDispatcherLifecycle(
       const agentSessionId = String(agent.session.id);
 
       // Dispatcher mid-turn hold so settles queue instead of flushing (T06).
-      if (dispatcherSessionId !== null && agentSessionId === dispatcherSessionId) {
+      const boundAgent = sessions.get(agentSessionId);
+      if (boundAgent !== undefined) {
         if (status === "running") {
-          multitask.wakeBus.noteTurnStarted(dispatcherSessionId);
+          multitask.wakeBus.noteTurnStarted(agentSessionId);
           // Per-turn reminder: re-inject ledger + standing rules (T11).
-          if (policyEnabled && parentAgentRef !== null) {
+          if (policyEnabled) {
             tryInject(
-              parentAgentRef,
-              assembleTurnReminder(multitask.listTodos(dispatcherSessionId)),
+              boundAgent,
+              assembleTurnReminder(multitask.listTodos(agentSessionId)),
             );
           }
         }
         if (status === "idle") {
           // Ticket 58 (register D-5): decide the delivery redrive BEFORE the
-          // bus is told the turn ended. Ordering matters twice over — the pass
-          // only counts an attempt if the result is still undelivered (so a
-          // turn that delivered costs nothing), and while the bus is still
-          // busy the redrive becomes a pending flag, so the turn-end flush
-          // delivers it exactly once alongside anything else waiting.
+          // bus is told the turn ended. Ordering matters twice over — the
+          // pass only counts an attempt if the result is still undelivered
+          // (so a turn that delivered costs nothing), and while the bus is
+          // still busy the redrive becomes a pending flag, so the turn-end
+          // flush delivers it exactly once alongside anything else waiting.
           if (policyEnabled) {
-            multitask.redriveUndelivered(dispatcherSessionId);
+            multitask.redriveUndelivered(agentSessionId);
           }
-          multitask.wakeBus.noteTurnEnded(dispatcherSessionId);
+          multitask.wakeBus.noteTurnEnded(agentSessionId);
         }
         return;
       }
@@ -249,13 +272,12 @@ export function bindDispatcherLifecycle(
         return { ok: false, reason: "not-top-level" };
       }
       const sessionId = String(agent.session.id);
-      if (parentAgentRef !== null) {
-        return dispatcherSessionId === sessionId
-          ? { ok: false, reason: "already-active-here" }
-          : { ok: false, reason: "already-active-elsewhere" };
+      if (sessions.has(sessionId)) {
+        return { ok: false, reason: "already-active-here" };
       }
-      parentAgentRef = agent;
-      dispatcherSessionId = sessionId;
+      // ADR-0019: another chat being a dispatcher is not a refusal — each
+      // session activates independently.
+      sessions.set(sessionId, agent);
       host.bindParent(agent, sessionId);
       // ADR-0005: policy is fixed for this session's lifetime.
       if (policyEnabled) {
@@ -265,21 +287,34 @@ export function bindDispatcherLifecycle(
       return { ok: true };
     },
 
-    wakeNotice(text: string): void {
+    wakeNotice(sessionId: string, text: string): void {
       // Ticket 57 (D-4): the recovery notice must OPEN the turn it lands in.
       // `inject` only queues, so before this fix the notice sat in context
-      // until the user happened to speak next — the chain stopped after a
+      // until the user happened to speak next — the chain stalled after a
       // restart. Waking is what the reference does on boot.
-      if (parentAgentRef === null) return;
-      tryWake(parentAgentRef, text);
+      const agent = sessions.get(sessionId);
+      if (agent === undefined) return;
+      tryWake(agent, text);
     },
 
     dispatcherSessionId(): string | null {
-      return dispatcherSessionId;
+      // Insertion order: the last entry is the most recent activation.
+      const ids = [...sessions.keys()];
+      return ids.length === 0 ? null : (ids.at(-1) ?? null);
+    },
+
+    isDispatcherSession(sessionId: string): boolean {
+      return sessions.has(sessionId);
+    },
+
+    dispatcherSessionIds(): readonly string[] {
+      return [...sessions.keys()];
     },
 
     unbind(): void {
-      deactivate();
+      for (const sessionId of [...sessions.keys()]) {
+        deactivateSession(sessionId);
+      }
       unbound = true;
       for (const dispose of disposers) {
         dispose();

@@ -11,7 +11,6 @@ import {
   toRegisterableTool,
   type RegisterableTool,
 } from "../src/adapter/dispatcher-tools.js";
-import { DISPATCHER_TOOL_GATE_REFUSAL } from "../src/adapter/activation-command.js";
 import type { AdapterContext } from "../src/adapter/cordis-dsh-host.js";
 
 function createToolsCaptureCtx(): AdapterContext & {
@@ -172,7 +171,7 @@ describe("adapter dispatcher tool registration", () => {
   });
 });
 
-describe("dispatcher tool activation gate (ticket 19)", () => {
+describe("per-session routing (ADR-0019)", () => {
   it("resolveExecSessionId reads common exec shapes", () => {
     assert.equal(
       resolveExecSessionId({ agent: { session: { id: "a1" } } }),
@@ -185,7 +184,7 @@ describe("dispatcher tool activation gate (ticket 19)", () => {
     assert.equal(resolveExecSessionId({ agent: { session: {} } }), null);
   });
 
-  it("gated handlers refuse sessions other than the activated one", async () => {
+  it("handlers route to the session that registered them, whatever the exec says", async () => {
     const ctx = createToolsCaptureCtx();
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
@@ -193,52 +192,69 @@ describe("dispatcher tool activation gate (ticket 19)", () => {
       ctx,
       multitask,
       getSessionId: () => "disp-1",
-      resolveCallerSessionId: resolveExecSessionId,
     });
     const spawn = ctx.registered.find((tool) => tool.name === "spawn_worker");
     assert.ok(spawn);
 
-    const refused = (await spawn.execute(
+    // No execute-time gate (ADR-0019): the closed-over session id is the
+    // authority; visibility is the fence, not a refusal copy.
+    const routed = (await spawn.execute(
       { stream_key: "s", title: "T", prompt: "P" },
-      { agent: { session: { id: "other" } } },
-    )) as { ok: boolean; reason: string; detail: string };
-    assert.equal(refused.ok, false);
-    assert.equal(refused.reason, "not-activated");
-    assert.equal(refused.detail, DISPATCHER_TOOL_GATE_REFUSAL);
-    assert.equal(host.spawnCalls.length, 0);
+      { agent: { session: { id: "someone-else" } } },
+    )) as { ok: boolean };
+    assert.equal(routed.ok, true);
+    assert.equal(host.spawnCalls.length, 1);
+    assert.equal(host.spawnCalls[0]?.opts.parentSessionId, "disp-1");
 
-    // Unresolvable exec + live activation → weaker documented gate opens.
-    const fallback = (await spawn.execute(
-      { stream_key: "s", title: "T", prompt: "P" },
+    // Unresolvable exec: same routing, same session.
+    const again = (await spawn.execute(
+      { stream_key: "s2", title: "T", prompt: "P" },
       undefined,
     )) as { ok: boolean };
-    assert.equal(fallback.ok, true);
-
-    // Matching caller passes through.
-    const accepted = (await spawn.execute(
-      { stream_key: "s2", title: "T", prompt: "P" },
-      { agent: { session: { id: "disp-1" } } },
-    )) as { ok: boolean };
-    assert.equal(accepted.ok, true);
+    assert.equal(again.ok, true);
     assert.equal(host.spawnCalls.length, 2);
+    assert.equal(host.spawnCalls[1]?.opts.parentSessionId, "disp-1");
   });
 
-  it("gated handlers refuse everything while no dispatcher session is active", async () => {
-    const ctx = createToolsCaptureCtx();
+  it("two registrations route independently per session", async () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
+    const ctxA = createToolsCaptureCtx();
+    const ctxB = createToolsCaptureCtx();
     registerDispatcherTools({
-      ctx,
+      ctx: ctxA,
       multitask,
-      getSessionId: () => null,
-      resolveCallerSessionId: resolveExecSessionId,
+      getSessionId: () => "disp-a",
     });
-    const check = ctx.registered.find((tool) => tool.name === "check_workers");
-    assert.ok(check);
-    const refused = (await check.execute({}, {
-      agent: { session: { id: "whoever" } },
-    })) as { ok: boolean; detail: string };
+    registerDispatcherTools({
+      ctx: ctxB,
+      multitask,
+      getSessionId: () => "disp-b",
+    });
+    const spawnA = ctxA.registered.find((tool) => tool.name === "spawn_worker");
+    const spawnB = ctxB.registered.find((tool) => tool.name === "spawn_worker");
+    assert.ok(spawnA);
+    assert.ok(spawnB);
+
+    await spawnA.execute(
+      { stream_key: "shared", title: "A", prompt: "P" },
+      undefined,
+    );
+    await spawnB.execute(
+      { stream_key: "shared", title: "B", prompt: "P" },
+      undefined,
+    );
+    assert.deepEqual(
+      host.spawnCalls.map((call) => call.opts.parentSessionId),
+      ["disp-a", "disp-b"],
+    );
+
+    // Same stream key within ONE session still refuses.
+    const refused = (await spawnA.execute(
+      { stream_key: "shared", title: "A2", prompt: "P" },
+      undefined,
+    )) as { ok: boolean; reason: string };
     assert.equal(refused.ok, false);
-    assert.equal(refused.detail, DISPATCHER_TOOL_GATE_REFUSAL);
+    assert.equal(refused.reason, "duplicate-stream-key");
   });
 });

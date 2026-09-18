@@ -700,14 +700,17 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
       FOREIGN_TOOL_RESULT,
     );
 
-    // The process-global tool surface means a NON-activated chat sees the
-    // dispatcher tools too — the documented gate refuses it (design-16 §3.8).
-    const refused = (await ctx.tool("spawn_worker")?.execute(
+    // ADR-0019 retired the process-global execute-time gate. This agent
+    // carries no scoped ctx, so the five tools registered through the
+    // plugin-level FALLBACK surface and an out-of-scope exec is no longer
+    // refused — it routes to the session that registered the tool. (Live
+    // hosts register per agent scope, where an out-of-scope caller cannot
+    // see the tool at all — the strictly stronger fence.)
+    const crossCaller = (await ctx.tool("spawn_worker")?.execute(
       { stream_key: "k", title: "T", prompt: "P" },
       { agent: { session: { id: "some-other-chat" } } },
-    )) as { ok: boolean; reason: string };
-    assert.equal(refused.ok, false);
-    assert.equal(refused.reason, "not-activated");
+    )) as { ok: boolean } | undefined;
+    assert.equal(crossCaller?.ok, true);
 
     // The roster snapshot mirrors into OUR namespace only; the foreign
     // plugin's settings document is untouched.
