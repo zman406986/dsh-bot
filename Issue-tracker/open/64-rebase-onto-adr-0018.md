@@ -23,3 +23,14 @@ ADR-0018 (2026-09-18) replaced the project's governing model — *imitate the re
 - The exception list in ADR-0018 is exhaustive and is the fidelity bar; do not re-litigate trimmed items.
 - Copy policy: no verbatim copying from the reference tree; adapted copying permitted (AGENTS.md, human risk decision 2026-09-18).
 - Offline-first testing discipline (S8) survives the re-base even though S7 does not.
+
+### 2026-09-19 — seam verification result (AC: per-dispatcher dsh sessions / tool scoping)
+
+Finding written to `docs/research/dsh-tool-scoping-seam.md`; design work ticketed as **72**. In
+brief: `ctx.tools.register` is called on the plugin-level ctx (process-global;
+`src/adapter/dispatcher-tools.ts:201`), our code pins it to a single activation slot
+(`src/plugin.ts`), and per-session behavior is purely an execute-time gate against ONE session id
+(`gatedExecute`, `src/adapter/dispatcher-tools.ts:140-155`). Multi-dispatcher therefore needs
+either a host-side per-session scope (unverified — ticket 72 commissions the observation pass) or
+generalized session-keyed gating (implementable now, no host change). Multi-dispatcher design
+work stays gated on ticket 72.
