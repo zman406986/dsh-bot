@@ -11,7 +11,8 @@ import type { RebuildReport } from "../core/durability.js";
  *
  * - unknown-state workers (live at crash time) are stated as UNKNOWN —
  *   never replayed, never resumed, never claimed done (ids + transcript
- *   pointers only);
+ *   pointers only), together with the fact that they still hold their stream
+ *   keys and how to release one (ticket 59);
  * - restored terminal rows are stated plainly, with the expectation that
  *   anything landed-undelivered flushes on the next wake;
  * - an empty report emits nothing — silence when there is no story.
@@ -33,16 +34,29 @@ export const RESTART_DEGRADED_NOTICE =
   "Worker records from before the restart could not be read. " +
   "Nothing was restored and nothing was replayed.";
 
-/** One unknown-state line: count, ids, honest unknown wording, transcript refs. */
+/**
+ * One unknown-state line: count, ids, honest unknown wording, transcript refs,
+ * and — since ticket 59 — the fact that their stream keys are **held**.
+ *
+ * The held-key half is not decoration. Without it the dispatcher knows a worker
+ * is missing but not that re-dispatching its stream will be refused, so the
+ * refusal would read as a bug rather than as the one-worker-per-stream
+ * invariant working across a restart.
+ */
 export function restartUnknownStateLine(
   count: number,
   ids: readonly string[],
   refs: readonly string[],
+  streamKeys: readonly string[],
 ): string {
   return (
     `Before the last restart, ${count} worker(s) were still running: ` +
     `${ids.join(", ")}. Their state is unknown — nothing was replayed. ` +
-    `Transcripts: ${refs.join(", ")}.`
+    `Transcripts: ${refs.join(", ")}. ` +
+    `Stream(s) ${streamKeys.join(", ")} are held by them, so re-dispatching ` +
+    `onto those streams is refused; call stop_worker on the worker id to ` +
+    `release one once you know that worker is gone, or dispatch under a new ` +
+    `stream key.`
   );
 }
 
@@ -75,6 +89,7 @@ export function assembleRestartNotice(
         report.unknownState.length,
         report.unknownState.map((worker) => worker.workerId),
         refs,
+        report.unknownState.map((worker) => worker.streamKey),
       ),
     );
   }

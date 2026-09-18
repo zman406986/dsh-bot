@@ -316,7 +316,48 @@ describe("durable roster marker — restart rebuild", () => {
     assert.equal(hostAfter.spawnCalls.length, 0);
     assert.equal(hostAfter.interruptCalls.length, 0);
     assert.equal(hostAfter.sendMessageCalls.length, 0);
-    // Stream key is free for a legitimate re-dispatch.
+    // Ticket 59 (register B-1): the stream key is NOT free. That worker may
+    // still be alive and we hold no interrupt handle for it after a restart,
+    // so one-worker-per-stream has to hold ACROSS the restart too. This test
+    // previously asserted the opposite ("stream key is free for a legitimate
+    // re-dispatch") and was pinning the defect.
+    const blocked = await after.spawnWorker({
+      parentSessionId: "session-1",
+      streamKey: "todo-1",
+      title: "Re-dispatched",
+      prompt: "Try again.",
+      todoId: "todo-1",
+    });
+    assert.equal(blocked.ok, false);
+    assert.equal(
+      blocked.ok ? null : blocked.reason,
+      "stream-key-held-by-unknown-state",
+    );
+    // A refusal is structural: it never becomes a blind spawn attempt.
+    assert.equal(hostAfter.spawnCalls.length, 0);
+    assert.equal(after.listUnknownStateHolds("session-1").length, 1);
+
+    // The hold is per-stream, not a session-wide lock.
+    const otherStream = await after.spawnWorker({
+      parentSessionId: "session-1",
+      streamKey: "todo-2",
+      title: "Other work",
+      prompt: "Different stream.",
+    });
+    assert.ok(otherStream.ok);
+
+    // The escape hatch the restart notice points at: the dispatcher has
+    // established the worker is gone (or accepts the risk).
+    assert.equal(await after.releaseUnknownStateHold(pre.workerId), true);
+    assert.equal(after.listUnknownStateHolds("session-1").length, 0);
+    // Releasing drops the marker too. Leaving it would rebuild the hold on the
+    // next activation, and the dispatcher would be stuck resolving a stream
+    // key that comes back every restart.
+    assert.equal(durability.markers.has(pre.workerId), false);
+    // Unknown id → false, not a throw: release is idempotent from the caller's
+    // side so a repeated stop_worker cannot fail loudly.
+    assert.equal(await after.releaseUnknownStateHold(pre.workerId), false);
+
     const redispatch = await after.spawnWorker({
       parentSessionId: "session-1",
       streamKey: "todo-1",

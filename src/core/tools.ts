@@ -22,6 +22,7 @@ import {
   formatSpawnAck,
   formatSteerNote,
   formatStopNote,
+  formatStopUnknownStateNote,
   toCheckRow,
   type CheckWorkersToolResult,
   type DeliverResultToolResult,
@@ -357,6 +358,27 @@ export function createDispatcherTools(
       const workerId = requireString(args, "worker_id");
       const record = multitask.getWorker(workerId);
       if (record === undefined) {
+        // Ticket 59: a worker that was live at crash time is deliberately not
+        // on the roster, but it still holds its stream key. Stopping it is the
+        // dispatcher's way of abandoning that stream — the hold's documented
+        // escape hatch, and the only action the restart notice points at.
+        // Session-scoped, so one session can never release another's stream.
+        const sessionId = getSessionId();
+        const hold =
+          sessionId === null
+            ? undefined
+            : multitask
+                .listUnknownStateHolds(sessionId)
+                .find((held) => held.workerId === workerId);
+        if (hold !== undefined) {
+          const released = await multitask.releaseUnknownStateHold(workerId);
+          if (released) {
+            return {
+              ok: true,
+              note: formatStopUnknownStateNote(workerId, hold.streamKey),
+            };
+          }
+        }
         // abortWorker throws on unknown; map to already-settled-shaped refusal
         // so the model gets a clean tool result rather than an exception.
         return {

@@ -95,6 +95,18 @@ export type SpawnResult =
       readonly ok: false;
       readonly reason: "duplicate-stream-key";
       readonly detail: string;
+    }
+  | {
+      /**
+       * Ticket 59 (register B-1): a worker that was live at crash time still
+       * holds this stream key. We cannot prove it is gone, so we refuse to put
+       * a second live worker on the same stream. Distinct from
+       * `duplicate-stream-key` on purpose — this one is resolvable, and the
+       * remedy is a decision the dispatcher makes, not a blind retry.
+       */
+      readonly ok: false;
+      readonly reason: "stream-key-held-by-unknown-state";
+      readonly detail: string;
     };
 
 /**

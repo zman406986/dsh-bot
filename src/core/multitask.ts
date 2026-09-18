@@ -201,6 +201,26 @@ export interface Multitask {
    */
   rebuildFromDurability(parentSessionId: string): Promise<RebuildReport>;
   /**
+   * Workers that were live at crash time and were not reconstructed, whose
+   * stream keys are therefore still held (ticket 59, register B-1). They never
+   * appear on the roster; this is their machine-readable surface.
+   */
+  listUnknownStateHolds(
+    parentSessionId?: string,
+  ): readonly UnknownStateWorker[];
+  /**
+   * Resolve an unknown-state hold (ticket 59): the caller has established that
+   * the worker is gone, or accepts the risk, so the stream key is released for
+   * re-dispatch. Also drops the durable marker — otherwise the hold would come
+   * straight back on the next activation, which is the loop this exists to
+   * avoid. Returns false when nothing was held under that id.
+   *
+   * Async because the marker deletion is: resolving the hold but leaving the
+   * marker behind would resurrect it on the next activation, so "released"
+   * must not be reported before the marker is actually gone.
+   */
+  releaseUnknownStateHold(workerId: string): Promise<boolean>;
+  /**
    * Wake bus this core enqueues settles through. Settles are batched per
    * parent session; a mid-turn dispatcher queues rather than receiving an
    * injected wake. Callers use it to note dispatcher turn bounds, drain
@@ -247,6 +267,17 @@ export function createMultitask(
   const workers = new Map<string, WorkerRecord>();
   /** streamKey → workerId for every live (non-terminal) worker. */
   const liveByStreamKey = new Map<string, string>();
+  /**
+   * Workers that were live at crash time, keyed by workerId (ticket 59).
+   *
+   * They are not on the roster and we hold no interrupt handle for them, so
+   * we cannot tell whether they died with the process or are still running
+   * somewhere. What we CAN refuse is putting a second live worker on the same
+   * stream: each of these keeps its stream key occupied until the dispatcher
+   * resolves it. This is the one-worker-per-stream invariant holding *across*
+   * a restart, which it previously did not.
+   */
+  const unknownStateHolds = new Map<string, UnknownStateWorker>();
   const steerQueue: SteerQueue = createSteerQueue();
   const todoLedger: TodoLedger = createTodoLedger();
   const peerInbox: PeerInbox = createPeerInbox(options?.peer);
@@ -344,6 +375,20 @@ export function createMultitask(
   }
 
   /** Pure-reconcile against the session roster. Does not apply mutations. */
+  /**
+   * The unknown-state hold on a stream key, if any (ticket 59).
+   * A linear scan is deliberate: holds are created only for workers that were
+   * live at crash time, so the set is tiny and bounded by a single restart.
+   */
+  function findUnknownStateHold(
+    streamKey: string,
+  ): UnknownStateWorker | undefined {
+    for (const hold of unknownStateHolds.values()) {
+      if (hold.streamKey === streamKey) return hold;
+    }
+    return undefined;
+  }
+
   function runReconcile(
     sessionId: string,
     wake: WakeEvent,
@@ -441,6 +486,21 @@ export function createMultitask(
           ok: false,
           reason: "duplicate-stream-key",
           detail: `stream key "${request.streamKey}" already has a running worker (${existingId})`,
+        };
+      }
+      // Ticket 59 (register B-1): a stream key held by a worker that was live
+      // at crash time is NOT free. We hold no interrupt handle for it, so we
+      // cannot prove it stopped — and "cannot prove it stopped" must not
+      // silently become "assume it stopped". Refusing is the safe half; the
+      // surfacing half is the restart notice and `check_workers`.
+      const hold = findUnknownStateHold(request.streamKey);
+      if (hold !== undefined) {
+        return {
+          ok: false,
+          reason: "stream-key-held-by-unknown-state",
+          detail:
+            `stream key "${request.streamKey}" is still held by ${hold.workerId}, ` +
+            `whose state is unknown since the restart; resolve that worker (or use a new stream key) before re-dispatching onto this stream`,
         };
       }
       const workerId = await host.spawnWorker(request.prompt, {
@@ -750,7 +810,11 @@ export function createMultitask(
           // never resumed, never invented. Stream key stays free so the
           // dispatcher may re-dispatch. Transcript pointer falls back to
           // the worker id (child session id) when no settle landed.
-          unknownState.push({
+          // Ticket 59 (register B-1): the record keeps the stream key
+          // occupied. The comment above used to end "stream key stays free so
+          // the dispatcher may re-dispatch" — that is exactly the hazard: the
+          // worker may still be alive, and we threw away the only handle.
+          const hold: UnknownStateWorker = {
             workerId: marker.workerId,
             parentSessionId: marker.parentSessionId,
             streamKey: marker.streamKey,
@@ -758,7 +822,9 @@ export function createMultitask(
             lastKnownStatus: marker.status,
             transcriptRef: marker.transcriptRef ?? marker.workerId,
             todoId: marker.todoId,
-          });
+          };
+          unknownState.push(hold);
+          unknownStateHolds.set(hold.workerId, hold);
           continue;
         }
         // Terminal marker: restore onto the roster. toolCallCount is live
@@ -811,6 +877,28 @@ export function createMultitask(
         notifyRosterChanged(parentSessionId);
       }
       return { restored, unknownState };
+    },
+
+    listUnknownStateHolds(
+      parentSessionId?: string,
+    ): readonly UnknownStateWorker[] {
+      const holds = [...unknownStateHolds.values()];
+      // Optional filter: a dispatcher normally asks for its own session only.
+      if (parentSessionId === undefined) return holds;
+      return holds.filter((hold) => hold.parentSessionId === parentSessionId);
+    },
+
+    async releaseUnknownStateHold(workerId: string): Promise<boolean> {
+      const hold = unknownStateHolds.get(workerId);
+      if (hold === undefined) return false;
+      unknownStateHolds.delete(workerId);
+      // Drop the marker too. The in-memory release alone would unblock this
+      // boot but the marker would rebuild the hold on the next activation —
+      // an unresolvable-remedy loop, which is worse than the block it fixes.
+      if (durability !== undefined) {
+        await Promise.resolve(durability.deleteWorkerMarker(workerId));
+      }
+      return true;
     },
 
     wakeBus,

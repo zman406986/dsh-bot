@@ -214,6 +214,7 @@ export {
   formatSpawnAck,
   formatSteerNote,
   formatStopNote,
+  formatStopUnknownStateNote,
   toCheckRow,
 } from "./core/tool-results.js";
 export type {

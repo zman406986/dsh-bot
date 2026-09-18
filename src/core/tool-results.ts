@@ -175,3 +175,18 @@ export function formatSteerNote(title: string): string {
 export function formatStopNote(): string {
   return "Stopped. Nothing further will arrive from this worker. Any correction parked for it is dropped. Tell the user only if the work was visible and they need to know it was cancelled.";
 }
+
+/**
+ * Stop note for a worker that was live at crash time (ticket 59).
+ *
+ * Deliberately different from {@link formatStopNote}, because the difference is
+ * the whole point: a normal stop reaches the worker, this one cannot. Saying
+ * "Stopped" here would claim an interruption that never happened — and this
+ * repo has already shipped one name that promised more than it did.
+ */
+export function formatStopUnknownStateNote(
+  workerId: string,
+  streamKey: string,
+): string {
+  return `Released the stream held by ${workerId}. That worker was never reachable — its state has been unknown since the restart and nothing was interrupted, so if it survived it is still running. Stream "${streamKey}" can be dispatched onto again, but only do that if you know that worker is gone; otherwise use a new stream key. Any result the old worker produces is dropped, and the user has not been told anything.`;
+}

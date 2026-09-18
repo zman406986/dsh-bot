@@ -29,7 +29,7 @@ export const TOOL_DESCRIPTIONS = {
   [STEER_WORKER_TOOL]:
     "Send a correction into a worker that is still running. Context is preserved; the worker continues from where it is. Only the latest undelivered correction applies. Refused if the worker is not running.",
   [STOP_WORKER_TOOL]:
-    "Stop a worker for good. Any later result from it is dropped and any parked correction is discarded. Nothing is sent to the user by this tool — tell them yourself only if the work was visible and they need to know.",
+    "Stop a worker for good. Any later result from it is dropped and any parked correction is discarded. Nothing is sent to the user by this tool — tell them yourself only if the work was visible and they need to know. If the worker was running when the app last restarted, it cannot be reached: stopping it then releases the stream key it still holds, and you are told so plainly.",
   [DELIVER_RESULT_TOOL]:
     "Send a result to the user. Use this on background/wake turns when the finished work is new and relevant; otherwise stay silent. Lead with the concrete thing that finished. Optionally mark a todo completed after a successful send.",
 } as const;
