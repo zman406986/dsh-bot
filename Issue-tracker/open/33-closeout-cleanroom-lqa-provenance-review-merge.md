@@ -525,3 +525,46 @@ worktrees, so the 2026-09-18 clean-install result stands as the recorded evidenc
 **Still open on this ticket:** AC1 (left unticked, superseded — see the previous comment), AC3
 (Gate 2 in the worktree, unrun as a separate pass), AC7 (close tickets 27–33 + ticket 17 Phase 3
 with dated comments carrying commit hashes).
+
+### 2026-09-19 — live pass 5, Session A record: 78 + 88 + 68-AC5 + 87 live lanes passed (zero LLM); the three 78 clauses not run recorded; AC7 still NOT ticked
+
+Evidence root: `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-19\evidence\A\` (driver
+`.out.json` per command, `status-after-*.json` console tallies, `reqlog-A3-walk.json`, settings
+yaml copies, `web-profile-before.md5` / `web-profile-after.md5`, `teardown-port-and-pids.txt`);
+screenshots under `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-19\shots\`. Real dsh host boot
+(`@deepseek-ai/dsh@0.1.5-rc.1`, throwaway `multitask` profile, port 8877), Playwright headless
+chromium. **Zero LLM turns** and zero pageerror/console-error throughout (every status tally
+`log: []`); clean teardown (no LISTENING line, all five pids gone); stock `web` profile
+byte-identical (`web-profile-before.md5` / `web-profile-after.md5`).
+
+**Passed in Session A:**
+- **78 → resolved** (ticket commit `cd4caeb`): frame swap confirmed (`78-03-frame.json.out.json` —
+  shell in the `root` slot, `stock:0`, `failLoud:false`; `status-after-78-boot.json` `log: []`),
+  full re-apply on reload confirmed (`78-06-after-reload.json.out.json` identical;
+  `status-after-78-reload.json` `log: []`), seats in the elected frame confirmed (onboarding
+  `A3-03-probe-beat1.json.out.json` / `A3-08-probe-settled.json.out.json`; roster
+  `88-01c-rows.json.out.json`; conversation `88-04-seat.json.out.json`).
+- **88:** live re-confirm — clicking the seeded non-empty row `Interastral-Peace-Casino` opened
+  `.multitask-dispatcher-conv` with `shell=1, conv=1, selectedRows=1, rootChildIsShell=true,
+  stock=0` (`88-04-seat.json.out.json`); zero `Minified React error` / `slot entry crashed`
+  anywhere in the Session A evidence (`status-after-88-rowclick*.json` all `log: []`); a second
+  row and a flip-back also clean.
+- **68 AC 5 → resolved** (ticket commit `3cd6cd7`): first-run walk post-cutover inside the
+  elected frame, `intro → background → tools → first → handoff` → settled, `saveFailed:0`
+  (`A3-03`…`A3-08` probes; `status-after-A3-walk.json` `log: []`). Honest note: the walk window
+  was reopened by clearing the persisted seen record through the host's client-visible
+  `settings/update` RPC (`A3-clear-seen.json.out.json`).
+- **87 → live AC ticked** (ticket commit `5d0e6ac`): three consecutive reloads all `settled`
+  (`A4-01c-probe.json.out.json`, `A4-02c-probe.json.out.json`, `A4-03c-probe.json.out.json`),
+  delete round-trip re-showed the flow (`A4-11-probe-after-delete.json.out.json`) and the record
+  was restored (`A4-14-restore-seen.json.out.json`).
+
+**Not run in Session A (recorded, not claimed):** 78's `selectPanel`/main-page harmlessness (no
+driver-reachable seam; no shipped caller post-cutover/89), fallback-on-crash (proven pass 4 by a
+real crash; not re-inducible now that 88 is fixed), live unload/HMR (no unload affordance
+exists). Session A covered 78/88/68-AC5/87 only — the rest of the pass-5 list (29, 31, 69-Q2,
+81, 70 chunk 4) is not part of this record.
+
+**AC7 remains unticked and this ticket stays open** — the closure sweep (17/27/28/29/30/31/48 +
+the outside-map set, dated comments with commit hashes) is the later part-2 step; this comment
+only adds the pass-5 trail the umbrella was owed.
