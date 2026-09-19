@@ -876,3 +876,56 @@ Gates at disposition: `npm run typecheck` clean (both configs); `npm test` 1125 
 3. **FINDING 3/5 wedge family** — pointers recorded 2026-09-20 (W14): an unanswered host approval ask wedges the dispatcher turn (sharpens Q2); session cf5249cf's persisted open turn survives restart and eats sends. No fix claimed, no scope decided — W17/human.
 
 A future session may close this ticket when the human rules Q1 (after which L3/L4 either run live or are explicitly descoped) and the wedge family has an owner; everything else is recorded above with artifacts.
+
+### 2026-09-20 — W26, FINDING 3 fixed offline: the dispatch-approval seam is bounded by the relay's ADR-0008 deadline (RED-checked)
+
+Issue reference: the wedge-family pointer above (FINDING 3) and ticket 33's Session B-3 record — an
+unanswered `ctx.approval.request` WEDGED a dispatcher turn because the fail-closed pins assumed the
+service RETURNS. Merge **`987c241`** (branch `wt/69-approval-deadline`, commits `4dc5185` fix +
+`2e5e9fd` pins).
+
+**Mechanism (minimal bounded-wait wrapper, no semantic redesign):**
+`createDispatchApprovalSeam` (`src/adapter/dispatch-approval.ts`) now wraps the
+`service.request(...)` await in `boundedAsk` — at the deadline the ask collapses to the seam's
+EXISTING fail-closed `unavailable` outcome (the refusal path the chunk-A gate already refuses on),
+so the turn settles with the same honest `auto-review-refused` spawn record as every other
+refusal. **Deadline source: the relay's ADR-0008 constant, reused verbatim —**
+`DEFAULT_ACCESS_TIMEOUT_MS` (120_000, `src/core/access-relay.ts:19`), the same unanswered-ask
+semantics the relay arms (`access-relay.ts` schedules deny-at-deadline; here the deadline lands in
+the seam's fail-closed catch). Injected as an optional `timeoutMs` on the seam options (mirrors the
+relay's injectable `timeoutMs` / W22's injectable-delay pattern); **no new Config surface** — the
+plugin builder `dispatchApprovalSeamFor` keeps the ADR-0008 default, tests inject a tiny value.
+The refusal record: dispatch approvals carry NO approval-feed entry (the relay feed holds access
+asks only; the worker-dispatch card projects from the durable tool-call record), so the gate's
+`auto-review-refused` result IS the established record and the deadline path reuses it unchanged.
+Out of scope (recorded, not redesigned): the host's optional `ApprovalRequest.signal` abort is not
+wired — the losing ask is left to the host waterfall; only the seam stops waiting.
+
+**Offline pins** (`test/dispatch-approval.test.ts`, new describe, 5 tests): an ask the answerer
+NEVER returns refuses at the deadline (seam level: exactly one ask raised, then `unavailable`; end
+to end through the real spawn gate: `auto-review-refused` naming `unavailable`, no host spawn) —
+both carry a 2 s node:test cap so a removed wrapper fails visibly instead of hanging; an answer
+BEFORE the deadline is unchanged (existing pins' behavior); a service that REJECTS after the
+deadline surfaces no unhandled rejection; source pin — the deadline default must be
+`DEFAULT_ACCESS_TIMEOUT_MS` (an invented policy value fails the pin).
+
+**RED-check (actual):** wrapper disabled in the working tree (`await asked` bypass) → **2 of 17
+fail** in the file (both never-return pins, at the 2 s cap — the exact B-3 wedge shape);
+unchanged-behavior / late-rejection / source pins stay green by design. Re-applied → **17/17
+green**; tree byte-clean.
+
+**Gates on the branch (offline, FakeDshHost):** `npm run typecheck` clean (both configs);
+`npm test` **1130 pass / 0 fail / 273 suites** (baseline 1125/272/0 — +5 tests, +1 suite);
+`npm run lint:docs` green (0 findings, indexes fresh). **B3 holds:** empty diff on
+`access-relay.ts` / `access-types.ts` vs `e069b8a`. No posture seeder (`reviewPosture.set` has
+zero src callers); Q1 not re-litigated — the shipped posture stays EMPTY and this change does not
+touch posture content or policy.
+
+**Why this closes the wedge from OUR seam even if posture policy ever changes:** the B-3 wedge
+needed an ask that waits forever with no answerer. A gated dispatch reaches the seam only on a
+posture hit, and the posture is EMPTY pending Q1's human ruling — but even if a human later seeds
+rows (Q1's recorded reversal path), the seam now self-bounds: an absent-and-silent answerer
+produces the same honest refusal as an absent service, so a gated dispatch can no longer wedge the
+dispatcher turn regardless of posture content. FINDING 5 (the already-persisted open turn on
+cf5249cf and the lost open-turn reconcile) is a DIFFERENT mechanism — not covered here. L3/L4
+remain BLOCKED-no-seeder for live verification; this pass claims the offline half only.
