@@ -4,7 +4,7 @@ Always-on multitask dispatcher plugin for DeepSeek Harness (`dsh`). A primary ch
 
 ## Status
 
-Ticket 01 scaffold: plugin shape, `DshHost` seam, hand-written fake host, and a minimal multitask core surface. Host adapter and tools land in later tickets.
+Implemented and offline-tested: the dispatcher plugin (`src/core` multitask surface behind the `DshHost` seam, `src/adapter` Cordis/dsh glue, `src/worker` blank-context workers) and its web client surface (`client/`, the wrapper shell with roster, approval cards, and composer send). `npm test` runs the suite with no network and no LLM; the project's decision history is recorded in the repo's local `Issue-tracker/`. Remaining work is tracked in `Issue-tracker/open/`.
 
 ## Develop
 
@@ -45,10 +45,10 @@ Example `cordis.patch.yml` insert:
 
 ```bash
 npm run build
-dsh --profile multitask --patch ./dev/cordis.dev.patch.yml
+dsh --profile web --patch dev/cordis.web.patch.yml
 ```
 
-Where `dev/cordis.dev.patch.yml` holds the same insert row.
+Where `dev/cordis.web.patch.yml` holds the same insert row.
 
 ## Layout
 
