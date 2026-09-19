@@ -143,16 +143,37 @@ function createScope(options?: { noWrite?: boolean }) {
   };
 }
 
-/** Fake client face: locale registry + slot injects + the optional settings service. */
+/**
+ * Fake client face: locale registry + slot injects + the optional settings service.
+ *
+ * Ticket 86 (2026-09-19): the slots fake carries the shipped SlotCore register
+ * rule (one cell per slot name, `(priority ?? 0)` default, per-kind collision
+ * throw) so an entry this module registers at a colliding priority fails here
+ * instead of live. See test/client-face-scaffold.test.ts for the full citation
+ * (`dsh-web-frontend/dist/assets/index-BKQ_L1z6.js`, minified SlotCore.register).
+ */
 function createClientCtx(options?: {
   withSettings?: boolean;
   scope?: ReturnType<typeof createScope>;
 }) {
   const locales = new Map<string, unknown>();
+  const cells = new Map<
+    string,
+    Array<{
+      options: Record<string, unknown>;
+      component: unknown;
+      dispose(): void;
+    }>
+  >();
   const injects: Array<{
     parent: string;
-    entries: Array<{ options: unknown; component: unknown }>;
+    entries: Array<{
+      options: Record<string, unknown>;
+      component: unknown;
+      dispose(): void;
+    }>;
   }> = [];
+  const injectControllers: Array<() => void> = [];
   const injectRequests: string[][] = [];
   const boundNamespaces: string[] = [];
   const effectDisposers: Array<() => void> = [];
@@ -180,20 +201,24 @@ function createClientCtx(options?: {
     },
     slots: {
       inject(parent: string, callback: () => unknown) {
-        const record = { parent, entries: [] as Array<{ options: unknown; component: unknown }> };
+        const record = {
+          parent,
+          entries: [] as typeof injects[number]["entries"],
+        };
         injects.push(record);
         callback();
-        return () => {
+        const controller = () => {
           const at = injects.indexOf(record);
           if (at >= 0) injects.splice(at, 1);
-          record.entries.length = 0;
+          for (const entry of record.entries.splice(0)) entry.dispose();
         };
+        injectControllers.push(controller);
+        return controller;
       },
       register(registration: unknown, component: unknown) {
         const owner = injects.at(-1);
         assert.ok(owner, "slots.register outside of slots.inject (fake)");
-        owner.entries.push({ options: registration, component });
-        return () => {};
+        return registerSlotEntry(cells, owner.entries, registration, component);
       },
     },
     locale: {
@@ -216,12 +241,105 @@ function createClientCtx(options?: {
     injectRequests,
     boundNamespaces,
     locales,
-    /** Run every collected effect disposer: the fiber's unload path. */
+    cells,
+    /**
+     * Run every collected disposer: the fiber's unload path. Ticket 86:
+     * `slots.inject`'s controller is an effect on the caller's fiber, so the
+     * fake disposes the declaration records with the effect disposers — the
+     * host's own cascade.
+     */
     runFiberTeardown() {
       for (const dispose of [...effectDisposers].reverse()) dispose();
+      for (const dispose of [...injectControllers].reverse()) dispose();
     },
   };
   return ctx as typeof ctx & ClientContext;
+}
+
+/** One recorded slot entry in a fake's per-slot cell (ticket 86). */
+interface FakeSlotEntry {
+  options: Record<string, unknown>;
+  component: unknown;
+  dispose(): void;
+}
+
+/**
+ * The shipped SlotCore register rule, shared by this file's fake (ticket 86):
+ * cell lookup by slot name, `(priority ?? 0)` default, per-kind collision
+ * throw with host wording, ascending insert sort, entry disposer.
+ * (dsh-web-frontend `dist/assets/index-BKQ_L1z6.js`, minified SlotCore.register.)
+ */
+function registerSlotEntry(
+  cells: Map<string, FakeSlotEntry[]>,
+  owners: FakeSlotEntry[],
+  rawOptions: unknown,
+  component: unknown,
+): () => void {
+  const options = rawOptions as {
+    name: string;
+    key?: string;
+    id?: string;
+    priority?: number;
+  };
+  assert.equal(
+    typeof options.name,
+    "string",
+    "slot options need a string `name` (fake)",
+  );
+  const cell = cells.get(options.name) ?? [];
+  cells.set(options.name, cell);
+  const priority = options.priority ?? 0;
+  const collision = cell.find((entry) => {
+    const other = entry.options as {
+      key?: string;
+      id?: string;
+      priority?: number;
+    };
+    if (options.key !== undefined) {
+      return other.key === options.key && (other.priority ?? 0) === priority;
+    }
+    if (options.id !== undefined) {
+      return other.id === options.id && (other.priority ?? 0) === priority;
+    }
+    return (other.priority ?? 0) === priority;
+  });
+  if (collision !== undefined) {
+    const target =
+      options.key !== undefined
+        ? `already has an entry for key "${options.key}"`
+        : options.id !== undefined
+          ? `already has an entry with id "${options.id}"`
+          : "already has a registration";
+    const kind =
+      options.key !== undefined
+        ? "keyed slot"
+        : options.id !== undefined
+          ? "list slot"
+          : "single slot";
+    throw new Error(
+      `${kind} "${options.name}" ${target} at priority ${priority} — ` +
+        `register at a different priority to shadow it (lowest renders)`,
+    );
+  }
+  const entry: FakeSlotEntry = {
+    options: { ...rawOptions } as Record<string, unknown>,
+    component,
+    dispose: () => {},
+  };
+  cell.push(entry);
+  cell.sort(
+    (a, b) =>
+      ((a.options.priority as number | undefined) ?? 0) -
+      ((b.options.priority as number | undefined) ?? 0),
+  );
+  entry.dispose = () => {
+    const ownerAt = owners.indexOf(entry);
+    if (ownerAt >= 0) owners.splice(ownerAt, 1);
+    const cellAt = cell.indexOf(entry);
+    if (cellAt >= 0) cell.splice(cellAt, 1);
+  };
+  owners.push(entry);
+  return entry.dispose;
 }
 
 /** The single `settings.plugin.item` inject record, if any. */

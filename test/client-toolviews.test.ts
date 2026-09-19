@@ -36,12 +36,120 @@ import { DISPATCHER_TOOL_NAMES } from "../src/core/policy/prompts.js";
 import { ROSTER_STATUS_KEYS } from "../src/core/roster-snapshot.js";
 import type { WorkerStatus } from "../src/core/types.js";
 
-/** Fake the client face (see test/client-face-scaffold.test.ts for the idiom). */
+/** One recorded slot entry in a fake's per-slot cell (ticket 86). */
+interface FakeSlotEntry {
+  options: Record<string, unknown>;
+  component: unknown;
+  dispose(): void;
+}
+
+/**
+ * The shipped SlotCore register rule, shared by this file's fake (ticket 86):
+ * cell lookup by slot name, `(priority ?? 0)` default, per-kind collision
+ * throw with host wording, ascending insert sort, entry disposer.
+ */
+function registerEntry(
+  cells: Map<string, FakeSlotEntry[]>,
+  owners: FakeSlotEntry[],
+  rawOptions: unknown,
+  component: unknown,
+): () => void {
+  const options = rawOptions as {
+    name: string;
+    key?: string;
+    id?: string;
+    priority?: number;
+  };
+  assert.equal(
+    typeof options.name,
+    "string",
+    "slot options need a string `name` (fake)",
+  );
+  const cell = cells.get(options.name) ?? [];
+  cells.set(options.name, cell);
+  const priority = options.priority ?? 0;
+  const collision = cell.find((entry) => {
+    const other = entry.options as {
+      key?: string;
+      id?: string;
+      priority?: number;
+    };
+    if (options.key !== undefined) {
+      return other.key === options.key && (other.priority ?? 0) === priority;
+    }
+    if (options.id !== undefined) {
+      return other.id === options.id && (other.priority ?? 0) === priority;
+    }
+    return (other.priority ?? 0) === priority;
+  });
+  if (collision !== undefined) {
+    const target =
+      options.key !== undefined
+        ? `already has an entry for key "${options.key}"`
+        : options.id !== undefined
+          ? `already has an entry with id "${options.id}"`
+          : "already has a registration";
+    const kind =
+      options.key !== undefined
+        ? "keyed slot"
+        : options.id !== undefined
+          ? "list slot"
+          : "single slot";
+    throw new Error(
+      `${kind} "${options.name}" ${target} at priority ${priority} — ` +
+        `register at a different priority to shadow it (lowest renders)`,
+    );
+  }
+  const entry: FakeSlotEntry = {
+    options: { ...rawOptions } as Record<string, unknown>,
+    component,
+    dispose: () => {},
+  };
+  cell.push(entry);
+  cell.sort(
+    (a, b) =>
+      ((a.options.priority as number | undefined) ?? 0) -
+      ((b.options.priority as number | undefined) ?? 0),
+  );
+  entry.dispose = () => {
+    const ownerAt = owners.indexOf(entry);
+    if (ownerAt >= 0) owners.splice(ownerAt, 1);
+    const cellAt = cell.indexOf(entry);
+    if (cellAt >= 0) cell.splice(cellAt, 1);
+  };
+  owners.push(entry);
+  return entry.dispose;
+}
+
+/**
+ * Fake the client face (see test/client-face-scaffold.test.ts for the idiom).
+ *
+ * Ticket 86 (2026-09-19): the slots fake runs the shipped SlotCore register
+ * rule — one cell per slot name, `(priority ?? 0)` default, and a throw on a
+ * same-(priority ?? 0) collision along the entry's identity axis (key→keyed,
+ * id→list, else single) with the host's wording. This is the same rule the
+ * ticket-85 fix taught test/client-shell-mount.test.ts; it is what makes a
+ * no-priority `root` register (the pre-85 cutover bug) fail offline. Host
+ * source: `dsh-web-frontend/dist/assets/index-BKQ_L1z6.js`, minified
+ * SlotCore.register (`a = t.priority ?? 0`; per-kind `entries.find(...)`).
+ */
 function createClientCtx() {
   const locales = new Map<string, unknown>();
+  const cells = new Map<
+    string,
+    Array<{
+      options: Record<string, unknown>;
+      component: unknown;
+      dispose(): void;
+    }>
+  >();
   const injects: Array<{
     parent: string;
-    entries: Array<{ options: unknown; component: unknown }>;
+    entries: Array<{
+      options: Record<string, unknown>;
+      component: unknown;
+      dispose(): void;
+    }>;
   }> = [];
   const injectControllers: Array<() => void> = [];
   const effectDisposers: Array<() => void> = [];
@@ -57,22 +165,21 @@ function createClientCtx() {
     },
     slots: {
       inject(parent: string, callback: () => unknown) {
-        const record = { parent, entries: [] };
+        const record = { parent, entries: [] as typeof injects[number]["entries"] };
         injects.push(record);
         callback();
         const controller = () => {
           const at = injects.indexOf(record);
           if (at >= 0) injects.splice(at, 1);
-          record.entries.length = 0;
+          for (const entry of record.entries.splice(0)) entry.dispose();
         };
         injectControllers.push(controller);
         return controller;
       },
-      register(options: unknown, component: unknown) {
+      register(rawOptions: unknown, component: unknown) {
         const owner = injects.at(-1);
         assert.ok(owner, "slots.register outside of slots.inject (fake)");
-        owner.entries.push({ options, component });
-        return () => {};
+        return registerEntry(cells, owner.entries, rawOptions, component);
       },
     },
     locale: {
@@ -94,6 +201,7 @@ function createClientCtx() {
     // Test surface.
     locales,
     injects,
+    cells,
     findInject(parent: string) {
       return injects.find((record) => record.parent === parent);
     },
@@ -105,9 +213,10 @@ function createClientCtx() {
   };
   return ctx as typeof ctx & ClientContext & {
     findInject(parent: string):
-      | { parent: string; entries: Array<{ options: unknown; component: unknown }> }
+      | { parent: string; entries: FakeSlotEntry[] }
       | undefined;
     runFiberTeardown(): void;
+    cells: Map<string, FakeSlotEntry[]>;
   };
 }
 
@@ -623,8 +732,11 @@ describe("toolview — HMR reversal over the fake seam", () => {
     assert.equal(ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT), undefined);
     assert.equal(ctx.locales.has(LOCALE_NAMESPACE), false);
 
-    // Post-HMR fiber: everything registers again, no accumulation.
-    apply(ctx);
+    // Post-HMR fiber: everything registers again, no accumulation. Ticket 86:
+    // this re-apply would throw the shipped slot collision if teardown had
+    // left any entry in its cell (the fake now models that rule), so the
+    // HMR-reversal assertion is a real contract check, not just a count.
+    assert.doesNotThrow(() => apply(ctx));
     assert.equal(ctx.injects.length, 4);
     assert.equal(ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT)?.entries.length, 6);
     assert.equal(ctx.findInject(SHELL_OVERLAY_SLOT), undefined);
