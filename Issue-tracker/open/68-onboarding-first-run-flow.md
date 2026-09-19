@@ -71,8 +71,8 @@ staging-only shipped `settings.onboarding` slot must not be load-bearing.
   dispatcher-session creation; fail-open on probe/suppression-read failure (reference rule,
   adapted).
 - **Scope-out:** sign-in/account/privacy beats (U-A — record the gap, never invent a
-  counterpart); computer-readiness demo beyond a recorded gap until 71's capability gate
-  resolves; a second store (A5 — suppression rides our settings namespace); runtime agent
+  counterpart); computer-readiness demo beyond a recorded gap (ticket 71 resolved
+  2026-09-19: capability-blocked, ADR-0018 U-I — the gap is permanent, not pending); a second store (A5 — suppression rides our settings namespace); runtime agent
   management (U-G — the first-agent beat is user-driven creation only, `ctx.sessions.create`,
   `wrapper-vehicle-seams.md` Finding 1).
 - **Builds on:** `docs/research/always-on-dispatcher-behavior.md:18` (beat list, re-entry
@@ -106,7 +106,7 @@ mirrored in code as the module-header table in `src/client/onboarding.ts`:
 |---|---|---|
 | Sign-in (`:18`) | **U-A gap** (ADR-0018 exception 12) | No privacy/account gates; recorded, never invented — no beat exists |
 | Animated "meet your agents" intro (`:18`) | Honest counterpart | `intro` beat — static (no animation: the shell CSS discipline), adapted copy (B9) |
-| Computer-readiness demo (`:18`) | **71-dependent capability gap** | Remote computer/desktop area is ticket 71's gate; recorded until it resolves — no beat exists |
+| Computer-readiness demo (`:18`) | **71-dependent capability gap — now permanent** | Remote computer/desktop area is ticket 71's gate; **71 resolved 2026-09-19 as capability-blocked (ADR-0018 U-I)**, so this is a recorded capability gap, not a pending one — no beat exists, none is planned |
 | Background-jobs explainer (`:18`) | Honest counterpart, narrowed | `background` beat — our wake model is single-kind (ADR-0018 C15): only dispatched workers, stated plainly |
 | Tools beat (`:18`) | Honest counterpart | `tools` beat — workers act through tools under the user's approvals; the dispatcher asks first |
 | Creating the first agent (`:18`) | Honest counterpart, user-driven only (**U-G**) | `first` beat — create a chat and ask it to start dispatching; no auto-create, no runtime agent management |

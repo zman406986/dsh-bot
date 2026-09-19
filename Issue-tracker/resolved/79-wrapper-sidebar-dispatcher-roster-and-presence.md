@@ -134,3 +134,12 @@ degradation paths, and view models as the offline-testable scope, and this ticke
 no live-only item). Moved to `resolved/`. The two recorded tensions stay visible: ticket 82
 (ADR-0020's "retry" row vs U-A, ready-for-human) and the U-B draft-tier gap (recorded above
 and in code).
+
+### 2026-09-19 — ticket 82 resolved (pointer only; no change to what shipped here)
+
+Ticket 82 is closed: the conservative U-A reading stands (retry-less roster failure states),
+and ADR-0020's surface row was corrected to match — see
+`Issue-tracker/resolved/82-resolve-adr-0020-roster-failure-states-retry-row-against-u-a.md`.
+The tension noted in the AC above is therefore settled in favor of what this ticket shipped;
+nothing in this ticket's implementation or evidence changed. (Overnight dispatched ruling,
+subject to human reversal.)

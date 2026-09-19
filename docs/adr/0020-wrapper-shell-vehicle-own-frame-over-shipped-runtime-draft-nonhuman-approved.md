@@ -48,7 +48,7 @@ Reference surfaces from `always-on-dispatcher-behavior.md` areas 1–3, 7–8 (a
 | Whole shell: sidebar + main surface + always-on (area 1) | new (frame) + re-host (contents) | tickets 77–78 |
 | Guided first-run onboarding (area 1) | new — own ticket | ticket 68 |
 | Connection lifecycle: phases, reconnect banner, restored snapshot, privacy/account gates (area 1) | **excluded U-A** | — |
-| Roster failure states: empty / unreachable with retry (area 1) | new, honest copy only | ticket 79 |
+| Roster failure states: empty / unreachable, honest copy, retry-less (U-A) (area 1) | new, honest copy only | ticket 79 |
 | Dispatcher sidebar rows: status dot, blocked chip, unread marker, live activity line, hover preview precedence (area 2) | re-host from tickets 27/28 stores; row + preview are new | ticket 79 |
 | Hidden-agents overlay / pinned identities (area 2) | **excluded C13** | — |
 | Running-tasks panel, typed rows, snapshot states (area 3) | re-host — the Active/Needs-you/Finished sections (tickets 27/28) become the wrapper's panel | ticket 79 |
@@ -72,7 +72,7 @@ Copy policy (exception B9): every string above is new or adapted copy in our loc
 - **68 (onboarding):** the first-run flow is a wrapper surface — it renders inside our frame (or the `main` page during staging) and can use the shipped `settings.onboarding` list slot only if our frame does not displace the settings surface at that stage. "Seen" persistence rides our settings namespace; U-A forbids sign-in/account beats.
 - **69 (auto-review):** approval cards render in the wrapper's conversation surface (ticket 80's), fed by the access relay's pending asks; the classifier layer is new core work. U-D binding (session-scoped always-allow).
 - **70 (peer tier):** peers are dispatcher sessions, so the sidebar roster is where peer presence lands; point-to-point only (C14), peer messages are a wake source into the existing pipeline (C15). Blocked by 76's session keying in the same way the sidebar is.
-- **71 (remote computer):** remote-box approval cards are 69's card system with location labels in our surface; computer/browser worker types flow through the dispatched-worker wake pipeline (C15). dsh host capability is the blocker check, per that ticket.
+- **71 (remote computer):** remote-box approval cards are 69's card system with location labels in our surface; computer/browser worker types flow through the dispatched-worker wake pipeline (C15). dsh host capability is the blocker check, per that ticket. **Resolved 2026-09-19: the check failed and the area is descoped as capability-blocked (ADR-0018 U-I); only the location-label slice lives on.**
 
 ## Consequences
 
