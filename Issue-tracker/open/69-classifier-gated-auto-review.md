@@ -446,3 +446,23 @@ Gates at 1acb918: `npm run typecheck` clean (both configs); `npm test` **1056 pa
   shipped red) — attribution recorded there; no semantic overlap with 85.
 
 Ticket stays **open**: L1–L4 (live lane) pending; Q1 stays ready-for-human.
+
+### Handover 2026-09-19 (session end)
+
+The L1 wiring agent was cancelled mid-flight. Its uncommitted work was **kept, not reverted** — gates re-run on the recovered tree are green (`npm run typecheck` clean, both configs; `npm test` **1044 pass / 0 fail** over 256 suites; `npm run build:client` 161,087 B) — so the partial work is frozen as **`d25d6ef`** ("Ticket 69/89: WIP checkpoint from cancelled agent … tests green"). Worktree clean at session end. It did **not** finish the ticket: everything below compiles and passes offline tests but has had no live or independent verification.
+
+**Left by the cancelled agent (L1 offline half, apparently landed):**
+- `src/client/approval-feed.ts` — the shared relay feed/hub (`createApprovalRelayFeed`, `attach`): publishes pending-ask truth, replays the last good set, detaches with the fiber; `test/approval-feed.test.ts`.
+- `src/client/index.ts` — `mountShellPage` takes optional `ShellApprovalFeedWiring`; the composition creates the feed at `:273` and hands it to both mounts (`:414`, `:460`); the approvals store attaches at `:552`; with no feed it stays honestly `unfed` and renders no cards area.
+- `src/adapter/resolve-command.ts` + `registerDispatcherResolveCommand` (exported at `src/adapter/index.ts:153/165`), registered at `plugin.ts:622` — routes the explicit answer through the UNCHANGED core relay (`Multitask.resolveAccess`).
+- `src/adapter/dispatch-approval.ts` (`createDispatchApprovalSeam`, `src/adapter/index.ts:40`), wired at `plugin.ts:470` (`requestDispatchApproval`); `src/adapter/cordis-dsh-host.ts` carries the seam surface.
+- `src/core/roster-snapshot.ts` — v4 `pendingAsks` envelope (full pending truth, `parsePendingAsks` fail-closed on malformed/unbounded) — L1's feed source.
+- `src/client/approval-pane.tsx` pickups; tests `test/dispatch-approval.test.ts`, `test/resolve-command.test.ts`.
+
+**Remaining for L1–L4 (do not assume any of it works end-to-end):**
+1. **L1**: prove the publish chain — snapshot v4 publish → feed → `ApprovalCardsStore` → "Needs you" pane — and that `registerDispatcherResolveCommand` resolves into the core relay on a real host. The offline tests pin units, not the composition.
+2. **Q2-half offline pin** (dispatch-approval seam refusals/expiry under the fake host) if not already covered by `test/dispatch-approval.test.ts`.
+3. **Live halves on the 45/33 lane**: L3 (real `ctx.approval` face) and L4 (live card resolve round-trip); 81 stays the card-rendering surface, 30 stays the live answer surface.
+4. **Q1 stays ready-for-human** (§6): whether any non-empty default/Config-seeded posture should ship is undecided; `d25d6ef` does not touch it.
+
+**Successor opens first:** `src/client/index.ts` (`mountShellPage` + `ShellApprovalFeedWiring` seam), `src/client/approval-feed.ts`, `src/client/approval-cards.ts`, `src/client/approval-pane.tsx`, `src/adapter/resolve-command.ts`, `src/adapter/dispatch-approval.ts`, `src/plugin.ts:460-480` and `:610-630`, then this ticket's Design 2026-09-19 comment (§2 classifier, §3 contract, §5 chunking) as the frozen contract.
