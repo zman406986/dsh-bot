@@ -21,10 +21,13 @@ import {
   APPROVAL_DETAIL_CLAMP_CHARS,
   APPROVAL_EXPIRED_COPY,
   APPROVAL_LOCATION_LOCAL,
+  APPROVAL_LOCATION_REMOTE,
+  APPROVAL_PRODUCER_KINDS,
   APPROVAL_SECRET_STORED_COPY,
   DISPATCHER_START_COMMAND,
   accessPromptQuestion,
   accessPromptQuestionId,
+  approvalLocationLineFor,
   clampApprovalDetail,
   createAccessPromptPump,
   describeAccessAction,
@@ -1245,5 +1248,52 @@ describe("plugin apply — access prompts over the host seam", () => {
     const tool = ctx.tool("request_access");
     assert.equal(tool, undefined);
     assert.equal(seam.asks.length, 0);
+  });
+});
+
+// ── Ticket 71 AC-4 (implemented via ticket 81): the per-producer-kind
+// location-label map that supersedes ticket 30's constant line. Pure
+// kind→line mapping, offline (S8); the prompt pathway resolves through the
+// map, so today's shipped output is byte-identical (the local entry).
+
+describe("access prompt — per-producer-kind location labels (ticket 71 AC-4)", () => {
+  it("dispatched workers resolve the local line — the map's local entry", () => {
+    assert.equal(
+      approvalLocationLineFor(APPROVAL_PRODUCER_KINDS.worker),
+      APPROVAL_LOCATION_LOCAL,
+    );
+  });
+
+  it("the verified remote worker kinds resolve the remote line", () => {
+    assert.equal(
+      approvalLocationLineFor(APPROVAL_PRODUCER_KINDS.computerWorker),
+      APPROVAL_LOCATION_REMOTE,
+    );
+    assert.equal(
+      approvalLocationLineFor(APPROVAL_PRODUCER_KINDS.browserWorker),
+      APPROVAL_LOCATION_REMOTE,
+    );
+  });
+
+  it("unknown and absent kinds fall back to the local line — never a remote claim", () => {
+    assert.equal(approvalLocationLineFor("cloud-agent"), APPROVAL_LOCATION_LOCAL);
+    assert.equal(approvalLocationLineFor(""), APPROVAL_LOCATION_LOCAL);
+    assert.equal(approvalLocationLineFor(undefined), APPROVAL_LOCATION_LOCAL);
+    assert.equal(approvalLocationLineFor(null), APPROVAL_LOCATION_LOCAL);
+  });
+
+  it("no remote line can render while only local kinds exist: the shipped prompt detail is unchanged", () => {
+    const question = accessPromptQuestion(ticket());
+    assert.ok(question.detail.includes(APPROVAL_LOCATION_LOCAL));
+    assert.ok(!question.detail.includes(APPROVAL_LOCATION_REMOTE));
+  });
+
+  it("an explicit remote producer kind renders the remote line in the prompt detail", () => {
+    const question = accessPromptQuestion(
+      ticket(),
+      APPROVAL_PRODUCER_KINDS.computerWorker,
+    );
+    assert.ok(question.detail.includes(APPROVAL_LOCATION_REMOTE));
+    assert.ok(!question.detail.includes(APPROVAL_LOCATION_LOCAL));
   });
 });

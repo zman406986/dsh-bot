@@ -53,8 +53,12 @@
  *   always-shaped answer that still arrives (constructed or queued) resolves
  *   as a plain one-shot allow without ever being recorded as a row. Consent
  *   always covers the exact target shown, never a class or prefix pattern.
- * - Location line: workers are local dsh child sessions, so every prompt
- *   detail carries the constant honest line "Runs on your computer.".
+ * - Location line: resolved from the ask's producer kind through the
+ *   per-producer-kind label map (ticket 71 AC-4, re-basing ticket 30's
+ *   constant line). Workers are local dsh child sessions, so every prompt
+ *   today renders the map's local entry "Runs on your computer."; a remote
+ *   line requires a verified remote producer kind, which no ask can carry
+ *   yet (ticket 71's capability gate).
  * - Clamped detail: the reason text is hard-cut at `APPROVAL_DETAIL_CLAMP_CHARS`
  *   with an explicit omission marker (report-clamp pattern). The target name
  *   is never truncated.
@@ -96,12 +100,67 @@ export const ACCESS_PROMPT_DENY = "Deny";
 export const ACCESS_PROMPT_DENY_DETAIL = "denied from the access prompt";
 
 /**
- * Constant location line on every prompt detail (ticket 30, design-17 §7
- * `approval.location.local`): workers are local dsh child sessions, so the
- * line is constant until a non-local producer kind ever lands (design-17
- * conflict 6).
+ * Location line for a LOCAL producer (ticket 30, design-17 §7
+ * `approval.location.local`): dispatched workers are local dsh child
+ * sessions. This constant is now the LOCAL ENTRY of the per-producer-kind
+ * label map below (ticket 71 AC-4, 2026-09-19 design; supersession recorded
+ * on ticket 30) — the honest default every unrecognized kind falls back to,
+ * so the map can never fabricate a remote claim for an unknown kind.
  */
 export const APPROVAL_LOCATION_LOCAL = "Runs on your computer.";
+
+/**
+ * Location line for a REMOTE producer (ticket 71 AC-4, adapted copy —
+ * design-17 §7 `approval.location.remote`): an action labeled as running on
+ * the product's computer (remote box). Unreachable today — the dsh host
+ * exposes no remote-execution face (ticket 71's AC-1 gate verdict,
+ * 2026-09-19) — the map carries it so the label becomes honest automatically
+ * if the host ever grows the seam.
+ */
+export const APPROVAL_LOCATION_REMOTE =
+  "Runs on the product's computer (remote box).";
+
+/**
+ * Producer kinds the location map admits (ticket 71 AC-4). `"worker"` is the
+ * only kind the relay's asks can have today — dispatched workers are the
+ * single producer (C15) and the roster wire ships exactly one kind. The
+ * computer/browser kinds name the reference's dedicated worker types; the map
+ * is capability-independent, so they resolve the remote line WITHOUT any host
+ * seam existing (no ask can carry them yet — naming, not claiming).
+ */
+export const APPROVAL_PRODUCER_KINDS = {
+  /** Dispatched worker: a local dsh child session. */
+  worker: "worker",
+  /** Reference's dedicated computer worker (no dsh seam — ticket 71 gate). */
+  computerWorker: "computer-worker",
+  /** Reference's dedicated browser worker (no dsh seam — ticket 71 gate). */
+  browserWorker: "browser-worker",
+} as const;
+
+/**
+ * Per-producer-kind location label (ticket 71 AC-4, capability-independent
+ * re-base of ticket 30's constant line): a pure kind→line map. Local kinds
+ * (and every unknown/unrecognized kind — the honest default) resolve the
+ * local line; only the verified remote worker kinds resolve the remote line,
+ * so no prompt or card can claim remote without a producer kind that is
+ * actually remote. Render homes (71's recorded design): the shipped prompt
+ * pathway resolves through this map below, and ticket 81's card contract
+ * carries the resolved label per card through its injectable `locationFor`
+ * hook (`src/client/approval-cards.ts`).
+ */
+export function approvalLocationLineFor(
+  producerKind: string | null | undefined,
+): string {
+  switch (producerKind) {
+    case APPROVAL_PRODUCER_KINDS.computerWorker:
+    case APPROVAL_PRODUCER_KINDS.browserWorker:
+      return APPROVAL_LOCATION_REMOTE;
+    default:
+      // "worker" and every unrecognized kind: the local line — never a
+      // remote claim for an unverified kind (71's honesty rider).
+      return APPROVAL_LOCATION_LOCAL;
+  }
+}
 
 /**
  * Copy surfaced when an explicit answer arrives for a ticket the relay has
@@ -230,21 +289,25 @@ export function isWildcardAccessTarget(target: string): boolean {
 /**
  * Build the structured user question for a pending access ask.
  * Question copy is the design-16 §6 template; the detail carries the
- * (clamped) reason plus the constant location line on every prompt
- * (ticket 30). Options: Allow / Always allow (this session) / Deny —
- * minus the always option when the target carries a pattern wildcard
+ * (clamped) reason plus the location line resolved from the ask's producer
+ * kind through the ticket-71 AC-4 label map (supersedes ticket 30's constant
+ * line — the dispatched-worker kind renders the same local entry, so shipped
+ * output is byte-identical). Options: Allow / Always allow (this session) /
+ * Deny — minus the always option when the target carries a pattern wildcard
  * (wildcard fence, ticket 30).
  */
-export function accessPromptQuestion(ticket: {
-  workerId: string;
-  requestId: string;
-  body: AccessRequestBody;
-}): AccessPromptQuestionLike {
+export function accessPromptQuestion(
+  ticket: {
+    workerId: string;
+    requestId: string;
+    body: AccessRequestBody;
+  },
+  producerKind: string = APPROVAL_PRODUCER_KINDS.worker,
+): AccessPromptQuestionLike {
   const reason = clampApprovalDetail(ticket.body.reason);
+  const locationLine = approvalLocationLineFor(producerKind);
   const detail =
-    reason.length > 0
-      ? `${reason}\n\n${APPROVAL_LOCATION_LOCAL}`
-      : APPROVAL_LOCATION_LOCAL;
+    reason.length > 0 ? `${reason}\n\n${locationLine}` : locationLine;
   return {
     id: accessPromptQuestionId(ticket.requestId),
     question: `Worker ${ticket.workerId} needs approval to ${describeAccessAction(ticket.body)}.`,
