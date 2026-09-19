@@ -163,3 +163,5 @@ clause should decide whether the flag flip satisfies it or the roster-keyed card
 ### 2026-09-19 — one-line note
 
 Mooted by 78 cutover (a44084a): capsule retired.
+
+### 2026-09-19 — live pass 4: the one live AC (capsule renders on that boot) is MOOT — the capsule was retired at the 78 cutover (a44084a); the elected root frame renders instead. Not exercised, not ticked; the launcher-script drift items remain this ticket's real scope. Stays open.

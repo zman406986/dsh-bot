@@ -123,3 +123,19 @@ cutover — a44084a / 94e6127 / c437ee8; nothing capsule-era remains to render
 against, so this ticket's rendering scope is entirely post-cutover.
 
 Status stays **open** (checkbox 4 + live lane).
+
+### 2026-09-19 — live pass 4 (`C:\Users\TZhen\Desktop\dsh-live-pass4-2026-09-19\`): what the one-flow boot could and could not show for this ticket
+
+- **Needs-you cards:** never fed — the pass's single trivial worker task ("wait ~20 s, then
+  reply done") asks no permission, and a permission-ASKING flow needs LLM legs that were out
+  of the one-flow budget. Honest absence held: no pending cards, no dead buttons.
+- **Worker-dispatch cards in the wrapper conversation:** UNOBSERVABLE this pass — the
+  shell's conversation seat crashed on session selection (new ticket 88) and abdicated to
+  the stock frame, where the flow ran and the STOCK tool rows rendered. First live render
+  of the cards awaits 88.
+- **Settings-card decision (the remaining open bullet): live evidence added** — the
+  elected frame DISPLACES the shipped settings UI (no settings affordance exists inside the
+  shell), so ticket 47's card is reachable only in the abdicated stock UI. That matches the
+  comment's "the frame displaces the settings UI at cutover, so the decision is live"; the
+  decision itself (re-home into our own settings surface vs stay a shipped-settings entry)
+  still needs the lane/human call. Stays open.

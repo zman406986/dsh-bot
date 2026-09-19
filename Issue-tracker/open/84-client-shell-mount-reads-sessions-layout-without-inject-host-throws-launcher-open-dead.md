@@ -124,3 +124,16 @@ and `sessions` have no such wrapper.
   pageerrors) still FAILS: the 78 cutover's no-priority `root` registration aborts the
   whole loader entry before any chip or page exists (fail-loud screen, no composer, no
   stock app). Stays `open/` on 85; this ticket's own mechanism needs no further work.
+
+### 2026-09-19 — live pass 4: second consecutive clean boot for this ticket's mechanism; the live AC's vehicle is now retired — closure recommendation for the tracker owner
+
+Pass 4 (`C:\Users\TZhen\Desktop\dsh-live-pass4-2026-09-19\`) booted HEAD `8d0d572` with the
+78 cutover live: the whole page error log contained ZERO `cannot get property … without
+inject` errors across boot, the onboarding walk, a session selection, a crash-abdication,
+and a reload — the declared `sessions`/`remote`/`conversation` reads and the wrapped
+`layout`/`settingsScope` watches all held under far more stress than the original AC's
+single click. The AC as written ("clicking the launcher chip opens the shell main page") is
+now untestable BY DESIGN: a44084a retired the launcher chip and 94e6127's root election
+makes the shell the client without any open affordance. Recommendation: close as
+moot-verified (mechanism proven passes 3+4; vehicle retired) — left `open/` for the owner's
+call per the no-forced-resolutions rule.

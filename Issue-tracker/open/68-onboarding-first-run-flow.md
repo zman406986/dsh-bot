@@ -181,3 +181,26 @@ Zero LLM traffic. AC 5 remains with the live lane once 85 lands.
 - The pane renders in the no-selection state only; a user who selects a session mid-flow
   leaves the flow open at the same beat (state, not persistence — by design, no
   step-persistence beyond the seen flag).
+
+### 2026-09-19 — live pass 4 (`C:\Users\TZhen\Desktop\dsh-live-pass4-2026-09-19\`, outside the repo): AC 5 walked green EXCEPT the seen-flag reload clause — suppression is RACY on fresh boot → NEW ticket 87; AC 5 stays unticked, ticket stays open on 87
+
+On a fresh throwaway profile boot (85 fixed, shell as root, zero pageerrors):
+
+- **First-run pane rendered in the no-selection state**: five beats, progress dots, 跳过 /
+  下一步 (`shots/01-boot.png`) — in-shell, token-styled, zh copy as built.
+- **Walked Next ×4 → beat 5** ("一切就绪", primary button 开始使用) **→ Get-started** →
+  settled no-selection copy (“选择一个调度会话以查看其工作。”), **no save-failed line**.
+- **The seen write landed and serves back**: `settings.yaml` gains
+  `multitask-dispatcher.onboarding.seen: true` (`host-settings-after.yaml`); describe
+  returns it (`rpc-settings-describe-ours.json`). The hazard's fallback (host-side schema
+  field) was NOT needed for the write.
+- **BUT reload #1 re-showed the flow at step 1** (`onboarding-reshowed-after-reload.json`);
+  two later fresh loads suppressed correctly. Intermittent → the hazard note's OTHER branch
+  came true in a form the ticket didn't predict: not a rejected write, a RACY READ.
+  Filed as **87** with the ruled-out causes (write ✓, serve ✓, no save-failed line) and the
+  remaining suspects (scope snapshot timing/normalization).
+- The "≥1 dispatcher session" suppression clause could not be isolated live (the sidebar's
+  old sessions all render the 状态不可用 unavailable copy — mirrors absent in a fresh
+  namespace — and the flow showed, consistent with the mirror rule working).
+- Per the ticket's own hazard ("check on the live pass that a seen flag survives an HMR
+  swap") the answer is: **sometimes not** → AC 5 stays unticked; 87 owns the fix.

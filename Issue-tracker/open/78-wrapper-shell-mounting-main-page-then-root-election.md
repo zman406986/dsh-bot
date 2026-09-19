@@ -214,3 +214,26 @@ timers armed at launch and verified in tasklist. Zero LLM traffic.
 ### 2026-09-19 — one-line note
 
 85 landed (a2c09ed) — ready for live pass 4.
+
+### 2026-09-19 — live pass 4 (`C:\Users\TZhen\Desktop\dsh-live-pass4-2026-09-19\`, outside the repo): the cutover's live half is MOSTLY proven — frame swap ✓, re-apply ✓, real-crash abdication ✓; the conversation seat crashed on selection → 88; stays open on 88
+
+- **Frame swap visually confirmed:** the shell IS the client —
+  `[data-slot="root"]` renders `multitask-dispatcher-shell` (85's -1 took the cell; chips
+  0/0; zero boot pageerrors; `shots/01-boot.png`). The no-selection seat rendered BOTH
+  states inside the elected frame (onboarding beats, then the settled copy — 68's walk).
+- **Re-apply (HMR-ish full reload, honestly labeled — NOT a settings-UI unload: the frame
+  displaces the shipped settings UI, so no unload/disable affordance exists):** reload
+  re-registered -1 cleanly, `shell:1`, no collision.
+- **Fallback-on-crash: ✓ proven by a REAL crash, not a synthetic injection** (a synthetic
+  render crash has no non-destructive driver seam). Selecting a session crashed the
+  conversation seat (`slot entry crashed in 'root': Minified React error #300`) and the
+  per-entry boundary abdicated our entry — the stock `pI_x6G_frame` retook the cell
+  (`shots/02-abdicated-stock-frame.png`). The failsafe works exactly as designed; the crash
+  itself is **88**.
+- **selectPanel harmlessness in both states:** untestable this pass — no debug seam to call
+  `ctx.layout.selectPanel` from the driver, and the crash removed the elected state before
+  the abdicated-state probe could matter. Recorded as not-observed, not as passing.
+- Checklist status: the three "What to do" items remain ticked (offline contracts); this
+  comment supersedes "awaiting live pass 3". **The ticket stays `open/` on 88**: with the
+  conversation seat crashing on selection, "shell IS the client" holds only until the first
+  click.

@@ -137,3 +137,17 @@ panels not individually expanded/verified). Remaining live ACs still want their 
 launcher-route boot; note for whoever runs it: the shell `main` page cannot open until
 ticket 84 lands, and the activated card-composition flip should be checked against the
 roster-keyed behavior flagged in ticket 44's pass-2 comment.
+
+### 2026-09-19 — live pass 4 (`C:\Users\TZhen\Desktop\dsh-live-pass4-2026-09-19\`): the boot-graph AC is proven live on the profile route; the composition ACs are capsule-era language
+
+- **Boot-graph/bundle AC (unticked above): PROVEN** — the served page's `__DSH_BOOT__`
+  entries carry `{"id":"dsh-multitask-dispatcher","url":"/plugins/??dsh-multitask-dispatcher/client.js&rev=…-48","inject":[renderer, locale],"external":["react","react/jsx-runtime"]}`
+  and the combo route served our client bundle (`boot-graph-row.json`); the module
+  materialized and its root registration won the cell. (Route note: this pass booted the
+  `multitask` PROFILE, not the `--patch` overlay route the AC's wording names — the
+  launcher route remains unexercised since the overlay route's drift is ticket 48's.)
+- **The dormant-composition and `/dispatcher-start`-toolview ACs are stale vehicle
+  language:** the dormant capsule composition was retired at the 78 cutover (a44084a), and
+  toolview slot entries render inside the elected frame's conversation — which crashed on
+  selection this pass (ticket 88). Left to this ticket's own reconciliation with the
+  cutover; commented, not ticked, not resolved here.
