@@ -852,23 +852,34 @@ async function activateAndSpawn(
   return { workerId, agent };
 }
 
-async function requestAccess(
+/**
+ * Fire a worker-side request_access. FINDING 4 contract (ticket 69): the
+ * tool call now PARKS until the ask settles, so this returns the settlement
+ * promise without awaiting it — the park and the prompt emission are
+ * synchronous inside the call; the settlement lands when the test answers
+ * the ask (or the armed timeout denies, or a settle clears the ticket).
+ * Await the returned promise after the answer.
+ */
+function requestAccess(
   ctx: ReturnType<typeof createFullCtx>,
   workerId: string,
   args: Record<string, unknown> = {},
 ): Promise<void> {
   const tool = ctx.tool("request_access");
   assert.ok(tool, "request_access must be registered after activation");
-  const value = (await tool.execute(
-    {
-      class: "tool",
-      target: "write_file",
-      reason: "need to write outside the workspace",
-      ...args,
-    },
-    { agent: { session: { id: workerId } } },
-  )) as { ok: boolean };
-  assert.equal(value.ok, true);
+  return tool
+    .execute(
+      {
+        class: "tool",
+        target: "write_file",
+        reason: "need to write outside the workspace",
+        ...args,
+      },
+      { agent: { session: { id: workerId } } },
+    )
+    .then((value) => {
+      assert.equal((value as { ok: boolean }).ok, true);
+    }) as Promise<void>;
 }
 
 describe("plugin apply — access prompts over the host seam", () => {
@@ -878,7 +889,7 @@ describe("plugin apply — access prompts over the host seam", () => {
     apply(ctx, { enabled: true });
     const { workerId } = await activateAndSpawn(ctx);
 
-    await requestAccess(ctx, workerId);
+    const settled = requestAccess(ctx, workerId);
 
     assert.equal(seam.asks.length, 1);
     const ask = seam.asks[0];
@@ -909,7 +920,7 @@ describe("plugin apply — access prompts over the host seam", () => {
     // Resolve the prompt so the relay's armed default timeout is cancelled
     // (no stray timer after the test).
     ask.resolve(allowAnswer(questionIdOf(ask)));
-    await tick();
+    await settled;
     await tick();
   });
 
@@ -918,10 +929,10 @@ describe("plugin apply — access prompts over the host seam", () => {
     const ctx = createFullCtx(seam);
     apply(ctx, { enabled: true });
     const { workerId } = await activateAndSpawn(ctx);
-    await requestAccess(ctx, workerId);
+    const settled = requestAccess(ctx, workerId);
 
     seam.asks[0]?.resolve(allowAnswer(questionIdOf(seam.asks[0])));
-    await tick();
+    await settled;
     await tick();
 
     assert.equal(ctx.sentMessages.length, 1);
@@ -937,10 +948,10 @@ describe("plugin apply — access prompts over the host seam", () => {
     const ctx = createFullCtx(seam);
     apply(ctx, { enabled: true });
     const { workerId } = await activateAndSpawn(ctx);
-    await requestAccess(ctx, workerId);
+    const settled = requestAccess(ctx, workerId);
 
     seam.asks[0]?.resolve(denyAnswer(questionIdOf(seam.asks[0])));
-    await tick();
+    await settled;
     await tick();
 
     assert.equal(ctx.sentMessages.length, 1);
@@ -956,7 +967,7 @@ describe("plugin apply — access prompts over the host seam", () => {
     const ctx = createFullCtx(seam);
     apply(ctx, { enabled: true, accessRequestTimeoutMs: 25 });
     const { workerId } = await activateAndSpawn(ctx);
-    await requestAccess(ctx, workerId);
+    const settled = requestAccess(ctx, workerId);
     assert.equal(ctx.sentMessages.length, 0);
 
     await new Promise((resolve) => setTimeout(resolve, 120));
@@ -970,7 +981,7 @@ describe("plugin apply — access prompts over the host seam", () => {
     // The user answers the stale prompt afterwards: the pump forwards, the
     // core relay no-ops it — never a second delivery.
     seam.asks[0]?.resolve(allowAnswer(questionIdOf(seam.asks[0])));
-    await tick();
+    await settled;
     await tick();
     assert.equal(ctx.sentMessages.length, 1);
   });
@@ -980,7 +991,7 @@ describe("plugin apply — access prompts over the host seam", () => {
     const ctx = createFullCtx(seam);
     apply(ctx, { enabled: true });
     const { workerId } = await activateAndSpawn(ctx);
-    await requestAccess(ctx, workerId);
+    const settled = requestAccess(ctx, workerId);
     assert.equal(seam.asks.length, 1);
 
     const ask = seam.asks[0];
@@ -990,14 +1001,15 @@ describe("plugin apply — access prompts over the host seam", () => {
         { id: questionIdOf(ask), selected: [ACCESS_PROMPT_ALWAYS_ALLOW] },
       ],
     });
-    await tick();
+    await settled;
     await tick();
     // This ask's own allow was delivered.
     assert.equal(ctx.sentMessages.length, 1);
 
     // A later ask with the same class+target hits the session row: delivered
     // immediately, never prompted (shipped policy no-op path).
-    await requestAccess(ctx, workerId);
+    const settled2 = requestAccess(ctx, workerId);
+    await settled2;
     assert.equal(seam.asks.length, 1);
     assert.equal(ctx.sentMessages.length, 2);
     assert.ok(ctx.sentMessages[1]?.text.includes("[Parent: access allowed]"));
@@ -1009,7 +1021,7 @@ describe("plugin apply — access prompts over the host seam", () => {
     apply(ctx, { enabled: true });
     const { workerId } = await activateAndSpawn(ctx);
 
-    await requestAccess(ctx, workerId, {
+    const settled = requestAccess(ctx, workerId, {
       class: "network",
       target: "gh-api*",
       reason: "reach the github api",
@@ -1030,14 +1042,14 @@ describe("plugin apply — access prompts over the host seam", () => {
         { id: questionIdOf(ask), selected: [ACCESS_PROMPT_ALWAYS_ALLOW] },
       ],
     });
-    await tick();
+    await settled;
     await tick();
     assert.equal(ctx.sentMessages.length, 1);
     assert.ok(ctx.sentMessages[0]?.text.includes("[Parent: access allowed]"));
 
     // No `gh-api*` row was stored: the prefix neighbour must prompt again,
     // where a stored pattern would have auto-allowed it silently.
-    await requestAccess(ctx, workerId, {
+    const settled2 = requestAccess(ctx, workerId, {
       class: "network",
       target: "gh-api-2",
       reason: "same class, neighbouring target",
@@ -1047,7 +1059,7 @@ describe("plugin apply — access prompts over the host seam", () => {
     assert.ok(neighbour);
     // Deny to cancel the relay's armed default timeout (test hygiene).
     neighbour.resolve(denyAnswer(questionIdOf(neighbour)));
-    await tick();
+    await settled2;
     await tick();
     assert.equal(ctx.sentMessages.length, 2);
     assert.ok(ctx.sentMessages[1]?.text.includes("[Parent: access denied]"));
@@ -1058,7 +1070,7 @@ describe("plugin apply — access prompts over the host seam", () => {
     const ctx = createFullCtx(seam);
     apply(ctx, { enabled: true });
     const { workerId, agent } = await activateAndSpawn(ctx);
-    await requestAccess(ctx, workerId);
+    const settled = requestAccess(ctx, workerId);
     const ask = seam.asks[0];
     assert.ok(ask);
     ask.resolve({
@@ -1066,7 +1078,7 @@ describe("plugin apply — access prompts over the host seam", () => {
         { id: questionIdOf(ask), selected: [ACCESS_PROMPT_ALWAYS_ALLOW] },
       ],
     });
-    await tick();
+    await settled;
     await tick();
 
     // Session ends and a new session activates in the same chat.
@@ -1081,13 +1093,13 @@ describe("plugin apply — access prompts over the host seam", () => {
 
     // The session row is gone: the same ask must prompt again. A leaked row
     // would auto-answer it with no new prompt.
-    await requestAccess(ctx, workerId);
+    const settled2 = requestAccess(ctx, workerId);
     assert.equal(seam.asks.length, 2);
     const second = seam.asks[1];
     assert.ok(second);
     // Deny to cancel the relay's armed default timeout (test hygiene).
     second.resolve(denyAnswer(questionIdOf(second)));
-    await tick();
+    await settled2;
     await tick();
     // One allow delivery (the first, remembered ask) + one deny delivery.
     assert.equal(ctx.sentMessages.length, 2);
@@ -1098,7 +1110,7 @@ describe("plugin apply — access prompts over the host seam", () => {
     const ctx = createFullCtx(seam);
     apply(ctx, { enabled: true, accessRequestTimeoutMs: 25 });
     const { workerId } = await activateAndSpawn(ctx);
-    await requestAccess(ctx, workerId);
+    const settled = requestAccess(ctx, workerId);
     assert.equal(ctx.sentMessages.length, 0);
 
     await new Promise((resolve) => setTimeout(resolve, 120));
@@ -1109,7 +1121,7 @@ describe("plugin apply — access prompts over the host seam", () => {
     const ask = seam.asks[0];
     assert.ok(ask);
     ask.resolve(allowAnswer(questionIdOf(ask)));
-    await tick();
+    await settled;
     await tick();
     assert.equal(ctx.sentMessages.length, 1);
     assert.ok(
@@ -1122,7 +1134,7 @@ describe("plugin apply — access prompts over the host seam", () => {
     const ctx = createFullCtx(seam);
     apply(ctx, { enabled: true });
     const { workerId } = await activateAndSpawn(ctx);
-    await requestAccess(ctx, workerId, {
+    const settled = requestAccess(ctx, workerId, {
       class: "credential",
       target: "API_TOKEN",
       reason: "need the API token",
@@ -1134,7 +1146,7 @@ describe("plugin apply — access prompts over the host seam", () => {
     assert.ok(ask);
     assert.ok(JSON.stringify(ask.request).includes("API_TOKEN"));
     ask.resolve(allowAnswer(questionIdOf(ask)));
-    await tick();
+    await settled;
     await tick();
 
     // The worker got the allow; the user-facing post-decision notice carries
@@ -1152,7 +1164,7 @@ describe("plugin apply — access prompts over the host seam", () => {
     const ctx = createFullCtx(seam);
     apply(ctx, { enabled: true });
     const { workerId } = await activateAndSpawn(ctx);
-    await requestAccess(ctx, workerId);
+    const settled = requestAccess(ctx, workerId);
     await tick();
 
     // The prompt owns the ask — the conversational wake carries no ask copy.
@@ -1164,7 +1176,7 @@ describe("plugin apply — access prompts over the host seam", () => {
     const ask = seam.asks[0];
     assert.ok(ask);
     ask.resolve(allowAnswer(questionIdOf(ask)));
-    await tick();
+    await settled;
     await tick();
   });
 
@@ -1172,7 +1184,7 @@ describe("plugin apply — access prompts over the host seam", () => {
     const ctx = createFullCtx(createFailingUserQuestions());
     apply(ctx, { enabled: true, accessRequestTimeoutMs: 25 });
     const { workerId } = await activateAndSpawn(ctx);
-    await requestAccess(ctx, workerId);
+    const settled = requestAccess(ctx, workerId);
     await tick();
     await tick();
 
@@ -1186,13 +1198,14 @@ describe("plugin apply — access prompts over the host seam", () => {
     await new Promise((resolve) => setTimeout(resolve, 120));
     assert.equal(ctx.sentMessages.length, 1);
     assert.ok(ctx.sentMessages[0]?.text.includes("timed out"));
+    await settled;
   });
 
   it("no seam configured: conversational relay stays the ask surface", async () => {
     const ctx = createFullCtx(undefined);
     apply(ctx, { enabled: true, accessRequestTimeoutMs: 25 });
     const { workerId } = await activateAndSpawn(ctx);
-    await requestAccess(ctx, workerId);
+    const settled = requestAccess(ctx, workerId);
     await tick();
 
     // Never suppressed when the prompt seam is absent (ticket 23 fallback).
@@ -1203,6 +1216,7 @@ describe("plugin apply — access prompts over the host seam", () => {
     await new Promise((resolve) => setTimeout(resolve, 120));
     assert.equal(ctx.sentMessages.length, 1);
     assert.ok(ctx.sentMessages[0]?.text.includes("timed out"));
+    await settled;
   });
 
   it("deactivation abandons the outstanding prompt; the ticket clears on settle", async () => {
@@ -1210,7 +1224,7 @@ describe("plugin apply — access prompts over the host seam", () => {
     const ctx = createFullCtx(seam);
     apply(ctx, { enabled: true, accessRequestTimeoutMs: 40 });
     const { workerId, agent } = await activateAndSpawn(ctx);
-    await requestAccess(ctx, workerId);
+    const settled = requestAccess(ctx, workerId);
     assert.equal(seam.asks.length, 1);
 
     // Session ends (agent/disposed) → the pump abandons the prompt.
@@ -1225,6 +1239,7 @@ describe("plugin apply — access prompts over the host seam", () => {
       stopReason: "completed",
       lastAssistantMessage: [{ type: "text", text: "done" }],
     });
+    await settled;
     await tick();
     assert.equal(ctx.sentMessages.length, 0);
   });
@@ -1234,7 +1249,7 @@ describe("plugin apply — access prompts over the host seam", () => {
     const ctx = createFullCtx(seam);
     apply(ctx, { enabled: true, accessRequestTimeoutMs: 5_000 });
     const { workerId, agent } = await activateAndSpawn(ctx);
-    await requestAccess(ctx, workerId);
+    const settled = requestAccess(ctx, workerId);
     assert.equal(seam.asks.length, 1);
 
     ctx.fire("agent/disposed", { agent });
@@ -1258,7 +1273,7 @@ describe("plugin apply — access prompts over the host seam", () => {
     // Answer the fresh prompt so the relay ticket resolves and its armed
     // timeout is cancelled (no stray timer after the test).
     second.resolve(allowAnswer(questionIdOf(second)));
-    await tick();
+    await settled;
     await tick();
     assert.equal(ctx.sentMessages.length, 1);
   });

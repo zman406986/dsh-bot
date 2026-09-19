@@ -532,18 +532,28 @@ describe("multi-dispatcher — scoped surfaces (ADR-0019)", () => {
 });
 
 describe("multi-dispatcher — per-session prompts and policy rows (ADR-0019)", () => {
-  /** Fire a worker-side request_access from `workerId` through the global tool. */
-  async function ask(
+  /**
+   * Fire a worker-side request_access from `workerId` through the global
+   * tool. FINDING 4 contract (ticket 69): the tool call PARKS until the ask
+   * settles, so this returns the settlement promise without awaiting it —
+   * the park and the prompt emission are synchronous inside the call. Await
+   * the returned promise after the answer (or the armed timeout deny).
+   */
+  function ask(
     multi: ReturnType<typeof createMultiCtx>,
     workerId: string,
     target = "write_file",
   ): Promise<void> {
     const tool = multi.ctx.globalTool("request_access");
     assert.ok(tool);
-    await tool.execute(
-      { class: "tool", target, reason: "need it to do the work" },
-      { sessionId: workerId },
-    );
+    return tool
+      .execute(
+        { class: "tool", target, reason: "need it to do the work" },
+        { sessionId: workerId },
+      )
+      .then((value) => {
+        assert.equal((value as { ok: boolean }).ok, true);
+      }) as Promise<void>;
   }
 
   function alwaysAnswer(asked: CapturedAsk): void {
@@ -570,8 +580,8 @@ describe("multi-dispatcher — per-session prompts and policy rows (ADR-0019)", 
     const spawnB = await spawnVia(b, "k-b");
     assert.ok(spawnA.ok && spawnB.ok);
 
-    await ask(multi, spawnA.worker_id as string);
-    await ask(multi, spawnB.worker_id as string);
+    const settledA = ask(multi, spawnA.worker_id as string);
+    const settledB = ask(multi, spawnB.worker_id as string);
     assert.equal(seam.asks.length, 2);
     assert.deepEqual(
       seam.asks.map((captured) => captured.agentSessionId).sort(),
@@ -595,8 +605,11 @@ describe("multi-dispatcher — per-session prompts and policy rows (ADR-0019)", 
     // Hygiene: let the armed relay timeouts deny both asks (no real 120 s
     // timer outlives the test). B's deny reaches worker B; A's deny has no
     // bound parent left to deliver through (A is deactivated — the relay's
-    // documented best-effort delivery) so only B's lands.
+    // documented best-effort delivery) so only B's lands. The parked tool
+    // calls settle on those denies (FINDING 4: the ask holds the tool call).
     await new Promise((resolve) => setTimeout(resolve, 120));
+    await settledA;
+    await settledB;
     assert.equal(multi.ctx.sentMessages.length, 1);
     assert.ok(multi.ctx.sentMessages[0]?.targetId === spawnB.worker_id);
   });
@@ -614,8 +627,8 @@ describe("multi-dispatcher — per-session prompts and policy rows (ADR-0019)", 
     const spawnA = await spawnVia(a, "k-a");
     const spawnB = await spawnVia(b, "k-b");
     assert.ok(spawnA.ok && spawnB.ok);
-    await ask(multi, spawnA.worker_id as string);
-    await ask(multi, spawnB.worker_id as string);
+    const settledA = ask(multi, spawnA.worker_id as string);
+    const settledB = ask(multi, spawnB.worker_id as string);
     assert.equal(seam.asks.length, 2);
     const askA = seam.asks.find((captured) => captured.agentSessionId === "s-a");
     const askB = seam.asks.find((captured) => captured.agentSessionId === "s-b");
@@ -623,7 +636,8 @@ describe("multi-dispatcher — per-session prompts and policy rows (ADR-0019)", 
     assert.ok(askB);
     alwaysAnswer(askA);
     alwaysAnswer(askB);
-    await tick();
+    await settledA;
+    await settledB;
     await tick();
     // Each ask's own allow was delivered through its own parent.
     assert.equal(multi.ctx.sentMessages.length, 2);
@@ -636,7 +650,8 @@ describe("multi-dispatcher — per-session prompts and policy rows (ADR-0019)", 
     // no prompt, direct delivery.
     const spawnB2 = await spawnVia(b, "k-b2");
     assert.ok(spawnB2.ok);
-    await ask(multi, spawnB2.worker_id as string);
+    const settledB2 = ask(multi, spawnB2.worker_id as string);
+    await settledB2;
     await tick();
     assert.equal(seam.asks.length, 2, "B's row still auto-answers");
     assert.equal(multi.ctx.sentMessages.length, 3);
@@ -650,7 +665,7 @@ describe("multi-dispatcher — per-session prompts and policy rows (ADR-0019)", 
     await activate(multi, a);
     const spawnA2 = await spawnVia(a, "k-a2");
     assert.ok(spawnA2.ok);
-    await ask(multi, spawnA2.worker_id as string);
+    const settledA2 = ask(multi, spawnA2.worker_id as string);
     await tick();
     assert.equal(
       seam.asks.length,
@@ -670,7 +685,7 @@ describe("multi-dispatcher — per-session prompts and policy rows (ADR-0019)", 
         },
       ],
     });
-    await tick();
+    await settledA2;
     await tick();
   });
 });

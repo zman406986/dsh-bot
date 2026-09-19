@@ -1329,13 +1329,19 @@ describe("roster snapshot — plugin publishes through the settings namespace", 
 
     // The worker asks for access: the relay parks a ticket (core observer)
     // and the plugin republishes the snapshot carrying the blocked marker.
+    // FINDING 4 (ticket 69): the tool call parks until the ask settles, so
+    // fire it and resolve below once the marker is asserted.
     const access = ctx.tool("request_access");
     assert.ok(access);
-    const asked = (await access.execute(
-      { class: "tool", target: "edit_file", reason: "need to edit files" },
-      { agent: { session: { id: spawned.worker_id } } },
-    )) as { ok: boolean };
-    assert.equal(asked.ok, true);
+    const settled = access
+      .execute(
+        { class: "tool", target: "edit_file", reason: "need to edit files" },
+        { agent: { session: { id: spawned.worker_id } } },
+      )
+      .then((value) => {
+        assert.equal((value as { ok: boolean }).ok, true);
+      }) as Promise<void>;
+    await flushActivation();
 
     assert.equal(updates.length, afterSpawn + 1);
     const latest = (updates.at(-1) as Record<string, unknown>)[
@@ -1355,6 +1361,17 @@ describe("roster snapshot — plugin publishes through the settings namespace", 
       "class",
       "target",
     ]);
+
+    // Test hygiene: the parked tool call settles when the ask leaves the
+    // relay — fire the worker's settle (the B-4 event that used to EAT the
+    // ask; here the ask is still parked, so the settle clears it and the
+    // tool call resolves instead of outliving the test).
+    ctx.fire("subagent/end", {
+      id: spawned.worker_id,
+      stopReason: "completed",
+      lastAssistantMessage: [{ type: "text", text: "done" }],
+    });
+    await settled;
   });
 
   it("non-activated sessions never publish: transitions gate on the dispatcher session", () => {
