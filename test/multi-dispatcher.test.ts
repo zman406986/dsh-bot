@@ -9,6 +9,12 @@
  * apply(), the real CordisDshHost, and the real Multitask core. No network,
  * no LLM, no running dsh.
  *
+ * Fake-vs-host (ticket 93): the settings-provider fake models the shipped
+ * scope contract — `register(ns, schema, options?)` returns the owner scope
+ * (`@deepseek-ai/dsh-settings/lib/index.js:281-315`) while
+ * `installSection(...)` returns VOID (`:327-343`;
+ * `lib/types/index.d.ts:228`).
+ *
  * Pinned here (ticket AC 5): a second dispatcher session's tools never
  * appear in the first's surface; handlers route to their own session's
  * state; the same model-authored stream_key in two sessions does not

@@ -14,6 +14,12 @@
  * `tools.register` throw on a duplicate name with the shipped wording
  * (`@deepseek-ai/dsh-commands/lib/index.js:82`,
  * `@deepseek-ai/dsh-tools/lib/index.js:2538`).
+ *
+ * Fake-vs-host (ticket 93): the settings-provider fake models the shipped
+ * scope contract — `register(ns, schema, options?)` returns the owner scope
+ * (`@deepseek-ai/dsh-settings/lib/index.js:281-315`) while
+ * `installSection(...)` returns VOID (`:327-343`;
+ * `lib/types/index.d.ts:228`).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";

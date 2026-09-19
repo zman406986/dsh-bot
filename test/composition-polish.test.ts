@@ -12,6 +12,12 @@
  * `@deepseek-ai/dsh-tools/lib/index.js:2538`) — the dormant-registration
  * matrix below must hold under the real fail-loud registries.
  *
+ * Fake-vs-host (ticket 93): the fake settings provider models the shipped
+ * scope contract — `register(ns, schema, options?)` returns the owner scope
+ * (`@deepseek-ai/dsh-settings/lib/index.js:281-315`) while
+ * `installSection(...)` returns VOID (`:327-343`;
+ * `lib/types/index.d.ts:228`).
+ *
  * Four composition contracts:
  * 1. **Activation copy** — the presence hint is appended exactly once to the
  *    success copy, and the host copy and the client locale faces stay one
