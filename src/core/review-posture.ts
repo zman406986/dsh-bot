@@ -132,6 +132,20 @@ export interface ReviewPostureTable {
  * §2): posture rows enter only through `set()` — via Multitask APIs (tests
  * now; any real seeder is a human decision) — and the shipped posture is
  * EMPTY, so un-configured behavior is byte-identical.
+ *
+ * The empty default is DELIBERATE, ruled 2026-09-19 on ticket 69 Q1
+ * (overnight dispatched ruling, subject to human reversal): a non-empty
+ * shipped default or a Config/settings-seeded posture would auto-answer
+ * access prompts without an explicit user act. That contradicts ADR-0018's
+ * exception U-D (no persisted rules, no settings-managed controller) and
+ * ADR-0011's "consent can never silently widen"; it is also invented policy,
+ * since the reference's classifier decision inputs were never recovered
+ * (research depth limit). Posture content therefore enters only through an
+ * explicit in-session act (session-scope rows, wildcard-fenced, cleared with
+ * the session). Any future non-empty default or Config seeder is a U-D
+ * amendment and needs a human signature first. The `profile` scope slot
+ * exists for consent-table shape parity and is cross-session by nature —
+ * seeding it is the same U-D amendment.
  */
 export function createReviewPostureTable(): ReviewPostureTable {
   const rows = new Map<string, ReviewPostureEntry>();

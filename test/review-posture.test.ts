@@ -402,6 +402,10 @@ describe("review posture — composed after the consent table (chunk A wiring)",
 
   it("empty posture: park, wake, and armed timeout are byte-identical to shipped (A2)", async () => {
     const { host, multitask, scheduler } = await setupCore();
+    // Q1 ruled 2026-09-19 (overnight dispatched ruling): the shipped posture
+    // stays EMPTY — a freshly composed core carries no rows and there is no
+    // seed parameter (a Config-seeded posture would be a U-D amendment).
+    assert.equal(multitask.reviewPosture.list().length, 0);
     const workerId = await spawnRunning(multitask, "session-1", "todo-1", "W");
 
     host.fireAccessRequest(accessEvent(workerId));

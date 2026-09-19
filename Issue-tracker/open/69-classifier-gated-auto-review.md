@@ -2,6 +2,10 @@
 
 **Status:** open
 **Labels:** ready-for-agent
+**Q1:** ruled 2026-09-19 (overnight dispatched ruling, agent — subject to human reversal): the
+shipped default posture stays **EMPTY**; no Config/settings-seeded posture. Ruled by an autonomous
+agent, not a human signature. Evidence + reversal path in the "Q1 ruled" comment at the end of
+this file.
 **Blocked by:** none — 67 resolved (ADR-0020); the 72 clause resolved by 76 (relay keying DID change: per-session policy rows + per-session prompt pump landed — the design incorporates it; see the 2026-09-19 triage comment). Rendering home 81 depends on THIS ticket's design, not the reverse.
 **Related:** ADR-0018 (in scope: "classifier-gated auto-review"; exception U-D), `docs/research/always-on-dispatcher-behavior.md` area 6, 30 (the shipped session-scoped always-allow + prompt UX), 13/23 (access relay + prompt pump), ADR-0008
 
@@ -513,3 +517,112 @@ round-trip), L2, L3, L4 — untouched, still the 45/33 lane's. The offline pin p
 composition's data path, not that the live slot declaration / React mount behaves; the React
 render path with a fed store is still unpinned (`test/client-approval-pane.test.ts:262-274`'s
 hooks-need-React note stands).
+
+### 2026-09-19 — agent (Q1 RULED: shipped posture stays EMPTY; no Config-seeded posture)
+
+**This is an overnight dispatched ruling by an autonomous agent, not a human signature.** The
+human delegated judgement calls for the unattended session ("don't ask me anything, trust your
+judgement") and is away; the ruling below is recorded so it can be reversed with a signature
+rather than re-derived. Q1 is hereby ticked as ruled (header field added).
+
+**The question** (§6 Q1, verbatim): "Should any non-empty default/Config-seeded posture ever
+ship?" — i.e. should the review posture the mechanism reads be pre-armed at construction or from
+plugin Config, so some access classes auto-answer without the user having acted?
+
+**Ruling — NO, on both halves:**
+1. **Shipped default stays EMPTY.** No rows exist at construction; posture content enters only
+   through an explicit, in-session user act (session-scope rows, wildcard-fenced, cleared with
+   the session).
+2. **No Config/settings-seeded posture, ever, without amending ADR-0018.** A Config field
+   declaring posture rows is a persisted, settings-managed rule store — exactly what exception
+   **U-D** excludes. This is not a new deviation needing a new exception-list entry: U-D already
+   covers it, so the answer is "the exception list already forbids it", not "let's add a rule".
+
+**Evidence consulted (file:line)**
+
+- `docs/adr/0018-imitate-reference-in-entirety-exception-list.md:16` — "classifier-gated
+  auto-review" is **in scope, formerly excluded**: the mechanism is owed, and it shipped
+  (`src/core/review-posture.ts`, `src/core/tools.ts:288-331`). The imitation duty is discharged
+  by the mechanism being present and consent-gated, not by shipping pre-armed content.
+- `docs/adr/0018-imitate-reference-in-entirety-exception-list.md:21` — "This list is exhaustive;
+  anything not on it is imitated" (the master rule).
+- `docs/adr/0018-imitate-reference-in-entirety-exception-list.md:37` — **U-D**: "'Always allow'
+  approval rules are session-scoped, not persisted; no settings-managed rule store, no dedicated
+  local tool-permission controller." A Config-seeded posture is the excluded thing by name.
+- `docs/research/always-on-dispatcher-behavior.md:51` — the reference's card anatomy carries the
+  always-allow choice as a **choice on a card** (an explicit user act); no pre-seeded rule set is
+  recorded anywhere in the notes. The classifier is described as deciding *what pauses*, not as
+  shipping an allow-list.
+- `docs/research/always-on-dispatcher-behavior.md:104-105` — recorded **depth limit**: the note
+  is "breadth over depth", approval flows "covered shallowly". Ticket 69's Design §1 already
+  states the classifier's decision INPUTS "were not recovered and are not invented here". A
+  non-empty default would therefore be *invented* reference policy — the one thing the research
+  discipline forbids.
+- `docs/research/reference-architecture-patterns.md:70` — "Auto-review: blocked actions raise
+  user-facing approval cards; worker escalates by retrying the same tool… **the human is the
+  decider**." The reference's default is to route to the human.
+- `docs/research/reference-agent-lifecycle.md:42` — "retire the session — **expire auto-review
+  approvals**…". The reference's approval state is session-lifetime-bound; a pre-armed posture
+  that survives sessions is not the reference's model either.
+- `src/core/access-relay.ts:22-26` — shipped consent seed is EMPTY: "Every class asks… No
+  `allow *` in the shipped seed." A non-empty posture default would be the *only* auto-answering
+  surface in the shipped product, with no counterpart in the consent table it composes after.
+- `src/core/review-posture.ts` (`createReviewPostureTable`) — no seed parameter by design;
+  composed after the consent table at `src/core/multitask.ts:341-360`, so a posture row can only
+  ever answer a consent **"ask"** miss.
+- `test/review-posture.test.ts` — "consent deny beats posture allow" / "consent allow beats
+  posture deny" (A1's never-override-an-explicit-deny order) and "empty posture always asks
+  (shipped posture is EMPTY)" are already pinned; this pass adds a composition-level pin in the
+  A2 test (`multitask.reviewPosture.list().length === 0` on a freshly composed core).
+- `docs/adr/0011-approval-session-scope-always-allow-fenced-option-set-draft-nonhuman-approved.md:13`
+  — "**Profile/preset writes are deliberately out of scope** (consent trap)"; and its
+  Consequences: "**Consent can never silently widen**: the remembered artifact is (session,
+  class, exact target)". A non-empty shipped default widens consent with **no user act at all** —
+  a direct contradiction of the shipped consent model and its copy.
+- `src/adapter/access-prompt.ts:30-58` — shipped prompt copy/options model the same boundary
+  (session-scope only; "always" never outlives the session). Nothing shipped promises or implies
+  a pre-approved class.
+
+**Reasoning (why the evidence lands here, and what the steelman was)**
+
+The strongest argument *for* a non-empty default is that the reference's classifier presumably
+lets safe actions run without asking, so an empty posture looks like asking the human more than
+the reference does. That argument fails on two independent grounds. First, we do not know what
+the reference's classifier allows — its inputs were never recovered (`always-on-dispatcher-
+behavior.md:104-105`), so any default we shipped would be our invention wearing the reference's
+name. Second, our architecture never had a "silent action" to suppress: a worker must raise an
+explicit structured ask (ADR-0008), and a posture **allow** answers an ask the worker already
+raised — it does not suppress one. So the honest role of the posture is policy *answering*, and
+answering with a policy the user never stated is precisely the "silent widen" that ADR-0011
+forbids and U-D excludes. Where the reference does pre-allow something (a saved rule), it is the
+result of a user clicking "always allow" — an explicit act, which is exactly the path we keep
+open. Finally, the imitation rule is satisfied by the mechanism: ADR-0018 names the area in
+scope and the table, the consent-miss composition, the deny copy, the dispatch gate, and the
+wildcard fence all shipped; a pre-armed policy is content, not mechanism.
+
+**Reversal path (deliberately cheap in this direction)**
+
+- To allow posture *content* later, the smallest step needs no ADR change and no migration: an
+  explicit in-session act (e.g. an "always allow this rule" choice on a card) writing a
+  session-scope row — the shape the table already supports and tests. Nothing is persisted, so
+  seeding later breaks no one.
+- To ship a **non-empty default or Config-seeded posture**, a human must amend ADR-0018's
+  exception list (U-D) with a signature, then add the Config field and its seeder; the reversal
+  is a code change plus a re-rule, not a data migration.
+- Either direction is safe to reverse; the reverse direction (shipping a pre-armed policy now and
+  walking it back after it auto-answered real prompts) is not, because answers already delivered
+  cannot be un-delivered.
+
+**Residual uncertainty (recorded honestly)**
+
+We cannot prove the reference ships no pre-armed allow policy — the notes never walked its rule
+store's initial contents (`always-on-dispatcher-behavior.md:105`). If a future observation shows
+the reference pre-arms something, the correct response is still not "seed ours": it is to record
+the finding and let a human amend U-D, because U-D (session-scoped, never persisted) is itself a
+human-accepted deviation.
+
+**Changes made by this ruling (smallest correct):**
+`src/core/review-posture.ts` — the `createReviewPostureTable` doc comment now records the ruled
+empty default, the reason, and that any seeder is a U-D amendment; `test/review-posture.test.ts`
+— the A2 test pins the empty posture at composition level. No behavior change, no new field, no
+new ticket (nothing is implied that is not already covered by chunk A/L-lane ACs).
