@@ -227,6 +227,124 @@ describe("Q2 offline half: gated dispatch, NO answerer → honest refusal, never
   });
 });
 
+/**
+ * FINDING 3 (live pass 5 Session B-3, ticket 33's record): an unanswered
+ * host approval ask WEDGED a dispatcher turn — the Q2 pins above assume the
+ * service RETURNS an outcome, but live the answerer can be absent-and-silent
+ * and the await had no time bound. These pins lock the bounded wait: the
+ * ADR-0008 deadline (the relay's unanswered-ask semantics, injectable
+ * `timeoutMs`, default `DEFAULT_ACCESS_TIMEOUT_MS`) collapses a silent
+ * answerer into the seam's EXISTING fail-closed `unavailable` refusal — the
+ * same refusal the Q2 pins already prove settles the turn honestly
+ * (`auto-review-refused`, durable in the spawn tool result; dispatch
+ * approvals carry no approval-feed entry — the relay feed holds access asks
+ * only — so the gate's refusal record IS the established record).
+ */
+describe("deadline (FINDING 3): an unanswered ctx.approval ask cannot wedge the turn", () => {
+  const REQUEST = { title: "Summarize RFCs", streamKey: "s-1" };
+
+  /** An answerer that takes the ask and never answers (the live B-3 shape). */
+  function neverReturningService(log?: Array<unknown>) {
+    return {
+      request: async (req: unknown) => {
+        log?.push(req);
+        return new Promise(() => {});
+      },
+    };
+  }
+
+  it(
+    "an ask the answerer NEVER returns refuses at the deadline — the existing fail-closed outcome",
+    { timeout: 2_000 },
+    async () => {
+      const asks: Array<unknown> = [];
+      const seam = createDispatchApprovalSeam({
+        getApproval: () => neverReturningService(asks),
+        getAgent: () => ({ session: { id: "session-1" } }),
+        timeoutMs: 5, // injectable: no real waiting
+      });
+      // The await itself is the no-wedge assertion.
+      assert.equal(await seam(REQUEST), "unavailable");
+      assert.equal(
+        asks.length,
+        1,
+        "the ask WAS raised — the deadline fired, not an early degradation",
+      );
+    },
+  );
+
+  it(
+    "end to end: a gated spawn whose ask never returns refuses honestly at the deadline — no host spawn, turn settles",
+    { timeout: 2_000 },
+    async () => {
+      const seam = createDispatchApprovalSeam({
+        getApproval: () => neverReturningService(),
+        getAgent: () => ({ session: { id: "session-1" } }),
+        timeoutMs: 5,
+      });
+      const { host, tools } = setup(seam);
+      const result = (await spawnTool(tools).execute({
+        stream_key: "s-1",
+        title: "Summarize RFCs",
+        prompt: "Read and summarize the three auth RFCs.",
+      })) as SpawnWorkerToolResult;
+      assert.ok(!result.ok);
+      if (result.ok) return;
+      assert.equal(result.reason, "auto-review-refused");
+      assert.ok(
+        result.detail.includes("unavailable"),
+        "the durable refusal record names the fail-closed outcome",
+      );
+      assert.equal(host.spawnCalls.length, 0, "no host spawn");
+    },
+  );
+
+  it("a service that answers BEFORE the deadline is unchanged (existing pins' behavior)", async () => {
+    const seam = createDispatchApprovalSeam({
+      getApproval: () => ({ request: async () => "allowed-once" }),
+      getAgent: () => ({ session: { id: "session-1" } }),
+      timeoutMs: 30_000,
+    });
+    assert.equal(await seam(REQUEST), "allowed-once");
+  });
+
+  it("a service that REJECTS after the deadline is harmless (no unhandled rejection surfaces)", async () => {
+    const seam = createDispatchApprovalSeam({
+      getApproval: () => ({
+        request: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          throw new Error("waterfall collapsed late");
+        },
+      }),
+      getAgent: () => ({ session: { id: "session-1" } }),
+      timeoutMs: 5,
+    });
+    assert.equal(await seam(REQUEST), "unavailable");
+    // Let the late rejection fire; the node:test runner fails the process on
+    // an unhandled rejection, so reaching here green IS the assertion.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  });
+
+  it("the deadline default is the ADR-0008 constant, not an invented policy (source pin)", () => {
+    // The behavior pins drive `createDispatchApprovalSeam` with an injected
+    // short timeoutMs, so they cannot see which constant the production
+    // default resolves to. This pin is the composition-polish idiom: source
+    // read, comments stripped, the ADR-0008 constant must be the fallback.
+    const raw = readFileSync(
+      new URL("../src/adapter/dispatch-approval.ts", import.meta.url),
+      "utf8",
+    );
+    const withoutComments = raw
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+    assert.ok(
+      withoutComments.includes("DEFAULT_ACCESS_TIMEOUT_MS"),
+      "the seam's deadline default must be the relay's ADR-0008 constant " +
+        "(DEFAULT_ACCESS_TIMEOUT_MS) — an invented value must fail here",
+    );
+  });
+});
+
 describe("plugin wiring: dispatchApprovalSeamFor — apply()'s own seam over the injected ctx.approval", () => {
   const AGENT = { session: { id: "session-1" }, followup() {} };
   const HOST = { parentAgentOf: () => AGENT };
