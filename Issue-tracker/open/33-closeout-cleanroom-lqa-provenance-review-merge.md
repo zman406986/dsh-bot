@@ -620,3 +620,6 @@ only adds the pass-5 trail the umbrella was owed.
   delete, do not blindly delete); README thin vs PRD; no CHANGELOG; the
   `test` script compiles everything under the client tsconfig (possible
   masking of server-side type errors).
+
+### 2026-09-19 — evidence-folder cleanup (desktop)
+At the human's request the superseded live-pass artifact folders were deleted from the Desktop: `dsh-live-pass2-2026-09-19`, `dsh-live-pass3-2026-09-19`, `dsh-live-repass3-2026-09-18`, `dsh-live-ticket45-2026-09-19`, `dsh-live-fixes-2026-09-19` (~96 MB; the fixes folder held harness recon copies only, never evidence). Any ticket citation pointing into those five folders is now a dead path — the recorded results stand as written, but the raw artifacts are gone. Still on disk and current: `C:\Users\TZhen\Desktop\dsh-live-pass4-2026-09-19\` and `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-19\` (boot recipe + Session A evidence; see the pass-5 handover above).
