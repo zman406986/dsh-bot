@@ -367,6 +367,16 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
       "settings.card.save",
       "settings.card.title",
       "settings.card.unsaved",
+      // Ticket 81 (ADR-0020 slice 5): the approval cards' own chrome (the
+      // option labels, location line, expired copy, and secret-stored
+      // reassurance ride the projections as ticket 30's shipped copy —
+      // never re-keyed here) plus the dispatch card's gate label.
+      "shell.approval.failed",
+      "shell.approval.no-channel",
+      "shell.approval.secret-promise",
+      "shell.approval.submitted",
+      "shell.approval.target",
+      "shell.approval.unavailable",
       // Ticket 77 (ADR-0020 slice 1): the wrapper shell's chrome copy.
       // Ticket 80 (ADR-0020 slice 4): the conversation pane's copy.
       "shell.conv.attachment-only",
@@ -385,6 +395,7 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
       "shell.conv.waiting",
       "shell.conv.working",
       "shell.conversation.pending",
+      "shell.dispatch.gating",
       "shell.empty",
       "shell.noselection",
       // Ticket 68 (ADR-0018 in-scope area): the first-run onboarding beats.

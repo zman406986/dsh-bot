@@ -42,6 +42,11 @@ import { useSyncExternalStore } from "react";
 import type { JSX } from "react";
 import type { TranslateFn } from "./overlay.js";
 import { TOOLVIEW_DEGRADED_KEY, type ToolviewModel } from "./toolviews.js";
+import {
+  createApprovalCardsSection,
+  DispatchCardView,
+  type ApprovalCardsSeat,
+} from "./approval-pane.js";
 import type {
   ConversationItem,
   ConversationStore,
@@ -287,12 +292,20 @@ function Item(props: { t: TranslateFn; item: ConversationItem }): JSX.Element {
   const { t, item } = props;
   if (item.kind === "tool") {
     return (
-      <details
-        className={`${CONVERSATION_CLASS}__item ${CONVERSATION_CLASS}__tool`}
-        data-tool={item.toolName}
-        data-settled={item.settled ? "true" : "false"}
-        data-failed={item.failed ? "true" : "false"}
-      >
+      <>
+        {/* Ticket 81: a settled spawn record also renders its frozen
+            worker-dispatch card (ticket 69 §3.2) — presentation-time only,
+            projected from this record (replay-safe; C15 holds: no new wake
+            kind, the spawn card rides the ordinary transcript). */}
+        {item.dispatch !== null ? (
+          <DispatchCardView t={t} card={item.dispatch} />
+        ) : null}
+        <details
+          className={`${CONVERSATION_CLASS}__item ${CONVERSATION_CLASS}__tool`}
+          data-tool={item.toolName}
+          data-settled={item.settled ? "true" : "false"}
+          data-failed={item.failed ? "true" : "false"}
+        >
         <summary className={`${CONVERSATION_CLASS}__tool-head`}>
           <span className={`${CONVERSATION_CLASS}__tool-name`}>
             {item.toolName}
@@ -317,7 +330,8 @@ function Item(props: { t: TranslateFn; item: ConversationItem }): JSX.Element {
         <div className={`${CONVERSATION_CLASS}__tool-body`}>
           <ToolBody t={t} view={item.view} />
         </div>
-      </details>
+        </details>
+      </>
     );
   }
   const roleKey =
@@ -357,12 +371,21 @@ function Item(props: { t: TranslateFn; item: ConversationItem }): JSX.Element {
  * store, and the host actions. The component takes the session id as its prop
  * (the shell passes the selected session); the composer is keyed by session
  * so a switch starts a fresh, empty draft (U-B: no draft persistence).
+ *
+ * The optional `approvals` seat (ticket 81) mounts the "Needs you"
+ * approval-cards area above the transcript: the fed-or-unfed card store plus
+ * the composition's resolve seat. Without the seat the pane simply renders
+ * no cards area — never an invented queue.
  */
 export function createConversationPane(
   t: TranslateFn,
   store: ConversationStore,
   actions: ConversationActions,
+  approvals?: ApprovalCardsSeat,
 ): (props: { sessionId: string }) => JSX.Element {
+  const ApprovalCards = approvals
+    ? createApprovalCardsSection(t, approvals)
+    : null;
   return (props) => {
     const sessionId = props.sessionId;
     useSyncExternalStore(store.subscribe, store.getBox);
@@ -371,6 +394,7 @@ export function createConversationPane(
     return (
       <div className={CONVERSATION_CLASS} data-pane="conversation">
         <style>{CONVERSATION_CSS}</style>
+        {ApprovalCards !== null ? <ApprovalCards /> : null}
         {state.kind !== "ready" ? (
           <div className={`${CONVERSATION_CLASS}__notice`} data-state={state.kind}>
             {t(

@@ -317,6 +317,27 @@ export const localeDictionary: LocaleDictionary = {
     "shell.onboard.step": "Step {current} of {total}",
     "shell.onboard.save-failed":
       "Couldn't save that you have seen this introduction — it may appear again next time.",
+    // Ticket 81 (ADR-0020 slice 5): approval cards in the conversation
+    // surface, re-hosting ticket 30's anatomy. The option labels, the
+    // location line, the expired copy, and the secret-stored reassurance are
+    // ticket 30's shipped copy riding the projections verbatim (its
+    // supersession record) — not re-keyed here. These keys are the card's
+    // own chrome: field label, the pending secret's never-shown promise,
+    // the submit outcome lines (honest, retry-less — U-A), and the
+    // dispatch card's gate label. The section heading reuses the roster's
+    // "Needs you" key; decision reasons render as core vocabulary verbatim.
+    "shell.approval.target": "Target",
+    "shell.approval.secret-promise":
+      "The value stays stored securely — it is never shown to workers or in this chat.",
+    "shell.approval.unavailable":
+      "Answering is not available in this surface yet.",
+    "shell.approval.no-channel":
+      "No approval channel is reachable here — nothing was changed.",
+    "shell.approval.failed":
+      "The answer could not be delivered — nothing was changed.",
+    "shell.approval.submitted":
+      "Answer sent — this card updates when the dispatcher confirms.",
+    "shell.dispatch.gating": "Gate",
   },
   zh: {
     "roster.title": "工作者",
@@ -457,6 +478,20 @@ export const localeDictionary: LocaleDictionary = {
     "shell.onboard.step": "第 {current} 步，共 {total} 步",
     "shell.onboard.save-failed":
       "未能保存“已完成引导”的记录——下次可能会再次显示。",
+    // Ticket 81（ADR-0020 切片 5）：会话表面中的审批卡片，承接 ticket 30 的结构。
+    // 选项标签、位置行、过期文案、密钥“已安全存储”的安抚文案随投影原样复用
+    // （其被取代记录）——不在此处重新建立键。这些键是卡片自身的镶边：字段标签、
+    // 待决密钥的“永不显示”承诺、提交结果行（如实、不设重试——U-A），以及
+    // 派发卡片的审批门标签。区块标题复用 roster 的“需要你处理”键；决定原因
+    // 以核心词汇原样呈现。
+    "shell.approval.target": "目标",
+    "shell.approval.secret-promise":
+      "数值始终安全存储——不会显示给工作者，也不会出现在此聊天中。",
+    "shell.approval.unavailable": "此表面暂不支持审批答复。",
+    "shell.approval.no-channel": "此处没有可用的审批通道——没有任何更改。",
+    "shell.approval.failed": "答复未能送达——没有任何更改。",
+    "shell.approval.submitted": "答复已提交——待调度器确认后此卡片会更新。",
+    "shell.dispatch.gating": "审批门",
   },
 };
 

@@ -74,6 +74,11 @@
  * `shell.tsx` is covered by build + typecheck.
  */
 import { describeToolview, type ToolviewModel } from "./toolviews.js";
+import { SPAWN_WORKER_TOOL } from "../core/policy/prompts.js";
+import {
+  projectDispatchCard,
+  type WorkerDispatchCard,
+} from "./approval-cards.js";
 
 /** Minimal structural face of one durable session event (envelope + data). */
 export interface ConversationEventLike {
@@ -131,6 +136,15 @@ export type ConversationItem =
       readonly toolName: string;
       /** Ticket 24's re-hosted view model (detail fields or degraded). */
       readonly view: ToolviewModel;
+      /**
+       * Ticket 81: the presentation-time worker-dispatch card for a
+       * `spawn_worker` record (ticket 69 §3.2) — projected from THIS item's
+       * parsed args + structured result, so a replayed window yields the
+       * identical card. `null` for every other tool, for an unsettled call,
+       * and for records too malformed to name a spawn (the generic row
+       * covers those — never a fabricated card).
+       */
+      readonly dispatch: WorkerDispatchCard | null;
       /** True when the paired result reported an error. */
       readonly failed: boolean;
       /** False until the paired `tool/result` arrives. */
@@ -374,6 +388,9 @@ export function reduceConversationWindow(
           callId,
           toolName: name,
           view: describeToolview(name, { args, result: null }),
+          // No result yet: the dispatch card projects only from a settled
+          // record (the row's own running state is the pending presentation).
+          dispatch: null,
           failed: false,
           settled: false,
         };
@@ -390,12 +407,24 @@ export function reduceConversationWindow(
         if (callId === null) continue;
         const call = toolCalls.get(callId);
         if (call === undefined) continue; // result without a loaded call
+        const resultRecord = toolResultRecord(data);
         const updated: ToolItem = {
           ...call.item,
           view: describeToolview(call.item.toolName, {
             args: call.args,
-            result: toolResultRecord(data),
+            result: resultRecord,
           }),
+          // Ticket 81: spawn records additionally project the frozen
+          // worker-dispatch card from their own args + result (pure in the
+          // record → replay-safe; ticket 69 §3.2, C15 holds).
+          dispatch:
+            call.item.toolName === SPAWN_WORKER_TOOL
+              ? projectDispatchCard({
+                  callId,
+                  args: call.args,
+                  result: resultRecord,
+                })
+              : null,
           failed:
             toolResultIsError(data.message) ||
             (data.error !== undefined && data.error !== null),
