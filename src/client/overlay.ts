@@ -162,6 +162,10 @@ export const localeDictionary: LocaleDictionary = {
     "toolview.field.steer": "Steer",
     "toolview.field.delivered": "Delivered",
     "toolview.field.attachments": "Attachments",
+    // Ticket 70: send_peer row labels (the conversation-visible trace of
+    // peer traffic; the message body itself never renders on the row).
+    "toolview.field.peer": "To session",
+    "toolview.field.priority": "Priority",
     // Ticket 32 (design-17 §7): the activation success presence hint. The
     // host command copy (`src/adapter/activation-command.ts`
     // `ACTIVATION_PRESENCE_HINT`) is the en authority; this face carries the
@@ -364,6 +368,9 @@ export const localeDictionary: LocaleDictionary = {
     "toolview.field.steer": "纠偏",
     "toolview.field.delivered": "已送达",
     "toolview.field.attachments": "附件",
+    // Ticket 70：send_peer 行标签（同伴流量的对话可见痕迹；消息正文不出现在行上）。
+    "toolview.field.peer": "目标会话",
+    "toolview.field.priority": "优先",
     "activation.presence-hint":
       "“工作者”面板会显示实时进度；结果完成后会直接送达本聊天。",
     "capsule.chip.open": "打开工作者面板",

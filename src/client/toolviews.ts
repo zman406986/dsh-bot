@@ -25,6 +25,7 @@ import {
   CHECK_WORKERS_TOOL,
   DELIVER_RESULT_TOOL,
   DISPATCHER_TOOL_NAMES,
+  SEND_PEER_TOOL,
   SPAWN_WORKER_TOOL,
   STEER_WORKER_TOOL,
   STOP_WORKER_TOOL,
@@ -38,10 +39,11 @@ import { LOCALE_NAMESPACE } from "./overlay.js";
 export const TOOL_CALL_TOOLVIEW_SLOT = "tool.call.toolview";
 
 /**
- * The wire tool names this face claims, in registration order — all five
+ * The wire tool names this face claims, in registration order — all six
  * dispatcher tools. `deliver_result` is included because its call row
  * benefits from an at-a-glance delivered/todo outcome on wake turns
- * (ticket 24 "if it benefits").
+ * (ticket 24 "if it benefits"); `send_peer` (ticket 70) because its row is
+ * the user-visible trace of peer traffic on the conversation surface.
  */
 export const TOOLVIEW_TOOL_NAMES: readonly string[] = [
   SPAWN_WORKER_TOOL,
@@ -49,6 +51,7 @@ export const TOOLVIEW_TOOL_NAMES: readonly string[] = [
   STEER_WORKER_TOOL,
   STOP_WORKER_TOOL,
   DELIVER_RESULT_TOOL,
+  SEND_PEER_TOOL,
 ];
 
 /**
@@ -92,6 +95,8 @@ export const TOOLVIEW_FIELD_KEYS = {
   steer: "toolview.field.steer",
   delivered: "toolview.field.delivered",
   attachments: "toolview.field.attachments",
+  peer: "toolview.field.peer",
+  priority: "toolview.field.priority",
 } as const;
 
 /** Locale key for the degraded row copy. */
@@ -331,6 +336,35 @@ function describeDeliver(payload: ToolCallPayload): ToolviewModel {
 }
 
 /**
+ * Ticket 70: the send_peer row — the conversation-visible trace of peer
+ * traffic. Read-only fields from the call's own record: the target session,
+ * the priority flag, and the acceptance outcome. The message BODY is never
+ * rendered here (the row stays a compact at-a-glance line; the body lives
+ * in the dispatcher's turns, not the tool row).
+ */
+function describeSendPeer(payload: ToolCallPayload): ToolviewModel {
+  const args = asRecord(payload.args);
+  const result = asRecord(payload.result);
+  const fields: ToolviewField[] = [];
+
+  const toSession = asString(result?.to_session) ?? asString(args?.to_session);
+  if (toSession !== null) {
+    fields.push({ labelKey: TOOLVIEW_FIELD_KEYS.peer, value: toSession });
+  }
+  const priority = asBool(args?.priority);
+  if (priority !== null) {
+    fields.push({
+      labelKey: TOOLVIEW_FIELD_KEYS.priority,
+      value: priority ? "true" : "false",
+    });
+  }
+  const outcome = outcomeField(result);
+  if (outcome !== null) fields.push(outcome);
+
+  return detailOrDegraded(fields, []);
+}
+
+/**
  * Parse one tool call payload into a view model for the given wire tool
  * name. Never throws: every deviation (foreign tool name, non-object props,
  * wrong-typed fields, junk rows) degrades to the safe `degraded` model.
@@ -357,6 +391,8 @@ export function describeToolview(
         return describeStop(payload);
       case DELIVER_RESULT_TOOL:
         return describeDeliver(payload);
+      case SEND_PEER_TOOL:
+        return describeSendPeer(payload);
       default:
         return DEGRADED;
     }

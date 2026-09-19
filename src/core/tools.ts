@@ -1,5 +1,5 @@
 /**
- * Dispatcher tool surface: five dsh-native tools mapped 1:1 onto
+ * Dispatcher tool surface: six dsh-native tools mapped 1:1 onto
  * existing Multitask methods (and an injectable user-send for deliver).
  * Handlers stay core-side; the adapter registers them on ctx.tools.
  * FakeDshHost stays green — handlers only call existing core methods.
@@ -16,6 +16,7 @@ import {
 import {
   CHECK_WORKERS_TOOL,
   DELIVER_RESULT_TOOL,
+  SEND_PEER_TOOL,
   SPAWN_WORKER_TOOL,
   STEER_WORKER_TOOL,
   STOP_WORKER_TOOL,
@@ -23,6 +24,8 @@ import {
 } from "./policy/prompts.js";
 import {
   formatCheckSummary,
+  formatPeerSendAck,
+  formatPeerSendRefusal,
   formatSpawnAck,
   formatSteerNote,
   formatStopNote,
@@ -30,6 +33,7 @@ import {
   toCheckRow,
   type CheckWorkersToolResult,
   type DeliverResultToolResult,
+  type SendPeerToolResult,
   type SpawnWorkerToolResult,
   type SteerWorkerToolResult,
   type StopWorkerToolResult,
@@ -225,7 +229,22 @@ const WORKER_ID_PARAM: ToolParameterNode = {
 };
 
 /**
- * Create the five dispatcher tool definitions bound to a Multitask core.
+ * Ticket 70 §2: inline ceiling on one peer message's text (U-F — refuse
+ * inline, never spill; the reference clamps peer text to 8000 chars,
+ * `docs/research/reference-behavior-notes.md:156`). Adapted bound, same
+ * number: an over-max text refuses the send before it is accepted.
+ */
+export const SEND_PEER_TEXT_MAX_CHARS = 8000;
+
+/**
+ * Ticket 70 §3: the fenced, default-minted conversation slot. The tool
+ * never takes one from the model — threading is U-B-excluded — so every
+ * tool-borne peer message carries this constant opaquely.
+ */
+export const PEER_DIRECT_CONVERSATION_ID = "direct";
+
+/**
+ * Create the six dispatcher tool definitions bound to a Multitask core.
  * Pure enough for unit tests: no ctx, no host types.
  */
 export function createDispatcherTools(
@@ -600,7 +619,107 @@ export function createDispatcherTools(
     },
   };
 
-  return [spawnWorker, checkWorkers, steerWorker, stopWorker, deliverResult];
+  /**
+   * Ticket 70 §2: point-to-point peer send. The registration closure IS the
+   * session: the sender's identity (`fromAgentId`/`fromName`) is the
+   * dispatcher's OWN session id — there is no `from` argument, so a
+   * dispatcher cannot spoof a sibling. `messageId` is minted here (the
+   * dedupe index stays an internal guarantee, not a model burden) and
+   * `conversationId` defaults to the fenced constant. Fire-and-forget: the
+   * mapped ack reports acceptance into the peer's inbox and lane, nothing
+   * more; failures carry honest refusal copy with no retry affordance.
+   */
+  const sendPeer: DispatcherToolDef = {
+    name: SEND_PEER_TOOL,
+    description: TOOL_DESCRIPTIONS[SEND_PEER_TOOL],
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        to_session: {
+          type: "string",
+          required: true,
+          description:
+            "The peer dispatcher's session id — from a peer message you received, or supplied by the user.",
+        },
+        text: {
+          type: "string",
+          required: true,
+          description:
+            "The message body. Self-contained: the peer does not see this conversation either.",
+        },
+        priority: {
+          type: "boolean",
+          required: false,
+          description:
+            "Request the peer's attention now. Interrupts only the peer's background work — never a turn their user is driving. Default false.",
+        },
+      },
+    },
+    async execute(args): Promise<SendPeerToolResult> {
+      const senderSessionId = requireSessionId();
+      const toSession = requireString(args, "to_session");
+      const text = requireString(args, "text");
+      const priority = args.priority === undefined ? false : args.priority;
+      if (typeof priority !== "boolean") {
+        return {
+          ok: false,
+          reason: "invalid-envelope",
+          detail: "priority must be a boolean when provided",
+        };
+      }
+      if (text.length > SEND_PEER_TEXT_MAX_CHARS) {
+        // U-F inline refusal: name the bound, deliver nothing, queue nothing.
+        return {
+          ok: false,
+          reason: "invalid-envelope",
+          detail: `text is ${text.length} characters; a peer message is capped at ${SEND_PEER_TEXT_MAX_CHARS} — send a shorter message`,
+        };
+      }
+
+      const messageId = `peer-${crypto.randomUUID()}`;
+      const ack = multitask.sendPeer(toSession, {
+        messageId,
+        fromAgentId: senderSessionId,
+        fromName: senderSessionId,
+        to: { kind: "agent", agentId: toSession },
+        conversationId: PEER_DIRECT_CONVERSATION_ID,
+        text,
+        priority,
+        createdAtMs: Date.now(),
+      });
+
+      if (ack.ok) {
+        return {
+          ok: true,
+          message_id: ack.messageId,
+          to_session: toSession,
+          summary: formatPeerSendAck({
+            toSession,
+            messageId: ack.messageId,
+            priority,
+          }),
+        };
+      }
+      return {
+        ok: false,
+        reason: ack.reason,
+        detail:
+          ack.reason === "invalid-envelope"
+            ? ack.detail
+            : formatPeerSendRefusal(ack.reason, toSession),
+      };
+    },
+  };
+
+  return [
+    spawnWorker,
+    checkWorkers,
+    steerWorker,
+    stopWorker,
+    deliverResult,
+    sendPeer,
+  ];
 }
 
 /**

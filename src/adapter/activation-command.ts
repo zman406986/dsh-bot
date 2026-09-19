@@ -62,7 +62,7 @@ export const DISPATCHER_START_UNRESOLVED =
   "from the chat you want to use as the dispatcher.";
 
 /**
- * Retired with the execute-time gate (ADR-0019): the five dispatcher tools
+ * Retired with the execute-time gate (ADR-0019): the six dispatcher tools
  * register through the activated agent's own scoped context, so an
  * out-of-scope caller cannot see them at all — the host's `UNKNOWN_TOOL` is
  * the strictly stronger behavior and no refusal copy is needed.

@@ -254,7 +254,7 @@ describe("plugin scaffold", () => {
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await new Promise((resolve) => setImmediate(resolve));
 
-    // Five dispatcher tools (T11) + worker access tool (T13).
+    // Six dispatcher tools (T11 + ticket 70 send_peer) + worker access tool (T13).
     const names = ctx.registeredTools.map((t) => t.name);
     for (const tool of [
       "spawn_worker",
@@ -262,6 +262,7 @@ describe("plugin scaffold", () => {
       "steer_worker",
       "stop_worker",
       "deliver_result",
+      "send_peer",
       "request_access",
     ]) {
       assert.ok(names.includes(tool), `missing tool: ${tool}`);
@@ -274,7 +275,7 @@ describe("plugin scaffold", () => {
     // Re-activation registers a fresh surface.
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(ctx.registeredTools.length, 6);
+    assert.equal(ctx.registeredTools.length, 7);
   });
 
   it("tool executions route to the registering session (ADR-0019: gate retired)", async () => {
@@ -313,7 +314,7 @@ describe("plugin scaffold", () => {
     const agent = createAgent("session-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(ctx.registeredTools.length, 6);
+    assert.equal(ctx.registeredTools.length, 7);
 
     for (const dispose of ctx.disposers) dispose();
 

@@ -1,5 +1,6 @@
 /**
- * Adapter registration of the five dispatcher tools (design-16 §3.8).
+ * Adapter registration of the six dispatcher tools (design-16 §3.8; sixth
+ * tool `send_peer` per ticket 70 §2).
  * ADR-0019: registration addresses a tool surface — the plugin passes the
  * ACTIVATED agent's own scoped `ctx.tools` (per-agent visibility: the model
  * only ever sees its own dispatcher's tools) or, when the agent carries no
@@ -146,7 +147,7 @@ export interface RegisterDispatcherToolsOptions {
 }
 
 /**
- * Register the five dispatcher tools on the given surface. Returns disposers.
+ * Register the six dispatcher tools on the given surface. Returns disposers.
  * No-op (empty list) when `tools` or `register` is unavailable.
  */
 export function registerDispatcherTools(

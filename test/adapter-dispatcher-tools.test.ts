@@ -66,7 +66,7 @@ function createToolsCaptureCtx(): AdapterContext & {
 }
 
 describe("adapter dispatcher tool registration", () => {
-  it("registers the five tools when ctx.tools.register exists", () => {
+  it("registers the six tools when ctx.tools.register exists", () => {
     const ctx = createToolsCaptureCtx();
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
@@ -75,7 +75,7 @@ describe("adapter dispatcher tool registration", () => {
       multitask,
       getSessionId: () => "session-1",
     });
-    assert.equal(disposers.length, 5);
+    assert.equal(disposers.length, 6);
     assert.deepEqual(
       ctx.registered.map((tool) => tool.name),
       [...DISPATCHER_TOOL_NAMES],

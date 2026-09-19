@@ -306,7 +306,7 @@ async function spawnVia(
 }
 
 describe("multi-dispatcher — scoped surfaces (ADR-0019)", () => {
-  it("each dispatcher sees only its own five tools; request_access is the one global", async () => {
+  it("each dispatcher sees only its own six tools; request_access is the one global", async () => {
     const multi = createMultiCtx();
     apply(multi.ctx, { enabled: true });
     const a = createScopedAgent("s-a");
@@ -318,6 +318,7 @@ describe("multi-dispatcher — scoped surfaces (ADR-0019)", () => {
     assert.deepEqual(a.scopedToolNames().sort(), [
       "check_workers",
       "deliver_result",
+      "send_peer",
       "spawn_worker",
       "steer_worker",
       "stop_worker",
@@ -325,6 +326,7 @@ describe("multi-dispatcher — scoped surfaces (ADR-0019)", () => {
     assert.deepEqual(b.scopedToolNames().sort(), [
       "check_workers",
       "deliver_result",
+      "send_peer",
       "spawn_worker",
       "steer_worker",
       "stop_worker",

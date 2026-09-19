@@ -452,6 +452,7 @@ describe("composition polish — dormant registration matrix (design-17 §3.2/§
       "check_workers",
       "deliver_result",
       "request_access",
+      "send_peer",
       "spawn_worker",
       "steer_worker",
       "stop_worker",

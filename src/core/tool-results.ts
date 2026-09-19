@@ -94,6 +94,34 @@ export type DeliverResultToolResult = {
   readonly detail?: string;
 };
 
+/**
+ * Ticket 70 §2: send_peer tool result. The ok branch maps the structural
+ * `PeerSendAck` onto an honest fire-and-forget summary: ok means accepted
+ * into the target's inbox and wake lane, and nothing more — never user
+ * delivery, never a reply, never "the peer read it". Failures carry the
+ * ack's reason plus honest refusal copy with NO retry affordance and NO
+ * queueing (A4; the conservative U-A reading per ticket 82): a failed send
+ * is reported, full stop.
+ */
+export type SendPeerToolResult =
+  | {
+      readonly ok: true;
+      readonly message_id: string;
+      readonly to_session: string;
+      /** Model-facing fire-and-forget ack text. Not user-visible. */
+      readonly summary: string;
+    }
+  | {
+      readonly ok: false;
+      readonly reason:
+        | "invalid-envelope"
+        | "unknown-target"
+        | "inbox-full"
+        | "message-id-reuse"
+        | "self-target";
+      readonly detail: string;
+    };
+
 /** Format elapsed milliseconds as a short human duration. */
 export function formatElapsedMs(elapsedMs: number): string {
   const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
@@ -212,4 +240,47 @@ export function formatStopUnknownStateNote(
   streamKey: string,
 ): string {
   return `Released the stream held by ${workerId}. That worker was never reachable — its state has been unknown since the restart and nothing was interrupted, so if it survived it is still running. Stream "${streamKey}" can be dispatched onto again, but only do that if you know that worker is gone; otherwise use a new stream key. Any result the old worker produces is dropped, and the user has not been told anything.`;
+}
+
+/**
+ * Ticket 70 §2: send_peer success ack. Acceptance only — the copy must not
+ * promise delivery to a person, a reply, or that the peer has read anything.
+ */
+export function formatPeerSendAck(input: {
+  toSession: string;
+  messageId: string;
+  priority: boolean;
+}): string {
+  const priorityLine = input.priority
+    ? "Priority was requested: it jumps the peer's queue and may interrupt their background work — never a turn their user is driving."
+    : "It waits in their normal lane, behind whatever their user is driving.";
+  return [
+    `Accepted for peer session ${input.toSession} (message ${input.messageId}).`,
+    "Their next turn will see it. This send carries no reply and waits for nothing — if the peer responds, it arrives later as its own message on a fresh turn. Do not wait, poll, or keep this turn open for it.",
+    priorityLine,
+  ].join("\n");
+}
+
+/**
+ * Ticket 70 §2: honest refusal copy per ack reason. A failed send is
+ * reported and dropped — no retry control, no queue (A4 + the conservative
+ * U-A reading per ticket 82).
+ */
+export function formatPeerSendRefusal(
+  reason: Exclude<
+    Extract<SendPeerToolResult, { ok: false }>["reason"],
+    "invalid-envelope"
+  >,
+  toSession: string,
+): string {
+  switch (reason) {
+    case "unknown-target":
+      return `No live dispatcher session "${toSession}". The message was NOT delivered and was not queued — if the user needs to know, tell them the send failed. There is no retry for a peer send.`;
+    case "self-target":
+      return `Session "${toSession}" is your own session. Sending a peer message to yourself is refused — nothing was sent.`;
+    case "inbox-full":
+      return `Peer session "${toSession}" has a full inbox of undelivered messages. The message was NOT delivered and was not queued.`;
+    case "message-id-reuse":
+      return "That message id was already accepted from you with a different payload. Nothing was sent.";
+  }
 }

@@ -11,6 +11,7 @@ import {
   CHECK_WORKERS_TOOL,
   DELIVER_RESULT_TOOL,
   DISPATCHER_TOOL_NAMES,
+  SEND_PEER_TOOL,
   SPAWN_WORKER_TOOL,
   STEER_WORKER_TOOL,
   STOP_WORKER_TOOL,
@@ -216,7 +217,7 @@ describe("wake-turn assembler", () => {
 });
 
 describe("tool descriptions (new copy)", () => {
-  it("covers the five dispatcher tool names", () => {
+  it("covers the six dispatcher tool names", () => {
     assert.deepEqual(
       [...DISPATCHER_TOOL_NAMES],
       [
@@ -225,6 +226,7 @@ describe("tool descriptions (new copy)", () => {
         STEER_WORKER_TOOL,
         STOP_WORKER_TOOL,
         DELIVER_RESULT_TOOL,
+        SEND_PEER_TOOL,
       ],
     );
     for (const name of DISPATCHER_TOOL_NAMES) {

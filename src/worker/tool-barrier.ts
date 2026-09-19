@@ -33,6 +33,9 @@ export const WORKER_DENIED_TOOL_CANDIDATES: readonly string[] = [
   "steer_worker",
   "stop_worker",
   "deliver_result",
+  // Ticket 70: workers are leaves of the peer tier — the peer-message tool
+  // is dispatcher-only (reference conformance, reference-behavior-notes:60).
+  "send_peer",
 ] as const;
 
 /** Host-agnostic restriction shape (mirrors dsh ToolRestriction.deny). */

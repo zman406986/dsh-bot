@@ -20,6 +20,7 @@ import {
 import {
   CHECK_WORKERS_TOOL,
   DELIVER_RESULT_TOOL,
+  SEND_PEER_TOOL,
   SPAWN_WORKER_TOOL,
   STEER_WORKER_TOOL,
   STOP_WORKER_TOOL,
@@ -85,18 +86,20 @@ describe("worker tool barrier", () => {
       "steer_worker",
       "stop_worker",
       "deliver_result",
+      "send_peer",
     ]) {
       assert.ok(names.has(required), `missing deny candidate: ${required}`);
     }
   });
 
-  it("denies the five registered dispatcher tools on the spawned worker filter", () => {
+  it("denies the six registered dispatcher tools on the spawned worker filter", () => {
     const dispatcherTools = [
       SPAWN_WORKER_TOOL,
       CHECK_WORKERS_TOOL,
       STEER_WORKER_TOOL,
       STOP_WORKER_TOOL,
       DELIVER_RESULT_TOOL,
+      SEND_PEER_TOOL,
     ];
     const known = new Set([...dispatcherTools, "bash"]);
     const filter = createWorkerAgentDef().resolveToolFilter(known);

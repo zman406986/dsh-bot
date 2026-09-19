@@ -190,7 +190,7 @@ function composeWakeText(
  * - Disabled path returns early: stock dsh — no core, no command, no tools,
  *   no policy, no wake handling.
  * - Enabled path boots dormant: stock experience plus the passive core/host
- *   plumbing and the `dispatcher-start` command. The five dispatcher tools
+ *   plumbing and the `dispatcher-start` command. The six dispatcher tools
  *   and request_access register only when a session activates, and the
  *   primary chat is never captured on load.
  */

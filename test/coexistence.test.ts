@@ -815,12 +815,13 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
       await new Promise((resolve) => setImmediate(resolve));
     }
 
-    // Six dispatcher tools alongside the foreign tool — no clobbering.
+    // Seven dispatcher tools alongside the foreign tool — no clobbering.
     assert.deepEqual(ctx.toolNames().sort(), [
       "check_workers",
       "deliver_result",
       FOREIGN.tool,
       "request_access",
+      "send_peer",
       "spawn_worker",
       "steer_worker",
       "stop_worker",
@@ -865,7 +866,7 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
     );
     const agent = createAgent("s-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
-    assert.equal(ctx.toolNames().length, 7); // six ours + one foreign
+    assert.equal(ctx.toolNames().length, 8); // seven ours + one foreign
 
     // HMR: dispose ONLY the dispatcher fiber.
     dispatcherFiber.dispose();
@@ -917,7 +918,7 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
       ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent }),
       { kind: "success", text: DISPATCHER_START_SUCCESS },
     );
-    assert.equal(ctx.toolNames().length, 6);
+    assert.equal(ctx.toolNames().length, 7);
   });
 });
 

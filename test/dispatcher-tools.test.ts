@@ -4,11 +4,14 @@ import { FakeDshHost } from "../src/core/fake-host.js";
 import { createMultitask, type Multitask } from "../src/core/multitask.js";
 import {
   createDispatcherTools,
+  SEND_PEER_TEXT_MAX_CHARS,
   type DispatcherToolDef,
 } from "../src/core/tools.js";
 import {
   CHECK_WORKERS_TOOL,
   DELIVER_RESULT_TOOL,
+  DISPATCHER_TOOL_NAMES,
+  SEND_PEER_TOOL,
   SPAWN_WORKER_TOOL,
   STEER_WORKER_TOOL,
   STOP_WORKER_TOOL,
@@ -16,6 +19,7 @@ import {
 import type {
   CheckWorkersToolResult,
   DeliverResultToolResult,
+  SendPeerToolResult,
   SpawnWorkerToolResult,
   SteerWorkerToolResult,
   StopWorkerToolResult,
@@ -344,7 +348,7 @@ describe("dispatcher tools — deliver_result", () => {
 });
 
 describe("dispatcher tools — FakeDshHost stays green", () => {
-  it("all five tools run against FakeDshHost without host extensions", async () => {
+  it("all six tools run against FakeDshHost without host extensions", async () => {
     const { host, multitask, tools } = await setup({
       deliverToUser: async () => true,
     });
@@ -356,6 +360,7 @@ describe("dispatcher tools — FakeDshHost stays green", () => {
         STEER_WORKER_TOOL,
         STOP_WORKER_TOOL,
         DELIVER_RESULT_TOOL,
+        SEND_PEER_TOOL,
       ],
     );
 
@@ -393,5 +398,134 @@ describe("dispatcher tools — FakeDshHost stays green", () => {
     // Fake host recorded only the existing seams.
     assert.equal(host.spawnCalls.length, 1);
     assert.ok(host.interruptCalls.length >= 2);
+  });
+});
+
+describe("dispatcher tools — send_peer (ticket 70 §2)", () => {
+  it("round-trips to Multitask.sendPeer and maps the ack to an acceptance-only summary", async () => {
+    const { host, multitask, tools } = await setup();
+    const sendPeer = byName(tools, SEND_PEER_TOOL);
+
+    const result = (await sendPeer.execute({
+      to_session: "peer-session-9",
+      text: "Handing off the RFC notes.",
+      priority: true,
+    })) as SendPeerToolResult;
+
+    assert.ok(result.ok);
+    if (!result.ok) return;
+    // The handler minted the id; the ack echoes it.
+    assert.ok(result.message_id.length > 0);
+    assert.equal(result.to_session, "peer-session-9");
+    // Honest fire-and-forget copy: acceptance only, never a reply promise.
+    assert.ok(result.summary.includes("Accepted"));
+    assert.ok(result.summary.includes("peer-session-9"));
+    assert.ok(result.summary.includes("never a turn their user is driving"));
+
+    // The envelope landed in the peer's inbox, sent AS this session.
+    const pending = multitask.listPendingPeers("peer-session-9");
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0]?.messageId, result.message_id);
+    assert.equal(pending[0]?.fromAgentId, "session-1");
+    assert.equal(pending[0]?.fromName, "session-1");
+    assert.deepEqual(pending[0]?.to, {
+      kind: "agent",
+      agentId: "peer-session-9",
+    });
+    assert.equal(pending[0]?.conversationId, "direct");
+    assert.equal(pending[0]?.priority, true);
+    // And it woke only the peer session.
+    assert.deepEqual(host.wakeCalls, ["peer-session-9"]);
+  });
+
+  it("priority is the 1:1 lane choice: queued mid user turn, never an interrupt", async () => {
+    const { host, multitask, tools } = await setup();
+    multitask.wakeBus.noteTurnStarted("peer-session-9", "user");
+
+    const result = (await byName(tools, SEND_PEER_TOOL).execute({
+      to_session: "peer-session-9",
+      text: "urgent?",
+      priority: true,
+    })) as SendPeerToolResult;
+    assert.ok(result.ok);
+
+    assert.deepEqual(host.interruptDispatcherCalls, []);
+    assert.equal(multitask.wakeBus.peek("peer-session-9"), undefined);
+    multitask.wakeBus.noteTurnEnded("peer-session-9");
+    const wake = multitask.wakeBus.drain("peer-session-9");
+    assert.equal(wake?.peerMessages?.[0]?.priority, true);
+  });
+
+  it("an unknown target refuses with honest no-delivery copy (liveness knob wired)", async () => {
+    const host = new FakeDshHost();
+    // Same shape as the plugin wiring: the activation lifecycle decides.
+    const multitask = createMultitask(host, {
+      isLiveDispatcherSession: (id) => id === "session-1",
+    });
+    let sessionId: string | null = "session-1";
+    const tools = createDispatcherTools({
+      multitask,
+      getSessionId: () => sessionId,
+    });
+
+    const result = (await byName(tools, SEND_PEER_TOOL).execute({
+      to_session: "ghost-session",
+      text: "anyone there?",
+    })) as SendPeerToolResult;
+
+    assert.equal(result.ok, false);
+    assert.ok(!result.ok);
+    assert.equal(result.reason, "unknown-target");
+    assert.ok(result.detail.includes("ghost-session"));
+    assert.ok(result.detail.includes("NOT delivered"));
+    // No queue, no retry affordance: nothing landed anywhere.
+    assert.equal(multitask.listPendingPeers("ghost-session").length, 0);
+    assert.deepEqual(host.wakeCalls, []);
+  });
+
+  it("a self-target refuses — the sender's own session id is not a peer", async () => {
+    const { host, multitask, tools } = await setup();
+
+    const result = (await byName(tools, SEND_PEER_TOOL).execute({
+      to_session: "session-1",
+      text: "note to self",
+    })) as SendPeerToolResult;
+
+    assert.equal(result.ok, false);
+    assert.ok(!result.ok);
+    assert.equal(result.reason, "self-target");
+    assert.ok(result.detail.includes("your own session"));
+    assert.equal(multitask.listPendingPeers("session-1").length, 0);
+    assert.deepEqual(host.wakeCalls, []);
+  });
+
+  it("over-max text refuses inline at the cap; the cap itself passes", async () => {
+    const { multitask, tools } = await setup();
+    const sendPeer = byName(tools, SEND_PEER_TOOL);
+
+    const over = (await sendPeer.execute({
+      to_session: "peer-session-9",
+      text: "x".repeat(SEND_PEER_TEXT_MAX_CHARS + 1),
+    })) as SendPeerToolResult;
+    assert.equal(over.ok, false);
+    assert.ok(!over.ok);
+    assert.equal(over.reason, "invalid-envelope");
+    assert.ok(over.detail.includes(String(SEND_PEER_TEXT_MAX_CHARS)));
+    assert.equal(multitask.listPendingPeers("peer-session-9").length, 0);
+
+    const atCap = (await sendPeer.execute({
+      to_session: "peer-session-9",
+      text: "y".repeat(SEND_PEER_TEXT_MAX_CHARS),
+    })) as SendPeerToolResult;
+    assert.ok(atCap.ok);
+    assert.equal(multitask.listPendingPeers("peer-session-9").length, 1);
+  });
+
+  it("the surface carries exactly the six dispatcher tools, send_peer included", async () => {
+    const { tools } = await setup();
+    assert.deepEqual(
+      tools.map((tool) => tool.name),
+      [...DISPATCHER_TOOL_NAMES],
+    );
   });
 });

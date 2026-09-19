@@ -305,8 +305,9 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
     // hint, the ticket-24 toolview copy, the ticket-38 capsule chip copy,
     // the ticket-39 activation-row copy, the ticket-40 action-wiring copy
     // (stop message, failure lines, per-row steer affordance), the
-    // ticket-41 deliverables-line copy, and the ticket-42 footer copy
-    // (flag provenance + copy-only Settings hint), the ticket-47
+    // ticket-41 deliverables-line copy, the ticket-42 footer copy
+    // (flag provenance + copy-only Settings hint), the ticket-70 send_peer
+    // row labels, the ticket-47
     // settings-card copy (chrome, save/discard, and one label/hint pair per
     // schema field), and the ticket-68 onboarding beat copy (five beats +
     // the step/next/done/skip/save-failed chrome).
@@ -424,6 +425,8 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
       "toolview.field.attachments",
       "toolview.field.delivered",
       "toolview.field.outcome",
+      "toolview.field.peer",
+      "toolview.field.priority",
       "toolview.field.steer",
       "toolview.field.stream",
       "toolview.field.title",

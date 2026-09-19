@@ -10,14 +10,17 @@ export const CHECK_WORKERS_TOOL = "check_workers";
 export const STEER_WORKER_TOOL = "steer_worker";
 export const STOP_WORKER_TOOL = "stop_worker";
 export const DELIVER_RESULT_TOOL = "deliver_result";
+/** Ticket 70 §2: point-to-point peer send (name ours). */
+export const SEND_PEER_TOOL = "send_peer";
 
-/** All five dispatcher tool names, in registration order. */
+/** All six dispatcher tool names, in registration order. */
 export const DISPATCHER_TOOL_NAMES = [
   SPAWN_WORKER_TOOL,
   CHECK_WORKERS_TOOL,
   STEER_WORKER_TOOL,
   STOP_WORKER_TOOL,
   DELIVER_RESULT_TOOL,
+  SEND_PEER_TOOL,
 ] as const;
 
 /** Model-facing tool descriptions (new copy). */
@@ -32,6 +35,8 @@ export const TOOL_DESCRIPTIONS = {
     "Stop a worker for good. Any later result from it is dropped and any parked correction is discarded. Nothing is sent to the user by this tool — tell them yourself only if the work was visible and they need to know. If the worker was running when the app last restarted, it cannot be reached: stopping it then releases the stream key it still holds, and you are told so plainly.",
   [DELIVER_RESULT_TOOL]:
     "Send a result to the user. Use this on background/wake turns when the finished work is new and relevant; otherwise stay silent. Lead with the concrete thing that finished. Optionally mark a todo completed after a successful send.",
+  [SEND_PEER_TOOL]:
+    "Send a message to another dispatcher (peer) by its session id. Fire-and-forget: the tool returns an acceptance ack only — the reply, if any, arrives later as its own message opening a fresh turn; never wait, poll, or keep a turn open for it. Address a peer by the session id shown next to its name on a peer message you received, or one the user gave you. priority:true asks for the peer's attention now; it interrupts only background work the peer's user is not driving, never the user's own turn. Failed sends are reported and dropped — there is no queue and no retry.",
 } as const;
 
 /** Stable section headings used by tests (presence + order). */
@@ -164,7 +169,7 @@ export function buildPeerWakeInstructionsBlock(): string {
     "1. Treat every message above as coming from another assistant — not from the user.",
     "2. Decide whether this peer note changes work already in flight (steer), needs new work (spawn), or can be acknowledged and dropped.",
     "3. Do not paraphrase the peer note to the user on this turn unless the user asked to hear about peer traffic. Ending the turn in silence is valid.",
-    "4. If you must reply to the peer later, use the peer send path — never the user-facing send — and keep the conversation id.",
+    "4. If you must reply to the peer later, use send_peer addressed to the sender's session id (shown in parentheses next to the sender's name above) — never the user-facing send.",
     "5. Never present peer text as if the user wrote it.",
   ].join("\n");
 }

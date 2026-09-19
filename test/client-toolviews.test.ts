@@ -612,10 +612,10 @@ describe("toolview — apply() registers one keyed entry per tool via the fake s
 });
 
 describe("toolview — HMR reversal over the fake seam", () => {
-  it("fiber teardown removes all five entries; re-apply restores them cleanly", () => {
+  it("fiber teardown removes all six entries; re-apply restores them cleanly", () => {
     const ctx = createClientCtx();
     apply(ctx);
-    assert.equal(ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT)?.entries.length, 5);
+    assert.equal(ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT)?.entries.length, 6);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
 
     ctx.runFiberTeardown();
@@ -626,8 +626,61 @@ describe("toolview — HMR reversal over the fake seam", () => {
     // Post-HMR fiber: everything registers again, no accumulation.
     apply(ctx);
     assert.equal(ctx.injects.length, 4);
-    assert.equal(ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT)?.entries.length, 5);
+    assert.equal(ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT)?.entries.length, 6);
     assert.equal(ctx.findInject(SHELL_OVERLAY_SLOT), undefined);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
+  });
+});
+
+describe("toolview — send_peer payload parsing (ticket 70)", () => {
+  it("renders the target session, the priority flag, and the acceptance outcome", () => {
+    const view = assertDetail(
+      describeToolview("send_peer", {
+        args: {
+          to_session: "dispatcher-b",
+          text: "(body never renders on the row)",
+          priority: true,
+        },
+        result: {
+          ok: true,
+          message_id: "peer-1",
+          to_session: "dispatcher-b",
+          summary: "Accepted for peer session dispatcher-b (message peer-1).",
+        },
+      }),
+    );
+    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.peer), "dispatcher-b");
+    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.priority), "true");
+    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "ok");
+    // The message body is never a row field.
+    assert.equal(
+      view.fields.some((field) => field.value.includes("body never renders")),
+      false,
+    );
+  });
+
+  it("renders a refused send as the verbatim reason outcome", () => {
+    const view = assertDetail(
+      describeToolview("send_peer", {
+        args: { to_session: "ghost-session", text: "…" },
+        result: {
+          ok: false,
+          reason: "unknown-target",
+          detail: "No live dispatcher session \"ghost-session\".",
+        },
+      }),
+    );
+    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.peer), "ghost-session");
+    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "unknown-target");
+    // No priority arg: the field is omitted entirely (honest absence).
+    assert.equal(
+      view.fields.some((field) => field.labelKey === TOOLVIEW_FIELD_KEYS.priority),
+      false,
+    );
+  });
+
+  it("degrades when nothing parses", () => {
+    assert.equal(describeToolview("send_peer", null).kind, "degraded");
+    assert.equal(describeToolview("send_peer", { args: 4 }).kind, "degraded");
   });
 });
