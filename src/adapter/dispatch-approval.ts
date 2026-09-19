@@ -35,6 +35,9 @@ import type {
   DispatchApprovalOutcome,
 } from "../core/tools.js";
 
+/** Re-exported so the adapter barrel can surface the seam's own type. */
+export type { DispatchApprovalFn };
+
 /**
  * Structural view of the host approval service (`ctx.approval`): only the
  * one verb the seam needs. The full service also carries `setPolicy` /
