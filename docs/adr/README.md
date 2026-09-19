@@ -74,3 +74,11 @@ multiple dispatchers real (per-dispatcher dsh sessions; tool-scoping verificatio
 are **distinct identifiers that happen to collide** — they name different items in
 different documents. The register (`docs/research/dsh-core-loop-deviations.md`) remains
 authoritative for deviations. ADR-0018's accepted text is left untouched.
+
+**2026-09-20 — AGENTS.md pointer note (ticket 97):** the wall-of-text `AGENTS.md` was
+decomposed; its rules now live in tracked files — `docs/agents-rulebook.md` (authority
+stack + moved-rule register), `read-before-running-live-and-browser-tests.md`, and
+`read-before-reference-tree-work.md`. `AGENTS.md` itself remains only as a local pointer
+stub (it is git-ignored). Older ADR text above that says "see AGENTS.md" (e.g. 0001's
+"Reference folder policy", 0018's B9) now resolves through that stub to these homes; the
+accepted ADR texts are left untouched, same as the 2026-09-19 identifier note.
