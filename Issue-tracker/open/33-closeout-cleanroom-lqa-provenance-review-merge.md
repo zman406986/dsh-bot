@@ -774,3 +774,78 @@ turn. Prompts/outputs tiny.
 
 No AC box on 33, 69, 81, or 30 is ticked by this session; no ticket file moves. Dispositions
 belong to the W14 sweep with the evidence review.
+
+### 2026-09-20 — live pass 5, Session B-3 (W12, two trivial tasks): 69 L3/L4 BLOCKED-no-seeder + waterfall face ANSWERED NEGATIVE (no ask surface under the wrapper; unanswered ask wedges the turn); 30 NOT-OBSERVABLE — needs access-ask prompts (B-4 after FINDING-1)
+
+Evidence root: `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-20\session-B3\` (README maps every
+artifact to the claim it proves; `recon-w12.txt` = the pre-boot offline recon; per-command
+`.json` → `.out.json` pairs in `session-B3/driver/`; screenshots in `session-B3/shots/`). Boot per
+the W9 recipe on the throwaway `multitask` profile, port 8877, WMI-detached, HEAD `39a0dca`;
+profile copy md5-verified pre-boot and CONFIRMED to carry W7's seam wiring
+(`dispatchApprovalSeamFor(ctx, host, sessionId)` at profile `lib/plugin.js:427`); kill timers
+armed at launch (30-min internal + 45-min WMI backstop + 20-min driver wrapper + 18-min
+self-exit), all cleared at teardown. `server.log` zero error lines; page error log has ONE entry —
+a 401 from the executor's own mis-navigated first goto, not a product pageerror; zero
+pageerror/React errors. Teardown: all six lane pids verified gone, port 8877 no LISTENING line,
+zero playwright browsers, profile document left clean (roster keys nulled, revision 4), stock
+`web` profile byte-identical (md5 AND mtimes).
+
+**Task budget: 2 tasks** (1 authorized + 1 amendment recorded BEFORE the second send in
+`session-B3/task-budget-w12.txt`). Each = one composer send → one dispatcher turn, ZERO worker
+turns, tiny prompts/outputs.
+
+- **FINDING 0 (why L3's round-trip was unreachable by construction): no live path can insert a
+  review-posture row.** Pre-boot recon at HEAD `39a0dca`: the spawn gate (`src/core/tools.ts:297`)
+  fires only on a `worker-dispatch` posture hit; `reviewPosture.set` has ZERO callers in `src/`
+  (tests only); the live-reachable surfaces — the 9 host commands (`w12-12-cmdlist`), the settings
+  document (`w12-10-describe2`: Config + roster-mirror keys only), and the adapter — carry zero
+  posture exposure (`grep posture src/adapter/` = 0 hits; `dispatcher-resolve`'s alwaysAllow
+  writes the CONSENT table, not posture). The PLAN's "in-session Multitask API insert in the test
+  harness only" exists only in the offline harness (FakeDshHost). No seeder was shipped (Q1/U-D;
+  W12 brief). ⇒ **69 L3 (gated round-trip) and L4 (posture auto-answer) both recorded
+  BLOCKED-no-seeder** — L4 was the PLAN's expected outcome; a gated dispatch stays unreachable
+  until a human-decided posture act exists (Q1's recorded reversal path).
+- **L3's waterfall face answered instead (W7's recorded live-only question: "whether the shipped
+  client approval composer still answers under the wrapper's root frame") — ANSWERED NEGATIVE.**
+  Code level: the composer ships in the served 11.2 MB combo bundle (`dsh-client-ui-approval` ×4,
+  `approval/request` ×2, `allowed-once` ×1 — `w12-15-combo`). Live level (task 2,
+  escalation-shaped): preset verified `workspace-write` via `/permission` (`w12-24`, approval
+  component = `ask`); the dispatcher was asked to write one file OUTSIDE the workspace — an action
+  that cannot be sandbox-allowed and must raise a host approval ask. Result over a ~3-minute
+  window: NO ask surface of any kind — zero approval/dialog/modal/toast elements including hidden
+  DOM (`w12-33-deep`), zero fixed/sticky overlays, sidebar chips unchanged (the `3 个需要你` chips
+  are the pass-5 landed-undelivered markers, per the standing B1/B2 guidance); the turn stayed
+  `进行中` (`w12-31`/`w12-34`), the file was never created, no refusal copy appeared.
+  Screenshots: `shots/w12-shot-during-turn.png`, `shots/w12-shot-final-state.png`. Verdict: the
+  approval waterfall SHIPS but does not ANSWER under the wrapper root frame.
+- **FINDING 3 (for the sweep; sharpens 69 Q2 without re-opening it): an unanswered host approval
+  ask WEDGES the dispatcher turn.** The offline Q2 pins prove a seam refusal (a RETURNED outcome)
+  never wedges a turn; live, the answerer can be absent-and-silent, and dispatch approvals ride
+  the seam's own cancellation with no core timer. Mechanism not distinguishable post-hoc — either
+  `ctx.approval.request()` hangs with no answerer UI, or pwsh hung/retried for other reasons —
+  but no file, no refusal, and no surface either way. A gated dispatch whose ask reaches this same
+  waterfall would wedge identically: a host-ask timeout/timeout-deny (or a proven answerer) is a
+  precondition for L3 ever passing live.
+- **30 → NOT-OBSERVABLE live (observation-only; NOTHING ticked).** No approval prompt ever
+  rendered, so no 30 AC was observable: the clamp bait was never consumed, no option set /
+  location line / expired copy ever appeared. Structural answer for the sweep: 30's re-hosted ACs
+  (option set, session always-allow, clamped detail, expired copy, secret-stored copy) require
+  ACCESS-REQUEST prompts — relay asks raised by `request_access` and rendered as 81's cards (or
+  the shipped `ctx.userQuestions.ask` pathway). A dispatch-approval ask is a different surface
+  (host approval waterfall, `toolName: spawn_worker`); a host tool-permission ask is a third
+  surface (host composer). **30 therefore cannot be live-verified by dispatch-approval or
+  host-permission prompts: it needs session B-4 after FINDING-1's fix** (or a worker-toolset
+  diagnostic), which also unblocks 69 L1/L2.
+- Also live-reproduced en route: composer send transport green again (input 112 → 0, message
+  landed — `w12-21`/`w12-22`); activation flip `data-dispatcher` false→true (`w12-17`); final
+  describe shows the schemaVersion-4 roster snapshot with `pendingAsks: []` throughout and
+  `blocked: null` on every row (`w12-36-describe-final`) — nothing parked; FINDING 1 is untouched
+  by this lane (the dispatch seam rides `spawn_worker`, not `request_access`). Driver quirks for
+  W13 recorded in `handover-W12.md`: navigate only via the driver's `goto` handler with the fresh
+  `?token=` URL (a `location.href` assignment lands on the 401 page — tonight's one console
+  error); JSON typing eats backslashes (type Windows paths with forward slashes); inherited
+  not-re-entrancy-guarded poll loop / fresh-filenames rule unchanged.
+
+No AC box on 33, 69, 81, or 30 is ticked by this session; no ticket file moves. Dispositions
+belong to the W14 sweep with the evidence review. Lane torn down; handover at
+`.scratch/_overnight-2026-09-20/handover-W12.md`.
