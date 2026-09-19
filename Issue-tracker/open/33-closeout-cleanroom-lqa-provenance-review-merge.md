@@ -707,3 +707,70 @@ stock `web` profile byte-identical (md5 + mtimes). Full teardown record:
 
 Files 92/93/94 are already resolved and do not move; this comment adds the live trail only. No AC
 box on 33 is ticked by this session.
+
+### 2026-09-20 — live pass 5, Session B-2 (W11, two trivial tasks): 92 delivery LIVE-VERIFIED; 69 L1/L2 + 81 cards + 30 UX NOT-TRIGGERED — no access ask ever parked; two findings recorded for the sweep/W12
+
+Evidence root: `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-20\session-B2\` (README maps every
+artifact to the AC it proves; per-command `.json` → `.out.json` pairs in `session-B2/driver/`;
+screenshots in `session-B2/shots/`). Boot per the W9 recipe on the throwaway `multitask` profile,
+port 8877, WMI-detached; profile copy md5-verified pre-boot against HEAD `cf315e8` (`b3089dc3…`
+lib / `5c9e10f7…` client); kill timers armed at launch (30-min internal + 45-min WMI backstop +
+20-min driver wrapper + 18-min self-exit), all cleared at teardown. Page error log `log: []`
+through the whole session including both task flows. Teardown: dsh tree killed, port 8877 no
+LISTENING line, zero playwright browsers, profile document left clean (roster keys nulled,
+revision 11→12), stock `web` profile byte-identical (md5 AND mtimes).
+
+**Task budget: 2 tasks** (1 authorized + 1 amendment recorded in
+`session-B2/task-budget-w11.txt` BEFORE the second send — the first task's transport was green but
+produced zero approval-flow coverage; the PLAN's "genuinely requires a second" clause was invoked
+honestly). Each task = one composer send → one dispatcher turn → one worker spawn → one worker
+turn. Prompts/outputs tiny.
+
+- **92 → LIVE-VERIFIED (the delivery click W10 could not cover zero-LLM).** 787-char draft typed,
+  send enabled (`w11-10b-draft2`); click send → input cleared 787→0 and the user message LANDED in
+  the host sink and renders in the transcript (`w11-13b-state` `hasTask:true`); the dispatcher LLM
+  turn ran from that delivery (`todo_write` + `spawn_worker` rows, worker `5d3b0648…`), the worker
+  completed, and the result was DELIVERED — roster truth `status:"completed"`, `delivered:true`
+  (`w11-17-poll2`), transcript narration "Probe B2 is done and reported" (`w11-18-conv`). Task 2
+  identical (`w11-28-state2`, worker `30ba1bf1…`). Served bundle carries `scopedConversation` ×5
+  and `dispatcher-resolve` ×1 (`w11-32-bundle`). This closes 92's one open clause: send → turn →
+  worker → delivery, end to end, live.
+- **69 L1 → NOT-TRIGGERED (no card ever existed).** Both workers were explicitly instructed (task
+  2: as their FIRST action, with an echo-back refusals rule) to call `request_access` once;
+  neither did, and neither reported a refusal. `settings/describe` showed `pendingAsks: []` at
+  every poll (`w11-15-cardpoll`, `w11-17-poll2`, `w11-30-cardpoll2`) while the channel demonstrably
+  published (revision 0→1→6→11). No pending ask ⇒ no card, no `/dispatcher-resolve` round-trip
+  (the command was registered — `w11-03-cmdlist`, token guard — but never exercised). The FEED
+  half is code-level live: served bundle carries `applyRelayTruth` ×3,
+  `createApprovalRelayFeed` ×2, `pendingAsksFromChannelValue` ×2 (`w11-32-bundle`).
+- **69 L2 → NOT-TRIGGERED.** Nothing ever waited. The dispatcher row's `needs-you` + `waiting`
+  chips seen tonight are the pass-5 landed-undelivered worker's `roster.landed` marker
+  (d54d583b) — deliberately NOT read as a blocked-on-ask marker (B1 handover note).
+- **81 → NOT-TRIGGERED (access-ask cards) + FINDING 2 (dispatch cards did not render).** No
+  pending ask ⇒ no access-ask/secret-ask card (honest absence held). AND: zero
+  `[data-card-kind]` elements after TWO settled `spawn_worker` records with delivered results
+  (`w11-23-dispatchcard`) — the worker-dispatch card projection (`projectDispatchCard`) never
+  produced a card from a live settled spawn; either the live host event shape does not carry the
+  JSON tool-result record the reduction parses (`conversation-store.ts:404-424`) or the reduction
+  never runs live. `gated: true` therefore unobservable tonight (posture is EMPTY per the Q1
+  ruling; a live ungated spawn was the expected shape). **Settings-card re-home: ruled** — see the
+  dated agent ruling on ticket 81 (card STAYS a shipped-settings entry; subject to human
+  reversal; box left for the sweep).
+- **30 → NOT-TRIGGERED live.** No ask ever parked, so the card/prompt answer surface never fired;
+  the 345-char clamp-bait reason was never consumed. Ticket 30's UX remains offline-verified only;
+  nothing on it was contradicted.
+- **FINDING 1 (needs triage — blocks 69 L1–L4's live lane and 13/23's relay loop at the
+  worker-ask step): the worker-side `request_access` tool appears not to reach the live worker
+  toolset.** 3/3 instructed workers skipped the call across two task shapes, two workers, and two
+  sessions (the third data point is pass-5 Session A's "pass5 ask" worker, same instruction
+  shape, restored row visible tonight). `request_access` registers on the plugin-level global
+  `ctx.tools` (`src/plugin.ts:466-491`, whose comment asserts workers "resolve it through the
+  global layer"), while the dispatcher's five tools register per-agent via `agent.ctx.tools`
+  (`:520-528`) and demonstrably reach the dispatcher. Alternative explanation: three independent
+  model non-compliances. Not distinguishable post-hoc in this lane (no worker-toolset listing
+  surface found; firehose rows carried no activity after completion). Recorded for the sweep /
+  a code owner to pin offline; W12 (L3/L4) does NOT depend on it (the dispatch seam rides
+  `spawn_worker`, which does reach the dispatcher).
+
+No AC box on 33, 69, 81, or 30 is ticked by this session; no ticket file moves. Dispositions
+belong to the W14 sweep with the evidence review.

@@ -154,3 +154,48 @@ verify-item explicitly. Nothing left to do here; reference updated for the moved
 Triaged 2026-09-20 by the overnight team-lead run: `ready-for-agent`. Residual: (i) live card
 verification (rides 69's L1/L2 live round-trip — this ticket is sequenced behind it, no code work
 tonight before that) and (ii) the settings-card re-home decision (checkbox 4, live-lane/human call).
+
+### 2026-09-20 — agent ruling (W11 live lane): settings card STAYS a shipped-settings entry; no re-home into the wrapper
+
+**Agent ruling by an autonomous overnight executor, subject to human reversal** — recorded here
+because checkbox 4 asked for the decision "with evidence once the frame displaces the settings UI",
+and the displaced-UI state is now live-confirmed (pass-4 evidence + tonight's boot: the elected
+frame renders no settings affordance; ticket 47's card is reachable only in the stock settings
+surface).
+
+**Ruling: do NOT re-home the settings card into the wrapper.** Ticket 47's card stays a
+shipped-settings entry. Reasons, with tonight's evidence:
+
+1. **Re-homing is new surface scope, not a move.** The wrapper deliberately renders no settings
+   chrome; a re-home means building a settings surface inside the frame (layout, zh/en copy parity,
+   `--dsw-alias-*` token styling, the host's staged-save/discard discipline) to host two fields
+   (`enabled`, `accessRequestTimeoutMs`) that apply to NEW chats only.
+2. **The wrapper's activation UX is already covered in-frame** by ticket 68's onboarding flow
+   (live-verified pass-5 Session A), so the settings entry is a low-traffic secondary surface —
+   the flag's own copy says it "applies to new chats", and a new chat starts in the stock shell
+   where the card already lives.
+3. **U-D adjacency.** A wrapper settings card one refactor away from a settings-managed approvals
+   controller is exactly the drift exception U-D excludes; keeping approval-adjacent config out of
+   our own frame keeps the fence visual as well as structural.
+
+The card's store (`settings-card-store.ts`) is already wrapper-side, so a later human-directed
+re-home is cheap; nothing in this ruling deletes or blocks it. Reversal path: a human decision on
+this ticket overrides the ruling; implementation is then ordinary scoped work.
+
+**Checkbox 4 is left UNTICKED** — ticking (and any disposition) belongs to the W14 sweep with the
+evidence review; this comment only records the ruling.
+
+### 2026-09-20 — W11 live-lane findings (Session B-2; full record on ticket 33)
+
+Session B-2 (evidence `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-20\session-B2\`) ran two
+trivial task flows on the live lane. No access ask ever parked (3/3 instructed workers skipped the
+`request_access` call — suspected worker-toolset visibility gap, FINDING 1 in ticket 33's Session
+B-2 record), so **access-ask/secret-ask cards remain live-unverified** (NOT-TRIGGERED; honest
+absence held — no strip, no dead buttons). **FINDING 2 (this ticket): worker-dispatch cards did
+not render** from two settled live `spawn_worker` records with delivered results — zero
+`[data-card-kind]` elements after both spawns (`session-B2/driver/w11-23-dispatchcard.json.out.json`);
+the projection's input record (`{ok, worker_id}` from the tool-result message,
+`conversation-store.ts:404-424`) either does not arrive in the live host event shape or the
+reduction never runs live. Offline pins exist; the live render is unproven. The served bundle
+carries the full wiring (`projectDispatchCard` ×2, `applyRelayTruth` ×3 —
+`session-B2/driver/w11-32-bundle.json.out.json`). No box moved; dispositions belong to the sweep.
