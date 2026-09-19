@@ -1,7 +1,7 @@
 # 28 — Running-tasks panel: Active / Needs-you / Finished sections
 
 **Blocked by:** 27 (presence enrichment — sections consume the v2 snapshot fields `blocked`/`delivered`/`kind`).
-**Status:** open
+**Status:** resolved
 
 ## Problem
 
@@ -121,3 +121,16 @@ watermarks) — new scope, own ticket; recorded on ticket 27 as well. If the
 human rules otherwise (e.g. wants the unseen-badge scope), this ruling
 reverses cleanly: the partition function does not change, only the marker
 persistence semantics above it.
+
+### 2026-09-20 — RESOLVED (W17 closure sweep): Needs-you + Finished LIVE-VERIFIED, stand-in ruled; moved open/ → resolved/
+
+**Verified.** Implementation complete and independently verified offline (worktree commit `6874cf2`, 599 pass / 0 fail; the verifier's OVERALL PASS + three non-blocking findings recorded in-ticket 2026-09-17; merged to main in `400450f`), then re-based onto the wrapper vehicle (ADR-0018): the section partition (`rosterSectionFor`) survives as a pure view model consumed by the wrapper sidebar (79) and the approval strip (81's heading reuses `roster.section.needs-you`). Blocked-by 27 satisfied (moved first in this sweep, `48937b9`). Live pass 5 Session C (record `ae9cf4c` on ticket 33; evidence `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-20\session-C\`): Needs-you + Finished LIVE-VERIFIED with real, unforced population — the durability rebuild restored landed-undelivered rows into Needs-you (landed chip + activity lines), stable across a real host kill + reboot + re-activation (needs-you ×2 → ×3), and Finished collapsed delivered rows to the muted count while landed rows stayed visible (the S6 pull-surface property held live). The rationale re-opened by the 2026-09-19 re-scope (Needs-you as the attention stand-in) was decided 2026-09-20 as a dated agent ruling below — Needs-you STANDS, now wrapper-native rather than a capsule-era compromise — SUBJECT TO HUMAN REVERSAL per the Q1 pattern. Offline gates at closure: `npm run typecheck` clean (both configs); `npm test` 1125 pass / 0 fail / 272 suites.
+
+**Remaining nuances (recorded deferrals, not open defects):**
+- Active section NOT-CAPTURED live (same poll gap — the worker ran between polls); the offline pins (full 24-status × blocked × delivered matrix) are the evidence; not claimed live.
+- Blocked-over-landed collision precedence never collided live (`blocked: null` throughout both lanes) — offline pins remain the only collision evidence.
+- If the human reverses the stand-in ruling (wants the unseen-badge scope), the partition function is unchanged — only marker persistence semantics above it move; new scope, own ticket (recorded on 27 as well).
+- The verifier's findings 2–3 (dead `rosterViewCopyKey` helper; two sources for `collapsedCount`) stand as recorded quality notes, non-blocking, unaddressed by design in this sweep (tracker-only).
+
+Moved `Issue-tracker/open/28-running-tasks-panel-sections.md` → `Issue-tracker/resolved/`,
+`**Status:**` → resolved. No other file moved.
