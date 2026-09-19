@@ -35,9 +35,18 @@
     "build:client": "node --import tsx scripts/build-client.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "test": "tsx --tsconfig tsconfig.client.json --test test/**/*.test.ts",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "prepack": "npm run build:client"
   },
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zman406986/dsh-bot.git"
+  },
+  "homepage": "https://github.com/zman406986/dsh-bot#readme",
+  "bugs": {
+    "url": "https://github.com/zman406986/dsh-bot/issues"
+  },
   "engines": {
     "node": ">=22"
   },
