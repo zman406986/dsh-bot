@@ -35,13 +35,20 @@
  *
  * This module is pure registration data + pure decisions: no React, no DOM,
  * no Cordis. Tests assert it directly (offline, S8), matching the
- * overlay/toolview registration-pin style. The launcher's component lives in
- * `shell.tsx`; the live composition (inject → register, feed binding, seat
- * projection) lives in `index.ts`.
+ * overlay/toolview registration-pin style. The live composition (inject →
+ * register, feed binding, seat projection) lives in `index.ts`.
+ *
+ * Ticket 89 (2026-09-19): the staging launcher's contracts —
+ * `SHELL_LAUNCHER_ENTRY_ID`, `SHELL_LAUNCHER_OVERLAY_ORDER`,
+ * `shellLauncherRegistration`, `SHELL_LAUNCHER_LABEL_KEY`,
+ * `ShellPageOpenOutcome`, `openShellPage`, `ShellLauncherLayout`,
+ * `createShellLauncherLayout` — were DELETED with the retired vehicle
+ * (nothing consumed them post-cutover). The LIVE main-page contracts
+ * (`MAIN_PAGE_SLOT`, `SHIPPED_MAIN_PAGE_KEY`, `SHELL_PAGE_KEY`,
+ * `shellPageRegistration`) and every `root`-election contract stay.
  */
 
-import type { ClientLayoutLike } from "./context.js";
-import { LOCALE_NAMESPACE, type SlotRegistrationOptions } from "./overlay.js";
+import { LOCALE_NAMESPACE } from "./overlay.js";
 import type { RosterPanelState } from "./roster-store.js";
 import type { ShellMirror } from "./shell-store.js";
 
@@ -85,105 +92,6 @@ export function shellPageRegistration(): ShellPageRegistrationOptions {
     name: MAIN_PAGE_SLOT,
     key: SHELL_PAGE_KEY,
     locale: LOCALE_NAMESPACE,
-  };
-}
-
-/**
- * The launcher affordance's additive `shell.overlay` entry id (ticket 78
- * staging): a chip that opens the shell page via `ctx.layout.selectPanel`.
- * Distinct from the roster entry id — coexistence in a list slot is by
- * unique id, not shadowing. Retired at the cutover together with the capsule
- * (the staging vehicles; ticket 78's cutover slice).
- */
-export const SHELL_LAUNCHER_ENTRY_ID = "multitask-dispatcher-shell-launcher";
-
-/**
- * Sort position of the launcher chip in the overlay list, one step BEFORE
- * the capsule's `-10`: it renders under the capsule chip (the entry
- * self-positions top-right below it) and an expanded capsule card paints
- * over it rather than the reverse.
- */
-export const SHELL_LAUNCHER_OVERLAY_ORDER = -11;
-
-/** Build the launcher's `shell.overlay` registration options (pure). */
-export function shellLauncherRegistration(): SlotRegistrationOptions {
-  return {
-    name: "shell.overlay",
-    id: SHELL_LAUNCHER_ENTRY_ID,
-    order: SHELL_LAUNCHER_OVERLAY_ORDER,
-    locale: LOCALE_NAMESPACE,
-  };
-}
-
-/** Copy key for the launcher chip's label — REUSED, no new locale key. */
-export const SHELL_LAUNCHER_LABEL_KEY = "shell.title";
-
-/**
- * Outcomes of the page-open decision (pure, honest): `opened` — the host
- * accepted the selection; `no-layout` — no layout service on this runtime
- * (optional face — degrade, never block); `panel-not-registered` — the host
- * rejected the key (the verified verb throws on unregistered `main` panels,
- * ui-layout `lib/client.js:399-412`). There is deliberately no success
- * surface beyond the page actually opening: the launcher renders no claim.
- */
-export type ShellPageOpenOutcome =
-  | { readonly kind: "opened" }
-  | { readonly kind: "no-layout" }
-  | { readonly kind: "panel-not-registered" };
-
-/**
- * Open the shell page through the layout controller, containing every
- * failure the verified seam documents. A thrown `selectPanel` (unknown key)
- * becomes an honest outcome instead of a crash — a crash here would abdicate
- * the launcher's overlay entry for no reason.
- */
-export function openShellPage(
-  layout: ClientLayoutLike | undefined,
-  pageKey: string,
-): ShellPageOpenOutcome {
-  if (layout === undefined || typeof layout.selectPanel !== "function") {
-    return { kind: "no-layout" };
-  }
-  try {
-    layout.selectPanel(pageKey);
-    return { kind: "opened" };
-  } catch {
-    return { kind: "panel-not-registered" };
-  }
-}
-
-/**
- * The launcher's click-time layout access (ticket 84). `layout` is a
- * genuinely OPTIONAL face — the chip must reach its honest `no-layout`
- * outcome when absent, and a hard entry in the module's Cordis inject list
- * would keep the whole module PENDING instead — but a bare `ctx.layout`
- * property read THROWS on the real host (`cannot get property "layout"
- * without inject`; that bare read is what killed the launcher click in live
- * pass 2). The composition therefore watches the service through the runtime
- * `ctx.inject([...])` wrapper (the settings-watch idiom, ticket 46) and
- * feeds the delivered face into this cell; the click runs
- * {@link openShellPage} over the cell's current value. Pure state + the pure
- * open decision — no Cordis — so the click path is pinned offline (S8).
- */
-export interface ShellLauncherLayout {
-  /** Replace the held face (`undefined` = absent, unloaded, or teardown). */
-  setFace(face: ClientLayoutLike | undefined): void;
-  /** The click: the page-open decision over the currently held face. */
-  open(): ShellPageOpenOutcome;
-}
-
-/** Build the launcher's layout cell over {@link openShellPage}. */
-export function createShellLauncherLayout(
-  pageKey: string,
-): ShellLauncherLayout {
-  let face: ClientLayoutLike | undefined;
-  return {
-    setFace(next: ClientLayoutLike | undefined) {
-      face = next;
-    },
-    open() {
-      return openShellPage(face, pageKey);
-    },
   };
 }
 

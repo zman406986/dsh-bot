@@ -617,7 +617,7 @@ describe("settings card — apply() wiring over the fake client seams (ticket 47
     const holder = createScope();
     const ctx = createClientCtx({ scope: holder });
     const card: SettingsCardStore = createSettingsCardStore();
-    applyClientModule(ctx, createRosterStore(), undefined, undefined, card);
+    applyClientModule(ctx, createRosterStore(), card);
 
     // The Host document carries our schema section resolved over the
     // composition layer; the card reads the persisted flag from exactly that.
@@ -635,7 +635,7 @@ describe("settings card — apply() wiring over the fake client seams (ticket 47
   it("no settings service ever appearing: the card stays unavailable, never a fake degrade", () => {
     const ctx = createClientCtx({ withSettings: false });
     const card = createSettingsCardStore();
-    assert.doesNotThrow(() => applyClientModule(ctx, createRosterStore(), undefined, undefined, card));
+    assert.doesNotThrow(() => applyClientModule(ctx, createRosterStore(), card));
     assert.equal(card.getBox().view.available, false);
     assert.equal(cardInject(ctx)?.entries.length, 1, "the entry still registers");
   });
@@ -644,7 +644,7 @@ describe("settings card — apply() wiring over the fake client seams (ticket 47
     const holder = createScope();
     const ctx = createClientCtx({ scope: holder });
     const card = createSettingsCardStore();
-    applyClientModule(ctx, createRosterStore(), undefined, undefined, card);
+    applyClientModule(ctx, createRosterStore(), card);
     holder.publish({ status: "ready", value: documentWith(), writable: true });
     assert.equal(card.getBox().view.available, true);
     // Two readers of one scope: the roster watch and the card.

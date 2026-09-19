@@ -10,6 +10,7 @@ import { describe, it } from "node:test";
 import { apply } from "../src/plugin.js";
 import {
   DISPATCHER_START_ALREADY_HERE,
+  DISPATCHER_RESOLVE_COMMAND,
   DISPATCHER_START_COMMAND,
   DISPATCHER_START_DESCRIPTION,
   DISPATCHER_START_NOT_TOP_LEVEL,
@@ -252,6 +253,7 @@ describe("activation lifecycle — flag matrix (design-16 §3.7)", () => {
     assert.deepEqual(ctx.commandNames(), [
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
+      DISPATCHER_RESOLVE_COMMAND,
     ]);
     assert.deepEqual(ctx.toolNames(), []);
   });
@@ -267,6 +269,7 @@ describe("activation lifecycle — flag matrix (design-16 §3.7)", () => {
     apply(ctx, { enabled: true });
 
     assert.deepEqual(ctx.commandNames().sort(), [
+      DISPATCHER_RESOLVE_COMMAND,
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
     ]);
@@ -399,6 +402,7 @@ describe("activation lifecycle — command behavior", () => {
     assert.deepEqual(ctx.commandNames(), [
       "dispatcher-start",
       "dispatcher-steer",
+      "dispatcher-resolve",
     ]);
     assert.equal(
       DISPATCHER_START_DESCRIPTION,

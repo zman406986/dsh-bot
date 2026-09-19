@@ -18,7 +18,7 @@
  * behaviour), so a deployment that does not compose the plugin leaves no trace.
  *
  * Theming (ticket 49's contract): every colour is a host design token
- * (`--dsw-alias-*`, ordinary custom properties on `body` — see `capsule.tsx`),
+ * (`--dsw-alias-*`, ordinary custom properties on `body`),
  * and the control vocabulary deliberately matches the shipped card CSS: the
  * card is `bg-layer-3` with a `border-l4` hairline, an open card drops to
  * `bg-layer-2`, text walks label-primary → secondary → tertiary, and the save

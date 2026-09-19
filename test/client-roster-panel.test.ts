@@ -82,11 +82,12 @@ function snapshot(
   publishedAtMs = 1_000,
 ): RosterSnapshot {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     dispatcherSessionId: "s-1",
     publishedAtMs,
     workers,
     recentResult: null,
+      pendingAsks: [],
   };
 }
 

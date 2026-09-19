@@ -7,8 +7,10 @@
  *
  * Presentation only: a card renders what the projection carries — relay
  * truth and the tool-call record — and acts only through the injected
- * resolve seat. The seat is the composition's to wire (the live transport
- * into `Multitask.resolveAccess` is ticket 69's L1 lane); without a seat a
+ * resolve seat. The seat is the composition's to wire; the live transport
+ * rides ticket 40's command transaction into the host's
+ * `/dispatcher-resolve` command and from there the unchanged
+ * `Multitask.resolveAccess` (ticket 69 L1); without a seat a
  * pending card says so honestly instead of offering dead buttons. There is
  * deliberately no retry affordance on a failed submit — one honest line,
  * nothing was changed (ADR-0018 U-A) — and no success fanfare: a routed
@@ -90,7 +92,15 @@ export const APPROVAL_CARD_KEYS = {
   gating: "shell.dispatch.gating",
 } as const;
 
-/** The resolve seat: the composition's transport into the relay (L1 wires it). */
+/**
+ * The resolve seat (ticket 69, L1): the composition's transport into the
+ * relay. It receives the WHOLE card because the transport needs the card's
+ * `workerId` (the relay resolves per worker) and `parentSessionId` (the
+ * dispatcher chat the `/dispatcher-resolve` command executes in) — not just
+ * the requestId. The live composition wires it to ticket 40's command
+ * transaction (`submitAccessResolve` in `src/client/actions.ts`); without a
+ * seat a pending card says so honestly instead of offering dead buttons.
+ */
 export type ApprovalResolveOutcome =
   | { readonly kind: "routed" }
   | { readonly kind: "no-channel" }
@@ -98,7 +108,7 @@ export type ApprovalResolveOutcome =
 
 export interface ApprovalCardActions {
   readonly onResolve: (
-    requestId: string,
+    card: AccessAskCard,
     choice: AccessAskOptionChoice,
   ) => Promise<ApprovalResolveOutcome>;
 }
@@ -157,7 +167,7 @@ function AccessAskCardView(props: {
 
   const submit = (choice: AccessAskOptionChoice): void => {
     if (actions === undefined || outcome !== null) return;
-    void actions.onResolve(card.requestId, choice).then(setOutcome);
+    void actions.onResolve(card, choice).then(setOutcome);
   };
 
   return (

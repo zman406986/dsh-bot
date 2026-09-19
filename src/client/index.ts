@@ -29,8 +29,8 @@
  * 3. ~~the dispatcher capsule entry~~ RETIRED at the ticket-78 cutover
  *    (2026-09-19): the `shell.overlay` chip/panel registration stopped (the
  *    capsule era ends; ADR-0020 supersedes ADR-0013's vehicle). Its stores,
- *    copy, and component remain as re-host assets fed by the SAME watch —
- *    dead-code disposition is the 65/66/73 lane's;
+ *    copy, and component were retained briefly as re-host assets and are now
+ *    DELETED outright (ticket 89, 2026-09-19) — nothing consumed them.
  * 4. the per-tool call views (ticket 24): keyed `tool.call.toolview` entries
  *    for the five dispatcher wire tool names — unclaimed keys, so additive-
  *    safe against the shipped composition (research Finding 5);
@@ -39,7 +39,10 @@
  *    插件配置 tab pairs our card with the namespace the Host serves.
  * 6. ~~the staging launcher chip~~ RETIRED at the ticket-78 cutover
  *    (2026-09-19) alongside the capsule: the `shell.overlay` chip and its
- *    `layout` watch stopped with the frame election (item 10);
+ *    `layout` watch stopped with the frame election (item 10). Its contracts
+ *    and component were retained briefly as re-host assets and are now
+ *    DELETED outright (ticket 89, 2026-09-19) — nothing consumed them; the
+ *    LIVE main-page contracts (item 7) stay.
  * 7. the wrapper shell page itself (ticket 78, ADR-0020 staging): one keyed
  *    `main` entry under OUR key (the only shipped key is `conversation`),
  *    binding the shell store to the sessions feed and hosting the existing
@@ -98,15 +101,10 @@ import {
 } from "./overlay.js";
 import {
   bindCommandTransport,
+  submitAccessResolve,
   tryPrefillSteer,
   type SteerPrefillOutcome,
 } from "./actions.js";
-import {
-  createCapsuleFooterStore,
-  createCapsuleStore,
-  type CapsuleFooterStore,
-  type CapsuleStore,
-} from "./capsule-store.js";
 import { createRosterStore, type RosterStore } from "./roster-store.js";
 import { createToolviewComponent } from "./toolview-panel.js";
 import {
@@ -152,6 +150,11 @@ import {
   type ApprovalCardsStore,
 } from "./approval-cards.js";
 import {
+  createApprovalRelayFeed,
+  type ApprovalRelayFeed,
+} from "./approval-feed.js";
+import type { ApprovalCardActions } from "./approval-pane.js";
+import {
   createConversationPane,
   type ConversationSendOutcome,
 } from "./conversation.js";
@@ -173,8 +176,22 @@ import { createOnboardingPane } from "./onboarding-pane.js";
  * ui-session, `remote` ← api-gateway, `conversation` ← ui-conversation).
  * Wrapper-only, deliberately NOT declared because a hard requirement would
  * hold the whole module PENDING when absent: `settingsScope` (ticket 46's
- * settings watch) and `layout` (the launcher's optional page controller,
- * watched in the staging-mount section below).
+ * settings watch — since ticket 69 L1 also the approval-cards relay feed's
+ * channel). (`layout` — the retired staging launcher's optional page
+ * controller — stopped being requested at the ticket-78 cutover, and the
+ * launcher contracts themselves were deleted by ticket 89.)
+ *
+ * Ticket 69 (L1/L3) face audit — why NOTHING new is declared here: the
+ * relay FEED rides the settingsScope wrapper above (the roster mirror, one
+ * channel); the resolve TRANSPORT rides the already-declared `remote`
+ * commands transaction plus the card's own `parentSessionId`; and the
+ * dispatch ANSWERER (`ctx.approval`, `@deepseek-ai/dsh-user-approval` —
+ * adapter notes :220/:390) is a HOST service wired in `src/plugin.ts`'s
+ * inject, never read client-side: the client half of that waterfall is the
+ * shipped `dsh-client-ui-approval` composer over the forwarded
+ * `approval/request` Remote event, which composes independently of this
+ * module (whether it still answers under the wrapper root frame is the
+ * live lane's L3 verification).
  */
 export const inject: readonly string[] = [
   "slots",
@@ -193,8 +210,6 @@ export function apply(ctx: ClientContext): void {
   applyClientModule(
     ctx,
     createRosterStore(),
-    createCapsuleStore(),
-    createCapsuleFooterStore(),
     createSettingsCardStore(),
   );
 }
@@ -203,19 +218,15 @@ export function apply(ctx: ClientContext): void {
  * The module body, factored over explicit stores so offline tests can drive
  * the data path end to end (watch payload → store → view model) without a
  * DOM harness. Not a second entry point: `apply` is the only thing the
- * loader registers. The capsule store (ticket 38) is the entry's own
- * expansion state; the footer store (ticket 42) holds the persisted flag
- * provenance read from the SAME watch; defaulting either keeps older
- * callers working and gives a fresh fiber a collapsed capsule. The
- * onboarding store (ticket 68) holds the first-run beat walk plus the seen
- * input read from that same watch; defaulting it starts a fresh fiber at
- * beat one.
+ * loader registers. The onboarding store (ticket 68) holds the first-run
+ * beat walk plus the seen input read from the SAME watch; defaulting it
+ * starts a fresh fiber at beat one. (The capsule-era store parameters were
+ * deleted with the capsule — ticket 89; older callers passing them would
+ * now misalign, and `apply` is the only production caller.)
  */
 export function applyClientModule(
   ctx: ClientContext,
   store: RosterStore,
-  capsule: CapsuleStore = createCapsuleStore(),
-  footer: CapsuleFooterStore = createCapsuleFooterStore(),
   card: SettingsCardStore = createSettingsCardStore(),
   onboarding: OnboardingStore = createOnboardingStore(),
 ): void {
@@ -232,12 +243,11 @@ export function applyClientModule(
   // is the HOST seam; client-side the service is `settingsScope`, and the shape
   // is `bind({namespace})` → `{getSnapshot, subscribe}`, with no `watch(ns, cb)`
   // in the contract (see `context.ts`). The old name never resolved, so this
-  // body never ran and the store sat at `waiting` forever (live: capsule never
-  // flipped, footer flag `unknown`). The panel degrades to "unavailable" copy
+  // body never ran and the store sat at `waiting` forever (live: the roster
+  // never flipped). The panel degrades to "unavailable" copy
   // when the service is missing or the feed is stale — never against an
-  // unverified live push channel. The SAME snapshot feeds the ticket-42 footer
-  // store (persisted flag provenance) — one channel, two honest readers, never
-  // a second source.
+  // unverified live push channel. (The ticket-42 footer store — once the
+  // snapshot's second reader — was deleted with the capsule, ticket 89.)
   //
   // Ticket 47 attaches its settings card to this SAME bind: one namespace, one
   // scope, and the card's writes (`set`/`unset`) leave through the transport
@@ -249,6 +259,18 @@ export function applyClientModule(
   // namespace feeds an explicit `undefined` — fail-open (the flow shows when
   // the record cannot be read; it is never silently hidden). The bound scope
   // is also kept for the seen WRITE hand-off below.
+  //
+  // Ticket 69 (L1 offline half): the SAME document also feeds the
+  // approval-cards relay feed — the roster snapshot's v4 `pendingAsks`
+  // envelope field IS the relay's pending-ask truth, re-published by the
+  // host on every park/resolve transition. One channel, one more honest
+  // reader (the roster panel's own "Needs you" list was already on it);
+  // never a second feed. The hub fans out to the per-mount approvals stores
+  // (each `mountShellPage` attaches its own) with last-truth replay, and a
+  // corrupt or unrelated document leaves every store untouched — the roster
+  // panel owns corruption/staleness presentation, and this feed never
+  // fabricates a "nothing waiting" from a document it cannot vouch for.
+  const approvalFeed = createApprovalRelayFeed();
   let seenScope: ClientSettingsScopeLike | null = null;
   ctx.effect(() => {
     let disposeWatch: (() => void) | undefined;
@@ -291,7 +313,7 @@ export function applyClientModule(
         // alive, the roster simply is not in it.
         if (snapshot.value === undefined) return;
         store.applyChannelValue(snapshot.value);
-        footer.applyChannelValue(snapshot.value);
+        approvalFeed.applyChannelValue(snapshot.value);
       };
       disposeWatch = scope.subscribe(readSnapshot);
       // Subscribe only fires on replacements; a scope bound after the first
@@ -371,10 +393,12 @@ export function applyClientModule(
   // RETIRED with the frame election below (the vehicle that opened the page
   // from the shipped app's floating layer; the page itself stays registered,
   // dormant behind the frame election and self-restoring on abdication).
-  // Its pure contracts (`openShellPage`, `createShellLauncherLayout`,
-  // `shellLauncherRegistration`) remain exported in `shell-mount.ts` /
-  // `shell.tsx` as retired-vehicle assets; the component is `shell.tsx`'s
-  // `createShellLauncher`. Dead-code disposition is the 65/66/73 lane's.
+  // Its pure contracts and component were retained briefly as retired-vehicle
+  // assets and are now DELETED (ticket 89, 2026-09-19): `openShellPage`,
+  // `createShellLauncherLayout`, `shellLauncherRegistration`, and
+  // `shell.tsx`'s `createShellLauncher` are gone. The LIVE main-page
+  // contracts (`SHELL_PAGE_KEY`, `shellPageRegistration`) stay — the `main`
+  // registration below is the pinned staging contract.
 
   // The shell page: one keyed `main` entry under OUR key (the only shipped
   // key is `conversation` — unclaimed cells are ours by default; claiming a
@@ -387,6 +411,7 @@ export function applyClientModule(
     const mount = mountShellPage(ctx, {
       store: onboarding,
       onSeen: writeOnboardingSeen,
+      approvalsFeed: approvalFeed,
     });
     return ctx.slots.register(
       shellPageRegistration(),
@@ -432,6 +457,7 @@ export function applyClientModule(
     const mount = mountShellPage(ctx, {
       store: onboarding,
       onSeen: writeOnboardingSeen,
+      approvalsFeed: approvalFeed,
     });
     return ctx.slots.register(
       shellRootRegistration(),
@@ -470,8 +496,10 @@ export interface ShellPageMount {
   readonly conversation: ConversationStore;
   /**
    * Ticket 81: the approval-cards store behind the conversation pane's
-   * "Needs you" area. Unfed until a relay-truth feed lands (ticket 69 L1);
-   * exposed so that wiring can ride this mount without a second store.
+   * "Needs you" area. Fed from the shared relay feed when the composition
+   * provides it (ticket 69 L1 — the roster snapshot's v4 `pendingAsks`),
+   * else honestly `unfed`; exposed so tests can drive the data path end to
+   * end without a second store.
    */
   readonly approvals: ApprovalCardsStore;
   /** Host seats handed to `createDispatcherShell`. */
@@ -489,20 +517,42 @@ export interface ShellOnboardingWiring {
   readonly onSeen: () => void;
 }
 
+/**
+ * The approval-cards relay feed the composition shares (ticket 69, L1).
+ * Optional so a composition (or a test) can mount the shell without it —
+ * the approvals store then stays `unfed` and the pane renders no cards
+ * area (honest unknown, never a fabricated "nothing needs you").
+ */
+export interface ShellApprovalFeedWiring {
+  readonly approvalsFeed?: ApprovalRelayFeed;
+}
+
 export function mountShellPage(
   ctx: ClientContext,
-  onboarding?: ShellOnboardingWiring,
+  wiring?: ShellOnboardingWiring & ShellApprovalFeedWiring,
 ): ShellPageMount {
+  const onboarding = wiring && wiring.store ? wiring : undefined;
+  const approvals =
+    wiring && wiring.approvalsFeed !== undefined ? wiring : undefined;
   const store = createDispatcherShellStore();
   const seat = createRosterStore();
   const conversation = createConversationStore();
-  // Ticket 81: the approval-cards store (the "Needs you" area's data seam).
-  // No relay-truth feed is wired client-side yet — the store stays `unfed`
-  // and the pane renders no cards area (honest unknown, never a fabricated
-  // "nothing needs you"). The feed + resolve transport into
-  // `Multitask.resolveAccess` are ticket 69's live lane (L1).
-  const approvals = createApprovalCardsStore();
+  // Ticket 81/69: the approval-cards store (the "Needs you" area's data
+  // seam). Fed from the ONE settings watch through the shared relay feed
+  // when the wiring provides it (below); unfed stores render nothing —
+  // honest unknown, never a fabricated "nothing needs you".
+  const approvalsStore = createApprovalCardsStore();
   let binding: ShellFeedBinding | undefined;
+
+  // Approval relay feed attach (ticket 69, L1 offline half): this mount's
+  // store joins the shared hub — replaying the last good pending set
+  // immediately, then every publish — and detaches with the mount's fiber
+  // (the sessions-feed-binding pattern: unsubscribes on unload/HMR).
+  ctx.effect(() => {
+    const feed = approvals?.approvalsFeed;
+    if (feed === undefined) return () => {};
+    return feed.attach(approvalsStore);
+  }, "multitask-dispatcher: shell approval relay feed");
 
   // Feed binding (ticket 79's projection, wired at THIS composition point —
   // the ticket-79 comment's "ticket 78's registration"). `sessions` is
@@ -544,10 +594,18 @@ export function mountShellPage(
 
   // The pane factory: bound once to the translate seat, the conversation
   // store, and the two verified actions — plus ticket 81's approvals seat
-  // (the cards store; the resolve transport is L1's, so no actions are
-  // passed and a fed pending card would say so honestly). Called per render
-  // with the selected session id (the shell's main seat), the same seat
-  // pattern as the hosted roster panel.
+  // WITH ticket 69's resolve seat (L1): a card answer executes the host's
+  // `/dispatcher-resolve` command through the SAME command transaction the
+  // start transport used (ticket 36 seam 2 — the composer's exact
+  // transaction, `ctx.remote.commands.execute`, verbatim line, no second
+  // channel). The card's own `parentSessionId` addresses the dispatcher
+  // chat, so the answer routes regardless of the current selection.
+  // Await-truth, no optimism: `routed` only means the host ran the command;
+  // the card settles when the relay feed re-publishes the worker unblocked
+  // (the store's pending-outranks-notice design).
+  const approvalActions: ApprovalCardActions = {
+    onResolve: (card, choice) => submitAccessResolve(sendTransport, card, choice),
+  };
   const conversationPane = createConversationPane(
     ctx.locale.bind(LOCALE_NAMESPACE),
     conversation,
@@ -564,7 +622,7 @@ export function mountShellPage(
       },
       onLoadOlder: (sessionId) => requestOlder(ctx.sessions, sessionId),
     },
-    { cards: approvals },
+    { cards: approvalsStore, actions: approvalActions },
   );
 
   // The hosted panel's per-row steer affordance uses the same verified
@@ -657,5 +715,5 @@ export function mountShellPage(
     onboarding: onboardingPane,
   };
 
-  return { store, seat, conversation, approvals, hosts };
+  return { store, seat, conversation, approvals: approvalsStore, hosts };
 }

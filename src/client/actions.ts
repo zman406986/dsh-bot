@@ -1,40 +1,41 @@
 /**
- * Capsule/panel action wiring (ticket 40): the ONE egress from the client
- * face's intents to the user's own send paths, bound to the seams ticket 36
- * verified (`docs/research/dsh-capsule-seams.md`).
+ * Client action wiring (ticket 40): the ONE egress from the client face to
+ * the user's own send paths, bound to the seams ticket 36 verified
+ * (`docs/research/dsh-capsule-seams.md`).
  *
- * The epic rule (ADR-0009, design-16 §3.4): an activation button calls the
- * same command path — it must never invent a second activation channel — and
- * the panel stays presentation-only, so this module defines the ONLY outbound
- * surface the client intents may use, a narrow {@link CommandTransport}, and
- * binds no service itself: `src/client/index.ts` composes the real transport
- * over the structural faces at module-composition time, and tests inject
- * fakes (offline, S8 — the test double proves the client works without a
- * browser or host).
+ * The epic rule (ADR-0009, design-16 §3.4): any client affordance calls the
+ * same send paths the user's own typing reaches — it must never invent a
+ * second channel — so this module defines the ONLY outbound surface the
+ * client may use, a narrow {@link CommandTransport}, and binds no service
+ * itself: `src/client/index.ts` composes the real transport over the
+ * structural faces at module-composition time, and tests inject fakes
+ * (offline, S8 — the test double proves the client works without a browser
+ * or host).
  *
- * The two intents ride two DIFFERENT verified user-send paths, because the
+ * The transport carries the TWO verified user-send paths, because the
  * installed host admits them differently (both facts verified against the
  * 0.1.5-rc.1 tree, see the seam note §2):
  *
- * - **start** — the composer's exact command transaction:
- *   `ctx.remote.commands.execute(sessionId, line, attachments)` with the
- *   line `/dispatcher-start` VERBATIM. The host's command runtime parses the
- *   line, logs `command/run`/`command/done` with `source: {kind: "user"}`,
- *   and runs the same handler a typed line reaches — identical admission,
- *   no second channel.
- * - **stop** — a conversational INTENT (ticket 31's no-stop guard: there is
- *   no off-while-running to switch off, ADR-0005/0009). The phrasing is a
- *   plain-language ask submitted as the user's own message through the
- *   prompt sink, so the dispatcher's policy (ticket 31's stop/course-change
- *   rule, design-17 §7) treats it exactly like the user typing it. The
- *   command endpoint is deliberately NOT used: `CommandRuntime.execute`
- *   returns `undefined` when the line parses as no command, so a
- *   conversational line would silently do nothing there. The sink is the
- *   host-documented scope-addressed face — a root-scope plugin addresses a
- *   session via `ctx.sessions.scope(id)` and that scope's
- *   `conversation.send(text)` (the host's own guidance:
- *   "address one via ctx.sessions.scope(id).conversation"), the same
- *   scope-addressing mechanism ticket 36 verified for the input resolver.
+ * - **command** — the composer's exact command transaction:
+ *   `ctx.remote.commands.execute(sessionId, line, attachments)`. The host's
+ *   command runtime parses the line, logs `command/run`/`command/done` with
+ *   `source: {kind: "user"}`, and runs the same handler a typed line
+ *   reaches — identical admission, no second channel. (Ticket 89 note: the
+ *   capsule's start button was the transaction's only in-tree caller and
+ *   retired with the capsule; the method stays as the verified seam. The
+ *   retired client-side `/dispatcher-start` line constant went with it —
+ *   the HOST-side activation command is `src/adapter`'s, untouched.)
+ * - **prompt** — a plain-language message submitted as the user's own turn
+ *   through the prompt sink. The command endpoint is deliberately NOT used
+ *   for conversational text: `CommandRuntime.execute` returns `undefined`
+ *   when the line parses as no command, so a conversational line would
+ *   silently do nothing there. The sink is the host-documented
+ *   scope-addressed face — a root-scope plugin addresses a session via
+ *   `ctx.sessions.scope(id)` and that scope's `conversation.send(text)`
+ *   (the host's own guidance: "address one via
+ *   ctx.sessions.scope(id).conversation"), the same scope-addressing
+ *   mechanism ticket 36 verified for the input resolver. This is the path
+ *   the wrapper shell's conversation composer rides (ticket 80).
  *
  * **Per-row steer affordance** — prefill only, per seam 3's verdict:
  * `ctx.conversation.input.for(actx).setDraft(text)` writes
@@ -47,28 +48,34 @@
  * queue, `src/adapter/steer-command.ts`) — this module never steers; it only
  * fills the user's own draft.
  *
- * **Failure handling** (ticket 40): a failed send maps to an honest locale
- * error line rendered by the capsule; there is no optimistic success copy,
- * no retry loop, and no invented queue — the host owns the composer journal
- * (design-17 conflict 9), and the ONLY success truth is the roster feed
- * itself: activation state flips when the host publishes a snapshot, never
- * because a click was accepted.
+ * Ticket 89 (2026-09-19): the capsule-era activation machinery — the start/
+ * stop intents, the CAPSULE_ACTION_* + CAPSULE_STOP_MESSAGE_KEY copy keys,
+ * `activationOutcomeCopyKey`, and the capsule action-notice store — is
+ * DELETED with the capsule it served; the live conversation pane has its
+ * own `shell.conv.*` honesty copy.
  *
- * Pure and dependency-light: no React, no DOM, no Cordis — asserted directly
- * by `test/client-capsule-actions.test.ts`.
+ * Pure and dependency-light: no React, no DOM, no Cordis.
  */
-import type { CapsuleActivationIntent } from "./capsule-store.js";
 import type {
   ClientConversationLike,
   ClientRemoteLike,
   ClientSessionsLike,
 } from "./context.js";
-
-/** The activation command line, submitted verbatim (ADR-0009). */
-export const DISPATCHER_START_LINE = "/dispatcher-start";
+import type { AccessAskCard, AccessAskOptionChoice } from "./approval-cards.js";
+import type { ApprovalResolveOutcome } from "./approval-pane.js";
 
 /** The steer command name used for the per-row prefill (power path). */
 export const DISPATCHER_STEER_LINE = "/dispatcher-steer";
+
+/**
+ * The access-ask resolve command name (ticket 69, L1): the wrapper's
+ * approval-card buttons execute `/dispatcher-resolve <workerId> <choice>`
+ * through the composer's own command transaction; the host handler
+ * (`src/adapter/resolve-command.ts`) routes into the unchanged relay via
+ * `Multitask.resolveAccess` — the same entry point the ticket-23 access
+ * prompt uses.
+ */
+export const DISPATCHER_RESOLVE_LINE = "/dispatcher-resolve";
 
 /**
  * Exactly what the per-row steer affordance writes into the composer:
@@ -159,133 +166,6 @@ export function bindCommandTransport(sources: TransportSources): CommandTranspor
   };
 }
 
-/** How an intent's send settled. Deliberately NO "success" kind: the only
- * activation success truth is the roster feed, never a click's receipt. */
-export type ActivationSendOutcome =
-  /** The transport accepted the line/prompt (no activation claim attached). */
-  | { readonly kind: "sent" }
-  /** The transport rejected the send — nothing was changed. */
-  | { readonly kind: "failed" }
-  /** The host resolved no command (e.g. the flag is off here). */
-  | { readonly kind: "unresolved" }
-  /** No channel or no current session — nothing was addressable. */
-  | { readonly kind: "unavailable" };
-
-/** Locale key for the failed-send error line. */
-export const CAPSULE_ACTION_SEND_FAILED_KEY = "capsule.action.send-failed";
-
-/** Locale key for the "command not available here" line. */
-export const CAPSULE_ACTION_NOT_AVAILABLE_KEY = "capsule.action.not-available";
-
-/** Locale key for the "no command channel" degraded line. */
-export const CAPSULE_ACTION_NO_CHANNEL_KEY = "capsule.action.no-channel";
-
-/** Locale key whose value is the SUBMITTED conversational stop phrasing. */
-export const CAPSULE_STOP_MESSAGE_KEY = "capsule.stop.message";
-
-/**
- * Map a send outcome to its honest capsule notice copy key, or `null` for
- * silence. `sent` maps to NULL on purpose: no optimistic fake success — the
- * roster feed shows the real state when (and only when) the host publishes
- * it, and the stop ask is confirmed conversationally by the dispatcher.
- */
-export function activationOutcomeCopyKey(
-  outcome: ActivationSendOutcome,
-): string | null {
-  switch (outcome.kind) {
-    case "sent":
-      return null;
-    case "failed":
-      return CAPSULE_ACTION_SEND_FAILED_KEY;
-    case "unresolved":
-      return CAPSULE_ACTION_NOT_AVAILABLE_KEY;
-    case "unavailable":
-      return CAPSULE_ACTION_NO_CHANNEL_KEY;
-  }
-}
-
-/**
- * Submit one activation intent through the transport (ticket 40). The stop
- * intent's phrasing must come pre-resolved from the locale seat (the caller
- * passes `t(CAPSULE_STOP_MESSAGE_KEY)`), so tests can assert the submitted
- * text via the locale key rather than literals.
- *
- * Resolves the current session at CALL time (fresh — the user may have
- * switched chats since the capsule rendered); with no addressable session
- * the outcome is `unavailable` and the transport is never touched.
- */
-export async function sendActivationIntent(
-  transport: CommandTransport,
-  currentSessionId: () => string | undefined,
-  intent: CapsuleActivationIntent,
-  stopMessage: string,
-): Promise<ActivationSendOutcome> {
-  const sessionId = currentSessionId();
-  if (sessionId === undefined) return { kind: "unavailable" };
-  try {
-    if (intent === "start") {
-      const result = await transport.sendCommand(sessionId, DISPATCHER_START_LINE);
-      if (result.kind === "no-channel") return { kind: "unavailable" };
-      return result.kind === "unresolved"
-        ? { kind: "unresolved" }
-        : { kind: "sent" };
-    }
-    const result = await transport.sendPrompt(sessionId, stopMessage);
-    return result.kind === "no-channel" ? { kind: "unavailable" } : { kind: "sent" };
-  } catch {
-    // Transport rejection: honest failure copy, no retry, no invented queue.
-    return { kind: "failed" };
-  }
-}
-
-/**
- * The capsule's action-notice line: the honest error copy from the last
- * attempt, cleared when the next attempt starts. Box identity changes only
- * on a real transition (same discipline as `CapsuleStore`), and the box
- * carries ONLY a copy key — there is no success state to flip to.
- */
-export interface CapsuleActionStatusBox {
-  readonly copyKey: string | null;
-  readonly version: number;
-}
-
-export interface CapsuleActionStatus {
-  /** Stable getter for `useSyncExternalStore`. */
-  getBox(): CapsuleActionStatusBox;
-  /** Replace the notice (`null` clears); no-op when unchanged. */
-  set(copyKey: string | null): void;
-  /** Subscribe; returns the unsubscribe disposer. */
-  subscribe(listener: () => void): () => void;
-}
-
-export function createCapsuleActionStatus(): CapsuleActionStatus {
-  let copyKey: string | null = null;
-  let version = 0;
-  let box: CapsuleActionStatusBox = { copyKey, version };
-  const listeners = new Set<() => void>();
-
-  return {
-    getBox() {
-      return box;
-    },
-    set(next: string | null) {
-      if (next === copyKey) return;
-      copyKey = next;
-      version += 1;
-      box = { copyKey, version };
-      for (const listener of [...listeners]) {
-        listener();
-      }
-    },
-    subscribe(listener: () => void) {
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
-    },
-  };
-}
-
 /** Per-row steer outcome: the draft was written, or prefill was impossible. */
 export type SteerPrefillOutcome =
   | { readonly kind: "prefilled" }
@@ -337,5 +217,52 @@ export function tryPrefillSteer(
     return { kind: "prefilled" };
   } catch {
     return { kind: "unavailable" };
+  }
+}
+
+/**
+ * The exact resolve line for one access-ask answer (ticket 69, L1):
+ * `/dispatcher-resolve <workerId> <allow|always-allow|deny>` — the card's
+ * option kinds ARE the command's choice vocabulary (one grammar, never a
+ * second mapping).
+ */
+export function dispatcherResolveLine(
+  workerId: string,
+  choice: AccessAskOptionChoice,
+): string {
+  return `${DISPATCHER_RESOLVE_LINE} ${workerId} ${choice}`;
+}
+
+/**
+ * Submit one access-ask answer through the command transaction (ticket 69,
+ * L1). The card's OWN `parentSessionId` — the dispatcher chat that owns the
+ * ask — is the session the command executes in, so the answer is routed
+ * even when another chat is selected. Outcomes follow the pane's contract:
+ * `routed` means the host ran the command (the ONLY success truth is
+ * still the relay feed — the card settles when the feed re-publishes the
+ * worker unblocked); `unresolved` (host parsed no command — older host or
+ * flag off) and `no-channel` both mean nothing answerable was reachable;
+ * a transport rejection is an honest `failed`. No retry control exists —
+ * one honest line, nothing was changed (ADR-0018 U-A).
+ */
+export async function submitAccessResolve(
+  transport: CommandTransport,
+  card: AccessAskCard,
+  choice: AccessAskOptionChoice,
+): Promise<ApprovalResolveOutcome> {
+  if (card.parentSessionId.length === 0 || card.workerId.length === 0) {
+    return { kind: "no-channel" };
+  }
+  try {
+    const result = await transport.sendCommand(
+      card.parentSessionId,
+      dispatcherResolveLine(card.workerId, choice),
+    );
+    if (result.kind === "no-channel" || result.kind === "unresolved") {
+      return { kind: "no-channel" };
+    }
+    return { kind: "routed" };
+  } catch {
+    return { kind: "failed" };
   }
 }

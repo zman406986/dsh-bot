@@ -1,7 +1,7 @@
 /**
- * Ticket 49 (extended by ticket 47) — the capsule, the roster panel, and the
- * settings card must style themselves from the host's shared design-token
- * layer, not from a private palette.
+ * Ticket 49 (extended by ticket 47) — the roster panel and the settings card
+ * must style themselves from the host's shared design-token layer, not from
+ * a private palette.
  *
  * Offline only (S8): the tokens are ordinary CSS custom properties defined on
  * `body` by the shipped theme stylesheet
@@ -10,14 +10,15 @@
  * referencing them — no service, no subscription, no boot-graph edge. These
  * pins hold that contract: no raw colour literal may come back, every colour
  * resolves through a `--dsw-*` token, the role mapping is the documented one,
- * and the two named traps stay shut.
+ * and the two named traps stay shut. (The capsule surface left this suite
+ * with its deletion — ticket 89; the wrapper shell's CSS is pinned in
+ * client-wrapper-shell.test.ts.)
  *
  * The pre-existing CSS contracts (namespacing, the ring being the only
  * animation, reduced-motion degradation) stay in their own tickets' files.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { CAPSULE_CSS } from "../src/client/capsule.js";
 import { ROSTER_PANEL_CSS } from "../src/client/panel.js";
 import { SETTINGS_CARD_CSS } from "../src/client/settings-card.js";
 
@@ -31,7 +32,6 @@ function tokensIn(css: string): string[] {
 }
 
 const SURFACES = [
-  { name: "capsule (CAPSULE_CSS)", css: CAPSULE_CSS },
   { name: "roster panel (ROSTER_PANEL_CSS)", css: ROSTER_PANEL_CSS },
   { name: "settings card (SETTINGS_CARD_CSS)", css: SETTINGS_CARD_CSS },
 ] as const;
@@ -84,18 +84,6 @@ describe("theme tokens — no private palette survives (ticket 49)", () => {
   }
 
   it("the token sets are exactly the documented mapping", () => {
-    assert.deepEqual(tokensIn(CAPSULE_CSS), [
-      "--dsw-alias-bg-layer-3",
-      "--dsw-alias-border-l2",
-      "--dsw-alias-border-l3",
-      "--dsw-alias-interactive-bg-hover",
-      "--dsw-alias-label-primary",
-      "--dsw-alias-label-tertiary",
-      "--dsw-alias-state-business-primary",
-      "--dsw-alias-state-error-primary",
-      "--dsw-alias-state-success-primary",
-      "--dsw-elevation-panel",
-    ]);
     assert.deepEqual(tokensIn(ROSTER_PANEL_CSS), [
       "--dsw-alias-border-l3",
       "--dsw-alias-label-tertiary",
@@ -127,54 +115,6 @@ describe("theme tokens — no private palette survives (ticket 49)", () => {
 });
 
 describe("theme tokens — role mapping (ticket 49)", () => {
-  it("capsule: floating chip and card are layered surfaces with host elevation", () => {
-    const chip = ruleFor(CAPSULE_CSS, ".multitask-dispatcher-capsule__chip");
-    assert.match(chip, /background:var\(--dsw-alias-bg-layer-3\)/);
-    assert.match(chip, /border:1px solid var\(--dsw-alias-border-l3\)/);
-    assert.match(chip, /color:var\(--dsw-alias-label-primary\)/);
-
-    const card = ruleFor(CAPSULE_CSS, ".multitask-dispatcher-capsule__card");
-    assert.match(card, /background:var\(--dsw-alias-bg-layer-3\)/);
-    assert.match(card, /color:var\(--dsw-alias-label-primary\)/);
-    assert.match(card, /box-shadow:var\(--dsw-elevation-panel\)/);
-  });
-
-  it("capsule: dot states use the state family, idle uses the muted label", () => {
-    assert.match(
-      ruleFor(CAPSULE_CSS, ".multitask-dispatcher-capsule__dot"),
-      /background:var\(--dsw-alias-label-tertiary\)/,
-    );
-    assert.match(
-      ruleFor(
-        CAPSULE_CSS,
-        '.multitask-dispatcher-capsule__dot[data-dot="active"]',
-      ),
-      /background:var\(--dsw-alias-state-business-primary\)/,
-    );
-    assert.match(
-      ruleFor(
-        CAPSULE_CSS,
-        '.multitask-dispatcher-capsule__dot[data-dot="error"]',
-      ),
-      /background:var\(--dsw-alias-state-error-primary\)/,
-    );
-  });
-
-  it("capsule: wake badge, failed-send notice and button surface use their siblings", () => {
-    assert.match(
-      ruleFor(CAPSULE_CSS, ".multitask-dispatcher-capsule__wake"),
-      /color:var\(--dsw-alias-state-success-primary\)/,
-    );
-    assert.match(
-      ruleFor(CAPSULE_CSS, ".multitask-dispatcher-capsule__action-notice"),
-      /color:var\(--dsw-alias-state-error-primary\)/,
-    );
-    assert.match(
-      ruleFor(CAPSULE_CSS, ".multitask-dispatcher-capsule__activation-button"),
-      /background:var\(--dsw-alias-interactive-bg-hover\)/,
-    );
-  });
-
   it("panel: every FSM dot maps to its state token", () => {
     const panel = ".multitask-dispatcher-roster-panel__dot";
     assert.match(

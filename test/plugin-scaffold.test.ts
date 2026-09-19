@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { Config, apply, inject, name } from "../src/plugin.js";
 import {
+  DISPATCHER_RESOLVE_COMMAND,
   DISPATCHER_START_COMMAND,
   DISPATCHER_STEER_COMMAND,
 } from "../src/adapter/index.js";
@@ -184,6 +185,7 @@ describe("plugin scaffold", () => {
       "tools",
       "commands",
       "userQuestions",
+      "approval",
     ]);
     assert.ok(Config);
   });
@@ -222,6 +224,7 @@ describe("plugin scaffold", () => {
     assert.deepEqual(ctx.registeredCommands.map((c) => c.name), [
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
+      DISPATCHER_RESOLVE_COMMAND,
     ]);
     // Deferred to activation (ticket 19): the tool surface stays stock.
     assert.equal(ctx.registeredTools.length, 0);
@@ -240,8 +243,9 @@ describe("plugin scaffold", () => {
     assert.deepEqual(ctx.registeredCommands.map((c) => c.name), [
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
+      DISPATCHER_RESOLVE_COMMAND,
     ]);
-    assert.equal(ctx.disposers.length, 3);
+    assert.equal(ctx.disposers.length, 4);
     for (const dispose of [...ctx.disposers]) dispose();
     assert.equal(ctx.registeredCommands.length, 0);
   });

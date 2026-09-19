@@ -37,6 +37,12 @@ export {
   type TextBlock,
 } from "./content-blocks.js";
 export {
+  createDispatchApprovalSeam,
+  DISPATCH_APPROVAL_TOOL_NAME,
+  type DispatchApprovalSeamOptions,
+  type HostApprovalServiceLike,
+} from "./dispatch-approval.js";
+export {
   registerDispatcherTools,
   resolveExecSessionId,
   toRegisterableTool,
@@ -143,6 +149,24 @@ export {
   type ParsedSteerInput,
   type RegisterDispatcherSteerCommandOptions,
 } from "./steer-command.js";
+export {
+  createDispatcherResolveCommand,
+  DISPATCHER_RESOLVE_COMMAND,
+  DISPATCHER_RESOLVE_DESCRIPTION,
+  DISPATCHER_RESOLVE_DENY_DETAIL,
+  DISPATCHER_RESOLVE_INPUT_HINT,
+  DISPATCHER_RESOLVE_NOT_ACTIVE,
+  DISPATCHER_RESOLVE_NOT_DISPATCHER,
+  DISPATCHER_RESOLVE_USAGE,
+  dispatcherResolveNoPendingAsk,
+  dispatcherResolveSettled,
+  dispatcherResolveSuccess,
+  parseResolveInput,
+  registerDispatcherResolveCommand,
+  type DispatcherResolveChoice,
+  type ParsedResolveInput,
+  type RegisterDispatcherResolveCommandOptions,
+} from "./resolve-command.js";
 export {
   PLUGIN_NAME,
   PEER_WAKE_CUE,

@@ -26,10 +26,6 @@ import {
 } from "../src/client/overlay.js";
 import { CLIENT_MODULE_ID, wrapClientBundle } from "../src/client/wrapper.js";
 import { buildClient } from "../scripts/build-client.js";
-import {
-  createShellLauncherLayout,
-  SHELL_PAGE_KEY,
-} from "../src/client/shell-mount.js";
 
 /**
  * Fake the client face the way the shipped Cordis runtime behaves:
@@ -302,38 +298,14 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
     assert.deepEqual(validateLocaleDictionary(localeDictionary), []);
     const keys = Object.keys(localeDictionary.en).sort();
     // Roster copy (tickets 21 + 27 + 28), the ticket-32 activation presence
-    // hint, the ticket-24 toolview copy, the ticket-38 capsule chip copy,
-    // the ticket-39 activation-row copy, the ticket-40 action-wiring copy
-    // (stop message, failure lines, per-row steer affordance), the
-    // ticket-41 deliverables-line copy, the ticket-42 footer copy
-    // (flag provenance + copy-only Settings hint), the ticket-70 send_peer
-    // row labels, the ticket-47
+    // hint, the ticket-24 toolview copy, the ticket-40 per-row steer
+    // affordance copy, the ticket-70 send_peer row labels, the ticket-47
     // settings-card copy (chrome, save/discard, and one label/hint pair per
     // schema field), and the ticket-68 onboarding beat copy (five beats +
-    // the step/next/done/skip/save-failed chrome).
+    // the step/next/done/skip/save-failed chrome). (The capsule-era copy
+    // keys left with the capsule's deletion — ticket 89, 2026-09-19.)
     assert.deepEqual(keys, [
       "activation.presence-hint",
-      "capsule.action.no-channel",
-      "capsule.action.not-available",
-      "capsule.action.send-failed",
-      "capsule.activation.pitch",
-      "capsule.activation.start",
-      "capsule.activation.stop",
-      "capsule.chip.open",
-      "capsule.chip.wake",
-      "capsule.chip.workers",
-      "capsule.collapse",
-      "capsule.deliverables.collapse",
-      "capsule.deliverables.count",
-      "capsule.deliverables.expand",
-      "capsule.deliverables.label",
-      "capsule.dot.active",
-      "capsule.dot.dormant",
-      "capsule.dot.error",
-      "capsule.footer.flag.off",
-      "capsule.footer.flag.on",
-      "capsule.footer.settings-hint",
-      "capsule.stop.message",
       "roster.activity.toolcalls",
       "roster.blocked.credential",
       "roster.blocked.filesystem",
@@ -537,20 +509,8 @@ describe("client face scaffold — host inject guard semantics (ticket 84)", () 
       { message: 'cannot get property "layout" without inject' },
     );
   });
-
-  it("the launcher click rides the layout cell to the honest outcomes", () => {
-    // Pure cell behind the click (shell-mount): absent face → `no-layout`;
-    // the wrapper-delivered face → `opened` with OUR page key; teardown
-    // (face dropped) → `no-layout` again. Never a throw.
-    const launcherLayout = createShellLauncherLayout(SHELL_PAGE_KEY);
-    assert.deepEqual(launcherLayout.open(), { kind: "no-layout" });
-    const calls: string[] = [];
-    launcherLayout.setFace({ selectPanel: (id) => void calls.push(id) });
-    assert.deepEqual(launcherLayout.open(), { kind: "opened" });
-    assert.deepEqual(calls, [SHELL_PAGE_KEY]);
-    launcherLayout.setFace(undefined);
-    assert.deepEqual(launcherLayout.open(), { kind: "no-layout" });
-  });
+  // (The staging launcher's layout-cell test left with the launcher's
+  // deletion — ticket 89, 2026-09-19.)
 });
 
 describe("client face scaffold — built bundle registers through the module loader (Finding 4)", () => {

@@ -3,6 +3,7 @@ import type { DurabilityPort } from "../core/durability.js";
 import type { AccessRequestEvent } from "../core/access-types.js";
 import { clampActivity, clampRecentResultExcerpt } from "../core/report-clamp.js";
 import type { UserQuestionsLike } from "./access-prompt.js";
+import type { HostApprovalServiceLike } from "./dispatch-approval.js";
 import type { SettledEvent, SpawnOptions, TerminalWorkerStatus } from "../core/types.js";
 import type { RosterRecentResultSource } from "../core/roster-snapshot.js";
 import {
@@ -173,6 +174,15 @@ export interface AdapterContext {
    * ask surface (ticket 23 fallback clause).
    */
   userQuestions?: UserQuestionsLike;
+  /**
+   * Host approval answerer service (ticket 69 L3; `ctx.approval`,
+   * `@deepseek-ai/dsh-user-approval` — the face documented at
+   * `docs/research/dsh-adapter-api-notes.md:220-247`, inject note `:390`).
+   * Optional so stub contexts stay minimal; when absent the dispatch
+   * approval seam degrades every gated dispatch to `unavailable`, which the
+   * chunk-A spawn gate refuses (fail-closed, never a silent allow).
+   */
+  approval?: HostApprovalServiceLike;
   subagents: {
     startContinuable(spec: ContinuableStartSpecLike): Promise<ContinuableStartLike>;
     interrupt(targetSessionId: unknown, authority: unknown): void;

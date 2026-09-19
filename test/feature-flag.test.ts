@@ -19,6 +19,7 @@ import {
 } from "../src/adapter/settings-section.js";
 import { DISPATCHER_START_COMMAND } from "../src/adapter/activation-command.js";
 import { DISPATCHER_STEER_COMMAND } from "../src/adapter/steer-command.js";
+import { DISPATCHER_RESOLVE_COMMAND } from "../src/adapter/resolve-command.js";
 import type {
   AdapterContext,
   CommandDefinitionLike,
@@ -230,11 +231,12 @@ describe("feature flag — enabled path boots dormant (ticket 19)", () => {
   it("apply with enabled:true registers the command, no tools, no capture", () => {
     const ctx = createStubCtx({ withTools: true });
     apply(ctx, { enabled: true });
-    // Dormant: the two host commands are the visible affordances (ticket 22
-    // added dispatcher-steer; its handler gates on activation).
+    // Dormant: the host commands are the visible affordances (ticket 22 added
+    // dispatcher-steer; ticket 69 the resolve command; all gate on activation).
     assert.deepEqual(ctx.registeredCommands.map((c) => c.name), [
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
+      DISPATCHER_RESOLVE_COMMAND,
     ]);
     // Tools are deferred to activation (design-16 §3.3).
     assert.equal(ctx.registeredTools.length, 0);
@@ -243,7 +245,7 @@ describe("feature flag — enabled path boots dormant (ticket 19)", () => {
     assert.ok(ctx.listeners.has("agent/status"));
     assert.ok(ctx.listeners.has("subagent/end"));
     // Command disposers + lifecycle cleanup.
-    assert.equal(ctx.disposers.length, 3);
+    assert.equal(ctx.disposers.length, 4);
   });
 });
 
@@ -259,7 +261,7 @@ describe("feature flag — freeze semantics (ADR-0005)", () => {
     // Boot state unchanged (freeze copied the primitive at apply entry):
     // the commands are still registered and the lifecycle still activates
     // with policy, because `enabled` was true when apply froze it.
-    assert.equal(ctx.registeredCommands.length, 2);
+    assert.equal(ctx.registeredCommands.length, 3);
     const lifecycleAgent = {
       session: { id: "s-1", header: { parentSession: null, delegationDepth: 0 } },
       followup() {},
@@ -357,8 +359,8 @@ describe("feature flag — onChange is a runtime no-op", () => {
     hooks.onChange?.();
 
     // Running session unchanged: no teardown, commands still present.
-    assert.equal(ctx.registeredCommands.length, 2);
-    assert.equal(ctx.disposers.length, 3);
+    assert.equal(ctx.registeredCommands.length, 3);
+    assert.equal(ctx.disposers.length, 4);
     assert.ok(ctx.listeners.has("agent/status"));
   });
 
@@ -373,7 +375,7 @@ describe("feature flag — onChange is a runtime no-op", () => {
       hooks.setSource?.(() => ({ enabled: false }));
     });
     // Session still enabled-path wired (dormant with both commands).
-    assert.equal(ctx.registeredCommands.length, 2);
+    assert.equal(ctx.registeredCommands.length, 3);
   });
 });
 
@@ -392,7 +394,7 @@ describe("feature flag — no off-while-running", () => {
     hooks?.onChange?.();
     hooks?.onChange?.();
 
-    assert.equal(ctx.registeredCommands.length, 2);
+    assert.equal(ctx.registeredCommands.length, 3);
     assert.equal(ctx.registeredCommands[0]?.name, DISPATCHER_START_COMMAND);
     assert.ok(ctx.listeners.has("agent/status"));
   });

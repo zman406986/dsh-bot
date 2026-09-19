@@ -14,10 +14,12 @@ import {
   bindDispatcherLifecycle,
   createAccessPromptPump,
   createCordisDshHost,
+  createDispatchApprovalSeam,
   createSettingsRosterChannel,
   createStorageDomainDurability,
   installMultitaskSettingsSection,
   isWildcardAccessTarget,
+  registerDispatcherResolveCommand,
   registerDispatcherStartCommand,
   registerDispatcherSteerCommand,
   registerDispatcherTools,
@@ -70,6 +72,11 @@ export const name = "multitask-dispatcher";
  *         (ticket 19, ADR-0009)
  * - userQuestions: structured user-question seam for access-ask prompts
  *         (ticket 23, design-16 §4.4)
+ * - approval: the host approval answerer (`ctx.approval`,
+ *         `@deepseek-ai/dsh-user-approval`; adapter notes :220/:390) — the
+ *         dispatch approval seam's live face (ticket 69 L3). Optional at
+ *         runtime: the seam degrades to `unavailable` when the service is
+ *         absent and the chunk-A gate refuses fail-closed.
  */
 export const inject: string[] = [
   "subagents",
@@ -79,6 +86,7 @@ export const inject: string[] = [
   "tools",
   "commands",
   "userQuestions",
+  "approval",
 ];
 
 export interface PluginConfig {
@@ -449,6 +457,20 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       // projection's observation moments, feeding the check-row liveness
       // verdict — visibility only, no watchdog, no polling.
       lastActivityAtMs: (workerId: string) => host.lastActivityAtMs(workerId),
+      // Ticket 69 (L3 offline half): the dispatch approval seam's live
+      // face — `ctx.approval.request` (`@deepseek-ai/dsh-user-approval`,
+      // adapter notes :220/:390) scoped to THIS session's activated Agent.
+      // The seam degrades every failure (service absent, agent gone,
+      // throw, rogue outcome) to `unavailable`; the chunk-A spawn gate
+      // refuses on anything but `allowed-once`, so a gated dispatch with
+      // no live answerer refuses honestly and the dispatcher re-plans —
+      // it cannot wedge the turn (design §6 Q2's offline half). Whether
+      // the shipped client approval composer still answers under the
+      // wrapper's root frame stays the LIVE lane's verification (L3).
+      requestDispatchApproval: createDispatchApprovalSeam({
+        getApproval: () => ctx.approval,
+        getAgent: () => host.parentAgentOf(sessionId),
+      }),
     };
     // ADR-0019: register through the activated agent's own scoped context
     // (`agent.ctx.tools` — the host's per-agent scope seam). Agents without
@@ -587,6 +609,38 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       steer: (workerId, message) => multitask.steerWorker(workerId, message),
     });
   }, "multitask-dispatcher: dispatcher-steer command");
+
+  // Access-ask answer command (ticket 69, L1 offline half): the resolve
+  // TRANSPORT the wrapper's approval-card buttons execute through the
+  // composer's own command transaction (ticket 36 seam 2 / ticket 40's
+  // start precedent). The handler routes into the UNCHANGED relay via
+  // `Multitask.resolveAccess` — the same entry point the ticket-23 prompt
+  // pump uses — and "always-allow" inserts the SAME session-scope row the
+  // pump's sink inserts (ADR-0019 attribution + ticket-30 wildcard fence;
+  // the sink below is authoritative, the command re-checks defensively).
+  ctx.effect(function* () {
+    yield registerDispatcherResolveCommand({
+      ctx,
+      activeSessionIds: () => lifecycle.dispatcherSessionIds(),
+      findPending: (workerId, parentSessionId) =>
+        multitask
+          .listPendingAccess(parentSessionId)
+          .find((t) => t.workerId === workerId),
+      resolve: (workerId, decision) =>
+        multitask.resolveAccess(workerId, decision),
+      alwaysAllow: (ticket) => {
+        if (isWildcardAccessTarget(ticket.body.target)) return;
+        multitask.accessPolicy.set({
+          class: ticket.body.class,
+          targetPattern: ticket.body.target,
+          decision: "allow",
+          scope: "session",
+          session: ticket.parentSessionId,
+        });
+      },
+      isWildcardTarget: isWildcardAccessTarget,
+    });
+  }, "multitask-dispatcher: dispatcher-resolve command");
 
   // Ticket 23: when the core parks a pending access ask, present it through
   // the prompt seam. The core's own onAccessRequest handler was registered

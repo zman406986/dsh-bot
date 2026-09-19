@@ -21,8 +21,6 @@ import {
 import {
   SHELL_CSS,
   SHELL_CLASS,
-  SHELL_LAUNCHER_CSS,
-  SHELL_LAUNCHER_CLASS,
   createDispatcherShell,
   describePresenceDot,
   waitingPhrase,
@@ -68,11 +66,12 @@ function snapshot(
   dispatcherSessionId = "s-dispatcher",
 ): RosterSnapshot {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     dispatcherSessionId,
     publishedAtMs: 1_000,
     workers,
     recentResult: null,
+      pendingAsks: [],
   };
 }
 
@@ -272,10 +271,9 @@ describe("wrapper shell panes (ticket 77)", () => {
 });
 
 describe("wrapper shell CSS contract (ticket 77, ticket 49's discipline)", () => {
-  // Ticket 78 adds the staging launcher chip's stylesheet beside SHELL_CSS.
+  // The staging launcher's stylesheet left with its deletion — ticket 89.
   const SURFACES = [
     { css: SHELL_CSS, cls: SHELL_CLASS },
-    { css: SHELL_LAUNCHER_CSS, cls: SHELL_LAUNCHER_CLASS },
   ] as const;
 
   for (const { css, cls } of SURFACES) {
@@ -295,8 +293,6 @@ describe("wrapper shell CSS contract (ticket 77, ticket 49's discipline)", () =>
     it(`${cls}: uses only tokens already evidenced by our shipped surfaces/notes`, () => {
       const allowed = new Set([
         "--dsw-alias-bg-layer-1",
-        // The launcher chip borrows the capsule chip's surface vocabulary.
-        "--dsw-alias-label-primary",
         "--dsw-alias-bg-layer-3",
         "--dsw-alias-border-l3",
         "--dsw-alias-label-tertiary",
@@ -325,15 +321,6 @@ describe("wrapper shell CSS contract (ticket 77, ticket 49's discipline)", () =>
 
   it("the shell frame stylesheet opens with the frame class", () => {
     assert.match(SHELL_CSS.trim(), new RegExp(`^\\.${SHELL_CLASS}\\{`));
-  });
-
-  it("the launcher self-positions inside the click-through overlay layer", () => {
-    // Verified overlay anatomy (dsh-capsule-seams.md Seam 1): entries
-    // self-position; the launcher sits below the capsule chip (top:8px).
-    assert.match(
-      SHELL_LAUNCHER_CSS.trim(),
-      new RegExp(`^\\.${SHELL_LAUNCHER_CLASS}\\{position:absolute;`),
-    );
   });
 });
 

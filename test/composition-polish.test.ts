@@ -27,6 +27,7 @@ import { readFileSync } from "node:fs";
 import { apply as pluginApply } from "../src/plugin.js";
 import {
   ACTIVATION_PRESENCE_HINT,
+  DISPATCHER_RESOLVE_COMMAND,
   DISPATCHER_START_COMMAND,
   DISPATCHER_START_SUCCESS,
   DISPATCHER_STEER_COMMAND,
@@ -50,13 +51,6 @@ import {
   rosterBlockedKey,
   rosterViewCopyKey,
 } from "../src/client/roster-store.js";
-import {
-  CAPSULE_CHIP_OPEN_KEY,
-  CAPSULE_CHIP_WAKE_KEY,
-  CAPSULE_CHIP_WORKERS_KEY,
-  CAPSULE_COLLAPSE_KEY,
-  CAPSULE_DOT_KEYS,
-} from "../src/client/capsule-store.js";
 import {
   TOOLVIEW_DEGRADED_KEY,
   TOOLVIEW_FIELD_KEYS,
@@ -409,6 +403,7 @@ describe("composition polish — dormant registration matrix (design-17 §3.2/§
 
     // Visible host surface: exactly the two commands, no tools.
     assert.deepEqual(ctx.commandNames().sort(), [
+      DISPATCHER_RESOLVE_COMMAND,
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
     ]);
@@ -564,12 +559,6 @@ describe("composition polish — locale validation + literal sweep (§8)", () =>
       "activation.presence-hint",
       ROSTER_FINISHED_COUNT_KEY,
       TOOLVIEW_DEGRADED_KEY,
-      // Ticket 38: the capsule chip's accessible labels and badge templates.
-      CAPSULE_CHIP_OPEN_KEY,
-      CAPSULE_CHIP_WORKERS_KEY,
-      CAPSULE_CHIP_WAKE_KEY,
-      CAPSULE_COLLAPSE_KEY,
-      ...Object.values(CAPSULE_DOT_KEYS),
       ...Object.values(ROSTER_SECTION_KEYS),
       ...Object.values(TOOLVIEW_FIELD_KEYS),
       // Blocked phrases are composed per access class; all must exist.
@@ -593,15 +582,15 @@ describe("composition polish — locale validation + literal sweep (§8)", () =>
 
   it("the client render path carries no hard-coded user-facing sentence", () => {
     // Sweep the copy-rendering components (panel, toolviews, and the
-    // ticket-38 capsule, plus the ticket-47 settings card): any quoted literal
+    // ticket-47 settings card): any quoted literal
     // containing a space (a plausible English sentence) that is not a dotted
     // locale key is a dictionary bypass. Comments and the self-contained CSS
     // strings are stripped first (both legitimately carry prose/spaces and
-    // neither is user-facing text).
+    // neither is user-facing text). (The retired capsule component left the
+    // list with its deletion — ticket 89.)
     for (const file of [
       "../src/client/panel.tsx",
       "../src/client/toolview-panel.tsx",
-      "../src/client/capsule.tsx",
       "../src/client/settings-card.tsx",
     ]) {
       const raw = readFileSync(new URL(file, import.meta.url), "utf8");

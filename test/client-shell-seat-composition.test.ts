@@ -160,11 +160,12 @@ function worker(workerId: string, status: WorkerStatus): RosterSnapshot["workers
 
 function dispatcherSnapshot(dispatcherSessionId: string): RosterSnapshot {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     dispatcherSessionId,
     publishedAtMs: 1_000,
     workers: [worker("w-1", "running")],
     recentResult: null,
+      pendingAsks: [],
   };
 }
 

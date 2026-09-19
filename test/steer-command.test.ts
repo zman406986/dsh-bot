@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { apply } from "../src/plugin.js";
 import {
+  DISPATCHER_RESOLVE_COMMAND,
   DISPATCHER_START_COMMAND,
   DISPATCHER_STEER_COMMAND,
   DISPATCHER_STEER_DESCRIPTION,
@@ -245,6 +246,7 @@ describe("steer command — flag matrix and registration", () => {
     const ctx = createFullCtx();
     apply(ctx, { enabled: true });
     assert.deepEqual(ctx.commandNames(), [
+      DISPATCHER_RESOLVE_COMMAND,
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
     ]);
@@ -260,6 +262,7 @@ describe("steer command — flag matrix and registration", () => {
     void ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     void ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     assert.deepEqual(ctx.commandNames(), [
+      DISPATCHER_RESOLVE_COMMAND,
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
     ]);
@@ -512,6 +515,7 @@ describe("steer command — HMR reversal", () => {
     apply(ctx, { enabled: true });
     await activateWithRunningWorker(ctx);
     assert.deepEqual(ctx.commandNames(), [
+      DISPATCHER_RESOLVE_COMMAND,
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
     ]);

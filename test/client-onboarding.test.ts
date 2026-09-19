@@ -41,10 +41,6 @@ import {
   type ShellMirror,
 } from "../src/client/shell-store.js";
 import { createRosterStore } from "../src/client/roster-store.js";
-import {
-  createCapsuleFooterStore,
-  createCapsuleStore,
-} from "../src/client/capsule-store.js";
 import { createSettingsCardStore } from "../src/client/settings-card-store.js";
 import type {
   ClientContext,
@@ -57,11 +53,12 @@ import type { RosterSnapshot } from "../src/core/roster-snapshot.js";
 function mirror(kind: ShellMirror["kind"]): ShellMirror {
   if (kind === "snapshot") {
     const snapshot: RosterSnapshot = {
-      schemaVersion: 3,
+      schemaVersion: 4,
       dispatcherSessionId: "s-x",
       publishedAtMs: 1_000,
       workers: [],
       recentResult: null,
+      pendingAsks: [],
     };
     return { kind: "snapshot", snapshot };
   }
@@ -651,8 +648,6 @@ describe("onboarding shell seat + composition wiring (ticket 68)", () => {
     applyClientModule(
       ctx,
       createRosterStore(),
-      createCapsuleStore(),
-      createCapsuleFooterStore(),
       createSettingsCardStore(),
       onboarding,
     );

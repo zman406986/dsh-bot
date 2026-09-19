@@ -68,8 +68,7 @@ const PANEL_CLASS = "multitask-dispatcher-roster-panel";
  * (`dsh-client-ui-theme/lib/client.js:1052-1060`); status dots use the
  * `state-*` family, and the working ring keeps its translucency through
  * `color-mix` — the same idiom the host's own stylesheets use over tokens.
- * Text hierarchy and type sizes are deliberately left opacity-based / px
- * (see `CAPSULE_CSS`).
+ * Text hierarchy and type sizes are deliberately left opacity-based / px.
  */
 export const ROSTER_PANEL_CSS = `
 .multitask-dispatcher-roster-panel{font-size:12px;line-height:1.5;min-width:0}

@@ -4,13 +4,15 @@
  *
  * Offline only (S8): the registration contracts pinned over fakes in
  * the established overlay/toolview style — inject → register, one entry, id
- * stability — plus the page-open decision and the pure root fail-safe model.
- * The `root` election's REGISTRATION is pinned here (one dynamic entry,
- * contract options incl. the explicit shadowing priority — ticket 85,
- * collision-throwing fakes, unload abdication over fakes); the election's
- * LIVE half (frame swap, HMR fiber behavior, fallback-on-crash in a real
- * browser) is live-only (tickets 45/33) and is deliberately NOT claimed
- * here.
+ * stability — plus the pure root fail-safe model. The `root` election's
+ * REGISTRATION is pinned here (one dynamic entry, contract options incl. the
+ * explicit shadowing priority — ticket 85, collision-throwing fakes, unload
+ * abdication over fakes); the election's LIVE half (frame swap, HMR fiber
+ * behavior, fallback-on-crash in a real browser) is live-only (tickets
+ * 45/33) and is deliberately NOT claimed here.
+ *
+ * Ticket 89 (2026-09-19): the retired staging launcher's contracts and the
+ * page-open decision tests left this suite with their deletion.
  *
  * No browser, no network, no real Cordis — the fake mirrors the shipped
  * effect/inject semantics the scaffold suite documents (cordis
@@ -19,6 +21,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { apply, mountShellPage } from "../src/client/index.js";
+import { createApprovalRelayFeed } from "../src/client/approval-feed.js";
 import type {
   ClientContext,
   ClientLayoutLike,
@@ -28,22 +31,15 @@ import {
   LOCALE_NAMESPACE,
   ROSTER_ENTRY_ID,
   SHELL_OVERLAY_SLOT,
-  localeDictionary,
   rosterOverlayRegistration,
 } from "../src/client/overlay.js";
 import {
   MAIN_PAGE_SLOT,
   ROOT_FRAME_SLOT,
-  SHELL_LAUNCHER_ENTRY_ID,
-  SHELL_LAUNCHER_LABEL_KEY,
-  SHELL_LAUNCHER_OVERLAY_ORDER,
   SHELL_PAGE_KEY,
   SHELL_ROOT_DYNAMIC_PRIORITY,
   SHIPPED_MAIN_PAGE_KEY,
-  createShellLauncherLayout,
-  openShellPage,
   shellCellWinner,
-  shellLauncherRegistration,
   shellPageRegistration,
   shellRootRegistration,
   shellSeatHostsPanel,
@@ -79,11 +75,12 @@ function snapshot(
   dispatcherSessionId = "s-1",
 ): RosterSnapshot {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     dispatcherSessionId,
     publishedAtMs: 1_000,
     workers,
     recentResult: null,
+      pendingAsks: [],
   };
 }
 
@@ -337,31 +334,16 @@ describe("shell staging mount — registration contracts (ticket 78)", () => {
     assert.equal(shellPageRegistration().key, SHELL_PAGE_KEY);
   });
 
-  it("pins the launcher overlay registration as RETIRED pure data — own id, ordered beside the capsule", () => {
-    // The launcher registration CONTRACT stays exported as the retired
-    // vehicle's pure data (the 65/66/73 lane owns disposition); nothing
-    // registers it since the cutover (pinned above).
-    assert.deepEqual(shellLauncherRegistration(), {
-      name: "shell.overlay",
-      id: "multitask-dispatcher-shell-launcher",
-      order: -11,
-      locale: "multitask-dispatcher",
-    });
-    assert.equal(SHELL_LAUNCHER_OVERLAY_ORDER, -11);
-    // Coexistence by unique id: the launcher is NOT the roster entry.
-    assert.notEqual(SHELL_LAUNCHER_ENTRY_ID, ROSTER_ENTRY_ID);
+  it("the roster overlay registration stands alone in `shell.overlay` (the additive entries retired with the capsule era)", () => {
+    // The roster capsule + staging launcher chip entries stopped registering
+    // at the ticket-78 cutover, and their contracts were DELETED (ticket 89,
+    // 2026-09-19) — the roster entry's own pure contract is what remains.
     assert.deepEqual(rosterOverlayRegistration(), {
       name: "shell.overlay",
       id: ROSTER_ENTRY_ID,
       order: -10,
       locale: LOCALE_NAMESPACE,
     });
-  });
-
-  it("the launcher label reuses existing shell copy — no new locale key", () => {
-    assert.equal(SHELL_LAUNCHER_LABEL_KEY, "shell.title");
-    assert.equal(typeof localeDictionary.en["shell.title"], "string");
-    assert.equal(typeof localeDictionary.zh["shell.title"], "string");
   });
 });
 
@@ -385,14 +367,13 @@ describe("shell staging mount — apply() over the fake seams", () => {
     assert.equal(typeof entry.component, "function");
   });
 
-  it("registers NO shell.overlay entries — capsule and launcher retired at the cutover", () => {
+  it("registers NO shell.overlay entries — the additive entries retired at the cutover", () => {
     const ctx = createMountCtx();
     apply(ctx);
     // The cutover ends the capsule era (ticket 78's second AC): the roster
     // capsule's additive entry AND the staging launcher chip's entry stop
     // registering — no `shell.overlay` inject controller exists at all.
-    // Their sources stay as retired-vehicle assets (the 65/66/73 lane owns
-    // dead-code disposition).
+    // Their sources were deleted outright (ticket 89, 2026-09-19).
     const overlayRecords = ctx.injects.filter(
       (record) => record.parent === SHELL_OVERLAY_SLOT,
     );
@@ -403,11 +384,6 @@ describe("shell staging mount — apply() over the fake seams", () => {
           (entry.options as { id?: string }).id,
           ROSTER_ENTRY_ID,
           "the capsule entry must not register",
-        );
-        assert.notEqual(
-          (entry.options as { id?: string }).id,
-          SHELL_LAUNCHER_ENTRY_ID,
-          "the launcher entry must not register",
         );
       }
     }
@@ -607,33 +583,6 @@ describe("shell staging mount — apply() over the fake seams", () => {
   });
 });
 
-describe("shell staging mount — openShellPage decision", () => {
-  it("degrades to no-layout when the layout service is absent", () => {
-    assert.deepEqual(openShellPage(undefined, SHELL_PAGE_KEY), {
-      kind: "no-layout",
-    });
-    assert.deepEqual(openShellPage({} as ClientLayoutLike, SHELL_PAGE_KEY), {
-      kind: "no-layout",
-    });
-  });
-
-  it("opens through the host verb with the exact page key", () => {
-    const { layout, calls } = createLayoutFake();
-    assert.deepEqual(openShellPage(layout, SHELL_PAGE_KEY), {
-      kind: "opened",
-    });
-    assert.deepEqual(calls, [SHELL_PAGE_KEY]);
-  });
-
-  it("contains the host's throw on an unregistered panel as an honest outcome", () => {
-    const { layout, calls } = createLayoutFake("throws");
-    assert.deepEqual(openShellPage(layout, SHELL_PAGE_KEY), {
-      kind: "panel-not-registered",
-    });
-    assert.deepEqual(calls, []);
-  });
-});
-
 describe("shell staging mount — host inject guard semantics (ticket 84)", () => {
   /** Guard proxy: undeclared service reads throw like the real host proxy. */
   function guardCtx(ctx: ClientContext): ClientContext {
@@ -667,26 +616,14 @@ describe("shell staging mount — host inject guard semantics (ticket 84)", () =
     }) as unknown as ClientContext;
   }
 
-  it("the layout cell feeds the click: absent → no-layout, delivered → opened", () => {
-    const launcherLayout = createShellLauncherLayout(SHELL_PAGE_KEY);
-    assert.deepEqual(launcherLayout.open(), { kind: "no-layout" });
-    const { layout, calls } = createLayoutFake();
-    launcherLayout.setFace(layout);
-    assert.deepEqual(launcherLayout.open(), { kind: "opened" });
-    assert.deepEqual(calls, [SHELL_PAGE_KEY]);
-    // Teardown drops the face; the click degrades again — never throws.
-    launcherLayout.setFace(undefined);
-    assert.deepEqual(launcherLayout.open(), { kind: "no-layout" });
-  });
-
   it("apply() never bare-reads the optional layout face — even when a fake hands one", () => {
-    // The live-pass-2 kill: `ctx.layout` was read bare (at click time) and
-    // the host's context proxy threw. The launcher that watched `layout`
-    // retired at the cutover, so the module no longer requests the face at
-    // all — but the guard contract must hold regardless: over a context
-    // that throws on exactly that read — with a layout fake SITTING on the
-    // context, so only a bare read can reach it — the composition must
-    // still apply cleanly.
+    // The live-pass-2 kill: `ctx.layout` was read bare (at click time by the
+    // since-deleted staging launcher — ticket 89) and the host's context
+    // proxy threw. The launcher that watched `layout` retired at the cutover,
+    // so the module no longer requests the face at all — but the guard
+    // contract must hold regardless: over a context that throws on exactly
+    // that read — with a layout fake SITTING on the context, so only a bare
+    // read can reach it — the composition must still apply cleanly.
     const { layout } = createLayoutFake();
     const ctx = createMountCtx({ layout });
     const guarded = guardCtx(ctx);
@@ -839,6 +776,63 @@ describe("shell staging mount — live mounting path (mountShellPage)", () => {
     assert.deepEqual(mount.store.getBox().state.order, ["s-1"]);
   });
 });
+
+  it("approval relay feed (ticket 69 L1): the mount's store joins the shared hub and detaches with the fiber", () => {
+    const hub = createApprovalRelayFeed();
+    const ctx = createMountCtx({});
+    const mount = mountShellPage(ctx, {
+      approvalsFeed: hub,
+    });
+    // Unfed before any publish (honest unknown).
+    assert.equal(mount.approvals.getBox().state.kind, "unfed");
+
+    hub.applyChannelValue({
+      roster: {
+        schemaVersion: 4,
+        dispatcherSessionId: "s-1",
+        publishedAtMs: 1_000,
+        workers: [],
+        recentResult: null,
+        pendingAsks: [
+          {
+            requestId: "req-1",
+            workerId: "w-1",
+            class: "tool",
+            target: "run_tests",
+            reason: "needs the suite",
+            credentialName: "",
+            parentSessionId: "s-1",
+            createdAtMs: 1000,
+          },
+        ],
+      },
+    });
+    const state = mount.approvals.getBox().state;
+    assert.equal(state.kind, "ready");
+    if (state.kind === "ready") {
+      assert.equal(state.cards.length, 1);
+      assert.equal(state.cards[0]!.requestId, "req-1");
+      assert.equal(state.cards[0]!.status, "pending");
+    }
+
+    // Unload/HMR: the mount's fiber teardown detaches exactly this store.
+    ctx.runFiberTeardown();
+    hub.applyChannelValue({
+      roster: {
+        schemaVersion: 4,
+        dispatcherSessionId: "s-1",
+        publishedAtMs: 2_000,
+        workers: [],
+        recentResult: null,
+        pendingAsks: [],
+      },
+    });
+    const after = mount.approvals.getBox().state;
+    assert.equal(after.kind, "ready");
+    if (after.kind === "ready") {
+      assert.equal(after.cards.length, 1, "detached store keeps its last truth");
+    }
+  });
 
 describe("shell staging mount — seat projection primitives", () => {
   const parsed = snapshot([worker("w-1", "running")]);

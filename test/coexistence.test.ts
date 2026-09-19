@@ -30,6 +30,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { apply as applyDispatcherHost } from "../src/plugin.js";
 import {
+  DISPATCHER_RESOLVE_COMMAND,
   DISPATCHER_START_COMMAND,
   DISPATCHER_START_SUCCESS,
   DISPATCHER_STEER_COMMAND,
@@ -703,6 +704,7 @@ describe("coexistence — host face: fail-loud claims (Findings 1 and 2)", () =>
 
     // Commands: ours `dispatcher-`-prefixed (design-16 §5), foreign's its own.
     assert.deepEqual(ctx.commandNames().sort(), [
+      DISPATCHER_RESOLVE_COMMAND,
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
       FOREIGN.command,
@@ -792,6 +794,7 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
 
     // The dormant affordances are exactly the two `dispatcher-` commands.
     assert.deepEqual(ctx.commandNames().sort(), [
+      DISPATCHER_RESOLVE_COMMAND,
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
       FOREIGN.command,
@@ -906,6 +909,7 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
 
     foreignFiber.dispose();
     assert.deepEqual(ctx.commandNames().sort(), [
+      DISPATCHER_RESOLVE_COMMAND,
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
     ]);

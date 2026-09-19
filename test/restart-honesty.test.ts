@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { apply as pluginApply } from "../src/plugin.js";
 import {
+  DISPATCHER_RESOLVE_COMMAND,
   DISPATCHER_START_COMMAND,
   DISPATCHER_STEER_COMMAND,
   MARKER_TABLE_NAME,
@@ -29,6 +30,7 @@ import type { DurableWorkerMarker } from "../src/core/durability.js";
 import {
   ROSTER_SETTINGS_KEY,
   projectRosterSnapshot,
+  type RosterSnapshot,
 } from "../src/core/roster-snapshot.js";
 import { buildDispatcherPolicySection } from "../src/core/policy/prompts.js";
 import {
@@ -39,13 +41,12 @@ import {
   abortedReportBody,
   formatWakeReportBody,
 } from "../src/core/report-clamp.js";
-import { describeRosterPanel } from "../src/client/roster-store.js";
+import { describeRosterPanel, type RosterPanelState } from "../src/client/roster-store.js";
 import {
-  describeCapsuleActivationRow,
-  describeCapsuleChip,
-  describeCapsuleDeliverables,
-  describeCapsuleFooter,
-} from "../src/client/capsule-store.js";
+  createDispatcherShellStore,
+  describeShellPanes,
+  describeShellSidebar,
+} from "../src/client/shell-store.js";
 import {
   describeToolview,
   TOOLVIEW_TOOL_NAMES,
@@ -679,7 +680,7 @@ describe("restart honesty — no-stop guard (design-17 §4.6)", () => {
     }
   });
 
-  it("the capsule view models carry no direct stop/deactivate authority — the stop affordance is an intent (tickets 39 + 42, FINAL FORM)", () => {
+  it("the shell-era view models carry no direct stop/deactivate control field (ticket 31's guard, migrated off the retired capsule models — ticket 89)", () => {
     const workers = [
       {
         kind: "worker" as const,
@@ -704,120 +705,80 @@ describe("restart honesty — no-stop guard (design-17 §4.6)", () => {
         blocked: null,
       },
     ];
-    const states = [
+    const snapshot: RosterSnapshot = {
+      schemaVersion: 4,
+      dispatcherSessionId: "s-1",
+      publishedAtMs: 10_000,
+      workers,
+      recentResult: null,
+      pendingAsks: [],
+    };
+
+    // The live shell store drives both faces of the honest degrade: a fresh
+    // snapshot (working + landed-undelivered rows) and an unavailable
+    // presence. The exactly-at-window timestamp keeps the fresh row's
+    // presence available at the render clock.
+    const store = createDispatcherShellStore();
+    store.upsertSessions([
+      { sessionId: "s-1", title: "Dispatcher", dispatcher: true },
+      { sessionId: "s-chat", title: "Plain chat" },
+    ]);
+    store.applyPresence(snapshot);
+    store.select("s-1");
+    const sidebarFresh = describeShellSidebar(store.getBox().state, 10_000);
+    assert.equal(sidebarFresh.kind, "ready");
+    store.markPresenceUnavailable("s-1");
+    const sidebarUnavailable = describeShellSidebar(
+      store.getBox().state,
+      10_000,
+    );
+    assert.equal(sidebarUnavailable.kind, "ready");
+
+    // The roster panel states keep their full matrix (the same five honest
+    // shapes the retired capsule guard scanned) and the pane decisions ride
+    // along. Key scan over ALL of the shell-era view models — sidebar rows,
+    // pane decisions, the full panel rows: no key may offer direct
+    // kill/deactivate/stop authority, and the literal "stop" never appears
+    // as a value anywhere. (The conversation transcript's honest
+    // `interrupted` STATE flag is presentation history, not an affordance;
+    // the pane's send-only contract — area 7 — is pinned by the composer and
+    // copy tests in client-conversation-surface.test.ts.)
+    const panelStates: RosterPanelState[] = [
       { kind: "waiting" },
       { kind: "channel-missing" },
       { kind: "invalid" },
+      { kind: "snapshot", snapshot },
       {
         kind: "snapshot",
-        snapshot: {
-          schemaVersion: 3,
-          dispatcherSessionId: "s-1",
-          publishedAtMs: 10_000,
-          workers,
-          recentResult: null,
-        },
-      },
-      {
-        kind: "snapshot",
-        snapshot: {
-          schemaVersion: 3,
-          dispatcherSessionId: "s-1",
-          publishedAtMs: 1_000,
-          workers,
-          recentResult: null,
-        },
-      },
-    ] as const;
-
-    // The activation row is a CLOSED union of exactly three honest shapes;
-    // exact deep-equality against them leaves no room for any control field
-    // (handler, handle, command text) to ride along, so the stop affordance
-    // can only ever be the intent payload plus a label.
-    const canon = [
-      {
-        composition: "dormant",
-        stateKey: "capsule.dot.dormant",
-        affordance: { intent: "start", labelKey: "capsule.activation.start" },
-      },
-      {
-        composition: "activated",
-        stateKey: "capsule.dot.active",
-        affordance: { intent: "stop", labelKey: "capsule.activation.stop" },
-      },
-      {
-        composition: "unavailable",
-        stateKey: "capsule.dot.error",
-        affordance: null,
+        snapshot: { ...snapshot, publishedAtMs: 1_000 },
       },
     ];
-    for (const state of states) {
-      const rowView = describeCapsuleActivationRow(state, 10_000);
-      const expected = canon.find(
-        (shape) => shape.composition === rowView.composition,
+    const models: unknown[] = [
+      sidebarFresh,
+      sidebarUnavailable,
+      describeShellPanes(store.getBox().state),
+      ...panelStates.map((state) => describeRosterPanel(state, 10_000)),
+    ];
+    for (const model of models) {
+      const keys: string[] = [];
+      const stopValues: string[] = [];
+      collectKeys(model, (key) => {
+        keys.push(key);
+      });
+      collectEntries(model, (key, value) => {
+        if (value === "stop") stopValues.push(key);
+      });
+      const offenders = keys.filter((key) =>
+        /stop|cancel|kill|abort|deactivate|terminate|destroy/i.test(key),
       );
-      assert.ok(expected, `unknown composition ${rowView.composition}`);
       assert.deepEqual(
-        rowView,
-        expected,
-        "activation row must match its canonical shape exactly",
+        offenders,
+        [],
+        `shell view model must carry no direct stop/deactivate control field; found: ${offenders.join(", ")}`,
       );
-
-      // Key scan over ALL capsule view models — chip, activation row, the
-      // full panel rows, the deliverables line, and the ticket-42 footer
-      // (the guard's FINAL FORM): no key may offer direct
-      // kill/deactivate/stop authority — the only stop-shaped thing allowed
-      // anywhere is the intent payload VALUE. The footer models cover both
-      // faces of the honest degrade: a vouching document and no document.
-      const models = [
-        describeCapsuleChip(state, 10_000),
-        rowView,
-        describeRosterPanel(state, 10_000),
-        describeCapsuleDeliverables(state, 10_000),
-        describeCapsuleFooter({ enabled: true }),
-        describeCapsuleFooter(undefined),
-      ];
-      for (const model of models) {
-        const keys: string[] = [];
-        const stopValues: string[] = [];
-        collectKeys(model, (key) => {
-          keys.push(key);
-        });
-        collectEntries(model, (key, value) => {
-          if (value === "stop") stopValues.push(key);
-        });
-        const offenders = keys.filter((key) =>
-          /stop|cancel|kill|abort|deactivate|interrupt|terminate|destroy/i.test(
-            key,
-          ),
-        );
-        assert.deepEqual(
-          offenders,
-          [],
-          `capsule view model must carry no direct stop/deactivate control field; found: ${offenders.join(", ")}`,
-        );
-        // The literal "stop" may only ever appear as the value under the
-        // `intent` payload key — never as a control field name or elsewhere.
-        for (const key of stopValues) {
-          assert.equal(
-            key,
-            "intent",
-            `"stop" must be an intent payload, never a ${key} control`,
-          );
-        }
+      for (const key of stopValues) {
+        assert.fail(`"stop" appeared as a value under "${key}" — no client view model may carry a stop control value`);
       }
-    }
-
-    // The intent vocabulary is exactly the two payloads ticket 40 binds;
-    // `"stop"` exists only as an intent value handed to the callback seat.
-    const intents = states.map((state) =>
-      describeCapsuleActivationRow(state, 10_000).affordance?.intent ?? null,
-    );
-    for (const intent of intents) {
-      assert.ok(
-        intent === null || intent === "start" || intent === "stop",
-        `unexpected intent payload ${String(intent)}`,
-      );
     }
   });
 
@@ -826,6 +787,7 @@ describe("restart honesty — no-stop guard (design-17 §4.6)", () => {
     pluginApply(ctx, { enabled: true });
     const names = ctx.commandNames().sort();
     assert.deepEqual(names, [
+      DISPATCHER_RESOLVE_COMMAND,
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
     ]);
