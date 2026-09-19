@@ -1,7 +1,8 @@
 # 69 — Classifier-gated auto-review (ADR-0018 in-scope area)
 
-**Status:** open
-**Labels:** ready-for-human
+**Status:** resolved
+**Labels:** ready-for-human (discharged 2026-09-20: the human-gated residue was dispositioned by
+the operator-delegated reversible rulings below; restored if a human reverses any of them)
 **Q1:** ruled 2026-09-19 (overnight dispatched ruling, agent — subject to human reversal); **CONFIRMED
 2026-09-20** (operator-delegated agent ruling, still subject to human reversal — see the dated ruling
 comments at the end of this file): the shipped default posture stays **EMPTY**; no
@@ -1063,3 +1064,60 @@ every wedge pointer resolves to the W26 fix, the W27 repair record, or ticket 98
 recorded, none open-and-unowned. Reversal path: a human who wants the family treated as open
 work re-opens 98 (it is deferred, not deleted) or files anew; nothing in the shipped tree
 changes under this ruling.
+
+### 2026-09-20 — RESOLVED (W28 final closures, operator-delegated): every box met on its own wording or policy-voided with a recorded ruling; file moved open/ → resolved/
+
+**Box sweep against tonight's record** (each box read against its own condition; evidence-gated,
+ticket-32/33 precedent):
+
+- **Chunk A — A1–A6 ticked** 2026-09-19 with per-box evidence (commits `61dd7bf`/`1a337fa`).
+  **A7 ticked** this date (see the box): its own condition — pure-function unit tests over the
+  §3 projection shapes — is met by the pins that landed with the 81-contract module exactly as
+  the box anticipated (`test/approval-cards.test.ts`, 22 tests; B1 evidence, `9bcdd4d`).
+- **Chunk B — B1–B3 ticked** 2026-09-19 (`9bcdd4d`/`e9f18ab`/`1acb918`). **B3 holds through
+  every later merge** — the empty diff on `src/core/access-relay.ts`/`access-types.ts` vs
+  `e069b8a` was re-verified by W7, W19, W22, and most recently W26 (merge `987c241`).
+- **L1, L2 — ticked** 2026-09-20 (W14, commit `f313803`): LIVE-VERIFIED in Session B-5 — the
+  pending `secret-ask` card rendered inline with `data-status="pending"` + `data-request-id`
+  (`session-B5/driver/w23-15-deepcard`, `shots/w23-shot-parked-secretask.png`), the prefix-id
+  resolve was honestly refused while the ask was live (`w23-17`), then the full-id
+  `/dispatcher-resolve <id> allow` → "Answer routed…" (`w23-19`) → the ask left the relay, the
+  card left the feed, the parked call resolved, the worker named the decision; the
+  blocked-with-reason marker rode the row throughout (`w23-09`). Evidence root:
+  `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-20\session-B5\`.
+- **L3, L4 — NOT ticked; recorded VOID-BY-POLICY** (33/AC1 precedent): their live operation is
+  structurally unreachable under the confirmed EMPTY posture — no live path can create a
+  posture row (B-3 recon, record `f8035b9` on ticket 33), and no seeder may ship per U-D. See
+  the U-D/posture-lane ruling above for the ruling, the precedent, and the enumerated offline
+  pins that stand in their place.
+
+**Delivered substance (all merged to main):** the review-posture mechanism itself (chunk A:
+table, consent-miss composition, clearance, wildcard fence, dispatch gate, deny copy); the 81
+card contract (chunk B projections); the resolve transport (`/dispatcher-resolve` →
+`Multitask.resolveAccess`, offline composition pin `61ddf61`, live round-trip B-5); the relay
+feed (`createApprovalRelayFeed` + roster-snapshot v4 `pendingAsks`); the plugin-built dispatch
+approval seam (W7, merge `14ee7a9`); the park mechanics (W22, merge `c8849a7` — the parked ask
+holds the worker's tool call open; LIVE-VERIFIED in B-5); the deadline bound (W26, merge
+`987c241` — the seam cannot wedge on an absent-and-silent answerer). B3's protected surfaces
+were never touched by any of it.
+
+**Reversible rulings this ticket carries (each SUBJECT TO HUMAN REVERSAL, recorded above):**
+Q1 — posture default EMPTY, CONFIRMED 2026-09-20 (originally ruled 2026-09-19); park-vs-
+settlement semantics (W22); U-D / posture-lane re-affirmation with the L3/L4 VOID-BY-POLICY
+consequence (2026-09-20); wedge family HANDLED (2026-09-20).
+
+**Pointers out:** re-enabling auto-review (any posture content) is a deliberate HUMAN decision —
+the cheap path (an in-session user act) needs no ADR change; a Config-seeded/non-empty default
+needs a human amendment of ADR-0018's U-D (reversal path in the 2026-09-19 Q1 comment). The
+wrapper-frame prerequisites for any future posture-lane live work (host approval answering under
+the ADR-0020 root frame; activation-time open-turn reconcile) live in deferred ticket 98.
+
+**Gates at closure** (re-run for the record on main this date): `npm run typecheck` clean (both
+configs); `npm test` 1130 pass / 0 fail / 273 suites (the W26 expectation); `npm run lint:docs`
+green after the open-issue-index regeneration. Tracker-only change; no code touched by this
+closure.
+
+Moved `Issue-tracker/open/69-classifier-gated-auto-review.md` → `Issue-tracker/resolved/`,
+`**Status:**` → resolved. The `ready-for-human` label is discharged by the operator-delegated
+rulings above; a human reversal of any of them reopens this ticket cheaply (the label line
+records that).
