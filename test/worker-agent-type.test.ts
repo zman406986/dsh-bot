@@ -125,6 +125,7 @@ describe("worker prompt assembly", () => {
       "## Role",
       "## Autonomy",
       "## Limits",
+      "## Asking for access",
       "## Todo ledger",
       "## Work style",
       "## Final answer",
@@ -177,6 +178,59 @@ describe("worker prompt assembly", () => {
     assert.ok(/spawn/i.test(prompt));
     assert.ok(prompt.includes("do not maintain a todo list"));
     assert.ok(prompt.includes("final answer"));
+  });
+
+  // Ticket 13/69 (live pass 5, Session B-2 FINDING 1): three instructed live
+  // workers skipped `request_access` outright. The registration surface was
+  // already pinned correct (activation-lifecycle: the tool is the one GLOBAL;
+  // host source: the global layer reaches every agent's view) — the gap was
+  // model-facing: the contract never mentioned the tool while actively
+  // forbidding ask-and-wait. These pins hold the teaching in place.
+  it("teaches the request_access channel: the tool by name, once, then stop and wait", () => {
+    const prompt = buildWorkerSystemPrompt();
+    assert.ok(
+      prompt.includes("request_access"),
+      "the contract must name the worker-side ask tool",
+    );
+    assert.ok(
+      /call the request_access tool once/.test(prompt),
+      "the ask is one call, not a retry loop",
+    );
+    assert.ok(
+      /end your turn and stop/.test(prompt) &&
+        /answer arrives as your next message/.test(prompt),
+      "after asking, the worker stops and waits for the parent answer",
+    );
+  });
+
+  it("the access ask carries names-never-values and a final-denial rule", () => {
+    const prompt = buildWorkerSystemPrompt();
+    assert.ok(
+      /only its NAME, never a value/.test(prompt),
+      "credential asks pass the name only",
+    );
+    assert.ok(
+      /do not retry the same ask/.test(prompt),
+      "a denial is final — the denied ask is not retried",
+    );
+  });
+
+  it("Autonomy and Limits carve out the ask channel instead of contradicting it", () => {
+    const prompt = buildWorkerSystemPrompt();
+    // The old absolute "Never wait for a reply." is exactly what three live
+    // workers obeyed over the task's explicit ask instruction.
+    assert.ok(
+      !prompt.includes("Never wait for a reply"),
+      "the absolute no-wait line is gone",
+    );
+    assert.ok(
+      /exception is the access ask/.test(prompt),
+      "Autonomy names the ask as the one exception",
+    );
+    assert.ok(
+      prompt.includes("Your only channels back are your final answer and"),
+      "Limits no longer claims the final answer is the only channel back",
+    );
   });
 
   it("omits reconstruction codenames", () => {

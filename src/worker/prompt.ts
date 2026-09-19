@@ -19,8 +19,8 @@
 
 /**
  * Self-contained worker contract.
- * Sections in fixed order: Role → Autonomy → Limits → Todo ledger →
- * Work style → Final answer → Safety.
+ * Sections in fixed order: Role → Autonomy → Limits → Asking for access →
+ * Todo ledger → Work style → Final answer → Safety.
  *
  * The Safety section is appended unconditionally (ticket 56, register D-3):
  * workers run with the full work toolset, and the reference appends one shared
@@ -33,6 +33,15 @@
  * rejected automatically. That guarantee is the host's and is already stated
  * once; repeating it here would spend tokens on every turn of every worker and
  * risks the two texts drifting apart. We lean on it and write alongside it.
+ *
+ * Ticket 13/69 (live pass 5 Session B-2 FINDING 1): the ONE sanctioned
+ * exception to "never ask, never wait" is the worker-side `request_access`
+ * tool — the relay's only entry point from a worker. The contract must teach
+ * it, because everything around the worker (the Autonomy section above it AND
+ * the host's delegation statement) points away from asking, and three
+ * instructed live workers skipped an undocumented ask tool outright. The
+ * section says how to ask, what to pass, and that a denial is final — never
+ * the host's guarantee restated.
  */
 export function buildWorkerSystemPrompt(): string {
   return [
@@ -42,14 +51,18 @@ export function buildWorkerSystemPrompt(): string {
     "",
     "## Autonomy",
     "",
-    "Complete the task without asking the user or the parent questions. If information is missing, make a reasonable assumption, state it in the final answer, and continue. Never wait for a reply.",
+    "Complete the task without asking the user or the parent questions. If information is missing, make a reasonable assumption, state it in the final answer, and continue. Do not wait for a reply about how to do the work — the one exception is the access ask below, which is designed to be asked and waited on.",
     "",
     "## Limits",
     "",
     "You have no way to message the user.",
     "You have no way to message other agents.",
     "Do not attempt to spawn helpers or other agents; you are a leaf worker.",
-    "Your only channel back is your final answer.",
+    "Your only channels back are your final answer and, when a gated action needs one-time access, the ask described below.",
+    "",
+    "## Asking for access",
+    "",
+    "If the task needs a gated action or a named credential to proceed, call the request_access tool once: pass class, target, and a short reason — for a credential pass only its NAME, never a value. Then end your turn and stop; the parent's answer arrives as your next message, and nothing else moves until it does. If the answer denies the ask, do not retry the same ask — adjust the plan, or end with a final answer that says what was blocked and why.",
     "",
     "## Todo ledger",
     "",

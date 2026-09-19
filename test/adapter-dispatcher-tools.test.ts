@@ -17,6 +17,7 @@ import {
 import {
   registerDispatcherTools,
   resolveExecSessionId,
+  structuredPresentationMeta,
   toRegisterableTool,
   type RegisterableTool,
 } from "../src/adapter/dispatcher-tools.js";
@@ -173,6 +174,98 @@ describe("adapter dispatcher tool registration", () => {
     assert.deepEqual(rendered, [
       { type: "text", text: "Started in the background." },
     ]);
+  });
+
+  // Ticket 81 (live pass 5, Session B-2 FINDING 2): the durable `tool/result`
+  // event carries the tool's RENDERED text plus the OPTIONAL
+  // `output.presentationMeta` projection — never the raw structured `value`
+  // (dsh-agent-loop `appendToolResult`, lib/index.js:697-712; dsh-tools
+  // `createSuccessResult`, lib/index.js:3428). The client reducer reads
+  // `data.meta` first, so every registered dispatcher tool must ship the
+  // projection or the worker-dispatch card and the toolview parsers see only
+  // prose live.
+  it("every registered dispatcher tool carries output.presentationMeta", () => {
+    const ctx = createToolsCaptureCtx();
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host);
+    registerDispatcherTools({
+      ctx,
+      multitask,
+      getSessionId: () => "session-1",
+    });
+    assert.equal(ctx.registered.length, DISPATCHER_TOOL_NAMES.length);
+    for (const tool of ctx.registered) {
+      assert.equal(
+        typeof tool.output.presentationMeta,
+        "function",
+        `tool "${tool.name}" must attach presentationMeta (the durable record's structured half)`,
+      );
+    }
+  });
+
+  it("structuredPresentationMeta strips model-facing prose, keeps the structured fields", () => {
+    // spawn ack embeds the whole worker prompt — never durable twice.
+    const spawn = structuredPresentationMeta(
+      {},
+      {
+        ok: true,
+        worker_id: "w-1",
+        stream_key: "s-1",
+        title: "Title",
+        gated: true,
+        ack: "Started ... Self-contained prompt sent:\n---\nthe whole prompt",
+      },
+    ) as Record<string, unknown>;
+    assert.deepEqual(spawn, {
+      ok: true,
+      worker_id: "w-1",
+      stream_key: "s-1",
+      title: "Title",
+      gated: true,
+    });
+    // check summary is the rendered table — rows remain the structured half.
+    const check = structuredPresentationMeta({}, {
+      ok: true,
+      rows: [{ worker_id: "w-1" }],
+      summary: "running · \"Title\" · 1s",
+    }) as Record<string, unknown>;
+    assert.deepEqual(check, { ok: true, rows: [{ worker_id: "w-1" }] });
+    // steer/stop notes and refusal records: prose gone, reason/detail kept.
+    assert.deepEqual(structuredPresentationMeta({}, { ok: true, note: "n" }), {
+      ok: true,
+    });
+    assert.deepEqual(
+      structuredPresentationMeta({}, {
+        ok: false,
+        reason: "auto-review-refused",
+        detail: "d",
+      }),
+      { ok: false, reason: "auto-review-refused", detail: "d" },
+    );
+    // Non-record values pass through (the host rejects an undefined
+    // projection outright — there is no "absent" answer).
+    assert.equal(structuredPresentationMeta({}, null), null);
+    assert.deepEqual(structuredPresentationMeta({}, [1, 2]), [1, 2]);
+    assert.equal(structuredPresentationMeta({}, "text"), "text");
+    // The projection must not mutate its input value.
+    const original = { ok: true, ack: "a", worker_id: "w" };
+    structuredPresentationMeta({}, original);
+    assert.deepEqual(original, { ok: true, ack: "a", worker_id: "w" });
+  });
+
+  it("toRegisterableTool output attaches the presentation projection", () => {
+    const tool = toRegisterableTool({
+      name: "x",
+      description: "d",
+      parameters: { type: "object" },
+      async execute() {
+        return { ok: true };
+      },
+    });
+    assert.equal(typeof tool.output.presentationMeta, "function");
+    assert.deepEqual(tool.output.presentationMeta?.({}, { ok: true }), {
+      ok: true,
+    });
   });
 
   it("passes recentActivity through to check rows (ticket 29)", async () => {

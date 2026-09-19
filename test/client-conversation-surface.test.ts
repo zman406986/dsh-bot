@@ -425,6 +425,159 @@ describe("conversation reduction — tool rows (ticket 24 re-host)", () => {
   });
 });
 
+/**
+ * Ticket 81 (live pass 5, Session B-2 FINDING 2) — the durable record as the
+ * LIVE HOST shapes it, not as the earlier offline fixtures assumed. Host
+ * facts (dsh-agent-loop/lib/index.js:697-712 `appendToolResult`,
+ * dsh-llm/lib/index.js:94 `createToolResultMessage`, dsh-tools
+ * lib/index.js:3428 `createSuccessResult`): the `tool/result` event data
+ * carries `message` (source.callId + ONE `tool-result` block whose content
+ * is the tool's RENDERED text — for `spawn_worker` that is the ack prose,
+ * never JSON) and `meta` ONLY when the tool defines
+ * `output.presentationMeta`. The structured `value` is never serialized.
+ */
+function hostToolResult(
+  callId: string,
+  renderedText: string,
+  meta: unknown,
+): ConversationEntryLike {
+  return event("tool/result", {
+    turn: 1,
+    step: 1,
+    message: {
+      id: `r-${nextSeq}`,
+      role: "user",
+      content: [
+        {
+          type: "tool-result",
+          toolCallId: callId,
+          isError: false,
+          content: [{ type: "text", text: renderedText }],
+        },
+      ],
+      source: { kind: "tool", callId },
+    },
+    ...(meta !== undefined ? { meta } : {}),
+  });
+}
+
+describe("conversation reduction — dispatch card over the LIVE durable record (ticket 81 FINDING 2)", () => {
+  const ACK =
+    "Started \"Report\" in the background (worker w-9, stream s-1).";
+
+  it("with presentationMeta, a settled spawn projects its worker-dispatch card", () => {
+    const transcript = reduceConversationWindow({
+      entries: [
+        toolCall("c-1", "spawn_worker", {
+          stream_key: "s-1",
+          title: "Report",
+          prompt: "Do the thing.",
+        }),
+        hostToolResult("c-1", ACK, {
+          ok: true,
+          worker_id: "w-9",
+          stream_key: "s-1",
+          title: "Report",
+        }),
+      ],
+    });
+    assert.ok(transcript);
+    const item = transcript.items[0];
+    assert.equal(item?.kind, "tool");
+    if (item?.kind !== "tool") return;
+    // The tool row still renders the parsed outcome beside the card.
+    assert.equal(item.view.kind, "detail");
+    assert.equal(item.dispatch?.cardKind, "worker-dispatch");
+    assert.equal(item.dispatch?.outcome.kind, "spawned");
+    assert.equal(item.dispatch?.outcome.kind === "spawned"
+      ? item.dispatch.outcome.workerId
+      : null, "w-9");
+    assert.equal(item.dispatch?.gating, "ungated");
+    assert.equal(item.dispatch?.title, "Report");
+    assert.equal(item.dispatch?.streamKey, "s-1");
+    assert.equal(item.dispatch?.toolCallId, "c-1");
+  });
+
+  it("a posture-gated spawn carries gating: approval-allowed from the record's own marker", () => {
+    const transcript = reduceConversationWindow({
+      entries: [
+        toolCall("c-1", "spawn_worker", { title: "Gated" }),
+        hostToolResult("c-1", ACK, {
+          ok: true,
+          worker_id: "w-9",
+          stream_key: "s-1",
+          title: "Gated",
+          gated: true,
+        }),
+      ],
+    });
+    const item = transcript?.items[0];
+    assert.equal(
+      item?.kind === "tool" ? item.dispatch?.gating : null,
+      "approval-allowed",
+    );
+  });
+
+  it("a refused spawn projects the refusal outcome from the meta record", () => {
+    const transcript = reduceConversationWindow({
+      entries: [
+        toolCall("c-1", "spawn_worker", { title: "Refused" }),
+        hostToolResult(
+          "c-1",
+          "Refused: auto-review-refused — unavailable",
+          { ok: false, reason: "auto-review-refused", detail: "unavailable" },
+        ),
+      ],
+    });
+    const item = transcript?.items[0];
+    assert.equal(item?.kind === "tool" ? item.settled : null, true);
+    // A structured refusal is the tool's own RETURN value (isError false):
+    // the refusal lives in the record (`ok:false` + reason), not in the
+    // message's error flag.
+    assert.equal(item?.kind === "tool" ? item.failed : null, false);
+    assert.equal(item?.kind === "tool" ? item.dispatch?.outcome.kind : null, "refused");
+    assert.equal(
+      item?.kind === "tool" && item.dispatch?.outcome.kind === "refused"
+        ? item.dispatch.outcome.reason
+        : null,
+      "auto-review-refused",
+    );
+    assert.equal(
+      item?.kind === "tool" ? item.dispatch?.gating : null,
+      "approval-refused",
+    );
+  });
+
+  it("REGRESSION PIN (the B-2 live shape: rendered ack only, no meta) degrades honestly — no card, no fabricated fields", () => {
+    // This is EXACTLY what Session B-2's two settled spawns produced: the
+    // pre-fix adapter shipped no presentationMeta, so the durable record
+    // carried only the ack prose. The reducer must never fabricate a card or
+    // fields from prose — and the fix is the adapter attaching meta, not a
+    // client-side guess.
+    const transcript = reduceConversationWindow({
+      entries: [
+        toolCall("c-1", "spawn_worker", {
+          stream_key: "s-1",
+          title: "Report",
+          prompt: "Do the thing.",
+        }),
+        hostToolResult("c-1", ACK, undefined),
+      ],
+    });
+    assert.ok(transcript);
+    const item = transcript.items[0];
+    assert.equal(item?.kind === "tool" ? item.settled : null, true);
+    assert.equal(item?.kind === "tool" ? item.dispatch : null, null);
+    // The row still shows the ARGS-derived fields (title/stream) but carries
+    // no outcome and no worker id — nothing is invented from the prose ack.
+    if (item?.kind === "tool" && item.view.kind === "detail") {
+      const labels = item.view.fields.map((f) => f.labelKey);
+      assert.ok(!labels.includes("toolview.field.worker"));
+      assert.ok(!labels.includes("toolview.field.outcome"));
+    }
+  });
+});
+
 describe("conversation reduction — streaming + running (ticket 80)", () => {
   it("accumulates text deltas in place as ONE streaming item per attempt", () => {
     const window: ConversationWindowLike = {
