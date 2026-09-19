@@ -125,9 +125,14 @@ type CordisContext = AdapterContext &
  * `unavailable`; the chunk-A spawn gate refuses on anything but
  * `allowed-once`, so a gated dispatch with no live answerer refuses
  * honestly and the dispatcher re-plans — it cannot wedge the turn (design
- * §6 Q2's offline half). Whether the shipped client approval composer still
- * answers under the wrapper's root frame stays the LIVE lane's verification
- * (L3).
+ * §6 Q2's offline half). The ask is time-bounded with the relay's ADR-0008
+ * deadline (`DEFAULT_ACCESS_TIMEOUT_MS`, `src/adapter/dispatch-approval.ts`
+ * `timeoutMs`): a SILENT answerer (live pass 5 B-3, FINDING 3 — the
+ * approval composer can ship without ever answering) also lands in
+ * `unavailable` at the deadline, so the wedge FINDING 3 observed is
+ * unreachable from this seam. Whether the shipped client approval composer
+ * still answers under the wrapper's root frame stays the LIVE lane's
+ * verification (L3).
  */
 export function dispatchApprovalSeamFor(
   ctx: Pick<AdapterContext, "approval">,
