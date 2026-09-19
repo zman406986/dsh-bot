@@ -24,6 +24,7 @@ import {
   bindConversationFeed,
   requestOlder,
 } from "../src/client/conversation-feed.js";
+import { bindCommandTransport } from "../src/client/actions.js";
 import {
   CONVERSATION_CSS,
   CONVERSATION_CLASS,
@@ -735,6 +736,18 @@ describe("conversation feed binding — selection-driven windows (ticket 80)", (
 // ── Scoped pagination request
 
 describe("requestOlder — the scoped loadOlder() verb (ticket 80)", () => {
+  /**
+   * The host-faithful scope fake (ticket 92, live-found 2026-09-19): the
+   * scoped conversation face is reached through the SERVICE-METHOD boundary
+   * `scoped.get("conversation")` (`dsh-client-ui-conversation
+   * lib/client.js:16500-16506`, `:14375-14377`), while the PROPERTY read
+   * throws exactly as the live host does — the cordis context proxy resolves
+   * a service property by walking the fiber chain (`cordis lib/index.js
+   * :672-694`) and the scope fiber injects nothing, so the walk dies at the
+   * root fiber with `cannot get property "conversation" without inject`
+   * (`:690`). The verb is only valid as a METHOD of the returned face
+   * (detached references lose the host's tracker rebinding).
+   */
   function scopeFake(record: {
     loadCalls: string[];
     reject?: boolean;
@@ -744,20 +757,28 @@ describe("requestOlder — the scoped loadOlder() verb (ticket 80)", () => {
       list: { getSnapshot: () => ({}) },
       scope(id: string) {
         return {
-          conversation: {
-            async send(text: string) {
-              void text;
-            },
-            ...(record.withLoadOlder === false
-              ? {}
-              : {
-                  async loadOlder() {
-                    record.loadCalls.push(id);
-                    if (record.reject === true) {
-                      throw new Error("business failure");
-                    }
-                  },
-                }),
+          get(name: string): unknown {
+            if (name !== "conversation") return undefined;
+            return {
+              async send(text: string) {
+                void text;
+              },
+              ...(record.withLoadOlder === false
+                ? {}
+                : {
+                    async loadOlder() {
+                      record.loadCalls.push(id);
+                      if (record.reject === true) {
+                        throw new Error("business failure");
+                      }
+                    },
+                  }),
+            };
+          },
+          get conversation(): never {
+            throw new Error(
+              'cannot get property "conversation" without inject',
+            );
           },
         };
       },
@@ -793,6 +814,90 @@ describe("requestOlder — the scoped loadOlder() verb (ticket 80)", () => {
     assert.doesNotThrow(() => requestOlder(sessions, "s-1"));
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.deepEqual(record.loadCalls, ["s-1"]);
+  });
+});
+
+// ── The scoped send path (ticket 92, live-found)
+
+describe("sendPrompt — the session-scoped plain-prompt sink (ticket 40, shape corrected by ticket 92)", () => {
+  /**
+   * The host-faithful sessions fake (ticket 92): `sessions.scope(id)` is the
+   * Agent-scoped context (`dsh-api-session-controller lib/client.js
+   * :3254-3256`) and the conversation face is reached through the
+   * SERVICE-METHOD boundary (`dsh-client-ui-conversation lib/client.js
+   * :16500-16506`, `:14375-14377`). The PROPERTY read throws exactly as the
+   * live host does (`cordis lib/index.js:672-694` → `:690`), and a root-scope
+   * read throws the host's own scope error (`dsh-client-ui-conversation
+   * lib/client.js:3177-3181`) — the shape that killed the live composer send
+   * on pass 5.
+   */
+  function scopedSendFake(
+    sent: { sessionId: string; text: string }[],
+  ): ClientSessionsLike {
+    return {
+      list: { getSnapshot: () => ({}) },
+      scope: (id: string) => ({
+        get(name: string): unknown {
+          if (name !== "conversation") return undefined;
+          return {
+            // The host's tag-bound sink: `scopeOf(this.ctx)` resolves THIS
+            // scope's id, so only a call made through the scoped face lands.
+            send: async (text: string) => {
+              sent.push({ sessionId: id, text });
+            },
+          };
+        },
+        get conversation(): never {
+          throw new Error('cannot get property "conversation" without inject');
+        },
+      }),
+    };
+  }
+
+  it("reaches the sink through the scope's service-method boundary", async () => {
+    const sent: { sessionId: string; text: string }[] = [];
+    const transport = bindCommandTransport({
+      remote: () => undefined,
+      sessions: () => scopedSendFake(sent),
+    });
+    assert.deepEqual(await transport.sendPrompt("s-1", "hello"), {
+      kind: "sent",
+    });
+    assert.deepEqual(sent, [{ sessionId: "s-1", text: "hello" }]);
+  });
+
+  it("no scope and no reachable service are honest no-channel outcomes", async () => {
+    const sent: { sessionId: string; text: string }[] = [];
+    const noScope: ClientSessionsLike = {
+      list: { getSnapshot: () => ({}) },
+      scope: () => undefined,
+    };
+    const noService: ClientSessionsLike = {
+      list: { getSnapshot: () => ({}) },
+      scope: () => ({ get: () => undefined }),
+    };
+    assert.deepEqual(
+      await bindCommandTransport({
+        remote: () => undefined,
+        sessions: () => noScope,
+      }).sendPrompt("s-1", "hello"),
+      { kind: "no-channel" },
+    );
+    assert.deepEqual(
+      await bindCommandTransport({
+        remote: () => undefined,
+        sessions: () => noService,
+      }).sendPrompt("s-1", "hello"),
+      { kind: "no-channel" },
+    );
+    assert.deepEqual(
+      await bindCommandTransport({
+        remote: () => undefined,
+        sessions: () => undefined,
+      }).sendPrompt("s-1", "hello"),
+      { kind: "no-channel" },
+    );
+    assert.deepEqual(sent, []);
   });
 });
 

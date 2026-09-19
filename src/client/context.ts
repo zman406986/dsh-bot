@@ -191,26 +191,66 @@ export interface ClientEffectContext {
 }
 
 /**
+ * The session-scoped conversation face: the scope-addressed plain-prompt
+ * sink plus the optional pagination verb. Every verb must be called as a
+ * METHOD of this face (never detached) — the host rebinds `this.ctx` to the
+ * accessing scope through the service tracker, and a detached call loses it.
+ */
+export interface ScopedConversationLike {
+  /** Send a prompt into the scoped session (queued user turn). */
+  send(text: string): Promise<void>;
+  /**
+   * Pull one older history page for the scoped session (ticket 80; the
+   * scope-addressed pagination verb — `IConversation.loadOlder`,
+   * dsh-client-ui-conversation `client/service.d.ts:52-55`). Optional: a
+   * runtime without it degrades to a transcript without the older-pages
+   * affordance, never to a fabricated one.
+   */
+  loadOlder?(): Promise<void>;
+}
+
+/**
  * A session-scoped context view (`ctx.sessions.scope(id)`, ticket 36 seam
  * 2/3): a use-and-discard Agent-scoped context whose scope-addressed
- * conversation face carries the plain-prompt sink. The host's own guidance
- * for a root-scope plugin is to "address one via
- * ctx.sessions.scope(id).conversation" — `send` puts the text into that
- * session as the user's own queued turn.
+ * conversation face carries the plain-prompt sink. The host's own error copy
+ * names that face ("address one via ctx.sessions.scope(id).conversation"),
+ * and `send` puts the text into that session as the user's own queued turn —
+ * but the face is reached through the service-method boundary, never the
+ * property read (the block below).
+ *
+ * **Reach the service through `get(name)`, not the property read** (ticket
+ * 92, verified 2026-09-19): the cordis context proxy resolves a service
+ * PROPERTY read by walking the FIBER chain from the accessing context
+ * (`cordis/lib/index.js:672-694`); the scope fiber is the no-op `agentScope`
+ * plugin (`dsh-api-session-controller/lib/types/client/scope.js:21-36`), so
+ * the walk leaves the sessions plugin's fiber and reaches the root fiber,
+ * where `fiber.runtime === null` throws `cannot get property "conversation"
+ * without inject` — the conversation service is provided by a CHILD plugin
+ * of the conversation module's fiber
+ * (`dsh-client-ui-conversation/lib/client.js:16837`), never on the scope
+ * fiber's ancestor chain. `get(name)` is the service-method boundary: it
+ * resolves through the isolate-keyed service store with no fiber walk, and
+ * still rebinds `this.ctx` to the accessing (scoped) context, so the host's
+ * own `scopeOf(this.ctx)` check (`dsh-client-ui-conversation/lib/client.js
+ * :3170-3181`) finds the session tag. That is the host's own scoped call
+ * shape (`:16500-16506` `scopedConversation`, `:14375-14377` the queue
+ * dock). `src/client/actions.ts`'s `scopedConversation` helper owns the
+ * resolution; the property read survives there only as a structural
+ * fallback for a runtime whose context has no `get`.
  */
 export interface ScopedAgentContextLike {
-  conversation?: {
-    /** Send a prompt into the scoped session (queued user turn). */
-    send(text: string): Promise<void>;
-    /**
-     * Pull one older history page for the scoped session (ticket 80; the
-     * scope-addressed pagination verb — `IConversation.loadOlder`,
-     * dsh-client-ui-conversation `client/service.d.ts:52-55`). Optional: a
-     * runtime without it degrades to a transcript without the older-pages
-     * affordance, never to a fabricated one.
-     */
-    loadOlder?(): Promise<void>;
-  };
+  /**
+   * The service-method boundary (`ctx.get(name)`; cordis `reflect.get`,
+   * `cordis/lib/index.js:762-764`) — the verified way to reach a service
+   * from a session-scope context. Optional so a structural runtime without
+   * it can still be addressed through the property fallback.
+   */
+  get?(name: string): unknown;
+  /**
+   * The property read — present on the scope context, but it THROWS on the
+   * live host's composition (the doc block above); never the primary shape.
+   */
+  conversation?: ScopedConversationLike;
 }
 
 /**

@@ -173,12 +173,30 @@ function dispatcherSnapshot(dispatcherSessionId: string): RosterSnapshot {
  * The sessions face the host serves: the sidebar list feed (live
  * subscribe/publish like `bindShellSessionsFeed` reads) plus per-session
  * bindings whose `eventSource` is an ObservableSnapshot window.
+ *
+ * Ticket 92 (live-found, 2026-09-19): the scope-addressed conversation face
+ * is reached through the SERVICE-METHOD boundary, never the property read —
+ * host citations:
+ * - `sessions.scope(id)` → the Agent-scoped ctx, `dsh-api-session-controller
+ *   lib/client.js:3254-3256` (tag minted by `createScope`,
+ *   `lib/types/client/scope.js:27-36`).
+ * - `scoped.get("conversation")` is the host's own scoped shape
+ *   (`dsh-client-ui-conversation lib/client.js:16500-16506`
+ *   `scopedConversation`, `:14375-14377` the queue dock).
+ * - the PROPERTY read throws on the live host: the cordis context proxy
+ *   resolves a service property by walking the FIBER chain from the accessing
+ *   ctx (`cordis lib/index.js:672-694`) and the scope fiber injects nothing,
+ *   so the walk reaches the root fiber and throws `cannot get property
+ *   "conversation" without inject` (`:690`). The shipped `sendPrompt` died
+ *   exactly there (ticket 92), so this fake throws the same way.
  */
 function fakeSessions(initial: ShellFeedSnapshotLike) {
   const feedListeners = new Set<() => void>();
   let feed: ShellFeedSnapshotLike = initial;
   const windows = new Map<string, ConversationWindowLike>();
   const windowListeners = new Map<string, Set<() => void>>();
+  /** Every prompt the scoped sink accepted (the send path's observable). */
+  const sent: { sessionId: string; text: string }[] = [];
 
   const sessions: ClientSessionsLike = {
     list: {
@@ -189,10 +207,23 @@ function fakeSessions(initial: ShellFeedSnapshotLike) {
       },
     },
     scope: (id: string) => ({
-      conversation: {
-        loadOlder: () => Promise.resolve(),
+      get(name: string): unknown {
+        if (name !== "conversation") return undefined;
+        return {
+          loadOlder: () => Promise.resolve(),
+          // The host's tag-bound sink: `scopeOf(this.ctx)` inside `send`
+          // resolves THIS scope's id (client.js:3170-3181), so the fake only
+          // accepts a call made through the scoped face.
+          send: async (text: string) => {
+            sent.push({ sessionId: id, text });
+          },
+        };
       },
-      id,
+      get conversation(): never {
+        throw new Error(
+          'cannot get property "conversation" without inject',
+        );
+      },
     }),
     binding(id: string) {
       if (!windows.has(id)) return undefined;
@@ -215,6 +246,8 @@ function fakeSessions(initial: ShellFeedSnapshotLike) {
 
   return {
     sessions,
+    /** The prompts the scoped sink accepted (ticket 92's pin reads this). */
+    sent,
     /** The host publishes a new sidebar list snapshot. */
     publishFeed(next: ShellFeedSnapshotLike) {
       feed = next;
