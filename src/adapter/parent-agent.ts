@@ -123,6 +123,16 @@ export interface BindDispatcherLifecycleResult {
   dispatcherSessionId(): string | null;
   /** Whether this session is an activated dispatcher (ADR-0019). */
   isDispatcherSession(sessionId: string): boolean;
+  /**
+   * Activation generation for a session (ticket 90, F2): a counter bumped on
+   * every activation and returned only while THAT activation is live — null
+   * once the session is deactivated. A caller that captured the value at
+   * activation can tell "my activation" from "a later activation of the same
+   * session id", which {@link isDispatcherSession} (set membership) cannot:
+   * after a deactivate → re-activate, membership is true again and a chain
+   * from the previous activation would act for the new one.
+   */
+  activationGeneration(sessionId: string): number | null;
   /** Every activated dispatcher session id (ADR-0019). */
   dispatcherSessionIds(): readonly string[];
   /** Tear down listeners and every activation, if any. */
@@ -186,6 +196,15 @@ export function bindDispatcherLifecycle(
    * compatibility slot).
    */
   const sessions = new Map<string, AgentLike>();
+  /**
+   * Activation generation per session (ticket 90, F2): monotonic, never
+   * reused, stamped at activation. The entry survives deactivation so the
+   * value stays comparable; liveness is `sessions` membership, and
+   * {@link BindDispatcherLifecycleResult.activationGeneration} reports null
+   * for a session that is not an activated dispatcher.
+   */
+  const generations = new Map<string, number>();
+  let activationSeq = 0;
   let unbound = false;
   const disposers: Array<() => void> = [];
 
@@ -278,6 +297,10 @@ export function bindDispatcherLifecycle(
       // ADR-0019: another chat being a dispatcher is not a refusal — each
       // session activates independently.
       sessions.set(sessionId, agent);
+      // Ticket 90 (F2): stamp THIS activation before anything observes it
+      // (`onActivated` starts the rebuild chain that captures the value).
+      activationSeq += 1;
+      generations.set(sessionId, activationSeq);
       host.bindParent(agent, sessionId);
       // ADR-0005: policy is fixed for this session's lifetime.
       if (policyEnabled) {
@@ -305,6 +328,11 @@ export function bindDispatcherLifecycle(
 
     isDispatcherSession(sessionId: string): boolean {
       return sessions.has(sessionId);
+    },
+
+    activationGeneration(sessionId: string): number | null {
+      if (!sessions.has(sessionId)) return null;
+      return generations.get(sessionId) ?? null;
     },
 
     dispatcherSessionIds(): readonly string[] {

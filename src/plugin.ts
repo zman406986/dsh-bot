@@ -229,6 +229,24 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   const markers: StorageDomainDurability = createStorageDomainDurability(
     ctx.storageDomain,
   );
+  /**
+   * Activation rebuilds currently in flight: sessionId → the activation
+   * generation the rebuild was started for (ticket 90, F3). While a rebuild
+   * for a session is pending, the roster observer stays silent for that
+   * session: a snapshot taken now is a PRE-rebuild one, and ticket 31's
+   * acceptance rule is that the first snapshot after activation already
+   * carries the restored rows (see `rebuildAndNotice`). The marker read
+   * awaits the store, so a concurrent roster-affecting transition (spawn,
+   * settle, access park/resolve, delivery, reconcile) could otherwise publish
+   * first. Nothing is lost: the chain's own post-rebuild publish projects the
+   * live roster, which already includes the transition.
+   *
+   * Keyed by generation (ticket 90, F2), not by session id: a stale chain
+   * from an earlier activation of the same session id exits while a NEW
+   * activation's rebuild is still reading — a session-keyed flag would be
+   * cleared by that exit and reopen the pre-rebuild publish window.
+   */
+  const rebuildsInFlight = new Map<string, number>();
   // T10: real worker agent type — self-contained prompt + tool barrier + leaf depth.
   let multitaskRef: Multitask | null = null;
   const host: CordisDshHost = createCordisDshHost(ctx, {
@@ -265,10 +283,14 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     // per session — a transition publishes the CHANGED session's snapshot
     // whenever that session is an activated dispatcher (no single-active
     // slot); the snapshot itself carries its `dispatcherSessionId`.
+    // Ticket 90 (F3): a rebuild in flight for that session suppresses the
+    // publish — the ordering guarantee (restored rows in the FIRST snapshot)
+    // outranks publishing a pre-rebuild one, and the chain's own publish
+    // carries this transition anyway.
     onRosterChanged: (sessionId) => {
-      if (lifecycle.isDispatcherSession(sessionId)) {
-        publishRosterSnapshot(sessionId);
-      }
+      if (!lifecycle.isDispatcherSession(sessionId)) return;
+      if (rebuildsInFlight.has(sessionId)) return;
+      publishRosterSnapshot(sessionId);
     },
   });
   multitaskRef = multitask;
@@ -517,41 +539,70 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   // first wake (S4 across restart). Core rebuild semantics are frozen
   // (ADR-0006); this is adapter ordering only.
   const rebuildAndNotice = async (sessionId: string): Promise<void> => {
+    // Ticket 90 (F2): the chain acts for the activation it started under.
+    // Captured before the first await; `onActivated` guarantees a live one.
+    const activation = lifecycle.activationGeneration(sessionId);
+    // Ticket 90 (F3): the observer stays silent for this session until the
+    // rebuild has landed and its own publish is out.
+    if (activation !== null) rebuildsInFlight.set(sessionId, activation);
     let notice: string | null = null;
     try {
-      notice = assembleRestartNotice(
-        await multitask.rebuildFromDurability(sessionId),
-      );
-    } catch {
-      // Marker store unreadable: activation still succeeds; the honest
-      // degraded notice says nothing was restored or replayed.
-      notice = RESTART_DEGRADED_NOTICE;
+      try {
+        notice = assembleRestartNotice(
+          await multitask.rebuildFromDurability(sessionId),
+        );
+      } catch {
+        // Marker store unreadable: activation still succeeds; the honest
+        // degraded notice says nothing was restored or replayed.
+        notice = RESTART_DEGRADED_NOTICE;
+      }
+      // The activation may have ended while markers were being read — never
+      // publish or inject for a session that is no longer an activated
+      // dispatcher (ADR-0019: per-session liveness, not a single-active slot).
+      // Ticket 90 (F2): the comparison is the ACTIVATION GENERATION, not the
+      // session id. `isDispatcherSession` is set membership, so a chain from
+      // activation #1 resuming after a deactivate → re-activate of the SAME
+      // id would pass it and act for activation #2 — a double publish and a
+      // second redrive attempt against the persisted D-5 budget. The
+      // generation is null once its activation ends, so this single compare
+      // covers the deactivation and the stale-chain window alike.
+      if (
+        activation === null ||
+        lifecycle.activationGeneration(sessionId) !== activation
+      ) {
+        return;
+      }
+      publishRosterSnapshot(sessionId);
+      // Ticket 23: prompts sync stays after the first publish, as before
+      // (this session's pump only).
+      pumpFor(sessionId).sync();
+      if (notice !== null) {
+        // Ticket 57 (D-4): route recovery through the WAKING primitive.
+        // `injectNotice` only queues context; the reference re-wakes its parent
+        // on boot so the notice is acted on without the user speaking first.
+        // The trigger stays activation-driven (ADR-0009) — only the primitive
+        // changes. A future boot hook (if ADR-0016 is signed) calls this same
+        // method; item U-1 (is activation itself a deviation?) is not decided
+        // here.
+        lifecycle.wakeNotice(sessionId, notice);
+      }
+      // Ticket 58 (register D-5): activation is also a delivery opportunity.
+      // A restored result that settled before the restart and was never
+      // delivered gets a redrive turn — bounded, so it cannot become the
+      // unbounded persistence this ticket exists to remove. Called
+      // unconditionally: it is a cheap no-op when nothing is owed, and it is
+      // also the pass that escalates an already-exhausted obligation to `lost`.
+      multitask.redriveUndelivered(sessionId);
+    } finally {
+      // Only clear OUR entry: a stale chain must not reopen the gate while a
+      // later activation's rebuild is still in flight (ticket 90, F2/F3).
+      if (
+        activation !== null &&
+        rebuildsInFlight.get(sessionId) === activation
+      ) {
+        rebuildsInFlight.delete(sessionId);
+      }
     }
-    // The activation may have ended while markers were being read — never
-    // publish or inject for a session that is no longer an activated
-    // dispatcher (ADR-0019: per-session liveness, not a single-active slot).
-    if (!lifecycle.isDispatcherSession(sessionId)) return;
-    publishRosterSnapshot(sessionId);
-    // Ticket 23: prompts sync stays after the first publish, as before
-    // (this session's pump only).
-    pumpFor(sessionId).sync();
-    if (notice !== null) {
-      // Ticket 57 (D-4): route recovery through the WAKING primitive.
-      // `injectNotice` only queues context; the reference re-wakes its parent
-      // on boot so the notice is acted on without the user speaking first.
-      // The trigger stays activation-driven (ADR-0009) — only the primitive
-      // changes. A future boot hook (if ADR-0016 is signed) calls this same
-      // method; item U-1 (is activation itself a deviation?) is not decided
-      // here.
-      lifecycle.wakeNotice(sessionId, notice);
-    }
-    // Ticket 58 (register D-5): activation is also a delivery opportunity.
-    // A restored result that settled before the restart and was never
-    // delivered gets a redrive turn — bounded, so it cannot become the
-    // unbounded persistence this ticket exists to remove. Called
-    // unconditionally: it is a cheap no-op when nothing is owed, and it is
-    // also the pass that escalates an already-exhausted obligation to `lost`.
-    multitask.redriveUndelivered(sessionId);
   };
 
   const lifecycle = bindDispatcherLifecycle(ctx, host, multitask, {
