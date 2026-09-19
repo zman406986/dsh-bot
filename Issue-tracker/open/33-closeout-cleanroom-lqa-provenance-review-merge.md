@@ -1033,3 +1033,72 @@ settlement can no longer eat a parked ask or mark a worker completed+delivered w
 is owed. Worker prompt unchanged (W19 contract intact; denial final). RED-checked, gates on
 merged main 1125/0/272, B3 holds. Full record + SEMANTICS DECISION ruling (subject to human
 reversal) + the B-5 live verification list: ticket 69's comment 2026-09-20 (W22).
+
+### 2026-09-20 — live pass 5, Session B-5 (W23, ONE composer send = 1 of 3 budget): W22's park fix LIVE-VERIFIED end to end — the parked ask SURVIVES settlement, 69 L1 (card + resolve round-trip) and L2 (blocked marker) pass live, ticket 30's card anatomy live-observed (clamp cut + expired copy excepted)
+
+Evidence root: `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-20\session-B5\` (README maps every
+artifact to the claim; per-command `.json`/`.out.json` pairs in `session-B5/driver/`; offline
+host-state reads in `session-B5/probes/`; screenshots in `session-B5/shots/`). Boot per the W9
+recipe on the throwaway `multitask` profile, port 8877, WMI-detached, main `4ebe484`. Kill timers
+armed at launch (30-min internal + 45-min WMI backstop + 20-min driver wrapper + 18-min
+self-exit); all cleared at teardown: dsh tree + backstop killed, driver closed first, all pids
+gone, port 8877 no LISTENING line, zero chrome, profile document left clean (all three roster
+keys null, revision 8), stock `web` profile byte-identical (md5 AND mtimes). FINDING 5 hygiene
+held: pre-boot projcache sweep re-confirmed cf5249cf's persisted open turn (`openTurnStartSeq:
+415`); it was NEVER activated; the flow ran on cd03250b after a fresh `/dispatcher-start`.
+
+Gates before anything: typecheck clean (both configs); **1125 / 272 / 0** (the W22 expectation
+exactly). Rebuild + profile remove→re-add; served copy `LIB_DIFF_EMPTY` with the W22 markers
+confirmed pre-boot (`awaitSettled` ×5 + `createPendingAskSettleWaiter` in
+`lib/adapter/worker-access-tool.js`, waiter ×2 in `lib/plugin.js`).
+
+- **W22 mechanism → LIVE-VERIFIED (the park now gets its window; FINDING 4 is dead).** Send at
+  05:55:08.8; the worker called `request_access` once (credential NAME only) at ~05:55:12.7 and
+  the call DID NOT return: during-park offline projcache read
+  (`probes/w23-worker-7c5db9ce-duringpark.json`) shows the worker turn OPEN
+  (`openTurnStartSeq: 4`, boundary `kind:"start"`) with the call held in
+  `pendingCalls` (`call_00_ET_RDVEKoYQj86LKK2sEtmj3196` @1789854912690). The worker stayed
+  `spawned` the whole park — `completed` only AFTER the resolve (rev 7).
+- **`pendingAsks` non-empty at EVERY poll (timestamps captured).** Six consecutive polls
+  05:55:25.365→05:55:34.266 (`w23-09..14`, rev 4) + a seventh at 05:56:44 (`w23-18`) each carry
+  the full ticket (`access-1789854912700-1`, class/target/credentialName/parentSessionId) with
+  the worker `blocked:{credential, dsh-live-b5-probe-cred}`.
+- **69 L1 → LIVE-VERIFIED (both halves).** Card: a `secret-ask` card rendered inline
+  (`data-status="pending"`, `data-settled="false"`, `data-request-id`;
+  `w23-15-deepcard`, `shots/w23-shot-parked-secretask.png`). Round-trip: a prefix-id resolve was
+  honestly refused while the ask was live (`w23-17`; `findPending` matches the exact workerId),
+  then `/dispatcher-resolve <full-id> allow` → "Answer routed…" (`w23-19`, landed 3.1 s inside
+  the ADR-0008 deadline) → within one revision the ask left the relay, the card left the feed,
+  the parked call resolved (`pendingCalls: {}`, boundary `end`,
+  `probes/w23-worker-7c5db9ce-postresolve.json`), and the worker's reply NAMES the decision
+  ("Access was allowed for credential \"dsh-live-b5-probe-cred\" …",
+  `probes/w23-worker-7c5db9ce-turns.json`); worker `completed`+`delivered:true`. The dispatcher
+  turn did NOT wedge during the park.
+- **69 L2 → LIVE-VERIFIED.** While parked, the roster row read `data-presence="needs-you"` with
+  the blocked-with-reason marker "等待你的批准：使用凭据"dsh-live-b5-probe-cred"" (class + target
+  phrase) — distinct from the stale-window `unavailable` chip and pass-5's landed chips
+  (`w23-09` rows, screenshot).
+- **30 → LIVE-OBSERVED on the real prompt surface.** Option set `allow`/"Allow",
+  `always-allow`/"Always allow (this session)", `deny`/"Deny" all present and enabled; location
+  line "Runs on your computer." (71's local entry); secret-stored copy
+  "数值始终安全存储——不会显示给工作者，也不会出现在此聊天中。"; target field = credential name
+  (names-never-values held). NOT exercised live, honestly: the >240-char clamp cut (no bait sent
+  this lane — not contradicted, offline-pinned) and the expired copy (resolve beat the ADR-0008
+  clock). Nothing on 30 was contradicted.
+- **Wording nuance recorded (no claim affected):** W22's list said "the worker's continuation
+  TURN starts with the decision message"; live, the turn NEVER closed — `turns: 1` — the
+  resolved tool result continued the still-open turn and the final response names the decision.
+  That IS the fix's semantics (park the tool, never the turn-end); the phrase to keep is "the
+  worker continues in its still-open turn and reports the decision".
+- **Observations for the sweep (not defects):** (1) mid-park, the dispatcher LLM narrated "the
+  ask is reported as relayed and never lands on the parent" while core truth, the card, and the
+  marker were all correct (`w23-24-conv`) — model-comprehension artifact of the parked state;
+  user-visible truth was correct. (2) The parked spawned worker carried `delivered: true` at
+  every poll — consistent with "no delivery obligation yet" but unverified; flagging the field's
+  parked-state value. (3) The resolve command requires the FULL workerId; a prefix is honestly
+  refused (per the pins; a prefix affordance would save a round-trip).
+
+Task budget: 1/3 sends, recorded BEFORE typing (`session-B5/task-budget-w23.txt`, close-out
+appended); the two resolve attempts were command executions (zero LLM), not sends. No AC box on
+33, 69, 30, or 81 is ticked by this session; no ticket file moves — the W14/W17 sweep owns
+boxes and dispositions, with this record + the session-B5 README as the evidence map.
