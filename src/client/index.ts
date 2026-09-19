@@ -155,6 +155,10 @@ import {
   createApprovalRelayFeed,
   type ApprovalRelayFeed,
 } from "./approval-feed.js";
+import {
+  createShellMirrorFeed,
+  type ShellMirrorFeed,
+} from "./shell-mirror-feed.js";
 import type { ApprovalCardActions } from "./approval-pane.js";
 import {
   createConversationPane,
@@ -223,6 +227,9 @@ export function apply(ctx: ClientContext): void {
  *
  * - `approvalsFeed` — the ONE relay feed the settings watch feeds and every
  *   mount attaches to (the shared hub).
+ * - `mirrorsFeed` — the ONE per-session mirror feed the same settings watch
+ *   feeds and every mount attaches its shell store to (ticket 94; the
+ *   read side the live surface was missing).
  * - `mounts` — every `mountShellPage` result the slot injects created, in
  *   registration order (`main` page first, then the `root` frame). The
  *   array is the SAME array the injects push into, so it also collects
@@ -236,6 +243,8 @@ export function apply(ctx: ClientContext): void {
  */
 export interface ClientModuleComposition {
   readonly approvalsFeed: ApprovalRelayFeed;
+  /** Ticket 94: the per-session mirror hub every mount's shell store joins. */
+  readonly mirrorsFeed: ShellMirrorFeed;
   readonly mounts: readonly ShellPageMount[];
 }
 
@@ -300,6 +309,15 @@ export function applyClientModule(
   // panel owns corruption/staleness presentation, and this feed never
   // fabricates a "nothing waiting" from a document it cannot vouch for.
   const approvalFeed = createApprovalRelayFeed();
+  /**
+   * Ticket 94: the shell stores' mirror hub. The live surface had NO reader
+   * for the per-session family at all — `applySessionMirror` was defined and
+   * pinned but never called, so `state.mirrors` stayed empty forever
+   * (`data-dispatcher="false"`, the `状态不可用` chip, no hosted panel). Fed
+   * from the SAME single settings read as the two readers above, fanned out
+   * to every mount's shell store with a last-truth replay.
+   */
+  const mirrorsFeed = createShellMirrorFeed();
   /** Ticket 69 (L1): every mount this composition creates, in order. */
   const mounts: ShellPageMount[] = [];
   let seenScope: ClientSettingsScopeLike | null = null;
@@ -345,6 +363,10 @@ export function applyClientModule(
         if (snapshot.value === undefined) return;
         store.applyChannelValue(snapshot.value);
         approvalFeed.applyChannelValue(snapshot.value);
+        // Ticket 94: the same accepted document feeds the shell stores'
+        // per-session mirrors (`roster.<sessionId>`) — the reader the live
+        // surface was missing. One document, three honest readers.
+        mirrorsFeed.applyChannelValue(snapshot.value);
       };
       disposeWatch = scope.subscribe(readSnapshot);
       // Subscribe only fires on replacements; a scope bound after the first
@@ -452,6 +474,7 @@ export function applyClientModule(
       store: onboarding,
       onSeen: writeOnboardingSeen,
       approvalsFeed: approvalFeed,
+      mirrorsFeed: mirrorsFeed,
     });
     mounts.push(mount);
     return ctx.slots.register(
@@ -499,6 +522,7 @@ export function applyClientModule(
       store: onboarding,
       onSeen: writeOnboardingSeen,
       approvalsFeed: approvalFeed,
+      mirrorsFeed: mirrorsFeed,
     });
     mounts.push(mount);
     return ctx.slots.register(
@@ -507,7 +531,7 @@ export function applyClientModule(
     );
   });
 
-  return { approvalsFeed: approvalFeed, mounts };
+  return { approvalsFeed: approvalFeed, mirrorsFeed, mounts };
 }
 
 /**
@@ -571,13 +595,27 @@ export interface ShellApprovalFeedWiring {
   readonly approvalsFeed?: ApprovalRelayFeed;
 }
 
+/**
+ * The per-session mirror feed the composition shares (ticket 94). Optional so
+ * a composition (or a test) can mount the shell without it — the store then
+ * keeps `mirrors` empty and the sidebar renders its honest
+ * "not a dispatcher / presence unavailable" state, never a fabricated roster.
+ */
+export interface ShellMirrorFeedWiring {
+  readonly mirrorsFeed?: ShellMirrorFeed;
+}
+
 export function mountShellPage(
   ctx: ClientContext,
-  wiring?: ShellOnboardingWiring & ShellApprovalFeedWiring,
+  wiring?: ShellOnboardingWiring &
+    ShellApprovalFeedWiring &
+    ShellMirrorFeedWiring,
 ): ShellPageMount {
   const onboarding = wiring && wiring.store ? wiring : undefined;
   const approvals =
     wiring && wiring.approvalsFeed !== undefined ? wiring : undefined;
+  const mirrors =
+    wiring && wiring.mirrorsFeed !== undefined ? wiring : undefined;
   const store = createDispatcherShellStore();
   const seat = createRosterStore();
   const conversation = createConversationStore();
@@ -597,6 +635,18 @@ export function mountShellPage(
     if (feed === undefined) return () => {};
     return feed.attach(approvalsStore);
   }, "multitask-dispatcher: shell approval relay feed");
+
+  // Per-session mirror attach (ticket 94): this mount's shell store joins the
+  // shared hub — replaying the last-known `roster.<sessionId>` mirrors
+  // immediately, then every publish — and detaches with the mount's fiber
+  // (same pattern as the approvals feed above). WITHOUT this the sidebar's
+  // `data-dispatcher` flag, the presence chips, the needs-you marker, and the
+  // hosted roster panel have no live data at all (the live-found bug).
+  ctx.effect(() => {
+    const feed = mirrors?.mirrorsFeed;
+    if (feed === undefined) return () => {};
+    return feed.attach(store);
+  }, "multitask-dispatcher: shell per-session mirror feed");
 
   // Feed binding (ticket 79's projection, wired at THIS composition point —
   // the ticket-79 comment's "ticket 78's registration"). `sessions` is
