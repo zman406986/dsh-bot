@@ -32,7 +32,10 @@ import {
   projectRosterSnapshot,
   type RosterSnapshot,
 } from "../src/core/roster-snapshot.js";
-import { buildDispatcherPolicySection } from "../src/core/policy/prompts.js";
+import {
+  buildDispatcherPolicySection,
+  SPAWN_WORKER_TOOL,
+} from "../src/core/policy/prompts.js";
 import {
   assembleSessionPolicy,
   assembleWakeTurn,
@@ -106,6 +109,22 @@ function createRestartCtx() {
   const tables = new Map<string, Map<string, unknown>>();
   const updates: unknown[] = [];
   let nextChild = 1;
+  /**
+   * Ticket 90: one-shot holds on the NEXT marker-table resolution(s). The
+   * durability adapter resolves the table per operation
+   * (`ensureTable()` = `domainPromise.then(domain => domain.table(...))`), so
+   * a hold parked here delays exactly one read or write. The restart-honesty
+   * findings need a marker read that is genuinely pending while the test
+   * acts — a deactivation (F1), a concurrent roster transition (F3), a
+   * deactivate → re-activate (F2) — instead of a read that always resolves
+   * within the same tick. A hold stays in the queue (marked `taken`) until it
+   * is released, so the test can release it after the read has picked it up.
+   */
+  const tableHolds: Array<{
+    promise: Promise<void>;
+    release: () => void;
+    taken: boolean;
+  }> = [];
 
   const fire = (name: string, payload: unknown) => {
     for (const cb of [...(listeners.get(name) ?? [])]) {
@@ -207,7 +226,16 @@ function createRestartCtx() {
     storageDomain: {
       async open() {
         return {
-          table: makeTable,
+          // Ticket 90: `table()` is awaited by the durability adapter, so a
+          // parked hold here delays exactly this one resolution.
+          async table(name: string) {
+            const hold = tableHolds.find((candidate) => !candidate.taken);
+            if (hold !== undefined) {
+              hold.taken = true;
+              await hold.promise;
+            }
+            return makeTable(name);
+          },
           async close() {},
           name: "stub",
         };
@@ -218,6 +246,18 @@ function createRestartCtx() {
     updates,
     commandNames: () => [...commands.keys()],
     tool: (name: string) => tools.get(name),
+    /** Park the next marker-table resolution until released (ticket 90). */
+    holdNextMarkerTable() {
+      let release: () => void = () => {};
+      const promise = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      tableHolds.push({ promise, release, taken: false });
+    },
+    /** Release the OLDEST parked marker-table resolution (ticket 90). */
+    releaseMarkerTableHold() {
+      tableHolds.shift()?.release();
+    },
     runCommand(invocation: {
       commandId: string;
       agent?: AgentLike;
@@ -233,6 +273,11 @@ function createRestartCtx() {
     fire(name: string, payload: unknown): void;
     readonly updates: unknown[];
     commandNames(): string[];
+    tool(name: string):
+      | { execute: (args: unknown, exec?: unknown) => Promise<unknown> }
+      | undefined;
+    holdNextMarkerTable(): void;
+    releaseMarkerTableHold(): void;
     runCommand(invocation: {
       commandId: string;
       agent?: AgentLike;
@@ -245,10 +290,20 @@ async function seedMarkers(
   markers: DurableWorkerMarker[],
 ): Promise<void> {
   const domain = await ctx.storageDomain.open();
-  const table = domain.table(MARKER_TABLE_NAME);
+  const table = await domain.table(MARKER_TABLE_NAME);
   for (const marker of markers) {
     await table.put(marker.workerId, marker);
   }
+}
+
+/** Read the durable markers back through the same store (ticket 90). */
+async function readMarkers(
+  ctx: ReturnType<typeof createRestartCtx>,
+): Promise<Map<string, DurableWorkerMarker>> {
+  const domain = await ctx.storageDomain.open();
+  const table = await domain.table(MARKER_TABLE_NAME);
+  const entries = table.entries() as Iterable<[string, DurableWorkerMarker]>;
+  return new Map([...entries]);
 }
 
 function rosterSnapshots(
@@ -521,6 +576,188 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
       notices.length,
       1,
       "exactly one degraded notice: nothing restored, nothing replayed",
+    );
+  });
+
+  it("a deactivation during the marker read ends the chain: nothing published, nothing woken, no redrive spent (ticket 90 F1)", async () => {
+    const ctx = createRestartCtx();
+    await seedMarkers(ctx, [{ ...DONE_MARKER }]);
+    pluginApply(ctx, { enabled: true });
+    const agent = createAgent("s-1");
+
+    // The marker read is genuinely pending: activation has returned, the
+    // chain is parked inside `rebuildFromDurability`.
+    ctx.holdNextMarkerTable();
+    const result = ctx.runCommand({
+      commandId: DISPATCHER_START_COMMAND,
+      agent,
+    });
+    assert.equal(result.kind, "success");
+    await flushActivation();
+    assert.equal(
+      rosterSnapshots(ctx.updates).length,
+      0,
+      "no publish while the rebuild is still reading markers",
+    );
+
+    // The activation ends mid-read.
+    ctx.fire("agent/disposed", { agent });
+    const snapshotsAtDeactivation = rosterSnapshots(ctx.updates).length;
+
+    ctx.releaseMarkerTableHold();
+    await flushActivation();
+
+    // The guard's false branch: a chain that resumes for a session that is
+    // no longer an activated dispatcher must not publish (a snapshot here
+    // would re-flag a dead session as live), must not wake the notice, and
+    // must not spend a redrive attempt of the persisted D-5 budget.
+    assert.equal(
+      rosterSnapshots(ctx.updates).length,
+      snapshotsAtDeactivation,
+      "the dead chain publishes no roster snapshot",
+    );
+    assert.equal(
+      agent.woken.length,
+      0,
+      "the dead chain wakes nothing (no restart notice, no redrive turn)",
+    );
+    const markers = await readMarkers(ctx);
+    assert.equal(
+      markers.get("w-done")?.redriveAttempts ?? 0,
+      0,
+      "redriveUndelivered never ran: the persisted budget is untouched",
+    );
+  });
+
+  it("a roster transition during the marker read cannot publish a pre-rebuild snapshot (ticket 90 F3)", async () => {
+    const ctx = createRestartCtx();
+    await seedMarkers(ctx, [{ ...DONE_MARKER }]);
+    pluginApply(ctx, { enabled: true });
+    const agent = createAgent("s-1");
+
+    ctx.holdNextMarkerTable();
+    const result = ctx.runCommand({
+      commandId: DISPATCHER_START_COMMAND,
+      agent,
+    });
+    assert.equal(result.kind, "success");
+    await flushActivation();
+    assert.equal(
+      rosterSnapshots(ctx.updates).length,
+      0,
+      "no publish while the rebuild is in flight",
+    );
+
+    // A roster-affecting transition lands inside the window. A worker spawn is
+    // the cheapest real one: its marker write is a LATER table resolution, so
+    // it completes while the activation read is still parked.
+    const spawn = ctx.tool(SPAWN_WORKER_TOOL);
+    assert.ok(spawn, "the dispatcher tool surface is registered");
+    const spawned = (await spawn.execute({
+      stream_key: "k-race",
+      title: "Raced task",
+      prompt: "work",
+    })) as { ok: boolean };
+    assert.equal(spawned.ok, true, "the spawn completed mid-rebuild");
+
+    ctx.releaseMarkerTableHold();
+    await flushActivation();
+
+    // Ticket 31's ordering rule, now under concurrency: the FIRST mirrored
+    // snapshot must already carry the restored rows. Without the in-flight
+    // gate the spawn's transition publishes first — a pre-rebuild snapshot.
+    const snapshots = rosterSnapshots(ctx.updates);
+    assert.ok(snapshots.length >= 1, "a roster snapshot was published");
+    const first = snapshots[0];
+    assert.ok(first);
+    const firstIds = first.workers.map((worker) => worker.workerId);
+    assert.ok(
+      firstIds.includes("w-done"),
+      "the first snapshot already carries the restored rows (rebuild before publish)",
+    );
+    // And the raced transition is not lost: the post-rebuild publish projects
+    // the live roster, which includes the spawned worker.
+    assert.ok(
+      firstIds.includes("child-1"),
+      "the raced transition is in that same first snapshot, not dropped",
+    );
+  });
+
+  it("a stale chain from an earlier activation of the same session id is refused (ticket 90 F2)", async () => {
+    const ctx = createRestartCtx();
+    await seedMarkers(ctx, [{ ...DONE_MARKER }]);
+    pluginApply(ctx, { enabled: true });
+    const agent = createAgent("s-1");
+
+    // Activation #1 starts a chain and parks on the marker read.
+    ctx.holdNextMarkerTable();
+    const first = ctx.runCommand({
+      commandId: DISPATCHER_START_COMMAND,
+      agent,
+    });
+    assert.equal(first.kind, "success");
+    await flushActivation();
+
+    // Deactivate → re-activate the SAME session id: activation #2 owns the
+    // session now, and its chain parks on its own held read. This is the
+    // window the session-id check cannot see: set membership is true again.
+    ctx.fire("agent/disposed", { agent });
+    ctx.holdNextMarkerTable();
+    const second = ctx.runCommand({
+      commandId: DISPATCHER_START_COMMAND,
+      agent,
+    });
+    assert.equal(second.kind, "success");
+
+    // The stale chain resumes first. It is no longer acting for a live
+    // activation, so it must not publish and must not spend a redrive.
+    ctx.releaseMarkerTableHold();
+    await flushActivation();
+    assert.equal(
+      rosterSnapshots(ctx.updates).length,
+      0,
+      "the stale chain publishes nothing",
+    );
+
+    // A roster transition lands while the LIVE chain is still reading. The
+    // stale chain's exit must not have cleared the in-flight gate for the
+    // new activation (that is why the gate is keyed by generation).
+    const spawn = ctx.tool(SPAWN_WORKER_TOOL);
+    assert.ok(spawn);
+    const spawned = (await spawn.execute({
+      stream_key: "k-race",
+      title: "Raced task",
+      prompt: "work",
+    })) as { ok: boolean };
+    assert.equal(spawned.ok, true);
+    assert.equal(
+      rosterSnapshots(ctx.updates).length,
+      0,
+      "the live rebuild is still in flight: the transition does not publish yet",
+    );
+
+    // The live chain resumes: ONE publish (with the restored rows and the
+    // raced transition) and ONE redrive pass.
+    ctx.releaseMarkerTableHold();
+    await flushActivation();
+
+    const snapshots = rosterSnapshots(ctx.updates);
+    assert.equal(
+      snapshots.length,
+      1,
+      "exactly one publish for the new activation (no double publish)",
+    );
+    const ids = snapshots[0]?.workers.map((worker) => worker.workerId) ?? [];
+    assert.ok(
+      ids.includes("w-done"),
+      "the restored rows are in the first publish",
+    );
+    assert.ok(ids.includes("child-1"), "the raced transition is in it too");
+    const markers = await readMarkers(ctx);
+    assert.equal(
+      markers.get("w-done")?.redriveAttempts ?? 0,
+      1,
+      "the persisted D-5 budget was spent once, not twice",
     );
   });
 });
