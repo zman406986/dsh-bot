@@ -75,3 +75,26 @@ right and stays. Two things re-base:
 
 Classifier-gated auto-review remains NOT adopted here (per this ticket's constraint) and is seeded
 as its own scope ticket. Status stays open, re-scoped.
+
+### 2026-09-19 — agent (supersession record: what 71/81 supersede in this ticket, exactly)
+
+Recorded per the 71/81 triage note; this ticket neither moves nor closes — it stays open as the
+shipped approval surface until 81's re-host lands.
+
+- **Constant location line — superseded by ticket 71 (AC-4).** The "Location line" checkbox's
+  constant honest line, shipped as `APPROVAL_LOCATION_LOCAL`
+  (`src/adapter/access-prompt.ts:104`, applied `:246-247`), re-bases to per-producer-kind honest
+  labels (71, 2026-09-19 gate comment; capability-independent). Implementation rides ticket 81's
+  card system. Interim honesty: the constant line is the local entry of 71's label map, so the
+  shipped behavior stays truthful until the map lands.
+- **Prompt pathway rendering — superseded by ticket 81.** The `ctx.userQuestions.ask` pathway
+  was the plugin-UI constraint; under the wrapper (ADR-0020 slice 5) 81's inline approval cards
+  become the rendering home. The relay's frozen semantics (timeout ADR-0008, deny-by-default,
+  dedupe `suppressesConversational`, released-ask re-queue) and the no-new-prompt-pathway
+  forbidden list carry over to 81 unchanged.
+- **NOT superseded (re-hosted as-is by 81):** the Allow / Always allow (this session) / Deny
+  option set, session-scope rows + clearance on deactivation/unload (U-D-exact), the wildcard
+  always-allow fence, clamped detail with omission marker, expired-answer copy, and the
+  secret-stored reassurance copy.
+- This ticket's "Status stays open, re-scoped" holds: it is the fallback approval surface until
+  81 ships; only then do its rendering checkboxes retire (its relay/policy work never retires).

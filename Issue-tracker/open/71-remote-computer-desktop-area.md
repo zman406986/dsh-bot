@@ -1,8 +1,8 @@
 # 71 — Remote computer / bots' desktop area (ADR-0018 in-scope area)
 
-**Status:** open
-**Labels:** ready-for-agent
-**Blocked by:** none for the gated research pass — 67 resolved (ADR-0020). The dsh-host capability check is AC 1 of the brief (see the 2026-09-19 triage comment); if it comes back absent, the ticket halts into a recorded blocker + a ready-for-human escalation, per its own no-fantasy constraint.
+**Status:** blocked — capability gate FAILED (AC-1, 2026-09-19): the dsh host exposes no remote-execution / computer-use / browser-automation face (verdict + citations in the gate comment below). Awaiting the human decision: host-seam request vs descope-with-gaps.
+**Labels:** ready-for-human
+**Blocked by:** human decision (see the 2026-09-19 gate comment). Previously: none for the gated research pass — 67 resolved (ADR-0020); the absent-branch halt pre-sanctioned by the triage brief and this ticket's no-fantasy constraint has now executed.
 **Related:** ADR-0018 (in scope: "the remote computer / bots' desktop area (dedicated computer/browser worker types, remote-box approval surfaces with location labels, recording/teaching, remote/cloud jobs)"; exceptions C15, U-D), `docs/research/always-on-dispatcher-behavior.md` area 6 (remote-box cards), 30 (location-line re-base), `docs/research/prd-vs-reference-capability-gaps.md` (remote-box notes)
 
 ## Problem
@@ -14,19 +14,25 @@ exception list constraining it.
 
 ## What to do (research/design ticket)
 
-- [ ] Verify the reference's remote-box surfaces from the research notes (computer/browser worker
+- [x] Verify the reference's remote-box surfaces from the research notes (computer/browser worker
       types, location labels, recording/teaching — cite file:line; never open the reference tree)
       and reconcile with `prd-vs-reference-capability-gaps.md`'s remote-box rows.
-- [ ] Sort the area against the exception list, explicitly:
+      (Done 2026-09-19 with the binding shallow-depth caveat — AC-2 table in the gate comment.)
+- [x] Sort the area against the exception list, explicitly:
       - **C15 is binding:** remote/cloud jobs are NOT wake kinds — the single wake kind stays
         dispatched workers; if computer/browser workers exist, they flow through the same
         dispatched-worker wake pipeline or the conflict goes to the human.
       - **U-D is binding:** remote-box "always allow" stays session-scoped.
       - Location labels are IN (they are named in ADR-0018's in-scope sentence) — ticket 30's
         constant "Runs on your computer." line re-bases to per-producer-kind honest labels.
-- [ ] Recording/teaching: scope what "recording a computer session for replay/teaching" means on
+      (Recorded 2026-09-19 — AC-3 in the gate comment.)
+- [x] Recording/teaching: scope what "recording a computer session for replay/teaching" means on
       dsh; mark what has no honest seam rather than inventing one.
+      (2026-09-19: GAP — no honest seam exists; AC-5 in the gate comment.)
 - [ ] Draft implementation ACs once 67's vehicle is decided.
+      (Gated out for this pass 2026-09-19: AC-1 verified no host capability, and the brief
+      scopes implementation ACs to capabilities that verified — none of this area's did.
+      The capability-independent AC-4 label design is recorded and folded into 81.)
 
 ## Constraints
 
@@ -97,3 +103,134 @@ gaps); the location-label re-base (AC 4) proceeds either way.
   the reference research here is inventory-grade, not walkthrough-grade — cite or omit.
 - **Size:** S for the gated research pass + AC 4; the remainder is contingent — do not
   estimate until AC 1 resolves.
+
+### 2026-09-19 — agent (AC-1 GATE verdict: **ABSENT** → blocker recorded, escalated ready-for-human; ACs 2/3/4/5 closed as docs)
+
+**AC-1 — GATE: ABSENT.** Read-only sweep of every installed package under
+`C:\Users\TZhen\.dsh\profiles\node_modules\@deepseek-ai\` (~180 packages: package.json
+manifests + `lib/types` declarations; no reference tree opened). No remote-execution,
+computer-use, or browser-automation face exists. Decisive citations:
+
+- **Every "remote" in the host is Client↔Host transport** — the *web client* remoting into the
+  *local* host, not the host executing on a remote box:
+  - `dsh-api-gateway/lib/types/stream-protocol.d.ts:4` — `REMOTE_STREAM_MUX_PATH =
+    "/api/remote.mux"`, "Exact WebSocket route carrying every Typert Remote stream" (ticket
+    67's seam). Pure transport: reconnect generations, ready frames, event-result RPCs.
+  - `dsh-api-remotes/package.json` — "Remote BFF assembly for application-selected Host
+    capabilities". Its complete forwarded-event allowlist
+    (`dsh-api-remotes/lib/types/remote-events.d.ts:12-69`) is UI/status only:
+    `approval/request`, `user-questions/request`, `api-session/*`, `commands/change`,
+    `settings/document-updated`, `llm/adapters-updated`, `cordis/*`,
+    `goal/activation-changed`, `credentials/reference-updated`, `agent-preset/selected`.
+    **Nothing execution-shaped rides the mux.**
+  - `dsh-api-session-controller/lib/types/client/sessions/session.js:293` —
+    `this.remote.commands.execute(...)` is the web client admitting a slash-command line into
+    the host-local session executor ("pure admission semantics"); not remote-box execution.
+- **Every execution seam ships local implementations only** (abstract seams, local-only impls
+  installed): `dsh-shell` (`ctx.shell`) → `dsh-bash-local` ("Local-subprocess implementation"),
+  `dsh-pwsh-local` ("Local PowerShell implementation"), `dsh-bash-sandbox`/`dsh-pwsh-sandbox`
+  ("Sandbox-consuming ... confines every command via ctx.sandbox"). Sandbox backends
+  (`dsh-sandbox-local` package.json): "bwrap, ... landlock-run launcher, macOS Seatbelt, or the
+  Windows ACL restricted-token runner". `dsh-jobs-local`: "Process-local implementation" of
+  `ctx.jobs`; job types carry no remote/cloud/location vocabulary. `dsh-terminal`/
+  `dsh-terminal-bash`: local PTY; `dsh-tmux-context`: pane-location bookkeeping only.
+- **The host documents the absence itself** — `dsh-sandbox/lib/types/index.d.ts:3` (same text,
+  `dsh-sandbox/lib/index.js:167`): the confinement seam "shares the host kernel and filesystem";
+  "**Containers, microVMs, and remote execution replace the surrounding capability seam
+  instead**" — i.e. remote execution is named as a *different, not-present* capability family.
+- **No computer/browser automation**: no computer/screenshot/screen-control package anywhere;
+  the only "screenshot" hit in shipped code is UI copy (`dsh-web-app/lib/index.js`: "The browser
+  provides no implicit DOM, route, or screenshot context"); `dsh-web` is a search/fetch provider
+  registry; `dsh-acp` is "Automation-only Agent Client Protocol server ... over JSON-RPC stdio"
+  (local automation of dsh agents). The only computer-use-shaped types in the tree are vendored
+  third-party LLM SDK request schemas (`@anthropic-ai/sdk` beta computer-use tool types) —
+  not a dsh face. `dsh-fs/lib/types/index.d.ts:78`'s "remote/sandboxed backend" is a
+  hypothetical-backend caveat in the FsTarget mapping contract; installed fs backends are local.
+
+Searches run (all negative beyond the above): package descriptions for
+remote/exec/control/computer/screen/automat/mux vocabulary (0 hits for cloud/remote-box);
+`computer|screenshot|browser.automation` over all `.d.ts`; `remote` over every `lib/types` tree
+(all hits in the gateway/remotes/stream transport family); explicit
+`remote.?exec|remote.?shell|remote.?command|remote.?sandbox|remote.?computer|remote.?box|computer.?use`
+sweep (all hits resolved above). Verdict is firm, not UNCLEAR.
+
+**Blocker (ticket constraint "do not spec against fantasy"):** ADR-0018:16 brings "the remote
+computer / bots' desktop area" in scope, but the host cannot carry it: there is no surface on
+which a remote-box action would run, and the wrapper adds no execution capability of its own
+(2026-09-19 vehicle hand-off comment). Record: **the area is capability-blocked at the host.**
+
+**Ready-for-human — decision requested (pick one):**
+- **(a) Host-seam request:** ask the dsh host lane for a remote-execution / computer-use
+  capability family (e.g. a remote provider behind an existing seam — remote `ctx.shell` /
+  sandbox provider, or a computer-use tool family). Everything below stays design-only until
+  one lands; this ticket re-opens when it does.
+- **(b) Descope-with-gaps:** record the area as capability-blocked in the ADR-0018 ledger
+  (mirroring `prd-vs-reference-capability-gaps.md:4,82`, whose exclusion was capability-honest
+  all along), keeping only the capability-independent slice live (AC-4 location labels, folded
+  into 81).
+
+**AC-2 — reference verification table.** Binding caveat: the remote-box/computer feature area is
+"covered shallowly (structure confirmed, behavior not fully walked)"
+(`always-on-dispatcher-behavior.md:105`) — this table is inventory-grade, not walkthrough-grade;
+cited or omitted, nothing invented:
+
+| Reference surface (as recorded in the research notes) | Citation | Gate outcome |
+|---|---|---|
+| Dedicated computer/browser worker types; the worker exclusion set strips spawn/user-facing tools but workers keep "the computer/browser tools" | `reference-behavior-notes.md:60` | No host computer/browser tool family exists (AC-1); nothing to gate workers onto |
+| Risk-gated approval cards typed by surface, incl. "remote-box command/computer action (labeled as running on the product's computer)" with a local-vs-remote location line | `always-on-dispatcher-behavior.md:51` | Card/label concept adoptable capability-independently (AC-4); the remote half has no surface to label |
+| Running-tasks rows typed by kind: "dispatched worker, background one-shot command, remote/cloud job" | `always-on-dispatcher-behavior.md:32` (also `:97`) | "remote/cloud job" kind excluded by C15 anyway; `dsh-jobs-local` is process-local |
+| Per-surface location labels ("runs on your computer" vs the product's remote computer) + session always-allow | `always-on-dispatcher-behavior.md:96` | Labels IN via AC-4; always-allow already shipped session-scoped (ticket 30, U-D-exact) |
+| Recording/teaching, VNC/box surfaces | `prd-vs-reference-capability-gaps.md:82` | GAP — see AC-5 |
+
+Reconciliation with the gaps doc: `:4` scopes the project to "local dsh deployment; ...
+remote box / computer-use infrastructure excluded" and `:82` lists "remote sandbox & computer-use
+(box, VNC, recording/teaching) ... browser/computer tooling" as present-in-reference but
+excluded-from-PRD. ADR-0018:16 re-admitted the area as scope; AC-1 shows the admission is
+aspirational until the host grows a seam — the gaps doc's exclusion remains the capability truth.
+
+**AC-3 — exception sort (explicit):**
+- **C15 (ADR-0018:30, binding):** remote/cloud jobs are NOT wake kinds; the single wake kind
+  stays dispatched workers. Should computer/browser worker types ever land, they flow the
+  dispatched-worker wake pipeline (spawn → ledger → running-tasks → completion delivery) or the
+  conflict escalates to the human. The reference's third row kind ("remote/cloud job",
+  `always-on-dispatcher-behavior.md:32`) is excluded, not adopted.
+- **U-D (ADR-0018:37, binding):** remote-box "always allow" stays session-scoped, never
+  persisted, no settings-managed rule store. Ticket 30's session rows + clearance are the exact
+  shape; 81's cards inherit it unchanged.
+- **Location labels IN** (named in ADR-0018:16's in-scope sentence): AC-4 below. Honesty rider
+  from AC-1: until a non-local producer kind can exist, the only honest label for every real
+  producer is the local one — the re-base must not fabricate a remote claim.
+
+**AC-4 — location-label re-base DESIGN (capability-independent; recorded here, implementation
+folded into 81).** Supersedes ticket 30's constant line:
+- Current state: `src/adapter/access-prompt.ts:104`
+  `export const APPROVAL_LOCATION_LOCAL = "Runs on your computer.";` applied at `:246-247` to
+  every prompt detail — constant by documented design ("workers are local dsh child sessions
+  ... until a non-local producer kind ever lands", `:98-103`).
+- Re-base: replace the single constant with a per-producer-kind label map — dispatched worker
+  (local dsh child session) → "Runs on your computer."; computer-worker / browser-worker →
+  "Runs on the product's computer (remote box)."; unknown/unrecognized kind → fall back to the
+  local line (honest default; never claims remote without a verified kind). All copy adapted,
+  design-17 §7 `approval.location.*` family — no reference text.
+- Resolution is a pure function of the ask's producer kind, resolved at render. Two render
+  homes: (1) the shipped prompt pathway keeps working with the map (today's constant line
+  becomes its local entry); (2) ticket 81's card contract carries the resolved label per card —
+  the hook point the 67 hand-off names. A dated pointer comment is filed on 81.
+- Offline-testable when implemented: pure kind→line mapping; tests assert per-kind lines, the
+  unknown-kind fallback, and that no remote line can render while only local kinds exist.
+- This is a code change, so per the brief's gating it is NOT implemented in this pass: the
+  design stands either way, implementation rides 81's card re-host (or the prompt pathway if
+  that ships first).
+
+**AC-5 — recording/teaching scope-or-gap:**
+- Scope: nothing. Recording a computer session for replay/teaching requires a
+  capture/control seam (screen observation, input replay); AC-1 found none. The PRD persistence
+  rule (use the dsh session/job store; no second transcript DB) also forbids inventing a
+  parallel recording store. GAP recorded: **recording/teaching has no honest seam on dsh**;
+  reference-side depth is likewise shallow (`always-on-dispatcher-behavior.md:105`).
+- Implementation ACs: none drafted — the brief scopes those to capabilities that verified, and
+  none of this area's did. No live-only ACs exist to hand to the 45/33 lane.
+
+**Final state:** ACs 1 (verdict), 2, 3, 5 closed; AC 4 closed as design (implementation → 81);
+implementation ACs for the area gated out. Ticket blocked on the human decision (a) vs (b);
+labels → ready-for-human.

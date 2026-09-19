@@ -24,3 +24,16 @@
 
 - The relay's semantics (timeout ADR-0008, deny-by-default, dedupe) are untouched — rendering
   only. No persisted always-allow rules (U-D). No new prompt pathway.
+
+### 2026-09-19 — agent (from 71: location-label contract folded here)
+
+Ticket 71's AC-4 re-base design (capability-independent) lands in this ticket's card anatomy:
+when re-hosting ticket 30's prompt anatomy, the card's location line resolves from 71's
+per-producer-kind label map, superseding 30's constant `APPROVAL_LOCATION_LOCAL`
+("Runs on your computer.", `src/adapter/access-prompt.ts:104`). Per 71's AC-1 gate (2026-09-19)
+the dsh host exposes no remote-execution face, so today every real producer kind is local and
+the map renders the local line everywhere — the contract point is that the card takes the
+label resolved from the ask's producer kind, so a remote-box line becomes honest automatically
+if the host ever grows the seam (71 is blocked on that human decision: host-seam request vs
+descope-with-gaps). Unknown kinds fall back to the local line; no card may claim remote without
+a verified kind. U-D binding unchanged: session-scoped always-allow only.
