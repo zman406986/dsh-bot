@@ -281,3 +281,16 @@ No other ticket file moved; Status stays open.
 ### 2026-09-19 — one-line note
 
 70 chunks 1-3 landed (`d8e2658`, `1a4eb6d`, `fbd4066`; bookkeeping `a55dc99`+closeout) — peer tier OFFLINE-COMPLETE (suite 1101/1101, typecheck + client build green; ticket 70 resolved with the retirement/closeout comments), live two-dispatcher verification (chunk 4: A `send_peer` -> B peer-cue turn, priority interrupts B's non-user turn only, bad-id honest refusal) rides this ticket's live lane.
+
+### 2026-09-19 — closeout batch EXECUTED (tracker-closure agent): 46/49/84/34/32 closed; 29 left untouched — remaining part-2 list below
+
+One commit: `9126909` ("Closeout batch: 46/49/84 (+34/32/29 partial) — evidence-ticked closures"). Every moved ticket was read in full first; boxes ticked only where the recorded evidence met the box's own condition; MOOT-VERIFIED annotations follow the resolved ticket 81 pattern (cutover cites a44084a/94e6127/c437ee8).
+
+- **46 → resolved:** AC 2 ticked from the 2026-09-18 offline gates (711/0/186, RED-verified pin); AC 3 ticked — watch fires + footer flag real (pass 2, shots 10b/13), with the "capsule flips" clause MOOT-VERIFIED (pass 2's dormant-pitch caveat recorded; vehicle retired at the cutover).
+- **49 → resolved:** offline boxes 1–3 ticked from the 2026-09-18 record; research-note box re-verified in-tree (`docs/research/dsh-plugin-ui-patterns.md:95`) and the pass-2 token artifacts re-verified (values match byte-for-byte).
+- **84 → resolved:** live AC ticked MOOT-VERIFIED (vehicle retired; mechanism proven passes 3+4 — zero `without inject` errors; pass-4 session's only errors were 88's, fixed `d242d18`).
+- **34 → resolved:** AC 2 ticked on two recorded boots — the literal `dsh-bot.ps1` executor run never happened, recorded in-ticket (launcher-equivalent overlay boot 2026-09-18 + pass-4 profile boot; pass-4's cited `boot-graph-row.json` is absent from that dir, row content recorded in its README §1 — noted in-ticket); AC 3 ticked (proven live pre-cutover, two passes' screenshots); AC 4 ticked MOOT-VERIFIED (never green as written — 44's pass-2 caveat; frame/toolview vehicle void post-cutover).
+- **32 → resolved:** optional `settings.onboarding` box ticked as DROPPED per its own authorization; moot-closure with successor scope in 68/87; blocker discharge (merge `400450f` gates) cited.
+- **29: NOT closed, NOTHING added.** Its "if no seam" conditional is already settled inline ("conditional — not triggered: a seam was verified", 2026-09-17 comment); ticking it would falsely claim the box's action was performed. Still waits on pass 5's first-live firehose confirmation.
+
+**Remaining open for part 2 (closeout-map tickets):** 17 (last), 27, 28, 29, 30, 31, 48, 78 — per the readiness verdicts above (27/28/30 need live confirm + re-opened-rationale decisions; 29/31/78 close after pass 5; 48 needs its launcher-drift scope resolved or explicitly descoped). Open tickets outside this map: 68 (on 87's reload re-confirm), 69, 71, 81 (on 69's L1 lane + the settings-card decision), 82, 86, 89. (70 resolved by the peer tier 2026-09-19.)
