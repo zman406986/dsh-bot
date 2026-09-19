@@ -649,3 +649,61 @@ on the recorded text only — raw artifacts are gone (see the 2026-09-19 cleanup
 recorded evidence. Bookkeeping executor's own spot-checks this date corroborate the mechanical
 claims (ancestor check, byte-identity diff, file/line/count greps); the full re-read is the
 verification pass's. AC1 stays unticked (superseded); no box moved; ticket stays open.
+
+### 2026-09-20 — live pass 5, Session B-1 (W10, zero-LLM): 93 + 94 LIVE-VERIFIED; 92 partial (wiring + composer live, delivery NOT-COVERED-zero-LLM)
+
+Evidence root: `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-20\session-B1\` (README maps every
+artifact to the AC it proves; per-command `.json` → `.out.json` pairs in `session-B1/driver/`).
+Boot per the W9 record (`throwaway multitask` profile, port 8877, WMI-detached); profile copy
+md5-verified against repo lib/client pre-boot (`b3089dc3…`/`5c9e10f7…` — all three fixes in the
+served code). **Zero LLM contact by construction:** no `session/prompt`, no composer submit, no
+spawn, no steer; the only state-changing call was `commands/execute` of `/dispatcher-start` — a
+host command (gate + policy inject + publish, no model turn), whose registration was verified via
+`commands/list` BEFORE any interaction (token-incident guard). Page error log `log: []` throughout
+(`w10-17-status`). Kill timers armed at launch (30-min internal + 45-min WMI backstop + 20-min
+driver wrapper), all killed at teardown; port 8877 free; node inventory identical to pre-flight;
+stock `web` profile byte-identical (md5 + mtimes). Full teardown record:
+`session-B1/teardown-port-and-pids.txt`, `orphans-and-teardown-w10.txt`, `webprofile-verdict-w10.txt`.
+
+- **93 → LIVE-VERIFIED (document level).** A/B on one boot: `settings/describe` PRE-activation
+  shows only `onboarding/enabled/accessRequestTimeoutMs`, **zero `roster.*` keys, revision 0**
+  (`describe-01-baseline.json`); after the RPC activation (`w10-05-activate` — full
+  `DISPATCHER_START_SUCCESS` copy), describe shows **`roster` AND
+  `roster.session-cf5249cf-0bc6-4e8f-9360-c82f06218cfc`, revision 0→3**
+  (`describe-02-after-activate.json`, `w10-06b-mtsum`), each a `schemaVersion:4` snapshot with the
+  `dispatcherSessionId` set and 1 restored worker row (the `rebuildAndNotice` durability-rebuild
+  row from pass-5 Session A markers). The channel therefore attaches through the fixed
+  `settings.register` claim (`profile lib/adapter/settings-section.js:72` confirmed pre-boot) and
+  publishes BOTH mirror families — the exact defect this ticket fixed (the void `installSection`
+  return never yielded a scope). The 2026-09-19 Session B record (same session id, same checks,
+  zero keys at every point in time) is the before-picture; tonight is the after.
+- **94 → LIVE-VERIFIED (rows + presence + replay).** Pre-activation all 8 sidebar rows
+  `data-dispatcher="false"` / `data-presence="unavailable"` (`w10-03-frame2` — the Session B bug
+  surface reproduced honestly); post-activation the activated row flips **`data-dispatcher="true"`**,
+  **`data-presence="needs-you"`** with live chips `needs-you=1 个需要你` +
+  `waiting=结果已就绪，尚未送达` (the `roster.landed` copy), and the dispatcher row sorts FIRST
+  while the other 7 stay honest `unavailable` (`w10-07-rows`). After a full page reload the fresh
+  mount still replays the flag (`w10-13-rows-replay`: `disp:"true"`, row first); presence then
+  reads `unavailable` because `publishedAtMs` exceeded `ROSTER_STALE_WINDOW_MS` (60 s) — the
+  documented one-stale-rule (`src/client/shell-store.ts:241-248`), recorded so it is not misread
+  as a regression. Served-bundle detector: the combo route (`/plugins/??dsh-multitask-dispatcher/…`,
+  fetched in-page — curl gets the SPA fallback) carries **`applySessionMirror(` ×3** (pre-fix
+  bundle: exactly 1, the definition) + `createShellMirrorFeed`/`sessionMirrorsFromChannelValue`
+  call sites (`w10-15-bundle2`). Screenshot: `w10-shot-sidebar-after-reload.png`.
+- **92 → PARTIAL: wiring + composer verified live; the delivery click itself is
+  NOT-COVERED-zero-LLM (needs Session B-2 with one trivial task).** Verified live: the served
+  bundle carries the scoped service-method boundary — **`scopedConversation` ×3 and
+  `get("conversation")` ×2** (`w10-15-bundle2`) — and the dead property read is gone; the row
+  click opens the conversation seat in the elected frame with composer TEXTAREA + send button,
+  send disabled on empty input, no React error (`w10-09-seat`); a draft typed WITHOUT submitting
+  enables send and never reaches the transcript (`w10-10-type`, `w10-11-draft`). What a live
+  click-send would add (the turn actually landing in the host sink) requires a model turn and is
+  deliberately left to B-2 per the plan's zero-LLM line for this session.
+- **Hygiene for the next lane user:** after the observations, `settings/update` nulled BOTH roster
+  keys (accepted, revision 3→4; `describe-03-after-cleanup.json`), so no stale mirror persists in
+  the profile document; the dispatcher session `cf5249cf…` is NOT activated post-teardown
+  (activation is in-memory). W11 instructions at the end of `session-B1/README.md` (boot recipe,
+  timer syntax, stale-window nuance for reading L2 markers).
+
+Files 92/93/94 are already resolved and do not move; this comment adds the live trail only. No AC
+box on 33 is ticked by this session.
