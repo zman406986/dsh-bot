@@ -1,0 +1,34 @@
+# No-verbatim-copy review 2026-09-19 (ticket 33 close-out, part 1)
+
+- Question: does the shipped dsh multitask-dispatcher tree contain any **verbatim reproduction** of the reference reconstruction's prompts, tool strings, identifiers, or protocol artifacts?
+- Governing rule: AGENTS.md amendment 2026-09-18 — adapted copying is permitted; **verbatim** reproduction of reference text/identifiers/protocol artifacts is not. The S7 identifier grep is voided as a ship gate (ADR-0018); this is the quality-level successor review, not a compliance gate. Residual risk is human-accepted per AGENTS.md: "a public reconstruction with unknown provenance does not verify that its publisher held rights to the underlying product, and non-verbatim derivative use can still infringe."
+- Scope: OUR shipped tree only — `src/`, `test/`, `client/` (built), `lib/` (built), `scripts/`, `package.json`, root README. The reference tree was **not opened**; the comparison basis is entirely `docs/research/*.md`.
+- Relation to earlier audits: `clean-room-license-audit.md` (2026-09-16, ticket 15) ran the same greps under the then-binding clean-room rule and reviewed every prompt asset as new copy. This review re-runs the identifier sweep against today's much larger tree (post-27–32, post-wrapper cutover) under the no-verbatim standard.
+
+## Method
+
+1. **Comparison basis from research notes.** The reference-side "do not match verbatim" set is whatever `docs/research/` recorded of the reference: codenames (`Sand`, `executor`, `MessageSubagent`, `SAND_MULTITASK_*`, `buildSandSubagentSystemPrompt`, `SAND_SUBAGENT_SAFETY_PROMPT_SECTION`), reconstruction file basenames (`subagent-runtime`, `run-scheduler`, `completion-revivals`, `turn-toolset`, `system-prompt-assembly`, `sand-subagent-management-tools`, `sand-auto-review`, `cloud-meta-agent`, `subagents_pb`, …), reference protocol tokens (`agent_gone`, `no_runner`, `session_unavailable`, `max_redrives`, …), reference function names quoted in notes, and the specialist-prompt topics (multitask mode reminders, "fork yourself then stop"). The notes deliberately quote **no reference prose**, so prompt phrasing cannot be string-matched — its safeguard is provenance of authorship (all copy was authored in-repo: design-17 §7 drafts, then ticket-implemented), re-asserted below.
+2. **Grep battery** over `src/ test/ client/ lib/ scripts/ package.json README.md` (case-insensitive; word-boundary `sand`; basename and token variants).
+3. **Naming-independence check**: every hit traced; dispatcher tool names and module names traced to their recorded provenance.
+4. **Prompt-phrase probes** for the specific reference strings the prompt inventory flagged as most tempting to borrow.
+
+## Findings
+
+| Check | Result |
+|---|---|
+| Codenames `\bsand\b`, `MessageSubagent`, `SAND_MULTITASK`, `SandSubagent`, `buildSand`, `SAND_SUBAGENT`, `grok` | **0 product hits.** Only the intentional `FORBIDDEN_VOCAB` negative-test fixtures in `test/composition-polish.test.ts`, `test/report-clamp.test.ts`, `test/worker-agent-type.test.ts` (assert shipped copy stays free of them — the standing guard, kept). The English word "sandbox" (`src/core/access-types.ts`) is a generic host-isolation term, not the codename. |
+| Reconstruction file basenames (all variants above) | **0 hits** in `src/ test/ client/ lib/ scripts/`. Basename citations exist only in `docs/research/` evidence notes — sanctioned provenance, out of product scope. |
+| Reference protocol tokens (`agent_gone`, `no_runner`, `session_unavailable`, `max_redrives`, `QUIET_REVIVAL_INSTRUCTION`) | **0 hits.** Our protocol vocabulary (wake kinds, FSM statuses, refusal reasons) is PRD/CONTEXT-glossary vocabulary. |
+| Reference function names quoted in notes | **0 true hits.** The one surface match, `composeWakeText` (`src/plugin.ts`), is **our own function** — named in our design-16 (`§`, cites `plugin.ts:86-137`) before/at the notes that mention it; not a reference identifier. |
+| Tempting reference prompt phrasings ("fork yourself", multitask enter/stay/exit reminder phrasing, anti-ask-question copy) | **0 hits** — the flagged borrows never leaked into any prompt or locale string. |
+| Tool-name independence | Five dispatcher tools (`spawn_worker`, `check_workers`, `steer_worker`, `stop_worker`, `deliver_result`) + `request_access`: traced to **PRD §16 glossary / CONTEXT.md** (ticket 15's glossary-traceability table). The reference's literal tool-name strings were never recorded in any of our docs (behavior notes describe tools generically: "a dedicated stop tool", "inspect/steer/stop"), so no textual identity with a *recorded* reference artifact exists; generic verb_noun compounds independently derived from our own glossary are adapted naming, not verbatim reproduction. |
+| Prompt/locale/copy provenance | All model-facing and user-facing copy traces to in-repo authorship: `src/core/policy/prompts.ts`, `src/worker/prompt.ts`, `src/adapter/wake-copy.ts`, `src/adapter/access-prompt.ts` (ticket 15 read every asset end-to-end), locale faces from design-17 §7 via tickets 27/28/32 (en/zh key-parity asserted by `validateLocaleDictionary` in tests), wrapper copy via tickets 77–81 (each ticket's clean-room discipline per its constraints). No asset was imported or transliterated from the reference. |
+| Module/file naming | Shipped module names (`wake-bus`, `steer-queue`, `worker-fsm`, `todo-reconciler`, `roster-snapshot`, `restart-notice`, …) are PRD/CONTEXT-glossary names; no reconstruction basename is used as a module name (ticket 15 finding, still true). |
+
+## Verdict
+
+**PASS — no verbatim reproduction found.** Zero codename/basename/protocol-token matches outside sanctioned negative-test fixtures; zero matches against every reference artifact our research notes record; prompt, locale, tool-name, and protocol vocabularies trace to project glossaries and in-repo authored copy. The deliberate naming surface is independent in provenance and, where shapes coincide (generic `verb_worker` compounds), independently derived.
+
+## Residual risk (echoing the human-accepted-risk line)
+
+This is **static text matching + provenance tracing**, not a semantic-similarity pass against reference sources — which remains true to the reference tree's unknown-provenance status and was deliberately not opened. A paraphrased-but-not-literal borrow cannot be caught by these greps; the mitigation is the same as ticket 15's: new-copy discipline, `assertNewCopy`/`FORBIDDEN_VOCAB` guard tests, and glossary traceability. Per the AGENTS.md ruling of 2026-09-18, residual infringement risk from non-verbatim derivative use of an unknown-provenance public reconstruction is **human-accepted**; this review is a quality record, not a legal clearance.

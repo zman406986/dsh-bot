@@ -11,6 +11,9 @@
 | [0007](0007-todo-stays-dispatcher-only-with-structural-worker-link.md) | Todo stays the dispatcher's private ledger; the worker link is structural | accepted |
 | [0008](0008-worker-access-ask-structured-relay.md) | Worker access asks use a custom structured relay, not dsh's child approval waterfall | accepted |
 | [0009](0009-activation-explicit-command-no-capture-on-load.md) | Activation is an explicit user command; the plugin no longer captures the primary chat on load | accepted; **premise retracted 2026-09-18 — superseded by 0018** (no mode, always-on; its deferred-binding *mechanics* may survive) |
+| [0010](0010-dispatcher-presence-is-a-projection-of-core-state-draft-nonhuman-approved.md) | Dispatcher presence is a projection of core state, published on transitions and read from pull-only surfaces | draft (non-human-approved); vehicle half superseded by 0018/0020 — projection rules survive (filed 2026-09-19, ticket 33) |
+| [0011](0011-approval-session-scope-always-allow-fenced-option-set-draft-nonhuman-approved.md) | Approval answers: Allow / Always allow (this session) / Deny, with session-scoped memory, a wildcard fence, and honest degraded paths | draft (non-human-approved); location-line and rendering halves superseded by tickets 71/81 (filed 2026-09-19, ticket 33) |
+| [0012](0012-restart-replays-durability-never-work-draft-nonhuman-approved.md) | Restart replays durability, never work | draft (non-human-approved); trigger re-based from activation to the per-session lifecycle bind under 0018/0019 (filed 2026-09-19, ticket 33) |
 | [0013](0013-capsule-shell-overlay-slot-choice-draft-nonhuman-approved.md) | The dispatcher capsule is one additive shell.overlay entry — not a sidebar takeover or a keyed claim | draft (non-human-approved); **vehicle superseded by 0018** — its seam research remains valid |
 | [0014](0014-client-bundle-materialization-contract-draft-nonhuman-approved.md) | dsh.client.inject obligates consumer-driven materialization: smallest boot-time set, never immediately for ordinary plugin packages | draft (non-human-approved) |
 | [0015](0015-browser-test-infrastructure-playwright-draft-nonhuman-approved.md) | Real-browser verification is Playwright against a dsh --profile web --patch launcher boot; execution consolidates in ticket 33's browser pass | draft (non-human-approved) |
@@ -21,9 +24,12 @@
 | [0020](0020-wrapper-shell-vehicle-own-frame-over-shipped-runtime-draft-nonhuman-approved.md) | The wrapper vehicle: our own application frame over the shipped dsh client runtime (ADR-0018's "we build the whole UI") | draft (non-human-approved) |
 
 Draft ADRs 0013–0015 (capsule epic 35, ticket 37) are agent-drafted and **pending human
-sign-off** (ticket 33's close-out pass). Numbers 0010–0012 are reserved to design-17 §9's
+sign-off** (ticket 33's close-out pass). Numbers 0010–0012 were reserved to design-17 §9's
 ADR plan (presence projection, session-scope always-allow, activation-replay durability);
-each draft's header records this resolution.
+**all three were filed 2026-09-19** by ticket 33's close-out part 1 as
+`-draft-nonhuman-approved` records of the decisions as actually shipped (tickets 27/28,
+30, 31 respectively) — the reservation is consumed, and the pre-0018 ADR headers that
+describe 0010–0012 as "reserved" are historical statements of their filing-time state.
 
 Draft ADR 0019 (ticket 72, 2026-09-19) is agent-drafted and **pending human sign-off**. It
 resolves ADR-0018's per-dispatcher seam verification item: the installed host's per-agent

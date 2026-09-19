@@ -14,7 +14,7 @@ Work happens per the workflow doc: tests/greps run in the worktree checkout `C:\
 - [ ] **Gate 1 — clean-room identifier grep** over the full `main...clone/always-on-dispatcher` diff per `docs/research/clean-room-license-audit.md`: case-insensitive `rg` for `sand`, `executor`, `MessageSubagent`, `SAND_MULTITASK_*` and reconstruction basenames across every touched file (source, prompts, copy strings, comments, test fixtures, compiled client output). Only intentional `FORBIDDEN_VOCAB` negative-test fixtures may hit, in `test/` only.
 - [ ] **Manual copy read:** read every new prompt asset, locale string, and user-visible copy line added by 27–32; confirm original expression (design-17 §7 is the only sanctioned source) and en/zh key parity.
 - [ ] **Gate 2 — offline tests green in the worktree:** `npm test` 0 fail and `npm run typecheck` clean (both configs), no network/LLM/running dsh (S8); record the counts.
-- [ ] **Gate 3 — full-diff provenance review:** a human-free review of the complete branch diff for structural/phrasing/protocol borrow from the reference tree (per workflow §3), findings appended as a dated comment on `Issue-tracker/open/17-behavior-clone-reference-always-on-dispatcher.md` on MAIN.
+- [x] **Gate 3 — full-diff provenance review:** a human-free review of the complete branch diff for structural/phrasing/protocol borrow from the reference tree (per workflow §3), findings appended as a dated comment on `Issue-tracker/open/17-behavior-clone-reference-always-on-dispatcher.md` on MAIN. **(Done 2026-09-19 in its re-scoped form — no-verbatim-copy review; `docs/research/no-verbatim-copy-review-2026-09-19.md`, pointer on ticket 17.)**
 - [ ] Confirm the §5 conflict markers were honored: spot-check each `revisit-before-merge` row of design-17 §5 against the landed code (e.g. no stop control, no todo board, no second wake kind, session "always" rows cleared) and record each check in the review comment.
 - [ ] Merge `clone/always-on-dispatcher` → `main` (squash or merge, implementer's choice) with every message referencing the closed ticket numbers (e.g. `17.27`–`17.33`); then `npm ci` on main so `node_modules` matches the lockfile, and re-run the suite once on main.
 - [ ] Close tickets 27–33 (and ticket 17 Phase 3) with dated comments carrying commit hashes; never `git add -A` at any step.
@@ -248,3 +248,32 @@ Ticket 53's re-spec records that this merge (`400450f`) was judged under ADR-000
 ### 2026-09-19 — one-line note
 
 87 landed (5da8a54) — ready for live re-confirm.
+
+### 2026-09-19 — Close-out PART 1 done (ADR filings + no-verbatim review); closures remain PART 2, pending live pass 5
+
+**ADR-0010/0011/0012 filed** as `-draft-nonhuman-approved` records of the decisions AS ACTUALLY SHIPPED (reservation design-17 §9 held them for tickets 27/28, 30, 31; ticket 31/32's handover resolved):
+- **0010** — dispatcher presence is a projection of core state, published on transitions, read from pull-only surfaces (snapshot v2→v3 fail-closed contract, no-new-core-state observer timeliness, transition-only publish w/ coalescing skipped, sections partition shared by wrapper sidebar). Vehicle half superseded by 0018/0020 and recorded inside; two capsule-era rationales explicitly re-opened, not re-decided. (`docs/adr/0010-…`; tickets 27/28, commits `f09f19d`/`6874cf2`, merge `400450f`.)
+- **0011** — approval answers: Allow / Always allow (this session) / Deny, session-scoped memory, wildcard fence, honest degraded paths; U-D-exact; constant location line superseded by 71's per-producer-kind map, rendering re-hosted by 81 while 30 stays the live answer surface. (`docs/adr/0011-…`; ticket 30, `0e2e9fa`/`7c90a25`.)
+- **0012** — restart replays durability, never work (rebuild-before-first-publish ordering, one-time unknown-state honesty, degraded notice; trigger re-based from ADR-0009 activation to the per-session lifecycle bind under 0018/0019; notice rides 57's turn-opening wake, plus 58's bounded redrive). (`docs/adr/0012-…`; ticket 31, `818d03c`.)
+- `docs/adr/README.md` index updated for all three; the "reserved" lines in older ADR headers stand as historical filing-time statements.
+
+**No-verbatim-copy review (re-scoped Gate 1/Gate 3 successor) — PASS, zero hits.** Method + evidence: `docs/research/no-verbatim-copy-review-2026-09-19.md`. Grep battery over src/test/client/lib/scripts (codenames, reconstruction basenames, reference protocol tokens, reference fn names, tempting reference prompt phrasings): 0 product hits — only the sanctioned `FORBIDDEN_VOCAB` negative-test fixtures; sole fn-name surface match is our own `composeWakeText`. Tool/locale/module naming traced to PRD §16/CONTEXT glossaries and in-repo authored copy; the reference's literal tool names were never recorded in our docs, so no textual identity with a recorded reference artifact exists. Residual risk = the AGENTS.md human-accepted-risk line (static matching, not semantic similarity; reference prose never quoted in our notes). Pointer comment added on ticket 17 per Gate 3's letter. Not fixed-and-not-ticked here: old Gate 1 (voided by ADR-0018 — stays unticked, superseded), the manual full-copy-read AC (part 1b was targeted grep+judgment over derivation-prone surfaces; a full read of every 27–32 line remains part 2/live-pass work if still wanted under 0018), Gate 2 (no tests run today — docs-only pass).
+
+**Part 2 remaining (NOT done today):** closures for 27–33 + ticket 17 Phase 3 after live pass 5, each with dated comments carrying commit hashes; the moot-closure triage calls below; leftover offline AC ticks; §5-row confirmations are already recorded (2026-09-18 merge comment).
+
+**Closure-readiness assessment for part 2 (verdicts only; no ticket moved):**
+- **17 (Phase 3):** blocked until children below resolve — last to close.
+- **27:** not ready — implemented + re-based; needs wrapper live presence confirm (pass 5) + the two re-opened rationales (delivered-semantics re-derivation per 0018; native attention markers) decided.
+- **28:** not ready — sections proven offline + consumed by shell; needs live confirm + the "Needs-you rationale re-opened" decision.
+- **29:** close after pass 5 — verification half done (vehicle-independent); only the first-live firehose confirmation remains.
+- **30:** not ready — relay/policy work complete and fenced, but the ticket stays the live answer surface until 69's L1 card-resolve transport lands (69 open).
+- **31:** close after pass 5 — offline-complete; trigger re-base landed via 57/58 (both resolved); one live restart-honesty observation wanted.
+- **32:** moot-closure candidate — dormant composition proven live (re-pass #2/#3); activated/capsule composition retired at the 78 cutover; shell compositions are the successor surface.
+- **34:** nearly ready — boot-graph AC proven live (pass 4); needs the capsule-era composition ACs reconciled with the cutover + one launcher-route boot.
+- **46:** moot-closure READY — watch fix proven live (pass 2, AC ticked); remainder mooted by cutover; moot-closure already proposed in-ticket.
+- **48:** not ready — capsule AC moot, but the launcher-script drift items are this ticket's real, still-open scope (or an explicit descope call).
+- **49:** READY (small ticks first) — live AC ticked both schemes (pass 2); offline AC boxes 1–3 can be ticked from the existing 2026-09-18 offline evidence, then close; shell surfaces verified token-only.
+- **78:** close after pass 5 — cutover landed (`94e6127`+`a44084a`); AC 3 disposition re-pointed to 89; live root-election-under-load confirm wanted.
+- **84:** moot-verified READY — mechanism proven passes 3+4 (zero inject errors under heavy stress); AC untestable by design post-cutover; closure recommendation already recorded in-ticket for the owner.
+
+No other ticket file moved; Status stays open.
