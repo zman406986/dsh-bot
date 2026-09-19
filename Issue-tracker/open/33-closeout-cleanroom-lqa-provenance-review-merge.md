@@ -244,3 +244,7 @@ Ticket 53's re-spec records that this merge (`400450f`) was judged under ADR-000
 ### 2026-09-19 — one-line note
 
 88 landed (d242d18) — ready for live re-confirm.
+
+### 2026-09-19 — one-line note
+
+87 landed (5da8a54) — ready for live re-confirm.

@@ -204,3 +204,7 @@ On a fresh throwaway profile boot (85 fixed, shell as root, zero pageerrors):
   namespace — and the flow showed, consistent with the mirror rule working).
 - Per the ticket's own hazard ("check on the live pass that a seen flag survives an HMR
   swap") the answer is: **sometimes not** → AC 5 stays unticked; 87 owns the fix.
+
+### 2026-09-19 — one-line note
+
+87 landed (5da8a54) — ready for live re-confirm.
