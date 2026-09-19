@@ -1,6 +1,6 @@
 # 73 — Capsule (chip and expanded panel) must be draggable so the user can move it out of the way
 
-**Status:** open
+**Status:** cancelled
 **Labels:** needs-triage
 **Blocked by:** none
 **Related:** 35 (capsule epic — the surfaces this touches), 38 (`CAPSULE_CSS` / capsule implementation), 42 (capsule close-out), 49 (token theming)
@@ -44,3 +44,24 @@ need drag support. If the wrapper design does surface one, this ticket re-scopes
 
 Renumbered from 63 on 2026-09-19 — number collision with resolved/63-retune-wake-report-clamp.md
 (same defect class as the 64→66 fix). Ticket 65's references updated.
+
+### 2026-09-19 — CANCELLED: nothing left to drag, and no surviving drag requirement anywhere
+
+Dispositioned after ticket 78's cutover (commits `94e6127` / `a44084a` / `c437ee8`; live
+pass 4 confirmed shell-as-root renders, stock app returns on abdication). The premise this
+ticket designed around — fixed-position overlays that can overlap other host UI — is void:
+the capsule/launcher overlay entries are unregistered, and the shell registers as the
+dynamic `root` frame that fills the whole cell and DISPLACES the shipped UI (abdication
+restores it), so there is no coexistence overlap to escape. Verified honestly:
+
+- `src/client/shell.tsx` has no floating surfaces, no drag code, and no drag affordance —
+  a fixed three-pane grid (`width:100%;height:100%`).
+- No drag requirement exists outside the capsule-era tickets: ADR-0020 and the wrapper
+  tickets (77/78/79/80/68/81) never ask for one. The re-triage note above called the
+  wrapper an "OS window"; more precisely it is a root-slot frame in the same web page —
+  but the conclusion holds either way: within the page there is nothing to reposition,
+  and the page-cell is the host's own layout, not ours to drag.
+
+Per the anti-invention rule this does NOT re-scope onto the shell: if a future shell
+surface genuinely needs repositioning, that is a new ticket with its own evidence, not a
+revival of this one.

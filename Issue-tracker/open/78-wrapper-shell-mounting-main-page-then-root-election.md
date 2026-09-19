@@ -237,3 +237,14 @@ timers armed at launch and verified in tasklist. Zero LLM traffic.
   comment supersedes "awaiting live pass 3". **The ticket stays `open/` on 88**: with the
   conversation seat crashing on selection, "shell IS the client" holds only until the first
   click.
+
+### 2026-09-19 — pointer: the "65/66/73 lane" this ticket cites for dead-code disposition is resolved
+
+The 2026-09-19 disposition CANCELLED 65/66/73 (moved to `Issue-tracker/cancelled/`):
+all three were capsule-vehicle requests, subsumed by the shell this ticket cut over.
+The dead-code disposition they were assigned now lives in **open ticket 89
+("Delete retired capsule source assets")**, which carries the verified inventory of the
+retained assets listed in this ticket's AC 3 and "Assets kept" note (`capsule.tsx`,
+`capsule-store.ts`, `shell.tsx` launcher, `shell-mount.ts` launcher contracts, `capsule.*`
+copy) plus 81's unrendered-toolview question. No action needed in 78 — this comment only
+re-points the lane reference so it outlives the moved files.

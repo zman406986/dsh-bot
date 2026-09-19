@@ -1,6 +1,6 @@
 # 65 — The capsule's expanded window grows into the full dispatcher UI: dispatcher-bot conversations live inside it, dsh's own chat is not used for our surface
 
-**Status:** open
+**Status:** cancelled
 **Labels:** needs-triage
 **Blocked by:** none for research/design; implementation blocked by the open questions below
 **Related:** 51 (dedicated dispatcher-bots surface — this ticket extends and largely subsumes it), 35 (capsule epic), 73 (draggable, renumbered from the duplicate 63), 66 (collapsed chip key info, renumbered from the duplicate 64), 50 (front-desk mode), ADR-0016, design-16
@@ -86,3 +86,27 @@ the background while we build essentially the reference's window UI, but as a
 
 **Stays needs-triage:** kept open as the human-request record; not independently actionable
 without duplicating 67. Close as subsumed once 67's design confirms coverage of the seam tensions.
+
+### 2026-09-19 — CANCELLED (subsumed): the capsule vehicle was retired; the substance IS the shipped shell
+
+Dispositioned after ticket 78's cutover (commits `94e6127` root-frame election, `a44084a`
+capsule/launcher overlay retirement, `c437ee8` evidence; live pass 4 confirmed shell-as-root
+renders and the stock app returns on abdication). The expanded-capsule-as-whole-UI premise is
+void — there is no capsule to expand — and the substance needs no separate tracking because
+it lives in the shell itself:
+
+- "The whole dispatcher UI in our own surface" → the wrapper shell frame IS the client
+  (ADR-0020; tickets 77 skeleton + 78 cutover, landed).
+- "Conversation with dispatcher bots inside our window, host chat not used for our surface"
+  → ticket 80's conversation pane (composer + replay over the session event window) and
+  ticket 79's sidebar roster/presence, both resolved; the seam tensions (user→dispatcher
+  input, dispatcher→user delivery rendered in our own surface) were absorbed by 67 and
+  resolved by 80 over ticket 40's verified transports (command transaction + plain-prompt
+  sink, bound in `mountShellPage`).
+- "Selection of dispatcher bots" → 79's sidebar rows with `sessions.open(id)` selection.
+- First-run → 68 (in-shell onboarding seat); approvals → 81.
+- The "pass S7 grep" AC stays voided with S7 per the 2026-09-18 ruling (ADR-0018).
+
+Related-line hygiene (recorded, not edited): 51/35/50 are cancelled, ADR-0016 retracted —
+already noted in the re-triage above. Remaining follow-up from this lane is dead-code
+disposition of the retained capsule sources, filed as ticket 89.

@@ -139,3 +139,12 @@ Status stays **open** (checkbox 4 + live lane).
   comment's "the frame displaces the settings UI at cutover, so the decision is live"; the
   decision itself (re-home into our own settings surface vs stay a shipped-settings entry)
   still needs the lane/human call. Stays open.
+
+### 2026-09-19 — pointer: the "65/66/73 disposition" this ticket rides is now ticket 89
+
+The 2026-09-19 disposition CANCELLED 65/66/73 (moved to `Issue-tracker/cancelled/`) as
+capsule-vehicle requests subsumed by the shell. The dead-code disposition they owned —
+including this ticket's finding that the post-cutover toolview slot entries (ticket 24)
+are registered but unrendered and "ride the same 65/66/73 disposition" — is now tracked
+as **open ticket 89 ("Delete retired capsule source assets")**, which lists the toolview
+verify-item explicitly. Nothing left to do here; reference updated for the moved files.

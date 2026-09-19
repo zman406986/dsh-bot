@@ -1,6 +1,6 @@
 # 66 — Collapsed capsule must surface key info at a glance: dispatcher ON/OFF + running subagent count
 
-**Status:** open
+**Status:** cancelled
 **Labels:** needs-triage
 **Blocked by:** none
 **Related:** 35 (capsule epic — defines the collapsed chip), 38 (capsule implementation), 27/28 (status dots, roster sections), 49 (theming)
@@ -46,3 +46,22 @@ Split verdict:
 **Stays needs-triage:** the chip as specified is not actionable (superseded vehicle + voided
 ON/OFF premise); the surviving half is tracked by 67. Moot-closure candidate after 67 confirms
 coverage.
+
+### 2026-09-19 — CANCELLED: vehicle retired; the surviving half already shipped in the shell
+
+Dispositioned after ticket 78's cutover (commits `94e6127` / `a44084a` / `c437ee8`; live
+pass 4 confirmed shell-as-root renders). Both halves are settled:
+
+- **ON/OFF half — void** (per the re-triage above): ADR-0018 rules the dispatcher always-on
+  with no mode; there is no collapsed surface left to declare it on, and the shell has no
+  activation chip.
+- **Running-count half — delivered by ticket 79** (resolved): glanceable presence lives on
+  the shell's sidebar rows, not a chip — per-row working / needs-you / finished counters
+  (`shell.row.working` = "{count} …" templates in `src/client/shell.tsx`), aggregate
+  presence dots, waiting markers, and hover previews, all fed by the roster mirror watch.
+  `src/client/shell.tsx` confirms the implementation; the session-granularity re-host was
+  79's stated design.
+
+No surviving request needs separate tracking. Textual (not color-only) state and the honest
+dormant/error compositions carry over to the shell's copy where applicable (79's
+presence-unavailable line); any residual polish belongs under the shell tickets, not here.
