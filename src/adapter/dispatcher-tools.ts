@@ -34,8 +34,47 @@ export interface RegisterableTool {
       readonly type: string;
       readonly text?: string;
     }>;
+    /**
+     * Ticket 81 (live-pass 5 Session B-2 FINDING 2): the durable
+     * `tool/result` session event carries the tool's RENDERED text blocks
+     * (`render`) plus this OPTIONAL presentation projection — the structured
+     * `value` itself is never serialized into the event
+     * (`dsh-agent-loop/lib/index.js:697-712` `appendToolResult` spreads only
+     * `result.meta`; `dsh-tools/lib/index.js:3428` builds it from
+     * `output.presentationMeta` when the executing context is a top-level
+     * call). The client's conversation reduction reads `data.meta` FIRST
+     * (`conversation-store.ts` `toolResultRecord`) — without this callback
+     * the durable record carries only the prose ack, so the worker-dispatch
+     * card and the toolview parsers degrade to nothing live even though the
+     * offline fixtures (which inlined the structured result as JSON text)
+     * passed. Must be losslessly JSON-serializable (the host snapshots it).
+     */
+    readonly presentationMeta?: (args: unknown, value: unknown) => unknown;
   };
   readonly execute: (args: unknown, exec?: unknown) => Promise<unknown>;
+}
+
+/**
+ * The presentation projection attached to every registered dispatcher tool
+ * (ticket 81 FINDING 2): the structured result minus the model-facing prose
+ * fields. `ack` embeds the entire worker prompt and `summary` embeds the
+ * rendered roster table — both already durable in the tool/call arguments or
+ * derivable from `rows`, so the meta record stays compact; `note` likewise.
+ * A non-record value passes through unchanged (the host rejects an undefined
+ * projection outright, so there is no "absent" answer here).
+ */
+export function structuredPresentationMeta(
+  _args: unknown,
+  value: unknown,
+): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return value;
+  }
+  const record = { ...(value as Record<string, unknown>) };
+  delete record.ack;
+  delete record.summary;
+  delete record.note;
+  return record;
 }
 
 /** Render a structured tool result as a single model-facing text block. */
@@ -110,6 +149,9 @@ export function toRegisterableTool(
       // Loose schema: the registry validates shape; we return JSON objects.
       schema: { type: "object" },
       render: renderStructured,
+      // Ticket 81 FINDING 2: the structured result rides the durable record
+      // as `meta` (the reducer's preferred input); see RegisterableTool.
+      presentationMeta: structuredPresentationMeta,
     },
     execute(args: unknown, exec?: unknown): Promise<unknown> {
       const record =
