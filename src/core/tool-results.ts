@@ -39,6 +39,16 @@ export type SpawnWorkerToolResult =
       readonly worker_id: string;
       readonly stream_key: string;
       readonly title: string;
+      /**
+       * Ticket 69 (chunk B presentation contract): present only when the
+       * spawn proceeded THROUGH the review-posture gate (a posture row gated
+       * the dispatch class and the host approval seam answered
+       * `allowed-once`). Absent for the shipped ungated spawn, so the
+       * serialized tool-call record lets the client's dispatch-card
+       * projection derive honest `gating` provenance at presentation time
+       * (replay-safe: the marker rides the durable record, not client state).
+       */
+      readonly gated?: true;
       /** Model-facing ack text. Not user-visible. */
       readonly ack: string;
     }

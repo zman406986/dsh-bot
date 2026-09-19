@@ -534,6 +534,8 @@ describe("worker-dispatch gate (chunk A, A6)", () => {
     assert.ok(result.ok);
     assert.equal(host.spawnCalls.length, 1);
     assert.equal(seamCalls.length, 0);
+    // Chunk B marker: an ungated spawn carries NO gating provenance.
+    assert.equal(result.gated, undefined);
   });
 
   it("allow row + seam allowed-once → spawn proceeds", async () => {
@@ -553,6 +555,10 @@ describe("worker-dispatch gate (chunk A, A6)", () => {
     assert.equal(seamCalls.length, 1);
     assert.equal(seamCalls[0]?.title, "Summarize RFCs");
     assert.equal(seamCalls[0]?.streamKey, "s-1");
+    // Chunk B marker: the durable record carries the gating provenance so
+    // the client's dispatch-card projection derives `approval-allowed` at
+    // presentation time (ticket 69, design §3 shape 2).
+    assert.equal(result.gated, true);
   });
 
   it("allow row + seam refused outcome → honest refused result, no host spawn", async () => {

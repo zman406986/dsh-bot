@@ -274,6 +274,7 @@ export function createDispatcherTools(
       // on a gated dispatch refuses (fail-closed). Gating happens inside
       // the already-running dispatcher turn — no activation step, spawns
       // stay the single wake kind (C15).
+      let postureGated = false;
       const posture = multitask.reviewPosture.lookupDispatch(title, {
         parentSessionId,
       });
@@ -305,6 +306,10 @@ export function createDispatcherTools(
               `(approval outcome: ${outcome}); re-plan without this dispatch`,
           };
         }
+        // Chunk B marker: the durable tool-result record carries the gating
+        // provenance so the client's dispatch card derives `approval-allowed`
+        // at presentation time (never from client-side state).
+        postureGated = true;
       }
 
       const request = {
@@ -327,6 +332,7 @@ export function createDispatcherTools(
         worker_id: result.workerId,
         stream_key: streamKey,
         title,
+        ...(postureGated ? { gated: true as const } : {}),
         ack: formatSpawnAck({
           title,
           workerId: result.workerId,
