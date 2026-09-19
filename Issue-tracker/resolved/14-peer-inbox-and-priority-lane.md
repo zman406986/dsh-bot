@@ -31,3 +31,18 @@ Shipped as pure core modules + wake-bus integration (design-14):
 
 **Out of MVP (as designed):** messaging hub, fan-out directory, images, restart durability, out-of-process transport, dispatcher `send_peer` tool.
 - Moved to resolved by overnight sweep 2026-09-18: all ACs checked; verified via implementing commits and artifact spot-check on main.
+
+### 2026-09-19 — supersession note (ticket 70 C14 sort)
+
+Ticket 70 (Design 2026-09-19 §3, landed `d8e2658`) supersedes this ticket's last two ACs --
+the group/broadcast target shapes and the "group targets ignore priority" behavior (ACs 7
+and 8 above). Those ACs were authored against the pre-ADR-0018 feature-inventory posture;
+ADR-0018's exception list (C14: no group rooms; the tier is point-to-point only) is the
+definition of done, and retiring the shipped group|broadcast targets is in-scope
+conformance, not a new exception. As of `d8e2658`: `PeerTarget` is 1:1-only
+(`{kind:"agent", agentId}`), the ack reduces to `{ok, messageId, acceptedAtMs}`
+(`priorityHonored` and the `group-target`/`broadcast-target` reasons retired with the
+shapes they reported on), the priority flag is inherently 1:1, and `conversationId` is
+fenced (kept in schema, never surfaced). This ticket stays resolved as shipped -- history
+intact, boxes above stand as of their date; the retirement delta and its evidence live on
+ticket 70.

@@ -1,6 +1,6 @@
 # 70 — Peer tier: dispatcher-to-dispatcher messaging (ADR-0018 in-scope area)
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Blocked by:** none for the design pass — 67 resolved (ADR-0020); 72 resolved and its practical gate (76's session keying) landed. Live two-dispatcher verification rides the 45/33 lane (ADR-0019 sign-off gates live work only — ticket-76 precedent). See the 2026-09-19 triage comment.
 **Related:** ADR-0018 (in scope: "the peer tier (dispatcher-to-dispatcher messaging)"; exception C15, C14), PRD §7.6 / S9 / ADR-0002 (peer agents in scope; async fire-and-forget with optional priority interrupt), 14 (shipped peer inbox + priority lane), ticket 50's cancelled outbound half
@@ -29,6 +29,39 @@ work (S9).
       dispatcher's existing single-wake-kind pipeline, not a new wake kind class. — C14 sort
       recorded (retire group|broadcast); Design comment §3.
 - [x] Draft implementation ACs once 67 and 72 land. — Chunked ACs; Design comment §5.
+- [x] **Chunk 1 (offline, M):** core C14 sort + isolation. — `d8e2658`: `PeerTarget` is
+      1:1-only (group|broadcast retired as conformance per §3; `priorityAckFields` gone;
+      ok-ack reduced to `{ok, messageId, acceptedAtMs}`; `conversationId` fenced — the
+      assembler no longer surfaces it); new `isLiveDispatcherSession` knob finally produces
+      `unknown-target`, plus unconditional `self-target` refusal in `sendPeer` (plugin wires
+      the knob to `lifecycle.isDispatcherSession`); `test/multi-dispatcher-peer.test.ts` pins
+      all six §4 two-dispatcher cases + both knob fences + absent-knob host-agnosticism.
+      1:1 traffic behavior unchanged (narrow guard held).
+- [x] **Chunk 2 (offline, M):** sixth dispatcher tool `send_peer` + policy copy. —
+      `1a4eb6d`: def in `createDispatcherTools` (zero `activateToolSurface` changes — the
+      per-session scoped surface registers every def); addressing = dispatcher session id;
+      sender identity stamped from the registration closure (no spoofable `from` arg);
+      handler mints `messageId` + fenced `conversationId: "direct"`; ack maps to honest
+      acceptance-only summary (`formatPeerSendAck` — never user delivery, never a reply);
+      refusals (`unknown-target` / `self-target` / `inbox-full` / `message-id-reuse`) carry
+      no-retry copy (`formatPeerSendRefusal`); over-max 8000-char inline U-F refusal;
+      priority honored only as the 1:1 lane choice (interrupt rule is the shipped
+      non-user-only fail-closed wake-bus path — untouched); worker barrier denies
+      `send_peer`; toolview row + locale labels; scoped-visibility test (dispatcher sees it,
+      worker scope does not).
+- [x] **Chunk 3 (offline, S):** client placement per ADR-0020 hand-off. — `fbd4066`:
+      dispatcher sidebar rows (79) carry a hover/focus copy-session-id affordance (shows the
+      id verbatim; copies through the injected `copyToClipboard` host seam with a contained
+      best-effort `navigator.clipboard` fallback — no fake success); conversation surface
+      (80) pinned honest: an injected peer wake turn is skipped wholesale by the reduction
+      and never renders as user speech; locale labels en/zh; component tests per the 79/80
+      patterns.
+- [ ] **Chunk 4 (45/33 lane ONLY, S):** live two-dispatcher verification. — **Unticked by
+      design; routed to ticket 33's live lane** (ADR-0019 sign-off gates live work,
+      ticket-76 precedent). Remaining live ACs: two dispatchers activated; A's model calls
+      `send_peer` with B's session id; B opens a peer-cue turn; the priority variant
+      interrupts B's non-user turn and never a user-driven turn; a bad-id send yields honest
+      refusal copy with no retry. Trivial tasks only, kill timers per AGENTS.md.
 
 ## Constraints
 
@@ -320,3 +353,29 @@ Missing (new offline pin, expected pass — a failure here is a bug to fix, not 
   and §1 "(optional Phase 2)" post-rebase; ADR-0002 (accepted) resolved §15.5 in-scope and
   ADR-0018 lists the tier in-scope (`PRD:408` carries the resolution). Stale wording, not a
   live conflict — fold into the next PRD-wordsmith batch.
+
+### 2026-09-19 — agent (chunks 1–3 complete offline; resolved with chunk 4 routed to the 45/33 lane)
+
+**Recovery note (honest provenance):** the implementing session died on a usage limit after
+landing chunks 1–3 (`d8e2658`, `1a4eb6d`, `fbd4066`) but before any bookkeeping — the only
+uncommitted worktree state was the claim comment above, triaged sound and committed as
+`a55dc99`. A recovery pass re-audited all three chunk diffs against Design 2026-09-19 §2–§5
+(conformant; no hunks reverted), then ran the full gates fresh.
+
+**Gates (2026-09-19, post-chunk-3 tree):** `npm test` **1101/1101 pass, 266 suites, 0 fail**
+(offline, S8); `npm run typecheck` green (both tsconfigs); `npm run build:client` green
+(164,805 bytes). `grep` of `src/client` for `priorityHonored` / `group-target` /
+`broadcast-target` / retired target kinds: zero product references (comments + negative test
+assertions only) — the ack shrink left no dangling consumer.
+
+**Escalation 1 disposition (directory-less addressing):** the dispatch ruling accepted the
+design's reading (C13 covers it; peer addressing = dispatcher session ids learned from peer
+wake turns and 79's roster rows — chunk 3's copy affordance is the human-side source). No
+ADR-0018 annotation recorded; the human may add the one-liner later if they read C13
+narrower — nothing shipped depends on it.
+
+**Residual (recorded, no action here):** the design §6 inbound-clamp follow-up stands —
+`send_peer` refuses over-max text outbound (chunk 2), but the inbound accept edge still
+assembles peer text raw; a later ticket may apply the same 8000 bound at accept. Chunk 4's
+live ACs are deliberately unticked and live on ticket 33's lane (see the chunk-4 checkbox
+above for the enumerated list).

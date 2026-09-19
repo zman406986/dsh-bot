@@ -277,3 +277,7 @@ Ticket 53's re-spec records that this merge (`400450f`) was judged under ADR-000
 - **84:** moot-verified READY — mechanism proven passes 3+4 (zero inject errors under heavy stress); AC untestable by design post-cutover; closure recommendation already recorded in-ticket for the owner.
 
 No other ticket file moved; Status stays open.
+
+### 2026-09-19 — one-line note
+
+70 chunks 1-3 landed (`d8e2658`, `1a4eb6d`, `fbd4066`; bookkeeping `a55dc99`+closeout) — peer tier OFFLINE-COMPLETE (suite 1101/1101, typecheck + client build green; ticket 70 resolved with the retirement/closeout comments), live two-dispatcher verification (chunk 4: A `send_peer` -> B peer-cue turn, priority interrupts B's non-user turn only, bad-id honest refusal) rides this ticket's live lane.
