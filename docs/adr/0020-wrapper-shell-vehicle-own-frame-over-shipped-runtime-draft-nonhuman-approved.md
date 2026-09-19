@@ -48,7 +48,7 @@ Reference surfaces from `always-on-dispatcher-behavior.md` areas 1–3, 7–8 (a
 | Whole shell: sidebar + main surface + always-on (area 1) | new (frame) + re-host (contents) | tickets 77–78 |
 | Guided first-run onboarding (area 1) | new — own ticket | ticket 68 |
 | Connection lifecycle: phases, reconnect banner, restored snapshot, privacy/account gates (area 1) | **excluded U-A** | — |
-| Roster failure states: empty / unreachable with retry (area 1) | new, honest copy only | ticket 79 |
+| Roster failure states: empty / unreachable, honest copy, retry-less (U-A) (area 1) | new, honest copy only | ticket 79 |
 | Dispatcher sidebar rows: status dot, blocked chip, unread marker, live activity line, hover preview precedence (area 2) | re-host from tickets 27/28 stores; row + preview are new | ticket 79 |
 | Hidden-agents overlay / pinned identities (area 2) | **excluded C13** | — |
 | Running-tasks panel, typed rows, snapshot states (area 3) | re-host — the Active/Needs-you/Finished sections (tickets 27/28) become the wrapper's panel | ticket 79 |
