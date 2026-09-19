@@ -46,7 +46,7 @@
  * colour is set (the shell inherits the host's theme colour).
  */
 import { useSyncExternalStore } from "react";
-import type { JSX } from "react";
+import type { ComponentType, JSX } from "react";
 import type { TranslateFn } from "./overlay.js";
 import { formatTemplate, rosterBlockedKey } from "./roster-store.js";
 import {
@@ -138,23 +138,37 @@ export function waitingPhrase(
   return formatTemplate(safe, { target: waiting.blocked.target });
 }
 
-/** Host seats the shell fills with re-hosted components (ADR-0020). */
+/**
+ * Host seats the shell fills with re-hosted components (ADR-0020).
+ *
+ * TICKET-88 DISCIPLINE: every seat is a COMPONENT the shell renders as an
+ * element (`<hosts.seat />`), never a function the shell calls. A called
+ * component's hooks attach to the SHELL's own hook list, so the shell's
+ * hook count would depend on the render branch — the live pass-4 crash
+ * (React minified #300, "Rendered fewer hooks than expected" on the vendored
+ * React 19.3) died exactly there: selecting a session dropped the inlined
+ * onboarding hooks mid-fiber and the whole `root` entry abdicated. Rendered
+ * as elements, each seat keeps its own fiber: mounting and unmounting a
+ * seat across a branch flip is ordinary React, never a hook-count change.
+ */
 export interface ShellHosts {
   /**
-   * The right-panel seat: given the selected session id, render the hosted
-   * roster panel (the existing `createRosterPanel` output) or `null`. The
-   * per-session feed binding is ticket 79's; until then the host seat may
-   * render the panel only when its store has that session's data.
+   * The right-panel seat: rendered with the selected session id, it shows
+   * the hosted roster panel (the existing `createRosterPanel` output) or
+   * `null`. The per-session feed binding is ticket 79's; until then the
+   * host seat may render the panel only when its store has that session's
+   * data.
    */
-  readonly rosterPanel?: (sessionId: string) => JSX.Element | null;
+  readonly rosterPanel?: ComponentType<{ readonly sessionId: string }>;
   /**
-   * The main-seat conversation pane (ticket 80): given the selected session
-   * id, render the text-only conversation surface bound to that session's
-   * event window and composer actions. The shell itself never touches the
-   * conversation services — the seat is the composition's (same discipline
-   * as `rosterPanel`). When absent the pane stays the honest pending copy.
+   * The main-seat conversation pane (ticket 80): rendered with the selected
+   * session id, it shows the text-only conversation surface bound to that
+   * session's event window and composer actions. The shell itself never
+   * touches the conversation services — the seat is the composition's (same
+   * discipline as `rosterPanel`). When absent the pane stays the honest
+   * pending copy.
    */
-  readonly conversation?: (sessionId: string) => JSX.Element | null;
+  readonly conversation?: ComponentType<{ readonly sessionId: string }>;
   /**
    * Selection ride-along (ticket 79): called AFTER the store accepted a
    * row selection, with the same id — the composition wires this to the
@@ -171,7 +185,7 @@ export interface ShellHosts {
    * this frame, never in a staging-only slot, so it survives the ticket-78
    * cutover.
    */
-  readonly onboarding?: (() => JSX.Element) | undefined;
+  readonly onboarding?: ComponentType | undefined;
 }
 
 /** Sidebar row as a button (selection is a plain click, no router yet). */
@@ -362,7 +376,9 @@ export function createDispatcherShell(
               // Ticket 68: the onboarding seat replaces the bare no-selection
               // copy while the first-run flow is unsuppressed; it degrades to
               // the same copy itself once suppressed (one vocabulary).
-              hosts.onboarding()
+              // Ticket 88: RENDERED as an element — its hooks must live in
+              // their own fiber, never inlined into the shell's.
+              <hosts.onboarding />
             ) : (
               <div className={`${SHELL_CLASS}__noselection`}>
                 {t("shell.noselection")}
@@ -376,9 +392,10 @@ export function createDispatcherShell(
               {/* Ticket 80: the conversation pane is a HOST seat — the
                   composition binds it to the session's event window and the
                   send/older actions. Without a seat the pane keeps the
-                  honest pending copy instead of an invented surface. */}
+                  honest pending copy instead of an invented surface.
+                  Ticket 88: rendered as an element (own hook fiber). */}
               {hosts.conversation ? (
-                hosts.conversation(panes.main.sessionId)
+                <hosts.conversation sessionId={panes.main.sessionId} />
               ) : (
                 <div className={`${SHELL_CLASS}__conversation-pending`}>
                   {t("shell.conversation.pending")}
@@ -388,9 +405,9 @@ export function createDispatcherShell(
           )}
         </section>
         <aside className={`${SHELL_CLASS}__right`} data-pane="right">
-          {panes.right.kind === "hosted-roster" && hosts.rosterPanel
-            ? hosts.rosterPanel(panes.right.sessionId)
-            : null}
+          {panes.right.kind === "hosted-roster" && hosts.rosterPanel ? (
+            <hosts.rosterPanel sessionId={panes.right.sessionId} />
+          ) : null}
         </aside>
       </div>
     );

@@ -86,6 +86,8 @@
  * `no-channel`/copy-fallback UX via `src/client/actions.ts`.
  */
 
+import { createElement } from "react";
+import type { JSX } from "react";
 import type {
   ClientContext,
   ClientSettingsScopeLike,
@@ -606,14 +608,27 @@ export function mountShellPage(
       )
     : undefined;
 
+  // Host seats (ticket 88 discipline): every seat is a COMPONENT the shell
+  // renders as an element, never a function the shell calls. The live pass-4
+  // crash (React minified #300 on selection) was the seats' hooks being
+  // inlined into the SHELL's hook list via direct calls — the no-selection →
+  // selection flip then changed the shell's hook count and the whole `root`
+  // entry abdicated. As elements, each seat owns its fiber: mount/unmount
+  // across branch flips is ordinary React, never a hook-count change.
+  const RosterSeat = (props: { readonly sessionId: string }): JSX.Element | null =>
+    // The host-or-not gate reads the CURRENT shell store box at render time
+    // (the shell re-renders on every store emit, so the gate stays live —
+    // same reactivity the seat function always had). Zero hooks here: the
+    // gate's null flip only mounts/unmounts the panel element below.
+    shellSeatHostsPanel(store.getBox().state.mirrors.get(props.sessionId))
+      ? createElement(seatPanel)
+      : null;
+
   const hosts: ShellHosts = {
     // Host the panel ONLY for a session our mirrors vouch for (a parsed or
     // corrupt dispatcher snapshot); anything else renders an empty pane —
     // never an invented roster for a plain chat.
-    rosterPanel: (sessionId) =>
-      shellSeatHostsPanel(store.getBox().state.mirrors.get(sessionId))
-        ? seatPanel()
-        : null,
+    rosterPanel: RosterSeat,
     // The main seat: the text-only conversation surface (ticket 80), bound
     // to the reduced event-window store and the two verified host actions.
     // Send rides the capsule's OWN verified plain-prompt sink (ticket 40's
@@ -621,8 +636,9 @@ export function mountShellPage(
     // parallel channel, A4: the host owns the journal); older pages ride the
     // scoped `loadOlder()` (Finding 7). NO cancel affordance exists — the
     // ticket's area-7 rule; the scoped cancel verb stays deliberately
-    // unused (recorded on the ticket).
-    conversation: (sessionId) => conversationPane({ sessionId }),
+    // unused (recorded on the ticket). The pane factory's output IS the
+    // component (ticket 88: rendered by the shell, never called by it).
+    conversation: conversationPane,
     // Called AFTER the store accepted the row selection; the binding re-runs
     // its guarded select (no-op) and rides the host's `open` verb.
     onSelectSession: (sessionId) => {
@@ -630,7 +646,7 @@ export function mountShellPage(
     },
     // The no-selection main state hosts the first-run flow when the wiring
     // provides it (ticket 68); the seat itself settles to the no-selection
-    // copy once suppressed.
+    // copy once suppressed. (Ticket 88: a component, rendered as an element.)
     onboarding: onboardingPane,
   };
 
