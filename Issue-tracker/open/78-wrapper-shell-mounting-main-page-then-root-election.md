@@ -210,3 +210,7 @@ timers armed at launch and verified in tasklist. Zero LLM traffic.
 - None of this ticket's live-lane clauses (frame swap visual, HMR reversal, fallback-on-
   crash, onboarding/conversation/roster seats in the elected frame) could be observed —
   the frame never mounts. ACs unchanged; the ticket stays `open/` on 85.
+
+### 2026-09-19 — one-line note
+
+85 landed (a2c09ed) — ready for live pass 4.

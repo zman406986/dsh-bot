@@ -236,3 +236,7 @@ Ticket 53's re-spec records that this merge (`400450f`) was judged under ADR-000
 ### 2026-09-19 — one-line note
 
 78 cutover landed (94e6127 + a44084a) — live confirmation in pass 3.
+
+### 2026-09-19 — one-line note
+
+85 landed (a2c09ed) — ready for live pass 4.
