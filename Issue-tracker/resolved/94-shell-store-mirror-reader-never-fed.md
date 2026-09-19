@@ -157,3 +157,5 @@ added the approval feed).
     carrying `data-dispatcher="true"`, the presence chip, the hosted panel,
     ticket 81's cards) belongs to the separate live lane; ticket 93's host
     half is fixed in the same pass, so the pipeline is whole offline.
+- **2026-09-19 (wind-down agent)** — Offline-complete; live verification NOT
+  yet performed — see ticket 33 handover 2026-09-19.

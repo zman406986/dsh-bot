@@ -568,3 +568,55 @@ exists). Session A covered 78/88/68-AC5/87 only — the rest of the pass-5 list 
 **AC7 remains unticked and this ticket stays open** — the closure sweep (17/27/28/29/30/31/48 +
 the outside-map set, dated comments with commit hashes) is the later part-2 step; this comment
 only adds the pass-5 trail the umbrella was owed.
+
+### 2026-09-19 — session wrap (overnight autonomous run): handover to the next session
+
+- **Landed and resolved:** 48, 68, 71, 78, 82, 86, 87 (live re-confirm), 89,
+  90, 91, 92, 93, 94; **69-Q1 ruled** (posture default stays EMPTY; overnight
+  dispatched ruling, reversal path recorded on 69). Merge shas to cite (from
+  `git log --oneline -25`): `a3e54bf` (wt/91 → ticket 91 fakes),
+  `b01f758` (wt/90 → ticket 90), `61ddf61` (wt/69l1 → the 69-L1 composition
+  pin), `2ef2b43` (wt/q1 → 69-Q1 ruling), `bdf6a0e` (wt/pipe → tickets 93+94),
+  `55e6847` (wt/send → ticket 92), `9b5da8a` (wt/hygiene → packaging: MIT
+  LICENSE + `prepack` + repo metadata, retro ticket 95).
+- **Live pass 5 status:** Session A ALL PASS (78 frame/re-apply, 88 seat click
+  no React #300, 68 AC5 first-run walk, 87 three clean reloads + delete
+  round-trip) — evidence `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-19\evidence\A\`.
+  Session B exposed 3 live bugs (composer send threw; roster channel never
+  published — `settings.installSection` returns void in the real host; shell
+  mirror reader never fed) → fixed as tickets 92/93/94, merged to main at
+  `55e6847` (1103 tests / 269 suites / 0 fail, typecheck clean, build:client
+  ~164,898 B on disk).
+- **92/93/94 live verification: NOT ATTEMPTED (budget exhausted after recon
+  only — no build, no boot, no browser against the fixed code). Evidence root
+  `C:\Users\TZhen\Desktop\dsh-live-fixes-2026-09-19\` contains reference
+  copies of the pass-5 harness only, NO evidence. Do not treat 92/93/94 as
+  live-green.**
+- **Next session's first steps:** (1) rebuild (`npm run build && npm run
+  build:client`) then `plugin --profile multitask remove
+  dsh-multitask-dispatcher` + re-add — the `multitask` profile's installed
+  copy is STALE (pre-fix); the plain re-add reports "Already up to date" and
+  does NOT refresh, remove+add is required; verify `diff -rq` repo lib/ vs
+  profile copy is empty. (2) Boot per
+  `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-19\README.md` §2 (port 8877,
+  object-form patch row, kill timers armed at launch — mandatory per
+  AGENTS.md). (3) Live-verify 92 (composer send delivers; the fixed idiom is
+  `sessions.scope(id).get("conversation")`, NOT a property read), 93
+  (`settings/describe` now shows `roster.*` keys; cards render), 94 (rows
+  show `data-dispatcher="true"`, presence chips live). (4) Then Session B
+  (81 cards, 69 L1/L2, 30) and Session C (27/28 presence, 29 firehose,
+  31 restart, 70 chunk-4 peer) per ticket 33's pass-5 directive. (5) Then AC7
+  closures + ticket 17 last.
+- **Driver notes for the next agent:** driver protocol verbs
+  `goto/screenshot/wait/count/text/attr/click/typetext/press/sleep/js/status/close`;
+  commands are `{...}.json` → `....out.json`, strictly serialized; `js`
+  results arrive JSON-string-encoded (double-parse); `tools/cmd/` is wiped at
+  driver start so copy artifacts out. If tool output gets truncated in long
+  reads, read in ~15-line windows. Zero-LLM for 92/93/94 checks; trivial
+  tasks only if a spawn is needed.
+- **Unfiled audit backlog** (from a read-only audit; ticket when picked up):
+  no CI; no lint/format; a set of possibly-dead exports (incl.
+  `SHIPPED_CLAIMED_TOOLVIEW_KEYS` and `validateLocaleDictionary` — wire up or
+  delete, do not blindly delete); README thin vs PRD; no CHANGELOG; the
+  `test` script compiles everything under the client tsconfig (possible
+  masking of server-side type errors).

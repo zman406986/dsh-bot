@@ -226,3 +226,5 @@ commit that carries this file's move to `resolved/`.
 - **Still owed to the live lane (not claimed here):** click send in the
   elected frame against a real dsh boot and watch the turn land; the
   offline ACs above are complete.
+- **2026-09-19 (wind-down agent)** — Offline-complete; live verification NOT
+  yet performed — see ticket 33 handover 2026-09-19.

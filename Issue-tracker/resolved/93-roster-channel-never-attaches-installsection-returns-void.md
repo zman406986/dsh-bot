@@ -193,3 +193,5 @@ accepted a shape the host does not honour.
     93 was a host-contract mismatch on the write side (scope unobtainable
     from `installSection`), 94 was a missing call site on the read side. They
     are filed separately and fixed as separate commits, per the method.
+- **2026-09-19 (wind-down agent)** — Offline-complete; live verification NOT
+  yet performed — see ticket 33 handover 2026-09-19.
