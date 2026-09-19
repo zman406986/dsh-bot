@@ -1,7 +1,7 @@
 # 29 — Streaming presentation: live-activity verification handover + toolview/wake polish
 
 **Blocked by:** None to start (the verification half is independent; the snapshot-dependent polish lands after 27).
-**Status:** open
+**Status:** resolved
 
 ## Problem
 
@@ -155,3 +155,14 @@ tool call and settled ~10–15 s later); the positive live text is the B-4-run
 phrase rendered live. If the sweep wants a fresh positive capture, a future
 lane should instruct the worker to make two tool calls and check AFTER the
 first (poll cadence ≤2 s during the spawn window).
+
+### 2026-09-20 — RESOLVED (W17 closure sweep): first-live firehose confirmation landed with provenance; moved open/ → resolved/
+
+**Verified.** All actionable boxes ticked; implementation + offline tests (worktree commit `2054db2`, 551 pass / 0 fail; merged to main in `400450f`); the `session/event` → `recentActivity` → `check_workers` seam verified read-only against the installed dsh packages and re-based vehicle-independently (ADR-0018). The one item this ticket still owed — the first-live firehose confirmation — is DONE: live pass 5 Session C (record `ae9cf4c` on ticket 33; evidence `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-20\session-C\`) renders `request_access: credential` on a real check_workers toolview row — the resolver's exact output shape (tool name + first-string-argument hint, whitespace-collapsed) for the ONE real `request_access` tool/call, made live in the same night's B-4 lane on the same session and persisted in the transcript (provenance chain: `session-B4/probes/w21-worker-2dbc148e-turnoutline.json` + `session-C/driver/w13-23-cwrows.json.out.json`). The null-omission path is also live-confirmed on the session's own fresh check (a row checked before the worker's first tool call honestly omits the line). Child-session worker ids appear verbatim on rows (2dbc148e…, ddf56ee3…) — the 2026-09-17 residual ("first live integration should confirm end-to-end") is satisfied. No polish item open. Offline gates at closure: `npm run typecheck` clean (both configs); `npm test` 1125 pass / 0 fail / 272 suites.
+
+**Nuance (recorded, not a gap):**
+- The conditional "if no seam" box stays unticked — the condition never triggered (a seam was verified 2026-09-17); per the 2026-09-19 closeout precedent (ticket-33 batch `9126909`), ticking it would claim an action never performed.
+- Tonight's lane produced no NEW mid-run positive capture (the positive live text carries the B-4 provenance chain above, rendered live); a future lane wanting a fresh capture should poll ≤2 s during the spawn window after instructing two tool calls.
+
+Moved `Issue-tracker/open/29-streaming-presentation-activity-source-verification.md` →
+`Issue-tracker/resolved/`, `**Status:**` → resolved. No other file moved.
