@@ -1,7 +1,8 @@
 # 81 — Wrapper approval cards + capsule retirement (ADR-0020 slice 5)
 
-**Status:** open
-**Labels:** ready-for-human
+**Status:** resolved
+**Labels:** ready-for-human (discharged 2026-09-20: the human-gated residue was dispositioned by
+the operator-delegated rulings on ticket 69; restored if a human reverses any of them)
 **Blocked by:** 80 (cards render in the conversation surface), 69 (classifier gating design — this ticket is the wrapper-side rendering, 69 owns the gating design)
 **Related:** ADR-0020 (inventory rows: approvals), 13/23/30 (relay + prompt UX re-host), 45/33 (live lane)
 
@@ -298,3 +299,57 @@ Gates at disposition: `npm run typecheck` clean (both configs); `npm test` 1125 
 2. The settings ruling is human-reversible; a reversal reopens checkbox 4 cheaply (the store is already wrapper-side).
 
 A future session may close this ticket once item 1 is human-dispositioned; everything else is recorded above with artifacts.
+
+### 2026-09-20 — RESOLVED (W28 final closures, operator-delegated): all four checkboxes met on recorded evidence; the gated-card anatomy recorded VOID-BY-POLICY alongside 69's L3; file moved open/ → resolved/
+
+**Disposition.** Every checkbox is ticked and its tick stands on recorded evidence; the one
+never-live-observed item is dispositioned by the operator-delegated rulings on ticket 69 rather
+than left as open work:
+
+- **Checkbox 1 (inline cards re-hosting ticket 30's anatomy) — ticked, rendering + live
+  confirms.** Shipped `9bcdd4d` + `1acb918` (offline gates 1056/0 at the time; typecheck
+  clean; build:client ok). LIVE: the secret-ask card + resolve round-trip (Session B-5, via
+  69's L1 — `w23-15-deepcard`, `w23-17` honest prefix refusal, `w23-19` "Answer routed",
+  `shots/w23-shot-parked-secretask.png`); the worker-dispatch card from a settled spawn
+  (Session B-4 `w21-42-pollA`/`w21-44-final`, `shots/w21-shot-final-dispatch-card.png`,
+  `[data-card-kind="worker-dispatch"]` `gating="ungated"` — the W19 FINDING-2 fix `f8067c3`
+  confirmed live; re-rendered in Session C). Evidence root:
+  `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-20\` (sessions B-4/B-5/C).
+- **Checkbox 2 (blocked marker with reason) — ticked.** Shipped by 79's session-granularity
+  presence; LIVE-VERIFIED via 69's L2 (Session B-5 `w23-09` — the blocked-with-reason marker
+  on the row while the secret-ask card waited, distinct from landed/unavailable chips).
+- **Checkbox 3 (capsule retirement) — MOOT-VERIFIED as recorded.** Landed with 78's cutover
+  (`a44084a`/`94e6127`); the stores/copy/components survive as re-host inventory; the
+  toolview-slot dead-code disposition was executed by resolved ticket 89.
+- **Checkbox 4 (settings-card re-home) — ticked on the recorded decision.** STAYS a
+  shipped-settings entry (2026-09-20 agent ruling above, recorded during the W11 lane,
+  SUBJECT TO HUMAN REVERSAL; a reversal reopens the box cheaply — the store is already
+  wrapper-side).
+- **`gated: true` / `approval-allowed` card anatomy — recorded VOID-BY-POLICY** (annotated
+  alongside 69's L3, same operator-delegated ruling of 2026-09-20 on ticket 69, same 33/AC1
+  precedent): the gated gating value requires a posture row (the spawn result carries
+  `gated: true` only when the posture gate allowed via the seam), and under the confirmed
+  EMPTY posture no live path can create one — structurally unreachable, not unmet. The
+  mechanism is offline-pinned where it can be: W7's seam pins produce the `gated: true`
+  round-trip over an injected `ctx.approval` and W19's host-faithful fixtures project the
+  `approval-allowed` card through the real reduction (`test/dispatch-approval.test.ts`,
+  `test/adapter-dispatcher-tools.test.ts`). A human posture act (69's recorded reversal
+  path) re-opens this as ordinary live work.
+
+**Reversible rulings this ticket carries:** the settings-card re-home decision (W11, above);
+and it rides ticket 69's Q1 confirmation, U-D/posture-lane re-affirmation, and wedge-family
+HANDLED rulings by reference.
+
+**Pointers out:** wrapper-frame approval answering — the one systemic residual this ticket's
+B-3 evidence exposed (the shipped composer ships but does not answer under the ADR-0020 root
+frame) — lives in deferred ticket 98 with recorded revisit triggers.
+
+**Gates at closure** (re-run for the record on main this date): `npm run typecheck` clean
+(both configs); `npm test` 1130 pass / 0 fail / 273 suites (the W26 expectation);
+`npm run lint:docs` green after the open-issue-index regeneration. Tracker-only change; no
+code touched by this closure.
+
+Moved `Issue-tracker/open/81-wrapper-approval-cards-and-capsule-retirement.md` →
+`Issue-tracker/resolved/`, `**Status:**` → resolved. The `ready-for-human` label is
+discharged by the operator-delegated rulings on ticket 69; a human reversal of any of them
+reopens this ticket cheaply.
