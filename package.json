@@ -35,6 +35,7 @@
     "build:client": "node --import tsx scripts/build-client.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "test": "tsx --tsconfig tsconfig.client.json --test test/**/*.test.ts",
+    "lint:docs": "node tools/doc-lint.mjs && node tools/issue-index.mjs --check && node tools/adr-index.mjs --check",
     "prepare": "npm run build",
     "prepack": "npm run build:client"
   },
