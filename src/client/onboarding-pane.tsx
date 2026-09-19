@@ -12,6 +12,10 @@
  *   no-selection copy, one vocabulary — plus the one honest save-failed line
  *   when the Done/Skip flag write did not land (retry-less, U-A: no retry
  *   control; the flow simply shows again next launch — fail-open);
+ * - pending (ticket 87: the suppression read is in flight) → the SAME calm
+ *   no-selection state, never the flow and never a fake suppression — the
+ *   decision renders only once the document lands or the read settles
+ *   unreadable (fail-open show, as always);
  * - beats → the current beat's title + body, step count, progress dots,
  *   Skip, and Next/Get-started. No animations anywhere; the beat walk is a
  *   plain re-render.
@@ -99,18 +103,7 @@ export function createOnboardingPane(
         data-beat={view.kind === "beats" ? view.beatId : undefined}
       >
         <style>{ONBOARDING_CSS}</style>
-        {view.kind === "settled" ? (
-          <div className={`${ONBOARDING_CLASS}__settled-wrap`}>
-            {view.saveFailed ? (
-              <p className={`${ONBOARDING_CLASS}__save-failed`}>
-                {t("shell.onboard.save-failed")}
-              </p>
-            ) : null}
-            <div className={`${ONBOARDING_CLASS}__settled`}>
-              {t("shell.noselection")}
-            </div>
-          </div>
-        ) : (
+        {view.kind === "beats" ? (
           <>
             <h2 className={`${ONBOARDING_CLASS}__title`}>{t(view.titleKey)}</h2>
             <p className={`${ONBOARDING_CLASS}__body`}>{t(view.bodyKey)}</p>
@@ -151,6 +144,20 @@ export function createOnboardingPane(
               </button>
             </div>
           </>
+        ) : (
+          // Settled, or pending (ticket 87): the shell's calm no-selection
+          // copy either way — a pending read renders no flow and no
+          // save-failed line (nothing was attempted yet).
+          <div className={`${ONBOARDING_CLASS}__settled-wrap`}>
+            {view.kind === "settled" && view.saveFailed ? (
+              <p className={`${ONBOARDING_CLASS}__save-failed`}>
+                {t("shell.onboard.save-failed")}
+              </p>
+            ) : null}
+            <div className={`${ONBOARDING_CLASS}__settled`}>
+              {t("shell.noselection")}
+            </div>
+          </div>
         )}
       </div>
     );

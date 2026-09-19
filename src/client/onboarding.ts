@@ -41,13 +41,29 @@
  * to "unavailable" instead of showing wrong data. Here the risk is stranding
  * first-run, not wrong data, so the failure direction flips.)
  *
+ * THE READ RACE (ticket 87, live pass 4): a fresh page binds the scope while
+ * the shared describe mirror is still mid-read (`loading`, value `undefined`)
+ * — the record is persisted and served, but NOT YET DELIVERED. A decision
+ * taken in that window reads the fail-open default and renders the flow,
+ * which then re-shows on a reload whose record stands (the observed
+ * re-show), flipping to settled only when the document arrives. The store
+ * therefore tracks `buffering`: the scope reporting a read IN FLIGHT holds
+ * the pane at a calm `pending` view — never the flow, never a fake
+ * suppression — and the decision re-evaluates reactively when the document
+ * lands (settled) or the namespace reads as unreadable (fail-open show, as
+ * always). A runtime that never reports in-flight (no settings channel at
+ * all) never buffers: the flow shows, the original fail-open pin.
+ *
  * Pure state machine + decisions: no React, no DOM, no Cordis. Offline tests
  * drive the suppression matrix, the record parsing, the beat walk, the pane
  * view model, and the seen-write hand-off (S8); the pane component lives in
  * `onboarding-pane.tsx` (build + typecheck territory), the composition
  * wiring in `index.ts`.
  */
-import type { ClientSettingsScopeLike } from "./context.js";
+import type {
+  ClientSettingsScopeLike,
+  ClientSettingsScopeSnapshotLike,
+} from "./context.js";
 import type { ShellMirror } from "./shell-store.js";
 
 /**
@@ -152,7 +168,9 @@ export const ONBOARDING_BEATS: readonly OnboardingBeat[] = [
   },
 ];
 
-/** The pane's phase: walking the beats, or finished (flag write handed off). */
+/**
+ * The pane's phase: walking the beats, or finished (flag write handed off).
+ */
 export type OnboardingPhase = "beats" | "done";
 
 /** The store's immutable state; `version` fences `useSyncExternalStore`. */
@@ -162,6 +180,17 @@ export interface OnboardingBox {
    * (`undefined` = no readable record — fail-open input).
    */
   readonly seenValue: unknown;
+  /**
+   * The bound scope reported its namespace document MID-READ (`loading`, or a
+   * value-less `ready` — the shipped controller's pre-acceptance state): the
+   * suppression input is not deliverable YET, so the pane buffers at the calm
+   * pending view instead of rendering the flow from the fail-open default
+   * (ticket 87's reload-#1 re-show). False is the resting state: a runtime
+   * that never reports in-flight (no settings channel) never buffers — the
+   * flow shows, the original fail-open pin. Reactively cleared when the
+   * document lands or the namespace reads as unreadable.
+   */
+  readonly buffering: boolean;
   /** Index into {@link ONBOARDING_BEATS} while `phase` is `"beats"`. */
   readonly beatIndex: number;
   readonly phase: OnboardingPhase;
@@ -191,6 +220,17 @@ export interface OnboardingStore {
    * reset). Publishes only when the extracted seen value actually changes.
    */
   applyDocument(document: unknown): void;
+  /**
+   * Feed ONE scope snapshot — status and value together (ticket 87): the
+   * composition's read path. `loading` (or a value-less `ready`, the shipped
+   * pre-acceptance state) sets `buffering` — the pane's read is in flight;
+   * a delivered document feeds it and clears `buffering`; an unavailable
+   * namespace is a SETTLED unreadable read: fail-open reset, no buffering.
+   */
+  applySnapshot(
+    status: ClientSettingsScopeSnapshotLike["status"],
+    document: unknown,
+  ): void;
   /** Advance one beat; a no-op at (or past) the last beat. */
   advance(): void;
   /** Finish the flow (Done or Skip): phase `"done"`. The composition writes the flag. */
@@ -201,16 +241,30 @@ export interface OnboardingStore {
 
 export function createOnboardingStore(): OnboardingStore {
   let seenValue: unknown = undefined;
+  let buffering = false;
   let beatIndex = 0;
   let phase: OnboardingPhase = "beats";
   let saveFailed = false;
   let version = 0;
-  let box: OnboardingBox = { seenValue, beatIndex, phase, saveFailed, version };
+  let box: OnboardingBox = {
+    seenValue,
+    buffering,
+    beatIndex,
+    phase,
+    saveFailed,
+    version,
+  };
   const listeners = new Set<() => void>();
 
-  function publish(): void {
+  /**
+   * Replace the box only when a tracked input actually changed — the store's
+   * no-churn rule (stable snapshots), now over both the seen value and the
+   * buffering flag.
+   */
+  function publish(changed: boolean): void {
+    if (!changed) return;
     version += 1;
-    box = { seenValue, beatIndex, phase, saveFailed, version };
+    box = { seenValue, buffering, beatIndex, phase, saveFailed, version };
     for (const listener of [...listeners]) listener();
   }
 
@@ -228,7 +282,38 @@ export function createOnboardingStore(): OnboardingStore {
       const next = onboardingSeenFromDocument(document);
       if (Object.is(next, seenValue)) return; // stable snapshots: no emit churn
       seenValue = next;
-      publish();
+      publish(true);
+    },
+    applySnapshot(status, document) {
+      if (status === "unavailable") {
+        // A SETTLED unreadable read: the explicit fail-open reset (show),
+        // and the read is over — buffering ends either way.
+        const seenChanged = !Object.is(seenValue, undefined);
+        seenValue = undefined;
+        const bufferingChanged = buffering;
+        buffering = false;
+        publish(seenChanged || bufferingChanged);
+        return;
+      }
+      if (status === "loading" || document === undefined) {
+        // The document has not been accepted yet (the shipped controller's
+        // pre-acceptance state): the read is IN FLIGHT — buffer the pane.
+        // Inputs stay untouched: nothing was delivered.
+        if (!buffering) {
+          buffering = true;
+          publish(true);
+        }
+        return;
+      }
+      // A delivered document: feed it and re-evaluate (the reactive half of
+      // ticket 87 — the arrival itself closes or opens the flow), and the
+      // read is over.
+      const next = onboardingSeenFromDocument(document);
+      const seenChanged = !Object.is(next, seenValue);
+      seenValue = next;
+      const bufferingChanged = buffering;
+      buffering = false;
+      publish(seenChanged || bufferingChanged);
     },
     advance() {
       if (phase !== "beats") return;
@@ -236,22 +321,22 @@ export function createOnboardingStore(): OnboardingStore {
       const next = Math.min(beatIndex + 1, last);
       if (next === beatIndex) return; // at the last beat: no churn
       beatIndex = next;
-      publish();
+      publish(true);
     },
     complete() {
       if (phase === "done") return; // no-op re-complete: no emit
       phase = "done";
-      publish();
+      publish(true);
     },
     markSaveFailed() {
       if (saveFailed) return;
       saveFailed = true;
-      publish();
+      publish(true);
     },
   };
 }
 
-/** The pane's two render states (pure; the component maps one to seats). */
+/** The pane's render states (pure; the component maps one to seats). */
 export type OnboardingPaneView =
   | {
       /** Suppressed, or the flow completed: the settled no-selection state. */
@@ -262,6 +347,15 @@ export type OnboardingPaneView =
        * set for a merely suppressed pane — nothing failed there.
        */
       readonly saveFailed: boolean;
+    }
+  | {
+      /**
+       * The suppression read is IN FLIGHT (ticket 87): the pane renders the
+       * shell's calm no-selection state and decides only when the document
+       * lands or the read settles unreadable — never the flow from the
+       * fail-open default mid-read.
+       */
+      readonly kind: "pending";
     }
   | {
       readonly kind: "beats";
@@ -279,10 +373,15 @@ export type OnboardingPaneView =
 /**
  * The pane's render decision (pure): suppression first, then the flow's own
  * phase. The settled state renders the shell's own no-selection copy (one
- * vocabulary) plus, when the seen write failed, the save-failed line.
+ * vocabulary) plus, when the seen write failed, the save-failed line. A read
+ * still in flight (ticket 87) renders pending — the calm shell state — so the
+ * fail-open default never flashes the flow on a reload whose record stands.
  */
 export function describeOnboardingPane(
-  box: Pick<OnboardingBox, "seenValue" | "beatIndex" | "phase" | "saveFailed">,
+  box: Pick<
+    OnboardingBox,
+    "seenValue" | "buffering" | "beatIndex" | "phase" | "saveFailed"
+  >,
   mirrors: ReadonlyMap<string, ShellMirror>,
 ): OnboardingPaneView {
   if (isOnboardingSuppressed(box.seenValue, mirrors) || box.phase === "done") {
@@ -290,6 +389,9 @@ export function describeOnboardingPane(
       kind: "settled",
       saveFailed: box.phase === "done" && box.saveFailed,
     };
+  }
+  if (box.buffering) {
+    return { kind: "pending" };
   }
   const index = Math.min(box.beatIndex, ONBOARDING_BEATS.length - 1);
   const beat = ONBOARDING_BEATS[index]!;

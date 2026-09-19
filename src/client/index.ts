@@ -273,12 +273,19 @@ export function applyClientModule(
           // Namespace not exposed to this client (or preferences are
           // process-local): no honest feed exists at all.
           store.set({ kind: "channel-missing" });
-          // Ticket 68: no readable document = no seen record — the
-          // fail-open reset so first-run can never be stranded.
-          onboarding.applyDocument(undefined);
+          // Ticket 68/87: a SETTLED unreadable read — the explicit fail-open
+          // reset (the flow shows) with the pane's read no longer in flight.
+          onboarding.applySnapshot("unavailable", undefined);
           return;
         }
-        onboarding.applyDocument(snapshot.value);
+        // Ticket 87: the suppression input settles WITH the document. A
+        // `loading` snapshot (the shipped controller's pre-acceptance state —
+        // the describe read our own bind starts is still on the wire) sets
+        // the pane's buffering flag instead of deciding from the fail-open
+        // default; the document's arrival feeds the store and re-evaluates
+        // the decision reactively. A runtime that never binds a scope never
+        // buffers: the flow shows (the original fail-open pin).
+        onboarding.applySnapshot(snapshot.status, snapshot.value);
         // `loading` (or a first-section-less `ready`) means the namespace's
         // document has not been accepted yet: stay `waiting` — the feed is
         // alive, the roster simply is not in it.

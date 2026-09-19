@@ -461,4 +461,42 @@ describe("shell seat composition survives selection (ticket 88)", () => {
       root.unmount();
     });
   });
+
+  it("renders pending while the seen read is in flight and settles on the document's arrival — never the flow (ticket 87)", async () => {
+    // The live pass-4 reload-#1 ordering: the scope binds while the describe
+    // read is on the wire (`loading`, no value) — the persisted seen record
+    // stands but is NOT YET DELIVERED. Pre-fix the pane rendered the flow
+    // from the fail-open default in that window (the observed re-show).
+    const fake = fakeSessions({ ids: [], byId: {} });
+    const onboarding = createOnboardingStore();
+    onboarding.applySnapshot("loading", undefined);
+    const { Shell, root } = mountComposition(fake.sessions, onboarding);
+
+    await act(async () => {
+      root.render(createElement(Shell));
+    });
+    const seat = query("[data-onboarding]");
+    assert.ok(seat, "no-selection state hosts the onboarding seat");
+    assert.equal(
+      seat.getAttribute("data-onboarding"),
+      "pending",
+      "an in-flight read must buffer, not render the flow",
+    );
+
+    // The served document arrives through the SAME watch: the suppression
+    // decision re-evaluates reactively — settled, never through a beats
+    // render.
+    await act(async () => {
+      onboarding.applySnapshot("ready", { onboarding: { seen: true } });
+    });
+    assert.equal(
+      query("[data-onboarding]")?.getAttribute("data-onboarding"),
+      "settled",
+      "the arrival settles the pane on the persisted record",
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
 });

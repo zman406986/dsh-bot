@@ -72,9 +72,13 @@ const NO_MIRRORS: ReadonlyMap<string, ShellMirror> = new Map();
 
 function box(
   overrides: Partial<OnboardingBox> = {},
-): Pick<OnboardingBox, "seenValue" | "beatIndex" | "phase" | "saveFailed"> {
+): Pick<
+  OnboardingBox,
+  "seenValue" | "buffering" | "beatIndex" | "phase" | "saveFailed"
+> {
   return {
     seenValue: undefined,
+    buffering: false,
     beatIndex: 0,
     phase: "beats",
     saveFailed: false,
@@ -215,10 +219,11 @@ describe("onboarding suppression decision (ticket 68, AC 2)", () => {
 });
 
 describe("onboarding store — seen-flag lifecycle + beat walk (ticket 68)", () => {
-  it("starts at beat one, beats phase, no seen input, no failure", () => {
+  it("starts at beat one, beats phase, no seen input, no failure, not buffering", () => {
     const store = createOnboardingStore();
     assert.deepEqual(store.getBox(), {
       seenValue: undefined,
+      buffering: false,
       beatIndex: 0,
       phase: "beats",
       saveFailed: false,
@@ -345,6 +350,108 @@ describe("onboarding pane view model — render states (ticket 68)", () => {
       { onSeen: () => {} },
     );
     assert.equal(typeof pane, "function"); // never invoked offline (hooks need a renderer)
+  });
+});
+
+describe("onboarding settle gating — the racy seen read (ticket 87)", () => {
+  it("a scope-reported in-flight read buffers the pane: pending, never the flow", () => {
+    const store = createOnboardingStore();
+    const versions: number[] = [];
+    store.subscribe(() => versions.push(store.getBox().version));
+    store.applySnapshot("loading", undefined);
+    assert.equal(store.getBox().buffering, true);
+    assert.equal(
+      describeOnboardingPane(store.getBox(), NO_MIRRORS).kind,
+      "pending",
+      "the flow must not render from the fail-open default mid-read",
+    );
+    // Re-delivered in-flight reports do not churn (stable snapshots).
+    const version = store.getBox().version;
+    store.applySnapshot("loading", undefined);
+    store.applySnapshot("ready", undefined); // value-less ready = still pre-acceptance
+    assert.equal(store.getBox().version, version, "no emit churn while in flight");
+    assert.equal(versions.length, 1);
+  });
+
+  it("THE LOSING ORDER (live reload #1): the document arrives AFTER the first decision — pending → settled, never beats", () => {
+    const store = createOnboardingStore();
+    // The shipped controller's state at bind time while the describe read our
+    // own bind started is on the wire: `loading`, value undefined. Deciding
+    // here reads the fail-open default and re-shows the flow on a reload
+    // whose record stands — the pass-4 symptom.
+    store.applySnapshot("loading", undefined);
+    assert.equal(describeOnboardingPane(store.getBox(), NO_MIRRORS).kind, "pending");
+    // The document lands (the persisted seen record served back):
+    store.applySnapshot("ready", {
+      enabled: true,
+      [ONBOARDING_SETTINGS_KEY]: { seen: true },
+    });
+    assert.equal(store.getBox().buffering, false);
+    assert.deepEqual(store.getBox().seenValue, { seen: true });
+    assert.equal(describeOnboardingPane(store.getBox(), NO_MIRRORS).kind, "settled");
+  });
+
+  it("a fresh profile (the document lands WITHOUT a seen record) shows the flow — only after the read settles", () => {
+    const store = createOnboardingStore();
+    store.applySnapshot("loading", undefined);
+    assert.equal(describeOnboardingPane(store.getBox(), NO_MIRRORS).kind, "pending");
+    store.applySnapshot("ready", { enabled: true, accessRequestTimeoutMs: 30_000 });
+    assert.equal(store.getBox().buffering, false);
+    assert.equal(
+      describeOnboardingPane(store.getBox(), NO_MIRRORS).kind,
+      "beats",
+      "fail-open still shows a genuinely-first-run flow, after the settle",
+    );
+  });
+
+  it("unavailable SETTLES the read: buffering ends and the flow shows (fail-open)", () => {
+    const store = createOnboardingStore();
+    store.applySnapshot("loading", undefined);
+    store.applySnapshot("unavailable", undefined);
+    assert.equal(store.getBox().buffering, false);
+    assert.equal(store.getBox().seenValue, undefined);
+    assert.equal(
+      describeOnboardingPane(store.getBox(), NO_MIRRORS).kind,
+      "beats",
+      "an unreadable namespace must SHOW the flow — buffering may not strand it",
+    );
+  });
+
+  it("INVERSE HAZARD: a stale seen=true document is corrected by a later document without it — the flow re-opens", () => {
+    const store = createOnboardingStore();
+    store.applySnapshot("ready", { [ONBOARDING_SETTINGS_KEY]: { seen: true } });
+    assert.equal(describeOnboardingPane(store.getBox(), NO_MIRRORS).kind, "settled");
+    store.applySnapshot("ready", { enabled: true });
+    assert.equal(store.getBox().seenValue, undefined);
+    assert.equal(
+      describeOnboardingPane(store.getBox(), NO_MIRRORS).kind,
+      "beats",
+      "a transient stale record must not suppress wrongly",
+    );
+  });
+
+  it("no channel ever reports in-flight → the flow shows (the fail-open pin, unbuffered)", () => {
+    const store = createOnboardingStore();
+    assert.equal(store.getBox().buffering, false);
+    assert.equal(describeOnboardingPane(store.getBox(), NO_MIRRORS).kind, "beats");
+  });
+
+  it("the decision is REACTIVE through the store emit — an arrival re-evaluates without a second decision point", () => {
+    const store = createOnboardingStore();
+    const kinds: string[] = [];
+    store.subscribe(() => {
+      kinds.push(describeOnboardingPane(store.getBox(), NO_MIRRORS).kind);
+    });
+    store.applySnapshot("loading", undefined);
+    store.applySnapshot("ready", { [ONBOARDING_SETTINGS_KEY]: { seen: true } });
+    assert.deepEqual(kinds, ["pending", "settled"]);
+  });
+
+  it("a dispatcher mirror suppresses even while the read is in flight (durable proof needs no document)", () => {
+    const store = createOnboardingStore();
+    store.applySnapshot("loading", undefined);
+    const mirrors = new Map([["s-1", mirror("snapshot")]]);
+    assert.equal(describeOnboardingPane(store.getBox(), mirrors).kind, "settled");
   });
 });
 
@@ -602,6 +709,29 @@ describe("onboarding shell seat + composition wiring (ticket 68)", () => {
     const onboarding = applyWith(createOnboardingCtx(undefined));
     assert.equal(onboarding.getBox().seenValue, undefined);
     assert.equal(describeOnboardingPane(onboarding.getBox(), new Map()).kind, "beats");
+  });
+
+  it("TICKET 87 wiring: a loading bind buffers the pane; the served document settles it (the reload-#1 order)", () => {
+    // The shipped controller's bind-time snapshot while the describe read our
+    // bind starts is on the wire — the pass-4 reload state, persisted record
+    // and all.
+    const fake = createScopeFake({ status: "loading" });
+    const onboarding = applyWith(createOnboardingCtx(fake.scope));
+    assert.equal(onboarding.getBox().buffering, true);
+    assert.equal(
+      describeOnboardingPane(onboarding.getBox(), new Map()).kind,
+      "pending",
+      "the flow must not render from the fail-open default mid-read",
+    );
+    // The served document arrives through the SAME watch: the decision
+    // re-evaluates reactively — suppressed, never through a beats render.
+    fake.emit({
+      status: "ready",
+      value: { enabled: true, [ONBOARDING_SETTINGS_KEY]: { seen: true } },
+    });
+    assert.equal(onboarding.getBox().buffering, false);
+    assert.deepEqual(onboarding.getBox().seenValue, { seen: true });
+    assert.equal(describeOnboardingPane(onboarding.getBox(), new Map()).kind, "settled");
   });
 
   it("the seen write rides the wired scope; a rejection marks the honest failure", async () => {
