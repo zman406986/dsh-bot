@@ -849,3 +849,31 @@ turns, tiny prompts/outputs.
 No AC box on 33, 69, 81, or 30 is ticked by this session; no ticket file moves. Dispositions
 belong to the W14 sweep with the evidence review. Lane torn down; handover at
 `.scratch/_overnight-2026-09-20/handover-W12.md`.
+
+### 2026-09-20 — AC3 / Gate 2 executed in the worktree (overnight run, W16): typecheck clean both configs, `npm test` 1118 pass / 0 fail / 271 suites — Gate-2 box left UNTICKED for the closure sweep
+
+**Worktree state found:** `C:\Users\TZhen\Desktop\dsh-bot-always-on` was ABSENT — directory gone,
+no `clone/always-on-dispatcher` branch, `git worktree list` showed only main. This matches the
+launcher's recorded decommission (`dsh-bot.ps1` header note, 2026-09-19: the checkout "whose whole
+17.27-17.33 batch merged" was dropped from the launcher targets). Nothing was force-reset; the
+worktree was recreated additively, per the workflow doc's own recorded setup
+(`.scratch/clone-always-on/worktree-workflow.md` §1): `git worktree add
+C:/Users/TZhen/Desktop/dsh-bot-always-on -b clone/always-on-dispatcher main`. The branch is fresh
+at main HEAD **`3826525`**, i.e. exactly the launcher `-Sync` end-state (its sync convention is
+`git merge --ff-only main`, a no-op here); tree clean, `= main`.
+
+**Dependencies:** `node_modules` is junction-shared with the main checkout (`mklink /J`) — `npm ci`
+was NOT run (junction-shared rule; the 2026-09-18 clean-install record stands as the deps
+evidence, same citation as AC6's note below).
+
+**Gate 2 run, in `C:\Users\TZhen\Desktop\dsh-bot-always-on`, branch `clone/always-on-dispatcher`,
+HEAD `3826525`:**
+- `npm run typecheck` — clean (both `tsconfig.json` and `tsconfig.client.json`), exit 0.
+- `npm test` — **1118 pass / 0 fail / 271 suites** (0 cancelled / 0 skipped / 0 todo), offline
+  node:test run, ~123 s. Matches main's current counts exactly (worktree content = main HEAD).
+- No network, no LLM, no dsh-host contact from the run itself (a parallel live session B-4 runs in
+  the MAIN checkout only; the worktree run shares no state with it — the junction is
+  node_modules consumption, read-only).
+
+Gate 2's checkbox above is deliberately left UNTICKED — box-ticking belongs to the closure sweep
+(W17); this comment is the evidence record it can tick from.
