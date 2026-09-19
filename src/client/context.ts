@@ -173,8 +173,6 @@ export interface ClientSettingsScopeBinderLike {
  */
 export interface ClientInjectedServices {
   settingsScope?: ClientSettingsScopeBinderLike;
-  /** The ui-layout page controller, when the wrapper requested it (ticket 84). */
-  layout?: ClientLayoutLike;
 }
 
 /**
@@ -296,20 +294,6 @@ export interface ClientRemoteLike {
 }
 
 /**
- * The layout service face the staging launcher needs (ticket 78): the
- * ui-layout controller's page verb — `selectPanel(panelId)` selects a keyed
- * `main` panel ("Select a global panel or return to the Conversation";
- * ui-layout `lib/client.js:399-412`, verified in `dsh-capsule-seams.md`
- * Seam 4's status correction and `wrapper-vehicle-seams.md` Finding 5). The
- * verb THROWS on an unregistered `main` key ("layout.selectPanel: main panel
- * "X" is not registered") — `openShellPage` (`shell-mount.ts`) contains that
- * so the affordance degrades instead of crashing its overlay entry.
- */
-export interface ClientLayoutLike {
-  selectPanel(panelId: string): void;
-}
-
-/**
  * The narrow client context this scaffold's `apply` needs. Ticket 84
  * corrected the access contract: the host's context proxy THROWS on any
  * service property the module's Cordis inject list does not declare
@@ -318,9 +302,12 @@ export interface ClientLayoutLike {
  * and `conversation` are therefore DECLARED in `src/client/index.ts`'s
  * `inject` export; they stay optional in this STRUCTURAL type only, so
  * offline fakes can omit them and the honest-degrade branches stay
- * exercisable. `layout` is wrapper-only: a genuinely optional face reached
- * through the runtime `ctx.inject([...])` idiom (ticket 84), never a bare
- * read on this context.
+ * exercisable. `settingsScope` is the one genuinely OPTIONAL face, reached
+ * through the runtime `ctx.inject([...])` idiom, never a bare read on this
+ * context. (The launcher-era `layout` face — the `ClientLayoutLike`
+ * structural type and the `ctx.inject(["layout"])` watch that delivered it,
+ * tickets 78/84 — was DELETED with the launcher, ticket 89, 2026-09-19:
+ * nothing in the live composition ever read it post-cutover.)
  */
 export interface ClientContext extends ClientEffectContext {
   slots: SlotsServiceLike;
@@ -329,12 +316,4 @@ export interface ClientContext extends ClientEffectContext {
   remote?: ClientRemoteLike;
   sessions?: ClientSessionsLike;
   conversation?: ClientConversationLike;
-  /**
-   * The ui-layout page controller (ticket 78). Optional structural face,
-   * delivered through the runtime `ctx.inject(["layout"], …)` wrapper into
-   * the launcher's cell (ticket 84 — a bare read throws on the real host,
-   * and a hard inject would block module materialization): a runtime
-   * without it leaves the launcher degrading to an honest no-open.
-   */
-  layout?: ClientLayoutLike;
 }

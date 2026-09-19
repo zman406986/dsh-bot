@@ -4,8 +4,9 @@
  * The shipped `tool.call.toolview` slot is KEYED by wire tool name (Finding 5,
  * `dsh-client-ui-tool` contract/slots.d.ts:9-23): a key the shipped
  * composition already covers is replaced, not shared; an UNCLAIMED key falls
- * back to the generic tool row. The five dispatcher tool names have been
- * plugin-owned since ticket 11 and none is claimed by any shipped
+ * back to the generic tool row. The dispatcher tool names (five since ticket
+ * 11, six since ticket 70 added `send_peer`) have been plugin-owned and none
+ * is claimed by any shipped
  * `dsh-client-ui-*` package (shipped claims per the 0.1.5-rc.1 catalog:
  * `cordis_define` / `cordis_run` only), so claiming them is additive-safe.
  *
