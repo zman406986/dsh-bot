@@ -950,3 +950,77 @@ reads).
 
 No AC box on 33, 69, 81, or 30 is ticked by this session; no ticket file moves. Dispositions
 belong to the W14 sweep with the evidence review.
+
+### 2026-09-20 — live pass 5, Session C (W13, one composer send = 1 of 3 budget): 27/28 presence+sections LIVE (Needs-you/Finished + landed markers, real rebuild population), 29 firehose LIVE-VERIFIED with provenance, 31 restart honesty LIVE-VERIFIED across a real host kill+reboot; FINDING 5 re-confirmed read-only across two boots; three agent rulings recorded (27 ×2, 28 stand-in)
+
+Evidence root: `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-20\session-C\`
+(README maps every artifact to every claim). Boot per the W9 recipe, port
+8877, WMI-detached, main HEAD `7ac8edc` content = code-identical to `3826525`
+(tracker-only commits between); gates before anything: typecheck clean,
+**1118/271/0**. Profile refresh SKIPPED per the cheap-check rule: served copy
+verified md5-identical to the repo `lib`/`client` build AND carrying the W19 +
+presence markers (`structuredPresentationMeta` ×2, `dispatchApprovalSeamFor`
+×3, `request_access` ×2; client `applySessionMirror` ×3, `data-card-kind` ×2,
+`needs-you` ×14, `roster.section` ×10). Kill timers armed at launch (30-min
+internal ×2 boots, 45-min WMI backstop, 20-min driver wrappers, 18-min driver
+self-exits); driver-1's window closed mid-run → cmd/ archived BEFORE driver-2
+(whence zero artifacts lost, unlike B-4). Teardown clean: driver closed first
+("driver-closed"), all lane pids gone, port 8877 NO LISTENING line, zero
+chrome, profile document left clean (revision 3, all roster keys null), stock
+`web` profile byte-identical (md5 AND mtimes).
+
+Per-ticket one-line verdicts (details + artifacts in each ticket's dated
+comment; NO AC box ticked anywhere — the sweep owns boxes):
+- **27 presence:** snapshot v2 semantics, dots (needs-you/unavailable/idle),
+  landed marker, derived activity lines, and fail-closed stale degradation
+  LIVE-VERIFIED; running ring NOT-CAPTURED (poll gap — worker ran ~10–15 s
+  between polls); blocked marker NOT-TRIGGERED (nothing blocked naturally).
+- **28 sections:** Needs-you + Finished LIVE-VERIFIED with real population
+  incl. across the restart (needs-you ×2 → ×3, landed rows stay visible,
+  delivered row collapses to `已完成 | 1 个已完成`); Active NOT-CAPTURED
+  (same poll gap); collision precedence unobserved (offline pins stand).
+- **29 streaming:** firehose LIVE-VERIFIED — check_workers row renders
+  `request_access: credential`, the resolver's phrase for the one REAL
+  `request_access` tool/call (made live in tonight's B-4 lane on this
+  session, persisted in the transcript, rendered live now; provenance =
+  `session-B4/probes/w21-worker-2dbc148e-turnoutline.json` +
+  `session-C/driver/w13-23-cwrows.json.out.json`); the null-omission path
+  also live-confirmed on tonight's own fresh check. No polish item open.
+- **31 restart honesty:** LIVE-VERIFIED across a real SIGKILL + reboot +
+  re-activation — stale mirror degrades honestly pre-activation; first
+  post-activation snapshot carries all restored rows (rebuild-before-publish
+  live); one-time wake narrates honestly; no invented rows/notice. Nuance
+  recorded: markers carry no delivered bit → rebuilt panel says "not
+  delivered yet" for a pre-restart-delivered result until the wake
+  reconciles (obligation-truth, design-flagged, not fixed).
+- **FINDING 5 (read-only):** cf5249cf's persisted open turn
+  (`openTurnStartSeq: 415`, `lastStepBoundary {kind:start, seq:427}`,
+  `lastTurn: 18`, parked pending call) SURVIVED both of tonight's boots —
+  verified offline, session never activated, never sent to. The lane ran on
+  session-cd03250b (`openTurn: None`), which worked end-to-end again.
+- **Bonus evidence:** 81's worker-dispatch card rendered again from
+  tonight's own settled spawn (`gating="ungated"`); 58's durable
+  `redriveAttempts: 2` persisted across boots.
+
+**Agent rulings recorded tonight (each a dated comment on its ticket,
+explicitly SUBJECT TO HUMAN REVERSAL per the Q1 precedent):**
+1. Ticket 27 — delivered/landed semantics under ADR-0018's first-visible-ack:
+   keep the shipped `delivered` flag, re-glossed as "result has become
+   user-visible at least once"; landed = settled + not yet visible (flag-flip
+   and first-visibility coincide on the shipped deliver path; grounded in
+   tonight's rebuild/redrive observations).
+2. Ticket 27 — presence markers stay pull-only honest state markers; a
+   reference-style UNSEEN-attention badge is technically reachable in the
+   wrapper but needs new client state (per-session seen watermarks) = new
+   scope, own ticket; not decidable as a rationale alone.
+3. Ticket 28 — Needs-you STANDS as the attention surface (canonical record of
+   ADR-0010 context (a)): no push seam exists so native push-imitation would
+   be simulated push (forbidden by shipped honesty pins + U-A); the stand-in
+   is now wrapper-native (the shell needs-you counter IS the attention
+   marker), not a capsule-era placeholder. Reverses cleanly if the human
+   wants the unseen-badge scope.
+
+The ADR-0010 text itself was NOT edited (per brief); its "re-opened, not
+re-decided" rationales are now decided at agent level pending human
+reversal/review. Task budget: 1/3 sends, recorded pre-send
+(`session-C/task-budget-w13.txt`).

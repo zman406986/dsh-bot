@@ -92,3 +92,47 @@ model (ADR-0009, premise retracted and voided by ADR-0018's no-mode ruling) — 
 always-on session start/boot instead, and ticket 57 already moved restart recovery to a
 turn-opening wake. design-17's conditional ADR-0012 flag is moot in its old form. Status stays
 open (the live-verification debt is unchanged), re-scoped.
+
+### 2026-09-20 — live pass 5, Session C (W13): restart honesty LIVE-VERIFIED across a real host kill + reboot + re-activation (rebuild-before-publish, honest stale/degraded states, one-time honest wake); one recorded nuance (markers carry no delivered bit)
+
+Evidence root: `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-20\session-C\`
+(README maps artifacts to claims). Zero additional composer sends — the
+restart leg reused the flow's settled roster; the post-restart wake turn was
+the plugin's own shipped activation behavior, not a budgeted task.
+
+**Observed live, in order (`driver/w13-29…34`, screenshots):**
+1. **Host SIGKILL mid-roster** (`taskkill //F //T` on dsh pid; roster had 3
+   terminal rows) → reboot on a fresh token.
+2. **Pre-activation honesty:** the stale per-session mirror key SURVIVED the
+   ungraceful kill, so the sidebar row still claims `data-dispatcher="true"`
+   — but presence renders `状态不可用` (stale-at-view-time degrade, the
+   shared 60 s window, no heartbeat to fake freshness). No notice text
+   anywhere, no invented rows (`w13-30`).
+3. **Re-activation (`/dispatcher-start` RPC, kind success):** the FIRST
+   post-activation snapshot (revision 2) already carried ALL THREE restored
+   terminal rows — the rebuild-before-publish ordering held live
+   (`w13-33-postreact`). Panel/sections claim exactly what durability knows:
+   `completed` + landed chip `结果已就绪，尚未送达`, needs-you section ×3
+   with activity lines.
+4. **One-time wake honesty:** a single activation wake turn narrated the
+   restored state honestly — "All three are accounted for and reported, and
+   nothing is running" — and the redrive turns afterward said "(nothing new —
+   all three already reported)". No unknown-state fabrication (no invented
+   ids, no "state is unknown" copy — correctly absent: nothing was
+   unknown-state).
+5. **Rebuild honesty nuance (recorded, not a defect verdict):** durable
+   markers carry NO delivered field
+   (`probes/w13-markers-after-rebuild.json`: `delivered` absent on every
+   row), so the rebuilt panel claims "not delivered yet" for a result
+   (ddf56ee3) that WAS delivered pre-restart; the obligation layer's own wake
+   corrects it conversationally. The surface shows exactly what the
+   obligation layer owes — coherent with ticket 58's model; if a
+   marker-level delivered bit is ever wanted it is a durable-marker field
+   addition (design-17 conflict-8 stop-and-raise), recorded for design, NOT
+   fixed here.
+6. **Bonus (ticket 58 cross-proof):** `redriveAttempts: 2` on the restored
+   markers persisted across boots — the persisted attempt bound is real.
+
+No AC box ticked (sweep's job). FINDING 5 cross-proof: the cf5249cf persisted
+open turn survived BOTH of tonight's boots read-only
+(`probes/w13-cf5249cf-turnboundary.json`).

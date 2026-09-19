@@ -112,3 +112,46 @@ was plugin-UI (superseded vehicle); activity presentation re-hosts in the wrappe
 non-goals are now codified by ADR-0018: no timeline housekeeping cards = exception U-C;
 results-as-dispatcher-speech / text-only delivery = U-E; no worker-transcript streaming remains
 plain imitation (the reference streams none). Status stays open, re-scoped.
+
+### 2026-09-20 — live pass 5, Session C (W13): the `session/event` → `recentActivity` → `check_workers` firehose is LIVE-VERIFIED (phrase on a real check row, with provenance); no polish item remains open
+
+Evidence root: `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-20\session-C\`
+(README maps artifacts to claims). One trivial task (1 of 3 budget).
+
+**The firehose AC ("`recent_activity` text arrives on `check_workers` rows
+from a real `session/event`/`tool/call`") is confirmed live:**
+- A check_workers toolview row in the live page renders the phrase
+  **`request_access: credential`** — the resolver's exact output shape
+  (tool name + first-string-argument hint, whitespace-collapsed) for the ONE
+  real `request_access` call worker 2dbc148e ever made. Provenance: that call
+  happened LIVE tonight during the B-4 lane on this same session
+  (`../session-B4/probes/w21-worker-2dbc148e-turnoutline.json` — the offline
+  turn outline proves the real `tool/call`); the phrase rode the resolver
+  into that live check row, was persisted in the session transcript, and
+  re-renders in tonight's live page (`driver/w13-23-cwrows.json.out.json` —
+  row HTML: `data-status="spawned"` + field value `request_access:
+  credential`). This is resolver-fed text on a live check row, not fixture
+  data.
+- Tonight's OWN flow exercised the same path end-to-end: the dispatcher's
+  live check_workers on the fresh worker (ddf56ee3) ran BEFORE the worker's
+  first tool call, and the row honestly OMITTED the activity line (null →
+  omitted per the shipped contract — `driver/w13-23`, second row). The
+  null-path is therefore also live-confirmed, not just the happy path.
+- The panel keeps ticket 27's derived activity lines; live text remains a
+  check-rows surface only — the recorded no-schema-bump decision held live
+  (`w13-17`: workers carry `recentActivity: null` after settle — cleared on
+  settlement, as designed).
+
+**Polish items:** none remain open on this ticket — every box is ticked
+in-ticket; the conditional "if no seam" branch was never triggered (seam
+verified 2026-09-17). The 2026-09-17 residual ("first live integration should
+confirm the firehose end-to-end and note actual child-session ids appear as
+expected") is satisfied: child-session worker ids (2dbc148e…, ddf56ee3…)
+appear verbatim on the check rows. No AC box ticked here (sweep's job).
+
+One honest boundary: tonight's lane did not produce a NEW
+mid-run-activity-text event (the fresh worker was checked before its first
+tool call and settled ~10–15 s later); the positive live text is the B-4-run
+phrase rendered live. If the sweep wants a fresh positive capture, a future
+lane should instruct the worker to make two tool calls and check AFTER the
+first (poll cadence ≤2 s during the spawn window).

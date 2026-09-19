@@ -94,3 +94,70 @@ into a surface the wrapper supersedes. Disposition (nothing deleted):
   imitation standard (reference glanceable presence), not to this ticket's capsule-era compromises.
 
 Status stays open, re-scoped: re-host presence in the wrapper and verify against the reference bar.
+
+### 2026-09-20 — live pass 5, Session C (W13): snapshot v2 semantics, landed marker, activity lines, dots LIVE-VERIFIED on the wrapper sidebar; running ring NOT-CAPTURED (poll gap); blocked NOT-TRIGGERED; the two re-opened ADR-0010 rationale questions decided as agent rulings (subject to human reversal)
+
+Evidence root: `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-20\session-C\`
+(README maps every artifact to every claim below; per-command `.json` →
+`.out.json` pairs in `session-C/driver/`, screenshots in `session-C/shots/`,
+offline host-state reads in `session-C/probes/`). One trivial task (1 of 3
+budget, recorded pre-send). No AC box ticked (sweep's job).
+
+**Live (with one spawn running/settled on a clean session):**
+- **Snapshot v2 semantics LIVE:** rebuilt + live rows carry `blocked: null`,
+  `delivered` (flips false→true on delivery), `startedAtMs`/`toolCallCount`
+  feeding the derived activity lines (`completed · 41m 37s · 0 次工具调用`
+  matches the worker's real `startedAtMs` ≈ 41.6 min earlier) —
+  `driver/w13-10`, `w13-17`, `w13-33`.
+- **Dots LIVE:** needs-you dot (amber) on the dispatcher row, grey
+  unavailable/idle dots elsewhere (`data-presence` state tokens) —
+  `shots/w13-shot-sections-after-delivery.png`. **Animated running ring on a
+  working row NOT-CAPTURED:** the worker ran ~10–15 s between two polls; no
+  poll landed mid-run. Offline-pinned only — NOT claimed live.
+- **Landed marker LIVE:** `结果已就绪，尚未送达` ("Result ready — not
+  delivered yet") on all restored landed rows, incl. after restart.
+- **Activity lines LIVE:** derived `{status} · {elapsed} · {n} tool calls`
+  lines on Needs-you rows (ticket 29's live text reaches check rows, not the
+  panel — unchanged division).
+- **Blocked marker NOT-TRIGGERED:** nothing blocked naturally tonight; not
+  forced (per brief). Remains live-unverified.
+- **Fail-closed degradation LIVE (stale leg):** after the 60 s no-heartbeat
+  window the seat panel degrades to `工作者状态暂时不可用`; after a host
+  SIGKILL the surviving stale mirror key keeps the row's dispatcher flag but
+  presence renders `状态不可用` at view time — never a wrong roster
+  (`w13-09`, `w13-24`, `w13-30`).
+
+**AGENT RULING 1 of 2 (rationale re-opened by ADR-0010 context (b);
+decided 2026-09-20 by the overnight Session C executor, SUBJECT TO HUMAN
+REVERSAL per the Q1 pattern): `delivered`/landed-marker semantics under
+ADR-0018's first-visible-ack = keep the shipped flag, re-glossed.**
+`delivered:true` in presence means "the result has become user-visible at
+least once"; landed = settled + not yet user-visible. Grounds: (1) in the
+wrapper the ONLY path by which a result becomes visible is the deliver path
+that flips the flag (`src/core/tools.ts` deliver → `deliverToUser` success →
+`markDelivered`), so flag-flip and first-visibility coincide on the shipped
+surface — no schema change, no new core state (conflict-8 respected); (2) the
+landed set IS the delivery-obligation set (ticket 58's redrive population), so
+presence and the obligation layer stay one truth; (3) live anchor: rebuilt
+rows carry `delivered:false` from durability and the redrive wake narrates
+honestly ("already delivered") — the flag projects obligation truth, which
+under first-visible-ack IS the correct "not yet visible" signal. Recorded
+live caveat: durable markers carry NO delivered bit
+(`session-C/probes/w13-markers-after-rebuild.json`), so across a restart the
+panel says "not delivered yet" for results delivered pre-restart until the
+next wake reconciles — accepted tonight as honest obligation-truth; if the
+human ever wants marker-level delivery bits, that is a durable-marker field
+addition (design-17 conflict-8 stop-and-raise), not a client fix.
+
+**AGENT RULING 2 of 2 (attention markers, as this ticket's presence surface
+bears on ADR-0010 context (a); decided 2026-09-20, SUBJECT TO HUMAN
+REVERSAL): the wrapper presence markers (dots, blocked chip, landed chip,
+waiting chips) stay pull-only honest state markers — no simulated push.** The
+canonical Needs-you ruling is recorded on ticket 28 (its re-scope owns the
+question); this ticket's consequence: the presence chips/markers keep
+presenting current core truth at glance value. A native UNSEEN-attention
+marker (reference-style badges that persist until looked at) is technically
+reachable in the wrapper (the mirror feed updates a live-open page) but
+requires NEW client state (per-session seen watermarks) — that is new scope
+needing its own ticket, not a rationale re-decree; recorded here so the sweep
+sees it was considered, not missed.

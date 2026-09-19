@@ -68,3 +68,56 @@ the wrapper's running-tasks surface; the shell.overlay panel delivery is voided 
 vehicle. One rationale is explicitly re-opened: "Needs-you as the pull-only stand-in for push
 attention" was a capsule-era constraint. The wrapper owns the whole UI, so the reference's
 attention markers can be imitated natively instead of stood in for. Status stays open, re-scoped.
+
+### 2026-09-20 — live pass 5, Session C (W13): Needs-you + Finished sections LIVE-VERIFIED with real population (incl. across a host restart); Active NOT-CAPTURED (poll gap); the re-opened Needs-you stand-in question decided as an agent ruling (subject to human reversal)
+
+Evidence root: `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-20\session-C\`
+(README maps artifacts to claims). One trivial task (1 of 3 budget, recorded
+pre-send). No AC box ticked (sweep's job).
+
+**Live:**
+- **Needs-you section LIVE-VERIFIED with real, unforced population:** the
+  activation's durability rebuild restored two settled workers as
+  landed-undelivered rows → `需要你处理` section rendered both with the
+  landed chip `结果已就绪，尚未送达` + activity lines; the sidebar row
+  counter showed `2 个需要你`. After a host kill + reboot + re-activation,
+  the same section rebuilt with THREE rows (`3 个需要你`) — the partition is
+  stable across restart because it consumes the same v2 snapshot
+  (`driver/w13-17`, `w13-33-postreact`, `w13-34-rowfinal`,
+  `shots/w13-shot-post-restart-needsyou.png`).
+- **Finished section LIVE-VERIFIED:** tonight's own worker (completed +
+  delivered:true) collapsed to `已完成 | 1 个已完成` — count line = delivered
+  terminal rows only, landed rows stayed visible in Needs-you (the S6
+  pull-surface property held live).
+- **Precedence LIVE:** blocked > landed never collided tonight (nothing
+  blocked; `blocked: null` throughout) — offline pins remain the only
+  evidence for the collision case.
+- **Active section NOT-CAPTURED live:** the worker ran ~10–15 s between two
+  polls; no poll landed mid-run. Offline-pinned only — NOT claimed live.
+- **Stand-in behavior LIVE per the ruling below:** Needs-you collected
+  waiting-on-you rows, glanceable at the sidebar and panel; nothing
+  interrupted, nothing simulated push.
+
+**AGENT RULING (the rationale explicitly re-opened by this ticket's 2026-09-19
+re-scope and ADR-0010's context (a); decided 2026-09-20 by the overnight
+Session C executor, SUBJECT TO HUMAN REVERSAL per the Q1 pattern):
+Needs-you STANDS as the attention surface; the reference's push attention
+markers are NOT imitated, and the stand-in is now a wrapper-native surface
+rather than a capsule-era compromise.** Grounds: (1) dsh still exposes no
+push seam to the plugin — the roster reaches the client only through the
+settings-document mirror (`src/client/shell-mirror-feed.ts`), so any
+"appears the moment work needs you" interrupt would be simulated push, which
+the shipped honesty pins forbid (ticket 79's no-simulated-push test; ADR-0018
+U-A family); (2) what the wrapper DID remove is the capsule-era excuse: the
+needs-you counter/chips now live natively in the wrapper shell
+(`src/client/shell-store.ts` — "the needs-you counter IS the attention
+marker"), updating live on an open page via the mirror feed — the stand-in is
+now the native form of the pull-only marker, not a placeholder for one;
+(3) tonight's live pass shows the stand-in doing exactly the reference's job
+at the moment the user looks: three landed results sat in Needs-you across a
+restart until accounted for. A true UNSEEN-attention badge (persists until
+looked at) is reachable later but needs NEW client state (per-session seen
+watermarks) — new scope, own ticket; recorded on ticket 27 as well. If the
+human rules otherwise (e.g. wants the unseen-badge scope), this ruling
+reverses cleanly: the partition function does not change, only the marker
+persistence semantics above it.
