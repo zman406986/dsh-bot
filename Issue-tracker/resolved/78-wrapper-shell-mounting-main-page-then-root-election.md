@@ -1,6 +1,6 @@
 # 78 — Wrapper shell mounting: `main`-page registration, then the root-frame election (ADR-0020 slice 2)
 
-**Status:** open
+**Status:** resolved
 **Labels:** needs-triage
 **Blocked by:** 77 (the shell skeleton)
 **Related:** ADR-0020 (staging: `main` page first, `root` election last), `dsh-capsule-seams.md` Seam 4 (`ctx.layout.selectPanel`), 45/33 (live lane)
@@ -252,3 +252,51 @@ re-points the lane reference so it outlives the moved files.
 ### 2026-09-19 — one-line note
 
 88 landed (d242d18) — ready for live re-confirm.
+
+### 2026-09-19 — live pass 5, Session A: frame swap + full re-apply on reload + seats in the elected frame CONFIRMED; the three unexercisable clauses recorded NOT RUN — ticket RESOLVED
+
+Evidence root: `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-19\evidence\A\`; screenshots
+under `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-19\shots\` (A1–A4 files). Real host boot
+(`@deepseek-ai/dsh@0.1.5-rc.1`, throwaway `multitask` profile, port 8877), Playwright headless
+chromium, **zero LLM turns**, zero pageerror/console-error throughout (every `status-after-*`
+tally is `log: []`), clean teardown (`teardown-port-and-pids.txt`: no LISTENING line, all five
+pids gone; stock `web` profile byte-identical — `web-profile-before.md5` / `web-profile-after.md5`).
+
+**Live-lane clauses — ticked (this is live evidence, not the offline lane the constraint barred):**
+
+- [x] **Frame swap visually confirmed.** `78-03-frame.json.out.json` →
+  `{"shell":1,"rootCount":1,"rootChildClass":"multitask-dispatcher-shell",
+  "rootChildIsShell":true,"stock":0,"chips":0,"failLoud":false}` — the elected `root` single
+  slot renders OUR frame; the shipped frame is absent (`stock: 0`), no chips, no fail-loud
+  screen; `status-after-78-boot.json` → `log: []`. Shot `shots/A1-01-frame.png`.
+- [x] **Full re-apply on reload confirmed** (honestly labelled: a full page re-apply, NOT a
+  UI unload — no settings-unload affordance exists; the frame displaces the shipped settings
+  UI). `78-05-reload.json.in` → `78-06-after-reload.json.out.json` reproduces the frame probe
+  identically; the pass-3 fail-loud text (`single slot "root" already has a registration…`)
+  does not appear in any Session A evidence file, `failLoud:false`; `status-after-78-reload.json`
+  → `log: []`.
+- [x] **Seats in the elected frame confirmed.** Onboarding seat: `A3-03-probe-beat1.json.out.json`
+  (`data-onboarding="beats"`, beat `intro`, `第 1 步`) through `A3-08-probe-settled.json.out.json`
+  (settled), rendered with `rootChildIsShell:true` throughout (68's AC5 walk, same session).
+  Roster sidebar: `88-01c-rows.json.out.json` (7 session rows). Conversation seat:
+  `88-04-seat.json.out.json` (`conv=1, selectedRows=1, rootChildIsShell=true, stock=0`) after
+  clicking the seeded non-empty row `Interastral-Peace-Casino` — ticket 88's live re-confirm.
+
+**Live-lane clauses — NOT RUN, recorded with the reason (not claimed as passing):**
+
+- [ ] `ctx.layout.selectPanel` / `main`-page harmlessness — **NOT RUN**: no driver-reachable
+  seam to call `selectPanel` (same finding as pass 4), and post-cutover the only shipped caller
+  was retired with the launcher and then deleted (ticket 89; `src/client/index.ts:437`), so
+  nothing in the shipped composition invokes it. The registration contract that could be harmed
+  is offline-pinned; the live clause is moot for the shipped tree.
+- [ ] Fallback-on-crash — **NOT RUN this pass**: not re-inducible now that 88 is fixed (no real
+  crash to induce; a synthetic render crash has no non-destructive driver seam). Already proven
+  by a REAL crash in pass 4 (88's conversation-seat crash → the per-entry boundary abdicated our
+  entry → the stock frame retook the cell; pass-4 `shots/02-abdicated-stock-frame.png`).
+- [ ] Live unload/HMR reversal — **NOT RUN**: no settings-unload affordance exists (the frame
+  displaces the shipped settings UI), so the only exercisable path is the full reload above,
+  which passed; teardown reversal stays offline-pinned.
+
+**Disposition:** every clause is now ticked or moot-disposed with the structural reason — the
+ticket moves to `Issue-tracker/resolved/` with `**Status:** resolved`. Nothing remains
+exercisable on its live lane.
