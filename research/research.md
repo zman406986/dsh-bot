@@ -19,7 +19,7 @@ Short, descriptive kebab-case concept name, matching the `.out-of-scope/` conven
 These notes are **decision inputs**, not working state. They sit under `docs/` alongside `docs/adr/` for two reasons:
 
 - The dsh host facts are **project-wide** — the PRD's §11 integration checklist and §15 item 2 feed M1 through M4, not one feature. In `.scratch/` they'd be disposed of and re-researched per milestone.
-- ADRs cite them. `docs/adr/0001-choose-go-for-core.md` should be able to point at `docs/research/<slug>.md` as its evidence base.
+- ADRs cite them. `docs/adr/0001-typescript-in-process-multitask-core.md` points at `docs/research/dsh-extension-surface.md` as its evidence base.
 
 `.scratch/` is for the disposable chain (spec → tickets → implementation) and is swept per feature. Research is not swept.
 
