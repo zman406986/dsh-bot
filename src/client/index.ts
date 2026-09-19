@@ -217,6 +217,29 @@ export function apply(ctx: ClientContext): void {
 }
 
 /**
+ * What the composition built, handed back so offline tests can drive the
+ * REAL wiring instead of reconstructing it by hand (ticket 69, L1 offline
+ * composition pin). Two facts, both live references:
+ *
+ * - `approvalsFeed` — the ONE relay feed the settings watch feeds and every
+ *   mount attaches to (the shared hub).
+ * - `mounts` — every `mountShellPage` result the slot injects created, in
+ *   registration order (`main` page first, then the `root` frame). The
+ *   array is the SAME array the injects push into, so it also collects
+ *   mounts that arrive AFTER this call returns: on the real host the slot
+ *   declaration may appear later than the inject, and the callback form's
+ *   controller then runs whenever the declaration lands. Offline fakes run
+ *   the callback synchronously, so the list is complete at return there.
+ *
+ * Additive only: `apply` ignores the return, and the mounted stores were
+ * previously reachable only through the React component closure.
+ */
+export interface ClientModuleComposition {
+  readonly approvalsFeed: ApprovalRelayFeed;
+  readonly mounts: readonly ShellPageMount[];
+}
+
+/**
  * The module body, factored over explicit stores so offline tests can drive
  * the data path end to end (watch payload → store → view model) without a
  * DOM harness. Not a second entry point: `apply` is the only thing the
@@ -225,13 +248,17 @@ export function apply(ctx: ClientContext): void {
  * starts a fresh fiber at beat one. (The capsule-era store parameters were
  * deleted with the capsule — ticket 89; older callers passing them would
  * now misalign, and `apply` is the only production caller.)
+ *
+ * Returns the {@link ClientModuleComposition} (ticket 69, L1): the feed and
+ * every mount, so the composition itself — not a hand-rebuilt copy of it —
+ * can be driven offline.
  */
 export function applyClientModule(
   ctx: ClientContext,
   store: RosterStore,
   card: SettingsCardStore = createSettingsCardStore(),
   onboarding: OnboardingStore = createOnboardingStore(),
-): void {
+): ClientModuleComposition {
   // Locale namespace (Finding 6 idiom): labeled effect; executes immediately,
   // the returned disposer is collected for unload.
   ctx.effect(
@@ -273,6 +300,8 @@ export function applyClientModule(
   // panel owns corruption/staleness presentation, and this feed never
   // fabricates a "nothing waiting" from a document it cannot vouch for.
   const approvalFeed = createApprovalRelayFeed();
+  /** Ticket 69 (L1): every mount this composition creates, in order. */
+  const mounts: ShellPageMount[] = [];
   let seenScope: ClientSettingsScopeLike | null = null;
   ctx.effect(() => {
     let disposeWatch: (() => void) | undefined;
@@ -424,6 +453,7 @@ export function applyClientModule(
       onSeen: writeOnboardingSeen,
       approvalsFeed: approvalFeed,
     });
+    mounts.push(mount);
     return ctx.slots.register(
       shellPageRegistration(),
       createDispatcherShell(t, mount.store, mount.hosts),
@@ -470,11 +500,14 @@ export function applyClientModule(
       onSeen: writeOnboardingSeen,
       approvalsFeed: approvalFeed,
     });
+    mounts.push(mount);
     return ctx.slots.register(
       shellRootRegistration(),
       createDispatcherShell(t, mount.store, mount.hosts),
     );
   });
+
+  return { approvalsFeed: approvalFeed, mounts };
 }
 
 /**

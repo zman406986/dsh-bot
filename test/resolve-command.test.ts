@@ -350,6 +350,7 @@ describe("integration: command answer reaches the real relay (FakeDshHost)", () 
     assert.equal(multitask.listPendingAccess("session-1").length, 1);
 
     let commandResult: CommandResultLike | undefined;
+    let command: ReturnType<typeof createDispatcherResolveCommand>;
     {
       const options: RegisterDispatcherResolveCommandOptions = {
         ctx: {} as never,
@@ -372,7 +373,7 @@ describe("integration: command answer reaches the real relay (FakeDshHost)", () 
         },
         isWildcardTarget: isWildcardAccessTarget,
       };
-      const command = createDispatcherResolveCommand(options);
+      command = createDispatcherResolveCommand(options);
       commandResult = command.handler({
         agent: { session: { id: "session-1" } },
         rawInput: `${spawn.workerId} allow`,
@@ -389,7 +390,20 @@ describe("integration: command answer reaches the real relay (FakeDshHost)", () 
     // The session-scope row was remembered for THIS session's future asks.
     assert.equal(multitask.accessPolicy.list().length, 0, "plain allow writes no row");
 
-    // Answering again after settle is honestly refused (ticket gone).
+    // Answering again after settle is honestly refused (ticket gone): the
+    // command still exists, the ask does not — the no-pending-ask refusal,
+    // never a fabricated second success.
+    const again = command.handler({
+      agent: { session: { id: "session-1" } },
+      rawInput: `${spawn.workerId} allow`,
+    } as never) as CommandResultLike;
+    assert.deepEqual(again, {
+      kind: "error",
+      text: dispatcherResolveNoPendingAsk(spawn.workerId),
+    });
+
+    // A fresh ask parks and settles directly, so nothing is left pending (and
+    // the relay's armed timeout is cleared) when the test ends.
     host.fireAccessRequest({
       kind: "access-request",
       workerId: spawn.workerId,
