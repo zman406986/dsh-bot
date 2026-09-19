@@ -29,13 +29,21 @@
       live lane. Worker-dispatch cards render presentation-time from the
       conversation's spawn records (replay-safe; C15 holds). Gates:
       typecheck clean; `npm test` 1056/0; build:client ok; tests in
-      `test/approval-cards.test.ts` + `test/client-approval-pane.test.ts`.)
+      `test/approval-cards.test.ts` + `test/client-approval-pane.test.ts`. **Live confirm
+      2026-09-20 (W14):** the secret-ask card + resolve round-trip LIVE-VERIFIED (Session B-5 —
+      ticket 69's L1, ticked there this date); the worker-dispatch card LIVE-VERIFIED from a
+      settled spawn (`[data-card-kind="worker-dispatch"]`, `gating="ungated"`; Session B-4
+      `w21-42-pollA`/`w21-44-final`, `shots/w21-shot-final-dispatch-card.png` — FINDING 2 fix
+      confirmed; re-rendered in Session C).)
 - [x] While a card waits, the session's sidebar row shows the blocked marker with reason
       (closes the approval→presence loop, area 6).
       (Shipped by ticket 79's session-granularity presence — the blocked chip
       rides the roster mirror's structured ask (class+target) with the
       design-17 §4.1 precedence; offline-pinned in the 79/77 tests. Live
-      confirmation with a real pending card belongs to 69's L2.)
+      confirmation with a real pending card belongs to 69's L2. **Live confirm
+      2026-09-20 (W14): 69 L2 LIVE-VERIFIED (Session B-5, `w23-09`) — the
+      blocked-with-reason marker rendered on the row while the secret-ask card
+      waited.)**
 - [x] Capsule retirement: remove the `shell.overlay` chip/panel entry and its routes once the
       frame election has shipped; the stores/sections live on inside the wrapper (they are
       re-host inventory, not deleted). Toolview slot entries retire with the host chat —
@@ -49,13 +57,18 @@
       conversation pane renders tool rows from the window, incl. the
       worker-dispatch cards) — their retirement rides the same 65/66/73
       disposition. Nothing left to do in this ticket's rendering scope.)
-- [ ] Settings card (ticket 47) re-homes into the wrapper's own settings surface or stays a
+- [x] Settings card (ticket 47) re-homes into the wrapper's own settings surface or stays a
       shipped-settings entry — decide with evidence once the frame displaces the settings UI.
       (2026-09-19: not this pass — the frame now displaces the settings UI at
       cutover, so the decision is live: the shipped settings page is
       displaced by our root frame, and ticket 47's card currently renders
       only inside the displaced surface. Ready for a live-lane/human call;
-      note ticket 46's watch already feeds our own stores.)
+      note ticket 46's watch already feeds our own stores.
+      **TICKED 2026-09-20 (W14): decided — STAYS a shipped-settings entry**, per the 2026-09-20
+      agent ruling recorded below (W11 lane; subject to human reversal; the store is already
+      wrapper-side so a human-directed re-home stays cheap). Evidence for the displaced-UI
+      precondition: pass-4 + the Session B-2 boot. The ruling comment left this tick to the W14
+      sweep; the ruling itself is untouched, and the ticket's disposition is W17's.)
 
 ## Constraints
 
@@ -246,3 +259,22 @@ select the dispatcher row; the settled `spawn_worker` row must now carry a `[dat
 This rides the SAME rebuild the FINDING-1 contract fix rides: rebuild + profile remove/re-add
 before boot (stale-profile trap), then the card should render with zero extra LLM cost beyond
 the one trivial spawn.
+
+### 2026-09-20 — W14 post-live bookkeeping: checkbox 4 ticked (decision recorded); live-confirm annotations added to checkboxes 1–2; no ticket disposition made here
+
+- **Checkbox 4 → ticked.** The box asked for a decision with evidence once the frame displaces the
+  settings UI; the decision exists (2026-09-20 agent ruling above, recorded during the W11 lane):
+  the settings card STAYS a shipped-settings entry, subject to human reversal. The ruling comment
+  left the tick to this sweep; the ruling itself is untouched.
+- **Checkboxes 1–2 → live-confirm annotations added** (no new claims): the access-ask/secret-ask
+  card render + resolve round-trip and the blocked-with-reason marker were LIVE-VERIFIED in
+  Session B-5 (ticket 69's L1/L2, ticked there this date); the worker-dispatch card was
+  LIVE-VERIFIED in Session B-4 (`w21-42-pollA`, `w21-44-final`,
+  `shots/w21-shot-final-dispatch-card.png`) after the W19 FINDING-2 fix (merge `f8067c3`), and
+  again in Session C. Evidence roots: `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-20\session-B4\`
+  and `...\session-B5\` (each README maps artifact → claim).
+- **`gated: true` / `approval-allowed` card anatomy remains live-unobserved** (needs the L3
+  posture lane — 69 L3 BLOCKED-no-seeder). Recorded so the sweep does not overclaim. Capsule
+  retirement (checkbox 3) stands MOOT-VERIFIED as recorded.
+
+No file moved; the close/disposition call is W17's.

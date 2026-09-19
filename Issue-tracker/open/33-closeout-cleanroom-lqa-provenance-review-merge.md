@@ -1102,3 +1102,35 @@ Task budget: 1/3 sends, recorded BEFORE typing (`session-B5/task-budget-w23.txt`
 appended); the two resolve attempts were command executions (zero LLM), not sends. No AC box on
 33, 69, 30, or 81 is ticked by this session; no ticket file moves — the W14/W17 sweep owns
 boxes and dispositions, with this record + the session-B5 README as the evidence map.
+
+### 2026-09-20 — W14 post-live box sweep recorded (overnight bookkeeping executor): ticks landed on 69 (L1, L2) + 81 (checkbox 4); the rest left for W17 with reasons recorded in-ticket
+
+Per-ticket sweep verdicts (details in each ticket's dated W14 comment; evidence = this file's
+pass-5 session records + each session README's artifact→claim map):
+
+- **27:** every implementation box already ticked; live evidence recorded (Session C, `ae9cf4c`).
+  Running ring NOT-CAPTURED + blocked marker NOT-TRIGGERED stay live-unverified (offline pins
+  only) — nothing further tickable; closability flag for W17: CLOSE-WITH-NUANCE.
+- **28:** boxes ticked; Needs-you + Finished LIVE-VERIFIED with real population incl. across the
+  restart (Session C); Active NOT-CAPTURED (poll gap); Needs-you stand-in ruled (agent, subject to
+  human reversal). Flag: CLOSE-WITH-NUANCE (blocked-by 27).
+- **29:** every actionable box ticked; the "if no seam" conditional box stays unticked per the
+  2026-09-19 closeout precedent (condition never triggered — ticking would claim an action never
+  performed); firehose LIVE-VERIFIED with provenance (Session C). Flag: CLOSE.
+- **30:** boxes ticked; card anatomy LIVE-OBSERVED in Session B-5 (option set incl. always-allow,
+  location line, secret-stored copy, names-never-values); clamp-cut + expired-copy NOT exercised
+  (recipes recorded in `session-B5/README.md`). Flag: CLOSE-WITH-NUANCE — its live-answer-surface
+  gating (69's L1) now passes live.
+- **31:** boxes ticked; restart honesty LIVE-VERIFIED across a real SIGKILL + reboot +
+  re-activation (Session C); one recorded nuance (markers carry no delivered bit). Flag: CLOSE.
+- **69:** L1 + L2 ticked (B-5); L3/L4 stay unticked (BLOCKED-no-seeder, B-3); Q1 stays
+  human-gated → ticket stays OPEN per the PLAN's own end-state regardless of live outcomes.
+- **81:** checkbox 4 ticked (settings-card decision recorded, agent ruling subject to human
+  reversal); live confirms annotated on 1–2; stays open per the PLAN (69/81 not closed by the
+  sweep).
+
+Separately this date: **96 and 97 closed** after an independent W14 verification pass — the
+PLAN's W3/W5 verifier comments were never landed on those tickets, so the closure comments record
+the fresh verification (lint green + idempotent, self-test 38/38, no-rule-lost check vs the
+pre-decomposition AGENTS.md text, guides/stub/ADR-prose/README verified on disk, offline gates
+re-run: typecheck clean, 1125/272/0). AC7's sweep itself (27–33 + 17 closures) remains W17's.
