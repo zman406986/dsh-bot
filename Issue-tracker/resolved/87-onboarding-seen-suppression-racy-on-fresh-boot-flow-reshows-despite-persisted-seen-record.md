@@ -55,10 +55,12 @@ failure is a SHOW (fail-open direction), nothing strands; but "seen" cannot be t
 
 - [x] (offline) a fake models the losing order and the fixed wiring passes; no AC requires
       a live LLM.
-- [ ] (live, ZERO LLM calls) on a real profile boot with `onboarding.seen: true` persisted,
+- [x] (live, ZERO LLM calls) on a real profile boot with `onboarding.seen: true` persisted,
       THREE consecutive fresh page loads all suppress the flow; deleting the record and
-      reloading shows it again (round-trip both directions). *(Unticked deliberately —
-      needs the next live pass; see the 2026-09-19 comment's residual-uncertainty note.)*
+      reloading shows it again (round-trip both directions). *(Ticked 2026-09-19 — live pass 5,
+      Session A: both halves ran and passed; see the closing comment. Shape note: the "delete"
+      was a set to `{seen:false}` — not-seen under the fail-open parse, the same observable as a
+      removed record; the literal `onboarding: null` clear was also exercised the same session.)*
 
 ## Notes
 
@@ -124,3 +126,35 @@ before the `settingsScope` service resolves) is narrower than the covered window
 observable offline; if the live pass still catches a beats flash at capture time, that
 ordering is the suspect. (3) The live AC above (three clean reloads + delete-round-trip)
 is the gate that stays open.
+
+### 2026-09-19 — live pass 5, Session A: live AC TICKED — three clean reloads + delete round-trip both ran and passed
+
+Evidence root: `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-19\evidence\A\`; shots under
+`C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-19\shots\`. Real host boot
+(`@deepseek-ai/dsh@0.1.5-rc.1`, throwaway `multitask` profile, port 8877), Playwright headless
+chromium, **zero LLM turns**, clean teardown (`teardown-port-and-pids.txt`: no LISTENING line,
+all five pids gone; stock `web` profile byte-identical — `web-profile-before.md5` /
+`web-profile-after.md5`).
+
+- **Three consecutive fresh loads — all suppressed.** `A4-01c-probe.json.out.json`,
+  `A4-02c-probe.json.out.json`, `A4-03c-probe.json.out.json` each read
+  `onboardingAttr:"settled"`, `beatAttrs:[]`, `hasStep1:false`, `hasSelectCopy:true`,
+  `saveFailed:0` — the pass-4 racy re-show did NOT reproduce. The status tallies bracketing the
+  A4 phase both read `log: []` (`status-after-A4-delete.json`, `status-final.json`).
+- **Delete round-trip — the show direction ran.** Replaying the exact host RPC with `onboarding`
+  set to `{seen:false}` (`A4-delete-set-false.json.in` / `.out.json`: HTTP 200, revision 4) and
+  reloading (`A4-10-reload-after-delete.json.in`) re-showed the flow:
+  `A4-11-probe-after-delete.json.out.json` → `data-onboarding="beats"`, `beatAttrs:["intro"]`,
+  `hasStep1:true`, primary `下一步`; shot `shots/A4-01-reshow-after-delete.png`. The record was
+  then restored to `{seen:true}` (`A4-14-restore-seen.json.out.json`, HTTP 200, revision 5;
+  `settings-after-A4.yaml` carries the restored record at teardown).
+- **Honest shape note on "delete":** the run used a set to `{seen:false}` — a shape the fail-open
+  parse rejects as not-seen, i.e. the same observable as a removed record. The literal clear
+  (`onboarding: null` via `settings/update`, revision 2, `A3-clear-seen.json.out.json`) was also
+  exercised earlier the same session and likewise re-showed the flow
+  (`A3-03-probe-beat1.json.out.json`).
+- The fix comment's residual-uncertainty notes stand as recorded and were not contradicted: no
+  beats flash was captured at any of the three reloads, and no stuck-`loading` pending state was
+  observed.
+
+The live AC box is ticked above; nothing else on this ticket was open.
