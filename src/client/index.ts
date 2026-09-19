@@ -26,19 +26,20 @@
  *    `ctx.settingsScope` service, where the host half mirrors the roster
  *    snapshot under the `roster` key (the documented config-channel fallback —
  *    no invented push channel);
- * 3. the dispatcher capsule entry (ticket 38, ADR-0013) into the shipped
- *    `shell.overlay` list slot: collapsed chip → expandable panel, one
- *    entry, unchanged id (tickets 39–42 add the activation row, the wired
- *    intents, the deliverables line, and the provenance footer);
+ * 3. ~~the dispatcher capsule entry~~ RETIRED at the ticket-78 cutover
+ *    (2026-09-19): the `shell.overlay` chip/panel registration stopped (the
+ *    capsule era ends; ADR-0020 supersedes ADR-0013's vehicle). Its stores,
+ *    copy, and component remain as re-host assets fed by the SAME watch —
+ *    dead-code disposition is the 65/66/73 lane's;
  * 4. the per-tool call views (ticket 24): keyed `tool.call.toolview` entries
  *    for the five dispatcher wire tool names — unclaimed keys, so additive-
  *    safe against the shipped composition (research Finding 5);
  * 5. the plugin's settings card (ticket 47): one keyed `settings.plugin.item`
  *    entry whose `key` is our settings namespace, so the shipped
  *    插件配置 tab pairs our card with the namespace the Host serves.
- * 6. the wrapper shell's STAGING launcher (ticket 78, ADR-0020): a second
- *    additive `shell.overlay` entry whose click opens the shell's `main`
- *    page through the verified `ctx.layout.selectPanel` verb;
+ * 6. ~~the staging launcher chip~~ RETIRED at the ticket-78 cutover
+ *    (2026-09-19) alongside the capsule: the `shell.overlay` chip and its
+ *    `layout` watch stopped with the frame election (item 10);
  * 7. the wrapper shell page itself (ticket 78, ADR-0020 staging): one keyed
  *    `main` entry under OUR key (the only shipped key is `conversation`),
  *    binding the shell store to the sessions feed and hosting the existing
@@ -74,12 +75,15 @@
  * `/dispatcher-start` verbatim; stop = the scope-addressed plain-prompt
  * sink with the locale-keyed conversational phrasing) and the per-row steer
  * prefill seat (`input.for(actx).setDraft`) are built here over lazy
- * service sources and closed into the capsule factory. The faces are read
- * lazily so their VALUES are fresh at send/click time; the services
- * themselves are DECLARED in the module inject (ticket 84 — an undeclared
- * property read throws on the real host wherever it happens), and a face
- * that is absent still degrades to honest `no-channel`/copy-fallback UX
- * via `src/client/actions.ts`.
+ * service sources. Since the ticket-78 cutover the composition's ONE
+ * transport + steer seat live in `mountShellPage` (the wrapper shell's
+ * conversation pane and hosted roster panel are their only consumers; the
+ * capsule factory no longer receives them — its registration is retired).
+ * The faces are read lazily so their VALUES are fresh at send/click time;
+ * the services themselves are DECLARED in the module inject (ticket 84 — an
+ * undeclared property read throws on the real host wherever it happens),
+ * and a face that is absent still degrades to honest
+ * `no-channel`/copy-fallback UX via `src/client/actions.ts`.
  */
 
 import type {
@@ -89,27 +93,17 @@ import type {
 import {
   LOCALE_NAMESPACE,
   localeDictionary,
-  SHELL_OVERLAY_SLOT,
-  rosterOverlayRegistration,
 } from "./overlay.js";
 import {
-  CAPSULE_STOP_MESSAGE_KEY,
-  activationOutcomeCopyKey,
   bindCommandTransport,
-  createCapsuleActionStatus,
-  sendActivationIntent,
   tryPrefillSteer,
   type SteerPrefillOutcome,
 } from "./actions.js";
-import {
-  createDispatcherCapsule
-} from "./capsule.js";
 import {
   createCapsuleFooterStore,
   createCapsuleStore,
   type CapsuleFooterStore,
   type CapsuleStore,
-  type OnActivationIntent,
 } from "./capsule-store.js";
 import { createRosterStore, type RosterStore } from "./roster-store.js";
 import { createToolviewComponent } from "./toolview-panel.js";
@@ -129,10 +123,6 @@ import { createRosterPanel } from "./panel.js";
 import {
   MAIN_PAGE_SLOT,
   ROOT_FRAME_SLOT,
-  SHELL_PAGE_KEY,
-  createShellLauncherLayout,
-  openShellPage,
-  shellLauncherRegistration,
   shellPageRegistration,
   shellRootRegistration,
   shellSeatHostsPanel,
@@ -140,7 +130,6 @@ import {
 } from "./shell-mount.js";
 import {
   createDispatcherShell,
-  createShellLauncher,
   type ShellHosts,
 } from "./shell.js";
 import {
@@ -317,59 +306,6 @@ export function applyClientModule(
     writeOnboardingSeenRecord(seenScope, () => onboarding.markSaveFailed());
   };
 
-  // Capsule overlay entry (ticket 38, ADR-0013; Finding 5 universal idiom):
-  // inject waits for the shipped `shell.overlay` declaration, then registers
-  // on OUR fiber — the entry never outlives the module. Still exactly ONE
-  // entry with the unchanged id `multitask-dispatcher-roster`; only the
-  // component changes (chip + expandable panel instead of the bare panel).
-  ctx.slots.inject(SHELL_OVERLAY_SLOT, () => {
-    const t = ctx.locale.bind(LOCALE_NAMESPACE);
-
-    // Ticket 40: bind the intents to the verified seams at composition
-    // time. The transport and the seats resolve the service faces lazily at
-    // send/click time; unavailability settles into honest degrade outcomes
-    // inside `actions.ts`, never into a crash or a fake success.
-    const transport = bindCommandTransport({
-      remote: () => ctx.remote,
-      sessions: () => ctx.sessions,
-    });
-    const actionStatus = createCapsuleActionStatus();
-    const currentSessionId = () => ctx.sessions?.list.getSnapshot().current;
-    const onActivationIntent: OnActivationIntent = (intent) => {
-      // Clear the previous notice at dispatch; a `sent` outcome stays
-      // silent (no fake success — the roster feed is the success truth).
-      actionStatus.set(null);
-      const seat = ctx.locale.bind(LOCALE_NAMESPACE);
-      void sendActivationIntent(
-        transport,
-        currentSessionId,
-        intent,
-        seat(CAPSULE_STOP_MESSAGE_KEY),
-      ).then((outcome) => actionStatus.set(activationOutcomeCopyKey(outcome)));
-    };
-    const onRowSteer = (workerId: string): SteerPrefillOutcome =>
-      tryPrefillSteer(
-        {
-          sessions: () => ctx.sessions,
-          conversation: () => ctx.conversation,
-        },
-        workerId,
-      );
-
-    ctx.slots.register(
-      rosterOverlayRegistration(),
-      createDispatcherCapsule(
-        t,
-        store,
-        capsule,
-        onActivationIntent,
-        actionStatus,
-        onRowSteer,
-        footer,
-      ),
-    );
-  });
-
   // Per-tool call views (ticket 24): one inject at the shipped keyed slot,
   // one entry per dispatcher wire tool name. Keys are the plugin-owned core
   // tool names (ticket 11) — unclaimed by the shipped composition, so each
@@ -416,38 +352,16 @@ export function applyClientModule(
   });
 
   // ── Wrapper shell STAGING mount (ticket 78, ADR-0020 slice 2) ──
-
-  // The launcher affordance: a SECOND additive `shell.overlay` list entry
-  // (own id — coexistence by unique id, never shadowing) whose click runs
-  // the page-open decision. Ticket 84 corrected the access contract: a bare
-  // `ctx.layout` property read THROWS on the real host, and `layout` is
-  // genuinely optional — the chip must reach its honest `no-layout` outcome
-  // when absent, while a hard inject would keep the whole module PENDING.
-  // So the face is watched through the runtime `ctx.inject` wrapper (the
-  // settings-watch idiom, ticket 46) into a cell the click reads; absence
-  // leaves the cell undefined and `openShellPage` degrades. A staging
-  // vehicle only — retired at the cutover together with the capsule.
-  const launcherLayout = createShellLauncherLayout(SHELL_PAGE_KEY);
-  ctx.effect(() => {
-    launcherLayout.setFace(undefined);
-    if (typeof ctx.inject !== "function") return () => {};
-    ctx.inject(["layout"], (child) => {
-      launcherLayout.setFace(child.layout);
-      // The wrapper fiber's disposer: when the layout service unloads (or
-      // the child reloads around a replacement), the cell drops the stale
-      // face instead of feeding the click a dead controller.
-      return () => launcherLayout.setFace(undefined);
-    });
-    return () => launcherLayout.setFace(undefined);
-  }, "multitask-dispatcher: shell launcher layout watch");
-
-  ctx.slots.inject(SHELL_OVERLAY_SLOT, () => {
-    const t = ctx.locale.bind(LOCALE_NAMESPACE);
-    return ctx.slots.register(
-      shellLauncherRegistration(),
-      createShellLauncher(t, () => launcherLayout.open()),
-    );
-  });
+  //
+  // Cutover note (ticket 78, 2026-09-19): the staging LAUNCHER — the second
+  // additive `shell.overlay` chip plus its `ctx.inject(["layout"])` watch —
+  // RETIRED with the frame election below (the vehicle that opened the page
+  // from the shipped app's floating layer; the page itself stays registered,
+  // dormant behind the frame election and self-restoring on abdication).
+  // Its pure contracts (`openShellPage`, `createShellLauncherLayout`,
+  // `shellLauncherRegistration`) remain exported in `shell-mount.ts` /
+  // `shell.tsx` as retired-vehicle assets; the component is `shell.tsx`'s
+  // `createShellLauncher`. Dead-code disposition is the 65/66/73 lane's.
 
   // The shell page: one keyed `main` entry under OUR key (the only shipped
   // key is `conversation` — unclaimed cells are ours by default; claiming a

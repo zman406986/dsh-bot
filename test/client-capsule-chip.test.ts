@@ -526,28 +526,28 @@ describe("capsule chip — registration identity: one entry, unchanged id", () =
     assert.equal(ROSTER_ENTRY_ID, "multitask-dispatcher-roster");
   });
 
-  it("apply still registers exactly ONE shell.overlay entry, now the capsule", () => {
+  it("apply registers NO shell.overlay entry — the capsule retired at the ticket-78 cutover", () => {
     const ctx = createChipCtx();
     apply(ctx);
+    // The cutover (2026-09-19) ends the capsule era: the registration
+    // STOPS. The chip's component, store, and copy stay as re-host assets
+    // (dead-code disposition is the 65/66/73 lane's) — only the additive
+    // entry is gone, superseded by the wrapper shell frame's `root`
+    // election (ADR-0020).
     const overlay = ctx.injects.find(
       (record) => record.parent === SHELL_OVERLAY_SLOT,
     );
-    assert.ok(overlay, "shell.overlay inject missing");
-    assert.equal(overlay.entries.length, 1, "exactly one overlay entry");
-    const entry = overlay.entries[0];
-    assert.ok(entry);
-    assert.deepEqual(entry.options, rosterOverlayRegistration());
-    assert.equal(typeof entry.component, "function");
+    assert.equal(overlay, undefined, "no shell.overlay inject post-cutover");
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
 
-    // Fiber teardown reverses the entry; a fresh fiber re-registers one.
+    // Fiber teardown stays clean; a fresh fiber registers no overlay entry.
     ctx.runFiberTeardown();
     assert.equal(ctx.injects.length, 0);
     apply(ctx);
     const again = ctx.injects.find(
       (record) => record.parent === SHELL_OVERLAY_SLOT,
     );
-    assert.equal(again?.entries.length, 1);
+    assert.equal(again, undefined);
   });
 });
 

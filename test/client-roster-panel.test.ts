@@ -837,26 +837,20 @@ describe("roster panel — store applies the settings-watch feed", () => {
   });
 });
 
-describe("roster panel — apply() wires the fallback data path and the overlay entry", () => {
-  /** The shell.overlay inject record, whatever the module also registers. */
-  function overlayInject(ctx: ReturnType<typeof createClientCtx>) {
-    const record = ctx.injects.find(
-      (candidate) => candidate.parent === SHELL_OVERLAY_SLOT,
-    );
-    assert.ok(record, "shell.overlay inject missing");
-    return record;
-  }
-
-  it("registers locale, one roster overlay entry, and the settings watch", () => {
+describe("roster panel — apply() wires the fallback data path; the overlay entry is retired", () => {
+  it("registers locale, NO overlay entry (retired at the cutover), and the settings watch", () => {
     const ctx = createClientCtx();
     apply(ctx);
 
-    // Ticket 24 adds a second inject (tool.call.toolview); the roster
-    // contract stays: one overlay entry with the builder's options.
-    const overlay = overlayInject(ctx);
-    assert.equal(overlay.entries.length, 1);
-    assert.deepEqual(overlay.entries[0]?.options, rosterOverlayRegistration());
-    assert.equal(typeof overlay.entries[0]?.component, "function");
+    // The ticket-78 CUTOVER (2026-09-19) ends the capsule era: the roster
+    // capsule's `shell.overlay` entry no longer registers — the wrapper
+    // shell frame (the `root` election) is the product surface. The panel
+    // component and its store stay as re-host assets (the wrapper's right
+    // seat hosts them; the 65/66/73 lane owns disposition).
+    const overlay = ctx.injects.find(
+      (candidate) => candidate.parent === SHELL_OVERLAY_SLOT,
+    );
+    assert.equal(overlay, undefined, "no overlay inject post-cutover");
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
   });
 
@@ -942,12 +936,9 @@ describe("roster panel — apply() wires the fallback data path and the overlay 
     // (vendor registry.ts:300-302), so a wrong name means the callback never
     // runs — exactly the live defect. The browser provides `settingsScope`
     // (dsh-client-ui-settings `lib/types/client/index.d.ts:2-3`); the client
-    // has no `settings` service at all. Ticket 84 adds the launcher's layout
-    // watch as the second wrapper-only request.
-    assert.deepEqual(ctx.injectRequests, [
-      ["settingsScope"],
-      ["layout"],
-    ]);
+    // has no `settings` service at all. The launcher's `layout` watch (the
+    // ticket-84 second request) retired with the ticket-78 cutover.
+    assert.deepEqual(ctx.injectRequests, [["settingsScope"]]);
     for (const requested of ctx.injectRequests) {
       assert.ok(!requested.includes("settings"));
     }
@@ -1001,13 +992,14 @@ describe("roster panel — apply() wires the fallback data path and the overlay 
   it("fiber teardown (HMR) unsubscribes the scope; re-apply binds one fresh", () => {
     const ctx = createClientCtx();
     apply(ctx);
-    // Six declaration waits: shell.overlay, tool.call.toolview, (ticket 47)
-    // settings.plugin.item, ticket 78's launcher shell.overlay + `main`
-    // page, and the cutover's `root` frame election. The settings scope
-    // stays ONE bind — the card attaches to the same scope the roster watch
-    // holds, so there are exactly TWO subscriptions on that one scope
-    // (roster watch + settings card).
-    assert.equal(ctx.injects.length, 6);
+    // Four declaration waits: tool.call.toolview, (ticket 47)
+    // settings.plugin.item, ticket 78's `main` page (kept), and the
+    // cutover's `root` frame election. The capsule + launcher shell.overlay
+    // injects retired at the cutover. The settings scope stays ONE bind —
+    // the card attaches to the same scope the roster watch holds, so there
+    // are exactly TWO subscriptions on that one scope (roster watch +
+    // settings card).
+    assert.equal(ctx.injects.length, 4);
     assert.equal(ctx.boundNamespaces.length, 1);
     assert.equal(ctx.watchDisposedCount(), 0);
 
@@ -1018,7 +1010,7 @@ describe("roster panel — apply() wires the fallback data path and the overlay 
 
     // Post-HMR fiber: no duplicate accumulation.
     apply(ctx);
-    assert.equal(ctx.injects.length, 6);
+    assert.equal(ctx.injects.length, 4);
     assert.equal(ctx.boundNamespaces.length, 2);
     assert.equal(ctx.watchDisposedCount(), 2);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));

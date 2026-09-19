@@ -440,16 +440,7 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
 });
 
 describe("client face scaffold — apply over fake client seams", () => {
-  /** The shell.overlay inject record, whatever the module also registers. */
-  function overlayInject(ctx: ReturnType<typeof createClientCtx>) {
-    const record = ctx.injects.find(
-      (candidate) => candidate.parent === SHELL_OVERLAY_SLOT,
-    );
-    assert.ok(record, "shell.overlay inject missing");
-    return record;
-  }
-
-  it("registers the locale namespace and exactly one shell.overlay entry", () => {
+  it("registers the locale namespace and NO shell.overlay entry (capsule retired)", () => {
     const ctx = createClientCtx();
     apply(ctx);
 
@@ -461,14 +452,14 @@ describe("client face scaffold — apply over fake client seams", () => {
     );
 
     // Ticket 24 adds a second inject (tool.call.toolview) and ticket 47 a
-    // third (settings.plugin.item); this scaffold contract stays: exactly one
-    // shell.overlay entry, parented here.
-    const overlay = overlayInject(ctx);
-    assert.equal(overlay.entries.length, 1);
-    const entry = overlay.entries[0];
-    assert.ok(entry);
-    assert.deepEqual(entry.options, rosterOverlayRegistration());
-    assert.equal(typeof entry.component, "function");
+    // third (settings.plugin.item); the ticket-78 CUTOVER (2026-09-19)
+    // retires the additive overlay entries — the capsule (ticket 38) and
+    // the staging launcher chip — so NO `shell.overlay` inject remains:
+    // the wrapper shell frame (the `root` election) is the product surface.
+    const overlay = ctx.injects.find(
+      (candidate) => candidate.parent === SHELL_OVERLAY_SLOT,
+    );
+    assert.equal(overlay, undefined, "no shell.overlay inject post-cutover");
   });
 
   it("slot entries declare the locale namespace so the t seat resolves", () => {
@@ -485,12 +476,11 @@ describe("client face scaffold — apply over fake client seams", () => {
   it("fiber teardown (HMR/unload) reverses the namespace and the entry; re-apply restores", () => {
     const ctx = createClientCtx();
     apply(ctx);
-    // Six declaration waits: shell.overlay (capsule, ticket 38),
-    // tool.call.toolview (ticket 24), settings.plugin.item (ticket 47), the
-    // launcher's second shell.overlay inject, `main` (both ticket 78), and
-    // the cutover's `root` frame election (ticket 78).
-    assert.equal(ctx.injects.length, 6);
-    assert.equal(overlayInject(ctx).entries.length, 1);
+    // Four declaration waits: tool.call.toolview (ticket 24),
+    // settings.plugin.item (ticket 47), `main` (ticket 78 staging, kept),
+    // and `root` (the ticket-78 cutover's frame election). The capsule +
+    // launcher shell.overlay injects retired at the cutover.
+    assert.equal(ctx.injects.length, 4);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
 
     ctx.runFiberTeardown();
@@ -500,8 +490,7 @@ describe("client face scaffold — apply over fake client seams", () => {
 
     // A fresh fiber (post-HMR apply) registers everything again.
     apply(ctx);
-    assert.equal(ctx.injects.length, 6);
-    assert.equal(overlayInject(ctx).entries.length, 1);
+    assert.equal(ctx.injects.length, 4);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
   });
 });
@@ -515,10 +504,11 @@ describe("client face scaffold — host inject guard semantics (ticket 84)", () 
     // any face outside its declared inject list.
     const ctx = createStrictHostCtx();
     assert.doesNotThrow(() => apply(ctx));
-    // The optional faces were requested through the runtime inject wrapper
-    // (settings watch first, launcher layout watch second) — never a bare
-    // read, which the proxy would have thrown.
-    assert.deepEqual(ctx.injectRequests, [["settingsScope"], ["layout"]]);
+    // The one optional face still watched is the settings namespace (the
+    // roster/card/onboarding data path) — requested through the runtime
+    // inject wrapper, never a bare read. The launcher's `layout` watch
+    // retired with the ticket-78 cutover, so it is no longer requested.
+    assert.deepEqual(ctx.injectRequests, [["settingsScope"]]);
   });
 
   it("declared faces resolve and undeclared faces throw with the host's message", () => {

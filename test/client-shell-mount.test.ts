@@ -234,7 +234,10 @@ describe("shell staging mount — registration contracts (ticket 78)", () => {
     assert.equal(shellPageRegistration().key, SHELL_PAGE_KEY);
   });
 
-  it("pins the launcher overlay registration: own id, ordered beside the capsule", () => {
+  it("pins the launcher overlay registration as RETIRED pure data — own id, ordered beside the capsule", () => {
+    // The launcher registration CONTRACT stays exported as the retired
+    // vehicle's pure data (the 65/66/73 lane owns disposition); nothing
+    // registers it since the cutover (pinned above).
     assert.deepEqual(shellLauncherRegistration(), {
       name: "shell.overlay",
       id: "multitask-dispatcher-shell-launcher",
@@ -279,28 +282,32 @@ describe("shell staging mount — apply() over the fake seams", () => {
     assert.equal(typeof entry.component, "function");
   });
 
-  it("registers the launcher as a second additive shell.overlay entry; the capsule entry is untouched", () => {
+  it("registers NO shell.overlay entries — capsule and launcher retired at the cutover", () => {
     const ctx = createMountCtx();
     apply(ctx);
+    // The cutover ends the capsule era (ticket 78's second AC): the roster
+    // capsule's additive entry AND the staging launcher chip's entry stop
+    // registering — no `shell.overlay` inject controller exists at all.
+    // Their sources stay as retired-vehicle assets (the 65/66/73 lane owns
+    // dead-code disposition).
     const overlayRecords = ctx.injects.filter(
       (record) => record.parent === SHELL_OVERLAY_SLOT,
     );
-    assert.equal(overlayRecords.length, 2, "capsule + launcher injects");
-    const allOverlay = overlayRecords.flatMap((record) => record.entries);
-    assert.equal(allOverlay.length, 2, "two additive overlay entries");
-    const byId = allOverlay.map((e) => (e.options as { id: string }).id);
-    assert.ok(byId.includes(ROSTER_ENTRY_ID));
-    assert.ok(byId.includes(SHELL_LAUNCHER_ENTRY_ID));
-    const launcher = allOverlay.find(
-      (e) => (e.options as { id: string }).id === SHELL_LAUNCHER_ENTRY_ID,
-    )!;
-    assert.deepEqual(launcher.options, shellLauncherRegistration());
-    assert.equal(typeof launcher.component, "function");
-    // The capsule's own registration contract is byte-for-byte the old one.
-    const capsule = allOverlay.find(
-      (e) => (e.options as { id: string }).id === ROSTER_ENTRY_ID,
-    )!;
-    assert.deepEqual(capsule.options, rosterOverlayRegistration());
+    assert.equal(overlayRecords.length, 0, "no shell.overlay injects");
+    for (const record of ctx.injects) {
+      for (const entry of record.entries) {
+        assert.notEqual(
+          (entry.options as { id?: string }).id,
+          ROSTER_ENTRY_ID,
+          "the capsule entry must not register",
+        );
+        assert.notEqual(
+          (entry.options as { id?: string }).id,
+          SHELL_LAUNCHER_ENTRY_ID,
+          "the launcher entry must not register",
+        );
+      }
+    }
   });
 
   it("registers exactly one `root` entry — the cutover's dynamic election", () => {
@@ -362,10 +369,11 @@ describe("shell staging mount — apply() over the fake seams", () => {
   it("fiber teardown (HMR) reverses every registration incl. the dynamic root entry; re-apply restores the identity", () => {
     const ctx = createMountCtx();
     apply(ctx);
-    // Six declaration waits: shell.overlay (capsule), tool.call.toolview,
-    // settings.plugin.item, the launcher's shell.overlay, `main`, and `root`
-    // (the cutover's frame election).
-    assert.equal(ctx.injects.length, 6);
+    // Four declaration waits: tool.call.toolview, settings.plugin.item,
+    // `main` (the staging page registration, retained), and `root` (the
+    // cutover's frame election). The capsule + launcher shell.overlay
+    // injects retired at the cutover.
+    assert.equal(ctx.injects.length, 4);
     assert.equal(findInject(ctx, MAIN_PAGE_SLOT).entries.length, 1);
     assert.equal(findInject(ctx, ROOT_FRAME_SLOT).entries.length, 1);
 
@@ -375,7 +383,7 @@ describe("shell staging mount — apply() over the fake seams", () => {
     // A fresh fiber (post-HMR apply) registers the same contract again —
     // same slot, same key, no accumulation.
     apply(ctx);
-    assert.equal(ctx.injects.length, 6);
+    assert.equal(ctx.injects.length, 4);
     const main = ctx.injects.find(
       (record) => record.parent === MAIN_PAGE_SLOT,
     );
@@ -461,10 +469,12 @@ describe("shell staging mount — host inject guard semantics (ticket 84)", () =
 
   it("apply() never bare-reads the optional layout face — even when a fake hands one", () => {
     // The live-pass-2 kill: `ctx.layout` was read bare (at click time) and
-    // the host's context proxy threw. Over a guard that throws on exactly
-    // that read — with a layout fake SITTING on the context, so only a bare
-    // read can reach it — the composition must still apply cleanly: the
-    // face may only arrive through the runtime `ctx.inject` wrapper.
+    // the host's context proxy threw. The launcher that watched `layout`
+    // retired at the cutover, so the module no longer requests the face at
+    // all — but the guard contract must hold regardless: over a context
+    // that throws on exactly that read — with a layout fake SITTING on the
+    // context, so only a bare read can reach it — the composition must
+    // still apply cleanly.
     const { layout } = createLayoutFake();
     const ctx = createMountCtx({ layout });
     const guarded = guardCtx(ctx);

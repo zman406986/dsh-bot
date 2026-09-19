@@ -16,10 +16,8 @@ import type { ClientContext } from "../src/client/context.js";
 import {
   LOCALE_NAMESPACE,
   localeDictionary,
-  rosterOverlayRegistration,
   validateLocaleDictionary,
   SHELL_OVERLAY_SLOT,
-  type SlotRegistrationOptions,
 } from "../src/client/overlay.js";
 import {
   SHIPPED_CLAIMED_TOOLVIEW_KEYS,
@@ -573,25 +571,19 @@ describe("toolview — locale dictionary shape", () => {
 });
 
 describe("toolview — apply() registers one keyed entry per tool via the fake seam", () => {
-  it("registers the overlay entry plus five keyed toolview entries", () => {
+  it("registers the five keyed toolview entries; the overlay era is over", () => {
     const ctx = createClientCtx();
     apply(ctx);
 
-    // Six injects: shell.overlay (roster) + tool.call.toolview (toolviews)
-    // + settings.plugin.item (ticket 47's settings card), plus ticket 78's
-    // launcher shell.overlay inject, `main` page inject, and the cutover's
-    // `root` frame election.
-    assert.equal(ctx.injects.length, 6);
+    // Four injects: tool.call.toolview (toolviews) + settings.plugin.item
+    // (ticket 47's settings card) + ticket 78's `main` page inject and the
+    // cutover's `root` frame election. The shell.overlay injects (capsule,
+    // launcher) retired at the ticket-78 cutover.
+    assert.equal(ctx.injects.length, 4);
     const overlay = ctx.findInject(SHELL_OVERLAY_SLOT);
     const toolviews = ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT);
-    assert.ok(overlay, "overlay inject present");
+    assert.equal(overlay, undefined, "no overlay inject post-cutover");
     assert.ok(toolviews, "toolview inject present");
-
-    assert.equal(overlay.entries.length, 1);
-    assert.deepEqual(
-      overlay.entries[0]?.options as SlotRegistrationOptions,
-      rosterOverlayRegistration(),
-    );
 
     assert.equal(toolviews.entries.length, TOOLVIEW_TOOL_NAMES.length);
     for (const [index, name] of TOOLVIEW_TOOL_NAMES.entries()) {
@@ -633,9 +625,9 @@ describe("toolview — HMR reversal over the fake seam", () => {
 
     // Post-HMR fiber: everything registers again, no accumulation.
     apply(ctx);
-    assert.equal(ctx.injects.length, 6);
+    assert.equal(ctx.injects.length, 4);
     assert.equal(ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT)?.entries.length, 5);
-    assert.equal(ctx.findInject(SHELL_OVERLAY_SLOT)?.entries.length, 1);
+    assert.equal(ctx.findInject(SHELL_OVERLAY_SLOT), undefined);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
   });
 });

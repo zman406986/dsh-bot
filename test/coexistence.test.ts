@@ -46,13 +46,11 @@ import {
 import type { ClientContext } from "../src/client/context.js";
 import {
   LOCALE_NAMESPACE,
-  rosterOverlayRegistration,
   SHELL_OVERLAY_SLOT,
   type SlotRegistrationOptions,
 } from "../src/client/overlay.js";
 import {
   ROOT_FRAME_SLOT,
-  SHELL_LAUNCHER_ENTRY_ID,
   shellRootRegistration,
 } from "../src/client/shell-mount.js";
 import {
@@ -879,37 +877,21 @@ describe("coexistence — client face: additive lists and keyed cells (Finding 5
     assert.deepEqual([...ctx.locales.keys()], [FOREIGN.localeNs]);
   });
 
-  it("shell.overlay holds both plugins' entries additively, order-sorted", () => {
+  it("shell.overlay: the dispatcher registers nothing (capsule + launcher retired); the foreign entry stands alone", () => {
     const ctx = createClientCtx();
     applyForeignClientPlugin(ctx);
     applyDispatcherClient(ctx);
 
     const entries = ctx.entriesAt(SHELL_OVERLAY_SLOT);
-    // Additive: ALL entries coexist in the same list slot — neither
-    // registration replaced or evicted another's. (Ticket 78 adds our
-    // launcher chip beside the roster capsule.)
-    assert.equal(entries.length, 3);
-    const options = entries.map((e) => e.options as SlotRegistrationOptions);
-    // Finding 5 list rule: the UI sorts by `order ?? 0` — applying that
-    // documented rule puts the launcher (staging chip) first, then the
-    // roster (quiet status surface), then the foreign entry.
-    const sorted = [...options].sort((a, b) => a.order - b.order);
-    assert.deepEqual(
-      sorted.map((o) => [o.id, o.order]),
-      [
-        [SHELL_LAUNCHER_ENTRY_ID, -11],
-        [rosterOverlayRegistration().id, rosterOverlayRegistration().order],
-        [FOREIGN.overlayEntryId, FOREIGN.overlayOrder],
-      ],
-    );
-    // Ids are unique and per-plugin prefixed (design-16 §5).
-    for (const index of [0, 1] as const) {
-      assert.match(sorted[index]!.id, /^multitask-dispatcher-/);
-    }
-    assert.match(sorted[2]!.id, /^foreign-helper-/);
-    assert.equal(new Set(sorted.map((o) => o.id)).size, sorted.length);
-    // Each entry renders its own plugin's component.
-    assert.notEqual(entries[0]!.component, entries[1]!.component);
+    // The ticket-78 CUTOVER (2026-09-19) ends the capsule era: both of our
+    // additive entries (the roster capsule, the staging launcher chip)
+    // stopped registering — the wrapper shell frame's `root` election is
+    // the product surface. The foreign plugin's entry is unmolested.
+    assert.equal(entries.length, 1);
+    const options = entries[0]!.options as SlotRegistrationOptions;
+    assert.equal(options.id, FOREIGN.overlayEntryId);
+    assert.equal(options.order, FOREIGN.overlayOrder);
+    assert.match(options.id, /^foreign-helper-/);
   });
 
   it("tool.call.toolview: foreign key cell unaffected by the five dispatcher keys", () => {
@@ -968,8 +950,11 @@ describe("coexistence — client face: additive lists and keyed cells (Finding 5
     const dispatcherFiber = applyClientPluginInFiber(ctx, applyDispatcherClient);
     const foreignFiber = applyClientPluginInFiber(ctx, applyForeignClientPlugin);
 
-    // Unload ONLY the dispatcher's client fiber (HMR swap).
+    // Unload ONLY the dispatcher's client fiber (HMR swap): its `root`
+    // frame election, keyed page, toolviews, and card all leave; the
+    // foreign plugin's entries stay.
     dispatcherFiber.dispose();
+    assert.deepEqual(ctx.injects.filter((record) => record.parent === ROOT_FRAME_SLOT), []);
     assert.deepEqual(ctx.entriesAt(SHELL_OVERLAY_SLOT).map((e) => (e.options as SlotRegistrationOptions).id), [
       FOREIGN.overlayEntryId,
     ]);
@@ -980,19 +965,16 @@ describe("coexistence — client face: additive lists and keyed cells (Finding 5
     assert.deepEqual([...ctx.locales.keys()], [FOREIGN.localeNs]);
 
     // The fresh post-HMR fiber re-registers cleanly — no duplication of the
-    // foreign plugin's entries (ours: capsule + launcher).
+    // foreign plugin's entries, and still NO overlay entries of ours (the
+    // capsule + launcher retired at the cutover).
     applyDispatcherClient(ctx);
-    assert.equal(ctx.entriesAt(SHELL_OVERLAY_SLOT).length, 3);
+    assert.equal(ctx.entriesAt(SHELL_OVERLAY_SLOT).length, 1);
     assert.equal(ctx.entriesAt(TOOL_CALL_TOOLVIEW_SLOT).length, TOOLVIEW_TOOL_NAMES.length + 1);
     assert.deepEqual([...ctx.locales.keys()].sort(), [FOREIGN.localeNs, LOCALE_NAMESPACE]);
 
     // Unloading the foreign fiber afterwards removes exactly its own entries.
     foreignFiber.dispose();
-    assert.equal(ctx.entriesAt(SHELL_OVERLAY_SLOT).length, 2);
-    assert.deepEqual(
-      ctx.entriesAt(SHELL_OVERLAY_SLOT).map((e) => (e.options as SlotRegistrationOptions).id),
-      [rosterOverlayRegistration().id, SHELL_LAUNCHER_ENTRY_ID],
-    );
+    assert.equal(ctx.entriesAt(SHELL_OVERLAY_SLOT).length, 0);
     assert.equal(ctx.entriesAt(TOOL_CALL_TOOLVIEW_SLOT).length, TOOLVIEW_TOOL_NAMES.length);
     assert.deepEqual([...ctx.locales.keys()], [LOCALE_NAMESPACE]);
   });
