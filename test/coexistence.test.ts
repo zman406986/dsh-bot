@@ -115,9 +115,13 @@ function createAgent(
 /**
  * Fake the host face the way the shipped registries behave:
  *
- * - `settings.installSection` throws
- *   `settings namespace "X" is already registered` on a duplicate claim and
- *   registers the namespace-removal disposer on the CALLING plugin's fiber
+ * - `settings.register(ns, schema, {base})` returns the owner scope and
+ *   `settings.installSection` returns VOID (ticket 93: the live host's
+ *   installSection discards the scope, dsh-settings lib/index.js:327-343,
+ *   types :228; register is the scope-returning API, :281-315); a duplicate
+ *   claim of one namespace throws
+ *   `settings namespace "X" is already registered` and registers the
+ *   namespace-removal disposer on the CALLING plugin's fiber
  *   (Finding 1: "disposing that fiber removes the namespace");
  * - `commands.register` throws
  *   `command "X" is already registered …` on a duplicate name; the disposer
@@ -151,6 +155,21 @@ function createHostCtx() {
   };
 
   const settingsProvider = {
+    /**
+     * Host shape (ticket 93): the SCOPE-RETURNING API
+     * (`@deepseek-ai/dsh-settings/lib/index.js:281-315`).
+     */
+    register(ns: string, _schema: unknown, options?: { base?: unknown }) {
+      return claimNamespace(ns, options?.base);
+    },
+    /**
+     * Host shape (ticket 93): `installSection(owner, ns, schema, entry,
+     * hooks)` returns VOID — it claims the namespace through `register` and
+     * DISCARDS the scope (`dsh-settings/lib/index.js:327-343`; the shipped
+     * type is `installSection(…): void`, `lib/types/index.d.ts:228`). The
+     * composition `entry` becomes the base layer, exactly as `register`'s
+     * `options.base` does.
+     */
     installSection(
       _owner: unknown,
       ns: string,
@@ -161,43 +180,59 @@ function createHostCtx() {
       void _owner;
       void _schema;
       void _hooks;
-      if (settingDocs.has(ns)) {
-        throw new Error(`settings namespace "${ns}" is already registered`);
-      }
-      settingDocs.set(ns, { ...(entry as Record<string, unknown>) });
-      const watchers = new Set<(value: unknown) => void>();
-      settingWatchers.set(ns, watchers);
-      // Finding 1 lifecycle: the namespace dies with the claiming fiber.
-      disposers.push(() => {
-        settingDocs.delete(ns);
-        settingWatchers.delete(ns);
-        settingScopes.delete(ns);
-      });
-      const scope = {
-        get: () => settingDocs.get(ns),
-        watch(onChange: (value: unknown) => void) {
-          watchers.add(onChange);
-          return () => {
-            watchers.delete(onChange);
-          };
-        },
-        update(value: unknown) {
-          const current = settingDocs.get(ns);
-          if (current === undefined) return; // namespace already disposed
-          const next = { ...current, ...(value as Record<string, unknown>) };
-          settingDocs.set(ns, next);
-          for (const onChange of [...watchers]) onChange(next);
-        },
-        replace(value: unknown) {
-          if (!settingDocs.has(ns)) return;
-          settingDocs.set(ns, value as Record<string, unknown>);
-          for (const onChange of [...watchers]) onChange(value);
-        },
-      };
-      settingScopes.set(ns, scope);
-      return scope;
+      claimNamespace(ns, entry);
     },
   };
+
+  /** One namespace claim: duplicate THROWS, the scope watches the doc. */
+  function claimNamespace(
+    ns: string,
+    base: unknown,
+  ): {
+    get(): unknown;
+    watch(onChange: (value: unknown) => void): () => void;
+    update(value: unknown): Promise<void>;
+    replace(value: unknown): Promise<void>;
+  } {
+    if (settingDocs.has(ns)) {
+      throw new Error(`settings namespace "${ns}" is already registered`);
+    }
+    settingDocs.set(ns, { ...(base as Record<string, unknown>) });
+    const watchers = new Set<(value: unknown) => void>();
+    settingWatchers.set(ns, watchers);
+    // Finding 1 lifecycle: the namespace dies with the claiming fiber.
+    disposers.push(() => {
+      settingDocs.delete(ns);
+      settingWatchers.delete(ns);
+      settingScopes.delete(ns);
+    });
+    const scope = {
+      get: () => settingDocs.get(ns),
+      watch(onChange: (value: unknown) => void) {
+        watchers.add(onChange);
+        return () => {
+          watchers.delete(onChange);
+        };
+      },
+      // The host scope's writes are ASYNC (dsh-settings
+      // lib/types/index.d.ts:105-108); the document updates synchronously
+      // inside, exactly as the host's queued write does before it resolves.
+      async update(value: unknown) {
+        const current = settingDocs.get(ns);
+        if (current === undefined) return; // namespace already disposed
+        const next = { ...current, ...(value as Record<string, unknown>) };
+        settingDocs.set(ns, next);
+        for (const onChange of [...watchers]) onChange(next);
+      },
+      async replace(value: unknown) {
+        if (!settingDocs.has(ns)) return;
+        settingDocs.set(ns, value as Record<string, unknown>);
+        for (const onChange of [...watchers]) onChange(value);
+      },
+    };
+    settingScopes.set(ns, scope);
+    return scope;
+  }
 
   const ctx = {
     // Cordis effect contract (ticket 44): `execute` runs at apply; a returned
@@ -689,8 +724,29 @@ function applyForeignClientPlugin(ctx: ReturnType<typeof createClientCtx>) {
 }
 
 describe("coexistence — host face: fail-loud claims (Findings 1 and 2)", () => {
-  /** Route a claim through ctx.inject, exactly how a live plugin installs. */
+  /**
+   * Route a claim through ctx.inject, exactly how a live plugin installs.
+   * Ticket 93: the product claims through `register` (the scope-returning
+   * API); `installSection` is modeled too, as the void convenience the host
+   * ships for read-only consumers.
+   */
   function claimNamespace(ctx: ReturnType<typeof createHostCtx>, ns: string) {
+    return () =>
+      ctx.inject(["settings"], (child) => {
+        (
+          child as {
+            settings?: {
+              register(ns: string, schema: unknown, options?: unknown): unknown;
+            };
+          }
+        ).settings?.register(ns, {}, {});
+      });
+  }
+
+  function claimViaInstallSection(
+    ctx: ReturnType<typeof createHostCtx>,
+    ns: string,
+  ) {
     return () =>
       ctx.inject(["settings"], (child) => {
         (
@@ -760,6 +816,31 @@ describe("coexistence — host face: fail-loud claims (Findings 1 and 2)", () =>
       "hi",
     );
     assert.equal(seen.length, 1);
+  });
+
+  it("installSection returns void (ticket 93) but still claims the namespace", () => {
+    const ctx = createHostCtx();
+    applyForeignHostPlugin(ctx);
+
+    // The host's convenience install DISCARDS the scope
+    // (dsh-settings lib/index.js:327-343; types :228) — a product that
+    // reads its return value gets `undefined`, exactly as live.
+    const claimed = claimViaInstallSection(ctx, "third-party");
+    claimed();
+    assert.ok(ctx.hasSettingsNamespace("third-party"));
+    // …and the duplicate rule still fires for the same namespace.
+    assert.throws(
+      claimViaInstallSection(ctx, "third-party"),
+      /settings namespace "third-party" is already registered/,
+    );
+    // The foreign plugin's own claim (through installSection) is likewise
+    // protected from a `register` latecomer.
+    assert.throws(
+      claimNamespace(ctx, FOREIGN.settingsNs),
+      new RegExp(
+        `settings namespace "${FOREIGN.settingsNs}" is already registered`,
+      ),
+    );
   });
 
   it("a duplicate command name fails loud; the first claimant's handler stays live", () => {

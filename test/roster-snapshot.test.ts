@@ -14,6 +14,13 @@
  * and `tools.register` throw on a duplicate name with the shipped wording
  * (`@deepseek-ai/dsh-commands/lib/index.js:82`,
  * `@deepseek-ai/dsh-tools/lib/index.js:2538`).
+ *
+ * Fake-vs-host (ticket 93): the settings-provider fake models the shipped
+ * scope contract — `register(ns, schema, options?)` returns the owner scope
+ * (`@deepseek-ai/dsh-settings/lib/index.js:281-315`) while
+ * `installSection(...)` returns VOID (`:327-343`;
+ * `lib/types/index.d.ts:228`) — the shape whose absence starved this channel
+ * live (zero `roster.*` keys).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -908,6 +915,67 @@ describe("roster snapshot — settings-namespace channel (adapter)", () => {
     // The retained snapshot stays the latest even when the write failed.
     assert.equal(channel.lastSnapshot, three);
   });
+
+  it("contains an ASYNC write rejection without an unhandled rejection (ticket 93)", async () => {
+    // The host scope's `update(patch)` returns Promise<void>
+    // (dsh-settings lib/types/index.d.ts:105-108): validation and persist
+    // failures arrive as REJECTIONS, not sync throws
+    // (dsh-settings lib/index.js:443-455 throws only for
+    // not-registered/disposed/read-only/non-plain-object). A telemetry
+    // write that rejects must be counted, contained, and never crash the
+    // host as an unhandled rejection.
+    const channel = createSettingsRosterChannel();
+    const writes: unknown[] = [];
+    let rejectNext = false;
+    channel.attach({
+      update(value: unknown) {
+        writes.push(value);
+        return rejectNext
+          ? Promise.reject(new Error("settings persist failed"))
+          : Promise.resolve();
+      },
+    });
+
+    const ok = projectRosterSnapshot("s-1", [], 1);
+    channel.publish(ok);
+    assert.equal(channel.stats.writes, 1);
+    assert.equal(channel.stats.asyncFailures, 0);
+
+    rejectNext = true;
+    const bad = projectRosterSnapshot("s-1", [], 2);
+    assert.doesNotThrow(() => channel.publish(bad));
+    assert.equal(channel.stats.writes, 2);
+    // The rejection is observed on the next microtask turn; an unhandled
+    // rejection would fail the node test runner here.
+    for (let i = 0; i < 3; i += 1) await Promise.resolve();
+    assert.equal(channel.stats.asyncFailures, 1);
+    assert.equal(channel.stats.failures, 0);
+    assert.equal(channel.lastSnapshot, bad);
+  });
+
+  it("the scope comes from register, so an installSection-style void return cannot attach (ticket 93)", () => {
+    // The live `installSection` returns void (dsh-settings
+    // lib/index.js:327-343; types :228), which is what starved this channel
+    // until ticket 93. This pin models the OLD failure shape: a provider
+    // whose convenience install discards the scope leaves the channel
+    // unattached (skipped), while the register-returned scope attaches.
+    const channel = createSettingsRosterChannel();
+    const { updates, scope } = fakeScope();
+    const snapshot = projectRosterSnapshot("s-1", [], 1);
+    channel.publish(snapshot);
+    assert.equal(channel.stats.attached, false);
+    assert.equal(channel.stats.skipped, 1);
+    assert.deepEqual(updates, []);
+
+    channel.attach(scope);
+    assert.equal(channel.stats.attached, true);
+    // Catch-up: the document now carries BOTH mirror families.
+    assert.deepEqual(updates, [
+      { [ROSTER_SETTINGS_KEY]: snapshot, "roster.s-1": snapshot },
+    ]);
+    assert.equal(channel.stats.skipped, 1);
+    assert.equal(channel.stats.writes, 1);
+  });
 });
 
 describe("roster snapshot — per-session mirror keys (ticket 79, ADR-0019 keying)", () => {
@@ -998,19 +1066,35 @@ function createSettingsAwareCtx() {
   >();
   const updates: unknown[] = [];
   const claimedNamespaces = new Set<string>();
-  // Settings-provider fake: a second claim of one namespace fails loud
-  // (shipped rule, dsh-settings lib/index.js:283).
+  // Settings-provider fake: the shipped scope contract (ticket 93).
+  // - `register(ns, schema, options?)` RETURNS the owner scope
+  //   (dsh-settings lib/index.js:281-315; the scope built at `:298-314`).
+  // - `installSection(...)` returns VOID — it registers through `register`
+  //   and discards the scope (dsh-settings lib/index.js:327-343; the shipped
+  //   type is `installSection(…): void`, lib/types/index.d.ts:228).
+  // - a second claim of one namespace fails loud (shipped rule,
+  //   dsh-settings lib/index.js:283).
+  const claim = (
+    ns: string,
+  ): { update(value: unknown): Promise<void> } => {
+    if (claimedNamespaces.has(ns)) {
+      throw new Error(`settings namespace "${ns}" is already registered`);
+    }
+    claimedNamespaces.add(ns);
+    return {
+      // The host scope's `update` is ASYNC (dsh-settings
+      // lib/types/index.d.ts:105-108).
+      async update(value: unknown) {
+        updates.push(value);
+      },
+    };
+  };
   const settingsProvider = {
+    register(ns: string) {
+      return claim(ns);
+    },
     installSection(_owner: unknown, ns: string) {
-      if (claimedNamespaces.has(ns)) {
-        throw new Error(`settings namespace "${ns}" is already registered`);
-      }
-      claimedNamespaces.add(ns);
-      return {
-        update(value: unknown) {
-          updates.push(value);
-        },
-      };
+      claim(ns);
     },
   };
   let nextChild = 1;
@@ -1118,6 +1202,7 @@ function createSettingsAwareCtx() {
     updates,
     settingsInstallSection: (ns: string) =>
       settingsProvider.installSection({}, ns),
+    settingsRegister: (ns: string) => settingsProvider.register(ns),
     tool: (name: string) => tools.get(name),
     runCommand(commandId: string, agent?: AgentLike): unknown {
       const command = commands.get(commandId);
@@ -1133,7 +1218,8 @@ function createSettingsAwareCtx() {
     tool(name: string): { execute: (args: unknown, exec?: unknown) => Promise<unknown> } | undefined;
     runCommand(commandId: string, agent?: AgentLike): unknown;
     readonly updates: unknown[];
-    settingsInstallSection(ns: string): { update(value: unknown): void };
+    settingsInstallSection(ns: string): void;
+    settingsRegister(ns: string): { update(value: unknown): Promise<void> };
   };
 }
 
@@ -1319,12 +1405,25 @@ describe("roster snapshot — host duplicate-registration rule (ticket 91)", () 
 
   it("the settings fake throws on a duplicate namespace claim (dsh-settings:283)", () => {
     const ctx = createSettingsAwareCtx();
-    const install = ctx.settingsInstallSection;
-    assert.ok(install);
-    install("multitask-dispatcher");
+    // The product's claim path is `register` (ticket 93 — the host's
+    // scope-returning API); a second claim of the same namespace throws the
+    // shipped message.
+    ctx.settingsRegister("multitask-dispatcher");
 
     assert.throws(
-      () => install("multitask-dispatcher"),
+      () => ctx.settingsRegister("multitask-dispatcher"),
+      /settings namespace "multitask-dispatcher" is already registered/,
+    );
+  });
+
+  it("the settings fake models installSection as void (ticket 93)", () => {
+    const ctx = createSettingsAwareCtx();
+    // Host shape (dsh-settings lib/index.js:327-343; types :228): the
+    // convenience install returns NOTHING — a product that reads its return
+    // value gets `undefined` here exactly as live.
+    assert.equal(ctx.settingsInstallSection("multitask-dispatcher"), undefined);
+    assert.throws(
+      () => ctx.settingsRegister("multitask-dispatcher"),
       /settings namespace "multitask-dispatcher" is already registered/,
     );
   });

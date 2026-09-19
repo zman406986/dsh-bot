@@ -107,7 +107,6 @@ export {
   type SettingsInjectContext,
   type SettingsOwnerScopeLike,
   type SettingsProviderLike,
-  type SettingsSectionHooksLike,
   type SettingsSectionInstallOptions,
 } from "./settings-section.js";
 export {

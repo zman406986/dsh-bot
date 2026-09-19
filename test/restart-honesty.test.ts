@@ -14,6 +14,12 @@
  * `tools.register` throw on a duplicate name with the shipped wording
  * (`@deepseek-ai/dsh-commands/lib/index.js:82`,
  * `@deepseek-ai/dsh-tools/lib/index.js:2538`).
+ *
+ * Fake-vs-host (ticket 93): the settings-provider fake models the shipped
+ * scope contract — `register(ns, schema, options?)` returns the owner scope
+ * (`@deepseek-ai/dsh-settings/lib/index.js:281-315`) while
+ * `installSection(...)` returns VOID (`:327-343`;
+ * `lib/types/index.d.ts:228`).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -114,20 +120,33 @@ function createRestartCtx() {
   const tables = new Map<string, Map<string, unknown>>();
   const updates: unknown[] = [];
   const claimedNamespaces = new Set<string>();
-  // Settings-provider fake: a second claim of one namespace fails loud
-  // (shipped rule, dsh-settings lib/index.js:283). Exposed on the test
-  // surface so the ticket-91 pin can exercise it directly.
+  // Settings-provider fake: the shipped scope contract (ticket 93).
+  // - `register(ns, schema, options?)` RETURNS the owner scope
+  //   (dsh-settings lib/index.js:281-315).
+  // - `installSection(...)` returns VOID (dsh-settings lib/index.js:327-343;
+  //   types :228).
+  // - a second claim of one namespace fails loud (shipped rule,
+  //   dsh-settings lib/index.js:283). Exposed on the test surface so the
+  //   ticket-91 pin can exercise it directly.
+  const claim = (ns: string): { update(value: unknown): Promise<void> } => {
+    if (claimedNamespaces.has(ns)) {
+      throw new Error(`settings namespace "${ns}" is already registered`);
+    }
+    claimedNamespaces.add(ns);
+    return {
+      // The host scope's `update` is ASYNC (dsh-settings
+      // lib/types/index.d.ts:105-108).
+      async update(value: unknown) {
+        updates.push(value);
+      },
+    };
+  };
   const settingsProvider = {
+    register(ns: string) {
+      return claim(ns);
+    },
     installSection(_owner: unknown, ns: string) {
-      if (claimedNamespaces.has(ns)) {
-        throw new Error(`settings namespace "${ns}" is already registered`);
-      }
-      claimedNamespaces.add(ns);
-      return {
-        update(value: unknown) {
-          updates.push(value);
-        },
-      };
+      claim(ns);
     },
   };
   let nextChild = 1;
@@ -304,10 +323,8 @@ function createRestartCtx() {
     fire(name: string, payload: unknown): void;
     readonly updates: unknown[];
     readonly settingsProvider: {
-      installSection(
-        owner: unknown,
-        ns: string,
-      ): { update(value: unknown): void };
+      register(ns: string): { update(value: unknown): Promise<void> };
+      installSection(owner: unknown, ns: string): void;
     };
     commandNames(): string[];
     tool(name: string):
@@ -1186,11 +1203,21 @@ describe("restart honesty — host duplicate-registration rule (ticket 91)", () 
 
   it("the settings fake throws on a duplicate namespace claim (dsh-settings:283)", () => {
     const ctx = createRestartCtx();
-    ctx.settingsProvider.installSection({}, "multitask-dispatcher");
+    // The product's claim path is `register` (ticket 93).
+    ctx.settingsProvider.register("multitask-dispatcher");
 
     assert.throws(
-      () => ctx.settingsProvider.installSection({}, "multitask-dispatcher"),
+      () => ctx.settingsProvider.register("multitask-dispatcher"),
       /settings namespace "multitask-dispatcher" is already registered/,
+    );
+  });
+
+  it("the settings fake models installSection as void (ticket 93)", () => {
+    const ctx = createRestartCtx();
+    // Host shape (dsh-settings lib/index.js:327-343; types :228).
+    assert.equal(
+      ctx.settingsProvider.installSection({}, "multitask-dispatcher"),
+      undefined,
     );
   });
 });

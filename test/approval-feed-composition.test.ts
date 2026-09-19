@@ -24,6 +24,15 @@
  *   → the card leaves; answering again is honestly refused.
  *
  * Offline only (S8): no Cordis, no browser, no DOM, no network, no LLM.
+ *
+ * Ticket 93 host shape (2026-09-19): the fake settings provider models the
+ * installed host — `register(ns, schema, {base})` returns the owner scope
+ * (`@deepseek-ai/dsh-settings/lib/index.js:281-315`) while
+ * `installSection(...)` returns VOID (`:327-343`;
+ * `lib/types/index.d.ts:228`). The earlier fake handed a writable scope back
+ * through `installSection`, a host that does not exist: it let a dead roster
+ * channel pass 1,000+ offline tests. With the host shape modeled, dropping
+ * the scope starves this suite exactly as it starved the live surface.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -35,6 +44,8 @@ import {
 } from "../src/client/index.js";
 import type { ClientContext } from "../src/client/context.js";
 import { createRosterStore } from "../src/client/roster-store.js";
+import { describeShellSidebar } from "../src/client/shell-store.js";
+import { shellSeatHostsPanel } from "../src/client/shell-mount.js";
 import type { AccessAskCard } from "../src/client/approval-cards.js";
 import { SETTINGS_NAMESPACE } from "../src/adapter/settings-section.js";
 import { rosterSessionKey } from "../src/adapter/roster-channel.js";
@@ -58,15 +69,22 @@ import {
 
 /**
  * The single settings document both halves share. The host end is the owner
- * scope `installSection` returns (`update(partial)`); the client end is the
- * `settingsScope.bind({namespace})` snapshot. The live host merges `update`
- * into the namespace document and re-serves it to the bound scopes; that is
- * exactly what this does — nothing else.
+ * scope the shipped `settings.register(ns, schema, {base})` returns
+ * (`@deepseek-ai/dsh-settings/lib/index.js:281-315`; `update(partial)`); the
+ * client end is the `settingsScope.bind({namespace})` snapshot. The live host
+ * merges `update` into the namespace document and re-serves it to the bound
+ * scopes; that is exactly what this does — nothing else.
+ *
+ * Ticket 93 host shape: the scope comes from `register`, NOT from
+ * `installSection` — the live `installSection` returns VOID
+ * (`dsh-settings/lib/index.js:327-343`; types `:228`). A fake that handed the
+ * scope back through `installSection` modeled a host that does not exist and
+ * hid a dead roster channel (see the host fake below).
  */
 interface SettingsBridge {
   readonly document: Record<string, unknown>;
   readonly subscribers: Set<() => void>;
-  update(partial: unknown): void;
+  update(partial: unknown): Promise<void>;
 }
 
 function createSettingsBridge(): SettingsBridge {
@@ -75,7 +93,10 @@ function createSettingsBridge(): SettingsBridge {
   return {
     document,
     subscribers,
-    update(partial: unknown) {
+    // The host scope's `update` is ASYNC (dsh-settings
+    // lib/types/index.d.ts:105-108): the merge lands synchronously here, the
+    // promise settles after — the shape a caller must handle.
+    async update(partial: unknown) {
       if (typeof partial !== "object" || partial === null) return;
       for (const [key, value] of Object.entries(partial)) {
         document[key] = value;
@@ -143,16 +164,23 @@ function createHostCtx(bridge: SettingsBridge) {
     },
     // The optional settings service: the section installs and its owner
     // scope writes into the SHARED document (the roster mirror's write path).
+    // Host shape (ticket 93): `register` returns the scope; `installSection`
+    // returns VOID (dsh-settings lib/index.js:327-343, types :228) — it is
+    // modeled here so a regression that reaches for its return value starves
+    // exactly as it did live (zero `roster.*` keys, ticket 93).
     inject(services: readonly string[], callback: (child: unknown) => void) {
       if (!services.includes("settings")) return;
       callback({
         settings: {
-          installSection() {
+          register() {
             return {
-              update(value: unknown) {
-                bridge.update(value);
+              async update(value: unknown) {
+                await bridge.update(value);
               },
             };
+          },
+          installSection() {
+            // No scope: the live host discards it. Return value is void.
           },
         },
       });
@@ -243,6 +271,12 @@ function createHostCtx(bridge: SettingsBridge) {
       return command.handler(invocation as never) as CommandResultLike;
     },
     sendMessageCalls,
+    // Ticket 93: the plugin's unload/HMR teardown (every effect disposer,
+    // reverse order — the fiber cascade) so a test can drive
+    // `clearAllSessions` through the real path.
+    runTeardown() {
+      for (const dispose of [...disposers].reverse()) dispose();
+    },
   };
   return ctx as typeof ctx & AdapterContext;
 }
@@ -256,6 +290,10 @@ function createClientCtx(bridge: SettingsBridge) {
   const effectDisposers: Array<() => void> = [];
   const boundNamespaces: string[] = [];
   let watchDisposed = 0;
+  // The sessions feed state (ticket 94's pin; mutated by `setSessions`).
+  let feedIds: string[] = [];
+  let feedById: Record<string, { id: string; displayTitle?: string }> = {};
+  const feedSubscribers = new Set<() => void>();
 
   const ctx = {
     effect(execute: () => unknown, label?: string) {
@@ -322,10 +360,30 @@ function createClientCtx(bridge: SettingsBridge) {
         };
       },
     },
+    // The sessions feed (ticket 79's row authority; ticket 94's pin needs
+    // rows so the mirror's flag/presence can be asserted on a delivered row).
+    // Structural shape of the verified read face
+    // (`dsh-api-session-controller` `SessionListState`): ids + byId.
+    sessions: {
+      list: {
+        getSnapshot: () => ({ ids: feedIds, byId: feedById }),
+        subscribe(listener: () => void) {
+          feedSubscribers.add(listener);
+          return () => {
+            feedSubscribers.delete(listener);
+          };
+        },
+      },
+    },
     // Test surface.
     injects,
     boundNamespaces,
     watchDisposedCount: () => watchDisposed,
+    setSessions(rows: Array<{ id: string; displayTitle?: string }>) {
+      feedIds = rows.map((row) => row.id);
+      feedById = Object.fromEntries(rows.map((row) => [row.id, row]));
+      for (const listener of [...feedSubscribers]) listener();
+    },
     runFiberTeardown() {
       for (const dispose of [...effectDisposers, ...injectControllers]) {
         dispose();
@@ -335,6 +393,7 @@ function createClientCtx(bridge: SettingsBridge) {
   return ctx as typeof ctx & ClientContext & {
     boundNamespaces: string[];
     watchDisposedCount(): number;
+    setSessions(rows: Array<{ id: string; displayTitle?: string }>): void;
     runFiberTeardown(): void;
   };
 }
@@ -493,6 +552,175 @@ describe("ticket 69 L1 — the offline composition pin (real apply → real watc
     assert.deepEqual(again, {
       kind: "error",
       text: dispatcherResolveNoPendingAsk(spawned.worker_id),
+    });
+  });
+
+  it("ticket 93: the real channel publishes BOTH mirror families into the document, and unload clears the session key", async () => {
+    // The live-found failure: `installSection` returns void on the host, so
+    // the owner scope never attached and ZERO `roster.*` keys ever reached
+    // the document (settings/describe stayed at the three config keys).
+    // This pin drives the real channel through the real `register`-returned
+    // scope and asserts the keys the wrapper's read side needs.
+    const bridge = createSettingsBridge();
+    const host = createHostCtx(bridge);
+    pluginApply(host, {
+      enabled: true,
+      accessRequestTimeoutMs: ACCESS_TIMEOUT_MS,
+    });
+    host.runCommand({
+      commandId: DISPATCHER_START_COMMAND,
+      agent: topLevelAgent("s-1"),
+    });
+    await flush();
+
+    // The activation publish landed under the legacy key...
+    const legacy = publishedRoster(bridge);
+    assert.equal(legacy?.dispatcherSessionId, "s-1");
+    // ...AND under the per-session mirror key the shell store reads.
+    const mirror = parseRosterSnapshot(
+      bridge.document[rosterSessionKey("s-1")],
+    );
+    assert.equal(mirror?.dispatcherSessionId, "s-1");
+    assert.equal(mirror?.workers.length, 0);
+
+    // A real spawn republishes both families in one write.
+    const spawn = host.tool("spawn_worker");
+    assert.ok(spawn);
+    await spawn.execute(
+      { stream_key: "k-93", title: "Channel worker", prompt: "P." },
+      { agent: { session: { id: "s-1" } } },
+    );
+    const afterSpawn = parseRosterSnapshot(
+      bridge.document[rosterSessionKey("s-1")],
+    );
+    assert.equal(afterSpawn?.workers.length, 1);
+
+    // Plugin unload/HMR (the fiber cascade): no mirror key outlives the
+    // plugin — the host writes `null`, which the client reads as "not a
+    // dispatcher here anymore" (ticket 79's clear contract).
+    host.runTeardown();
+    assert.equal(bridge.document[rosterSessionKey("s-1")], null);
+  });
+
+  it("ticket 94: the mount's shell store is fed the per-session mirror (flag, presence, hosted panel)", async () => {
+    // The live-found failure: `applySessionMirror` had NO live call site, so
+    // `state.mirrors` stayed empty — every row rendered
+    // `data-dispatcher="false"` with the `状态不可用` chip, the right pane
+    // hosted no roster panel, and `data-presence` never populated. This pin
+    // drives the REAL composition (host publish → document → the watch's
+    // mirror feed → the mount's OWN shell store) and asserts the surface.
+    const bridge = createSettingsBridge();
+    const host = createHostCtx(bridge);
+    const client = createClientCtx(bridge);
+    // The feed is the row authority: one delivered row for the dispatcher.
+    client.setSessions([{ id: "s-1", displayTitle: "Dispatcher chat" }]);
+
+    pluginApply(host, {
+      enabled: true,
+      accessRequestTimeoutMs: ACCESS_TIMEOUT_MS,
+    });
+    host.runCommand({
+      commandId: DISPATCHER_START_COMMAND,
+      agent: topLevelAgent("s-1"),
+    });
+    await flush();
+
+    const composition = applyClientModule(client, createRosterStore());
+    const mount = composition.mounts[0];
+    assert.ok(mount, "the main page mount");
+    assert.equal(composition.mounts.length, 2, "main page + root frame");
+
+    for (const candidate of composition.mounts) {
+      const state = candidate.store.getBox().state;
+      // The mirror landed: the row is OURS (flag true) with live presence.
+      const row = state.rows.get("s-1");
+      assert.equal(row?.dispatcher, true, "the dispatcher flag is live");
+      assert.deepEqual(row?.presence, { working: 0, needsYou: 0, finished: 0 });
+      assert.equal(state.mirrors.get("s-1")?.kind, "snapshot");
+
+      // The sidebar view: dispatcher row first, presence available.
+      const sidebar = describeShellSidebar(state, Date.now());
+      assert.equal(sidebar.kind, "ready");
+      assert.equal(sidebar.kind === "ready" ? sidebar.rows.length : 0, 1);
+      const view = sidebar.kind === "ready" ? sidebar.rows[0] : undefined;
+      assert.equal(view?.sessionId, "s-1");
+      assert.equal(view?.presenceAvailable, true);
+      assert.equal(view?.presence?.working, 0);
+
+      // The right seat HOSTS the roster panel for that session (the live
+      // symptom was an empty right pane: `innerHTML` length 0).
+      assert.equal(
+        shellSeatHostsPanel(state.mirrors.get("s-1")),
+        true,
+        "the panel is hosted",
+      );
+      assert.notEqual(candidate.hosts.rosterPanel({ sessionId: "s-1" }), null);
+      // …and NOT for a session the mirrors do not vouch for.
+      assert.equal(candidate.hosts.rosterPanel({ sessionId: "s-other" }), null);
+    }
+
+    // A real spawn republishes through the same channel: the presence counts
+    // move on the MOUNT'S OWN store (no second feed, no second store).
+    const spawn = host.tool("spawn_worker");
+    assert.ok(spawn);
+    await spawn.execute(
+      { stream_key: "k-94", title: "Mirror worker", prompt: "P." },
+      { agent: { session: { id: "s-1" } } },
+    );
+    for (const candidate of composition.mounts) {
+      const row = candidate.store.getBox().state.rows.get("s-1");
+      assert.deepEqual(row?.presence, { working: 1, needsYou: 0, finished: 0 });
+    }
+
+    // Selecting the row projects the hosted panel's OWN store onto the same
+    // mirror (the seat projection) — the panel renders from a parsed
+    // snapshot, not from a copy.
+    mount.store.select("s-1");
+    const seatState = mount.seat.getBox().state;
+    assert.equal(seatState.kind, "snapshot");
+    assert.equal(
+      seatState.kind === "snapshot" ? seatState.snapshot.workers.length : -1,
+      1,
+    );
+  });
+
+  it("ticket 94: the mount's mirror feed detaches with the client fiber", async () => {
+    const bridge = createSettingsBridge();
+    const host = createHostCtx(bridge);
+    const client = createClientCtx(bridge);
+    client.setSessions([{ id: "s-1", displayTitle: "Dispatcher chat" }]);
+
+    pluginApply(host, {
+      enabled: true,
+      accessRequestTimeoutMs: ACCESS_TIMEOUT_MS,
+    });
+    host.runCommand({
+      commandId: DISPATCHER_START_COMMAND,
+      agent: topLevelAgent("s-1"),
+    });
+    await flush();
+
+    const composition = applyClientModule(client, createRosterStore());
+    const mount = composition.mounts[0];
+    assert.ok(mount);
+    assert.equal(mount.store.getBox().state.rows.get("s-1")?.dispatcher, true);
+
+    // Unload the client fiber: every effect (the watch and each mount's feed
+    // attach) goes with it.
+    client.runFiberTeardown();
+
+    // A later host publish reaches nothing — the detached store keeps its
+    // last truth instead of being fed by a dead fiber.
+    const spawn = host.tool("spawn_worker");
+    assert.ok(spawn);
+    await spawn.execute(
+      { stream_key: "k-94b", title: "Late worker", prompt: "P." },
+      { agent: { session: { id: "s-1" } } },
+    );
+    assert.deepEqual(mount.store.getBox().state.rows.get("s-1")?.presence, {
+      working: 0,
+      needsYou: 0,
+      finished: 0,
     });
   });
 

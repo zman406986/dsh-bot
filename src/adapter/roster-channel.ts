@@ -5,15 +5,25 @@ import type { SettingsOwnerScopeLike } from "./settings-section.js";
  * Host half of the roster data path (ticket 21, design-16 §4.2).
  *
  * The verified-or-fallback channel is the plugin's OWN settings namespace:
- * the owner scope that `settings.installSection` returns exposes `update`,
- * and the client watches the same namespace from the browser (settings-scope
- * inject idiom). This is a config channel doing telemetry duty — the
- * documented honest gap. Publishes are therefore best-effort by contract:
+ * the owner scope the host's `settings.register(ns, schema, {base})` returns
+ * exposes `update` (`@deepseek-ai/dsh-settings/lib/index.js:298-314`), and
+ * the client watches the same namespace from the browser (settings-scope
+ * inject idiom). Ticket 93 correction: the scope comes from `register`, NOT
+ * from `installSection` — that call returns void on the live host
+ * (`dsh-settings/lib/index.js:327-343`, `types/index.d.ts:228`), which is why
+ * this channel never attached and no `roster.*` key ever reached the document.
+ * This is a config channel doing telemetry duty — the documented honest gap.
+ * Publishes are therefore best-effort by contract:
  *
  * - no scope yet (settings service absent) → skipped, snapshot kept for a
  *   catch-up write when the scope attaches;
- * - a throwing `update` → counted as a failure and swallowed, never
- *   propagated (telemetry must not break core/host flow);
+ * - a throwing `update`, OR a rejected one — the host's `update(patch)`
+ *   returns `Promise<void>` (`dsh-settings/lib/types/index.d.ts:105-108`),
+ *   with only the not-registered / disposed / read-only / non-plain-object
+ *   refusals thrown synchronously (`dsh-settings/lib/index.js:443-455`) and
+ *   validation + persist failures arriving as rejections — counted as a
+ *   failure and contained, never propagated (telemetry must not break
+ *   core/host flow, and an unhandled rejection must never crash the host);
  * - the snapshot rides under {@link ROSTER_SETTINGS_KEY} so an `update`
  *   merge leaves the user's `enabled`/timeout config keys intact.
  *
@@ -48,8 +58,13 @@ export interface RosterChannelStats {
   readonly attached: boolean;
   /** Successful writes through the scope. */
   readonly writes: number;
-  /** `update` calls that threw. */
+  /** `update` calls that threw synchronously. */
   readonly failures: number;
+  /**
+   * Async write rejections (the host's `update` returns `Promise<void>`):
+   * counted separately so a rejected write is visible and never unhandled.
+   */
+  readonly asyncFailures: number;
   /** Publishes that had no writable scope (snapshot still retained). */
   readonly skipped: number;
 }
@@ -113,21 +128,45 @@ export function createSettingsRosterChannel(): SettingsRosterChannel {
   let scope: SettingsOwnerScopeLike | null = null;
   let lastSnapshot: RosterSnapshot | null = null;
   const writtenSessions = new Set<string>();
-  const stats = { attached: false, writes: 0, failures: 0, skipped: 0 };
+  const stats = {
+    attached: false,
+    writes: 0,
+    failures: 0,
+    asyncFailures: 0,
+    skipped: 0,
+  };
 
+  /**
+   * One best-effort write. The host's `Scope.update(patch)` is ASYNC
+   * (`dsh-settings/lib/types/index.d.ts:105-108`): only a few refusals throw
+   * synchronously (`dsh-settings/lib/index.js:443-455`); validation and
+   * persist failures arrive as a rejected promise. Both are contained here —
+   * an unhandled rejection from a telemetry write must never reach the host
+   * process, and the counters must tell the truth about which happened.
+   */
   function write(document: Record<string, unknown>): boolean {
     if (scope === null || typeof scope.update !== "function") {
       stats.skipped += 1;
       return false;
     }
+    let result: unknown;
     try {
-      scope.update(document);
-      stats.writes += 1;
-      return true;
+      result = scope.update(document);
     } catch {
       stats.failures += 1;
       return false;
     }
+    stats.writes += 1;
+    if (
+      typeof result === "object" &&
+      result !== null &&
+      typeof (result as PromiseLike<unknown>).then === "function"
+    ) {
+      void Promise.resolve(result).then(undefined, () => {
+        stats.asyncFailures += 1;
+      });
+    }
+    return true;
   }
 
   /**
