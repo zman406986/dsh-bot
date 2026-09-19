@@ -1,3 +1,16 @@
+/**
+ * Plugin scaffold — the Cordis plugin contract (name/inject/Config) plus a
+ * stub host context driving the real `apply()`.
+ *
+ * Fake-vs-host (ticket 91): `ctx.commands.register` and `ctx.tools.register`
+ * model the shipped fail-loud duplicate rules — a second registration of the
+ * same name THROWS the host's exact message, because both registries are
+ * `NamedEntries` tables whose insert() rejects a live key
+ * (`@deepseek-ai/dsh-commands/lib/index.js:82` and
+ * `@deepseek-ai/dsh-tools/lib/index.js:2538`). A duplicate that used to pass
+ * silently here now aborts this fake's `apply()` exactly as it aborts live
+ * activation (the ticket-84/85 amplifier class).
+ */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { Config, apply, inject, name } from "../src/plugin.js";
@@ -91,6 +104,15 @@ function createStubCtx(): AdapterContext & {
     },
     commands: {
       register(definition: CommandDefinitionLike) {
+        // Shipped rule: a duplicate name throws
+        // (dsh-commands lib/index.js:82, NamedEntries factory).
+        if (registeredCommands.some((c) => c.name === definition.name)) {
+          throw new Error(
+            `command "${definition.name}" is already registered (for a ` +
+              `per-agent variant, mount a command-injected plugin under ` +
+              `that agent's \`agent.ctx\`)`,
+          );
+        }
         registeredCommands.push(definition);
         return () => {
           const at = registeredCommands.indexOf(definition);
@@ -103,6 +125,15 @@ function createStubCtx(): AdapterContext & {
       register(definition: { name: string } & {
         execute: (args: unknown, exec?: unknown) => Promise<unknown>;
       }) {
+        // Shipped rule: a duplicate name throws
+        // (dsh-tools lib/index.js:2538, NamedEntries factory).
+        if (registeredTools.some((t) => t.name === definition.name)) {
+          throw new Error(
+            `tool "${definition.name}" is already registered (for a ` +
+              `per-agent variant, register through that agent's ` +
+              `\`agent.ctx\` instead)`,
+          );
+        }
         registeredTools.push(definition);
         return () => {
           const at = registeredTools.indexOf(definition);
@@ -331,6 +362,35 @@ describe("plugin scaffold", () => {
     ctx.fire("agent/session-start", { agent: createAgent("session-2") });
   });
 
+  it("a re-apply after dispose-all finds every name free (ticket 91 mirror-image pin)", async () => {
+    const ctx = createStubCtx();
+    apply(ctx, { enabled: true });
+    const agent = createAgent("session-1");
+    ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(ctx.registeredTools.length, 7);
+
+    for (const dispose of [...ctx.disposers]) dispose();
+    assert.equal(ctx.registeredCommands.length, 0);
+    assert.equal(ctx.registeredTools.length, 0);
+
+    // HMR re-load: the fresh apply must re-register the same three command
+    // names and the tool surface WITHOUT hitting the host's duplicate rule —
+    // teardown released every name (src/plugin.ts:664-687).
+    assert.doesNotThrow(() => apply(ctx, { enabled: true }));
+    assert.deepEqual(ctx.registeredCommands.map((c) => c.name), [
+      DISPATCHER_START_COMMAND,
+      DISPATCHER_STEER_COMMAND,
+      DISPATCHER_RESOLVE_COMMAND,
+    ]);
+    ctx.runCommand({
+      commandId: DISPATCHER_START_COMMAND,
+      agent: createAgent("session-2"),
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(ctx.registeredTools.length, 7);
+  });
+
   it("a firehose tool/call advances the count check_workers shows (ticket 75)", async () => {
     const ctx = createStubCtx();
     apply(ctx, { enabled: true });
@@ -374,5 +434,44 @@ describe("plugin scaffold", () => {
     // Fresh observed activity reads active — the quiet→active flip the
     // count wiring enables (previously the count could never advance).
     assert.equal(value.rows[0]?.liveness, "active");
+  });
+
+  // Ticket 91 negative controls: the shipped registries are fail-loud on a
+  // duplicate name, so a pre-registered name makes the REAL apply() throw
+  // (this is the offline detector for a double registration — the ticket-84/85
+  // activation-abort class, where the fake used to swallow it).
+  it("apply throws the host duplicate-command error when our command name is taken", () => {
+    const ctx = createStubCtx();
+    ctx.commands.register({
+      name: DISPATCHER_START_COMMAND,
+      description: "foreign claimant",
+      handler: () => ({ kind: "success", text: "foreign" }),
+    });
+
+    assert.throws(
+      () => apply(ctx, { enabled: true }),
+      new RegExp(
+        `command "${DISPATCHER_START_COMMAND}" is already registered`,
+      ),
+    );
+  });
+
+  it("activation throws the host duplicate-tool error when a dispatcher tool name is taken", () => {
+    const ctx = createStubCtx();
+    apply(ctx, { enabled: true });
+    // A foreign plugin already owns `spawn_worker` in this host.
+    ctx.tools.register({
+      name: "spawn_worker",
+      execute: async () => ({ ok: false }),
+    });
+
+    const agent = createAgent("session-1");
+    // The tool surface rides the activation effect, so the duplicate throws
+    // straight out of the command's activation path (live: it aborts the
+    // whole activation, not one degraded surface).
+    assert.throws(
+      () => ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent }),
+      /tool "spawn_worker" is already registered/,
+    );
   });
 });

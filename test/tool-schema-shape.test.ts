@@ -6,6 +6,10 @@
  * with INVALID_REQUEST ("false is not of type \"array\""). Offline fakes
  * never validate emitted schemas, so this walks the serialized trees
  * structurally — a regression fails without a live host.
+ *
+ * Fake-vs-host (ticket 91): the capture `tools.register` throws on a
+ * duplicate name with the shipped wording
+ * (`@deepseek-ai/dsh-tools/lib/index.js:2538`).
  */
 
 import assert from "node:assert/strict";
@@ -95,6 +99,16 @@ function createCaptureCtx(): AdapterContext & {
       schemas: () => registered.map((tool) => ({ name: tool.name })),
       register(definition: unknown) {
         const tool = definition as RegisterableTool;
+        // Shipped rule (ticket 91): a duplicate tool name throws
+        // (dsh-tools lib/index.js:2538, NamedEntries factory). The shipped
+        // surface never re-registers a name; this keeps it that way.
+        if (registered.some((t) => t.name === tool.name)) {
+          throw new Error(
+            `tool "${tool.name}" is already registered (for a per-agent ` +
+              `variant, register through that agent's \`agent.ctx\` ` +
+              `instead)`,
+          );
+        }
         registered.push(tool);
         return () => {
           const at = registered.indexOf(tool);
@@ -118,6 +132,22 @@ function registerFiveTools(): RegisterableTool[] {
 }
 
 describe("tool schema shape — provider-valid JSON Schema (ticket 45)", () => {
+  it("the capture registry throws the host duplicate-tool error (ticket 91 pin)", () => {
+    const ctx = createCaptureCtx();
+    const tool = {
+      name: "spawn_worker",
+      description: "d",
+      parameters: {},
+      execute: async () => ({}),
+    } as unknown as RegisterableTool;
+    ctx.tools.register(tool);
+
+    assert.throws(
+      () => ctx.tools.register(tool),
+      /tool "spawn_worker" is already registered/,
+    );
+  });
+
   it("all five serialized dispatcher tool schemas are structurally valid", () => {
     const tools = registerFiveTools();
     assert.deepEqual(

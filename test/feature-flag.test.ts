@@ -4,6 +4,11 @@
  * Unit tests, no network / LLM / real dsh host.
  * Covers: freeze semantics, disabled early-return, settings always installed,
  * onChange runtime no-op, policy gate, schema defaults.
+ *
+ * Fake-vs-host (ticket 91): the stub `commands.register` / `tools.register`
+ * are fail-loud on a duplicate name, like the shipped `NamedEntries` tables
+ * (`@deepseek-ai/dsh-commands/lib/index.js:82`,
+ * `@deepseek-ai/dsh-tools/lib/index.js:2538`).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -96,6 +101,15 @@ function createStubCtx(options?: {
     },
     commands: {
       register(definition: CommandDefinitionLike) {
+        // Shipped rule (ticket 91): a duplicate command name throws
+        // (dsh-commands lib/index.js:82, NamedEntries factory).
+        if (registeredCommands.some((c) => c.name === definition.name)) {
+          throw new Error(
+            `command "${definition.name}" is already registered (for a ` +
+              `per-agent variant, mount a command-injected plugin under ` +
+              `that agent's \`agent.ctx\`)`,
+          );
+        }
         registeredCommands.push(definition);
         return () => {
           const at = registeredCommands.indexOf(definition);
@@ -159,6 +173,15 @@ function createStubCtx(options?: {
     (ctx as { tools?: unknown }).tools = {
       schemas: () => registeredTools,
       register(definition: { name: string }) {
+        // Shipped rule (ticket 91): a duplicate tool name throws
+        // (dsh-tools lib/index.js:2538, NamedEntries factory).
+        if (registeredTools.some((t) => t.name === definition.name)) {
+          throw new Error(
+            `tool "${definition.name}" is already registered (for a ` +
+              `per-agent variant, register through that agent's ` +
+              `\`agent.ctx\` instead)`,
+          );
+        }
         registeredTools.push(definition);
         return () => {
           const at = registeredTools.findIndex((t) => t.name === definition.name);
@@ -169,8 +192,15 @@ function createStubCtx(options?: {
   }
 
   if (options?.withSettings === true) {
+    const claimedNamespaces = new Set<string>();
     ctx.settings = {
       installSection(owner, ns, schema, entry, hooks) {
+        // Shipped rule (ticket 91): a second claim of the same namespace
+        // throws (dsh-settings lib/index.js:283).
+        if (claimedNamespaces.has(ns)) {
+          throw new Error(`settings namespace "${ns}" is already registered`);
+        }
+        claimedNamespaces.add(ns);
         settingsCalls.push({ ns, schema, entry, hooks });
       },
     };
@@ -397,5 +427,34 @@ describe("feature flag — no off-while-running", () => {
     assert.equal(ctx.registeredCommands.length, 3);
     assert.equal(ctx.registeredCommands[0]?.name, DISPATCHER_START_COMMAND);
     assert.ok(ctx.listeners.has("agent/status"));
+  });
+});
+
+describe("feature flag — host duplicate-registration rule (ticket 91)", () => {
+  it("apply throws the host duplicate-command error when a command name is taken", () => {
+    const ctx = createStubCtx();
+    ctx.commands.register({
+      name: DISPATCHER_STEER_COMMAND,
+      description: "foreign claimant",
+      handler: () => ({ kind: "success", text: "foreign" }),
+    });
+
+    assert.throws(
+      () => apply(ctx, { enabled: true }),
+      new RegExp(`command "${DISPATCHER_STEER_COMMAND}" is already registered`),
+    );
+  });
+
+  it("the tools registry throws the host duplicate-tool error on a taken name", () => {
+    const ctx = createStubCtx({ withTools: true });
+    const tools = ctx.tools as unknown as {
+      register(definition: { name: string }): () => void;
+    };
+    tools.register({ name: "check_workers" });
+
+    assert.throws(
+      () => tools.register({ name: "check_workers" }),
+      /tool "check_workers" is already registered/,
+    );
   });
 });

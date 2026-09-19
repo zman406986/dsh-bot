@@ -15,6 +15,13 @@
  * collide while the same key within one session still refuses; deactivating
  * session A clears only A's policy rows and prompts; roster publishes carry
  * the changed session's id.
+ *
+ * Fake-vs-host (ticket 91): the plugin-level `commands.register` /
+ * `tools.register` and each agent's SCOPED `tools.register` throw on a
+ * duplicate name with the shipped wording
+ * (`@deepseek-ai/dsh-commands/lib/index.js:82`,
+ * `@deepseek-ai/dsh-tools/lib/index.js:2538`; the scoped layer uses the
+ * same `NamedEntries` factory).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -101,6 +108,17 @@ function createScopedAgent(id: string): ScopedAgent {
       name: string;
       execute: (args: unknown, exec?: unknown) => Promise<unknown>;
     }) {
+      // Shipped rule (ticket 91): duplicate tool name throws in the calling
+      // agent's scope too (dsh-tools lib/index.js:2538 — the scoped layer
+      // uses the same NamedEntries factory; dsh-tools/lib/types/index.d.ts
+      // :595 "duplicates within one layer ... fail").
+      if (scoped.has(definition.name)) {
+        throw new Error(
+          `tool "${definition.name}" is already registered (for a ` +
+            `per-agent variant, register through that agent's ` +
+            `\`agent.ctx\` instead)`,
+        );
+      }
       scoped.set(definition.name, definition);
       return () => {
         scoped.delete(definition.name);
@@ -129,6 +147,22 @@ function createMultiCtx(seam?: UserQuestionsLike) {
   const sentMessages: Array<{ targetId: unknown; text: string }> = [];
   const spawnedParents: Array<{ childId: string; parentSessionId: string }> = [];
   const updates: Array<Record<string, unknown>> = [];
+  const claimedNamespaces = new Set<string>();
+  // Settings-provider fake: a second claim of one namespace fails loud
+  // (shipped rule, dsh-settings lib/index.js:283).
+  const settingsProvider = {
+    installSection(_owner: unknown, ns: string) {
+      if (claimedNamespaces.has(ns)) {
+        throw new Error(`settings namespace "${ns}" is already registered`);
+      }
+      claimedNamespaces.add(ns);
+      return {
+        update(value: unknown) {
+          updates.push(value as Record<string, unknown>);
+        },
+      };
+    },
+  };
   let nextChild = 1;
 
   const fire = (name: string, payload: unknown) => {
@@ -161,17 +195,7 @@ function createMultiCtx(seam?: UserQuestionsLike) {
     },
     inject(services: readonly string[], callback: (child: unknown) => void) {
       if (services.includes("settings")) {
-        callback({
-          settings: {
-            installSection() {
-              return {
-                update(value: unknown) {
-                  updates.push(value as Record<string, unknown>);
-                },
-              };
-            },
-          },
-        });
+        callback({ settings: settingsProvider });
       }
     },
     on(name: string, cb: (payload: never) => void) {
@@ -187,6 +211,15 @@ function createMultiCtx(seam?: UserQuestionsLike) {
     },
     commands: {
       register(definition: CommandDefinitionLike) {
+        // Shipped rule (ticket 91): duplicate command name throws
+        // (dsh-commands lib/index.js:82, NamedEntries factory).
+        if (commands.has(definition.name)) {
+          throw new Error(
+            `command "${definition.name}" is already registered (for a ` +
+              `per-agent variant, mount a command-injected plugin under ` +
+              `that agent's \`agent.ctx\`)`,
+          );
+        }
         commands.set(definition.name, definition);
         return () => {
           commands.delete(definition.name);
@@ -199,6 +232,15 @@ function createMultiCtx(seam?: UserQuestionsLike) {
         name: string;
         execute: (args: unknown, exec?: unknown) => Promise<unknown>;
       }) {
+        // Shipped rule (ticket 91): duplicate tool name throws
+        // (dsh-tools lib/index.js:2538, NamedEntries factory).
+        if (tools.has(definition.name)) {
+          throw new Error(
+            `tool "${definition.name}" is already registered (for a ` +
+              `per-agent variant, register through that agent's ` +
+              `\`agent.ctx\` instead)`,
+          );
+        }
         tools.set(definition.name, definition);
         return () => {
           tools.delete(definition.name);
@@ -258,6 +300,8 @@ function createMultiCtx(seam?: UserQuestionsLike) {
     // Test surface
     fire,
     updates,
+    installSettingsSection: (ns: string) =>
+      settingsProvider.installSection({}, ns),
     commandNames: () => [...commands.keys()],
     globalToolNames: () => [...tools.keys()],
     globalTool: (name: string) => tools.get(name),
@@ -608,5 +652,57 @@ describe("multi-dispatcher — per-session prompts and policy rows (ADR-0019)", 
     });
     await tick();
     await tick();
+  });
+});
+
+describe("multi-dispatcher — host duplicate-registration rule (ticket 91)", () => {
+  it("apply throws the host duplicate-command error when a command name is taken", () => {
+    const multi = createMultiCtx();
+    multi.ctx.commands.register({
+      name: DISPATCHER_START_COMMAND,
+      description: "foreign claimant",
+      handler: () => ({ kind: "success", text: "foreign" }),
+    });
+
+    assert.throws(
+      () => apply(multi.ctx, { enabled: true }),
+      new RegExp(
+        `command "${DISPATCHER_START_COMMAND}" is already registered`,
+      ),
+    );
+  });
+
+  it("the plugin-level tool registry throws the host duplicate-tool error on a taken name", () => {
+    const multi = createMultiCtx();
+    const tool = { name: "request_access", execute: async () => ({ ok: true }) };
+    multi.ctx.tools.register(tool);
+
+    assert.throws(
+      () => multi.ctx.tools.register(tool),
+      /tool "request_access" is already registered/,
+    );
+  });
+
+  it("each agent's SCOPED registry throws the host duplicate-tool error on a taken name", () => {
+    const agent = createScopedAgent("s-a");
+    const tools = agent.ctx?.tools;
+    assert.ok(tools);
+    const tool = { name: "spawn_worker", execute: async () => ({ ok: true }) };
+    tools.register(tool);
+
+    assert.throws(
+      () => tools.register(tool),
+      /tool "spawn_worker" is already registered/,
+    );
+  });
+
+  it("the settings fake throws on a duplicate namespace claim (dsh-settings:283)", () => {
+    const multi = createMultiCtx();
+    multi.ctx.installSettingsSection("multitask-dispatcher");
+
+    assert.throws(
+      () => multi.ctx.installSettingsSection("multitask-dispatcher"),
+      /settings namespace "multitask-dispatcher" is already registered/,
+    );
   });
 });

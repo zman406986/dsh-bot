@@ -4,6 +4,13 @@
  * Offline only (S8): fake AdapterContext seams (commands + tools registry,
  * listener bus, storage stub) driving the real plugin apply() and the real
  * CordisDshHost. No network, no LLM, no running dsh.
+ *
+ * Fake-vs-host (ticket 91): the command and tool registries here (both the
+ * plugin-level `ctx` and the per-agent scoped `agent.ctx.tools` surface) are
+ * fail-loud on a duplicate name, like the shipped `NamedEntries` tables
+ * (`@deepseek-ai/dsh-commands/lib/index.js:82`,
+ * `@deepseek-ai/dsh-tools/lib/index.js:2538`). A double registration now
+ * aborts the fake's apply/activation instead of silently overwriting.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -53,6 +60,15 @@ function createScopedAgent(id: string): ScopedAgent {
         name: string;
         execute: (args: unknown, exec?: unknown) => Promise<unknown>;
       }) {
+        // Shipped rule: duplicate tool name throws
+        // (dsh-tools lib/index.js:2538, NamedEntries factory).
+        if (scoped.has(definition.name)) {
+          throw new Error(
+            `tool "${definition.name}" is already registered (for a ` +
+              `per-agent variant, register through that agent's ` +
+              `\`agent.ctx\` instead)`,
+          );
+        }
         scoped.set(definition.name, definition);
         return () => {
           scoped.delete(definition.name);
@@ -144,6 +160,15 @@ function createFullCtx() {
     },
     commands: {
       register(definition: CommandDefinitionLike) {
+        // Shipped rule: duplicate command name throws
+        // (dsh-commands lib/index.js:82, NamedEntries factory).
+        if (commands.has(definition.name)) {
+          throw new Error(
+            `command "${definition.name}" is already registered (for a ` +
+              `per-agent variant, mount a command-injected plugin under ` +
+              `that agent's \`agent.ctx\`)`,
+          );
+        }
         commands.set(definition.name, definition);
         return () => {
           commands.delete(definition.name);
@@ -156,6 +181,15 @@ function createFullCtx() {
         name: string;
         execute: (args: unknown, exec?: unknown) => Promise<unknown>;
       }) {
+        // Shipped rule: duplicate tool name throws
+        // (dsh-tools lib/index.js:2538, NamedEntries factory).
+        if (tools.has(definition.name)) {
+          throw new Error(
+            `tool "${definition.name}" is already registered (for a ` +
+              `per-agent variant, register through that agent's ` +
+              `\`agent.ctx\` instead)`,
+          );
+        }
         tools.set(definition.name, definition);
         return () => {
           tools.delete(definition.name);
@@ -341,8 +375,16 @@ describe("activation lifecycle — command behavior", () => {
   it("a second chat activates as its own dispatcher (ADR-0019: no single slot)", () => {
     const ctx = createFullCtx();
     apply(ctx, { enabled: true });
-    const first = createAgent("s-1");
-    const second = createAgent("s-2");
+    // Ticket 91: the LIVE shape — every agent loop mints `agent.ctx`
+    // (dsh-agent-loop/lib/index.js:761-762 `this.ctx = this.scope.ctx`;
+    // dsh-agent runtime-types.d.ts:149 makes `ctx` required), so each chat's
+    // tool surface lands in its OWN scope layer and a second activation is
+    // collision-free. Driving this with context-less stub agents instead
+    // would take the plugin-level fallback, which is documented as the
+    // single-dispatcher shape (src/plugin.ts:475-487) and is pinned as such
+    // in the test below.
+    const first = createScopedAgent("s-1");
+    const second = createScopedAgent("s-2");
 
     assert.deepEqual(ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent: first }), {
       kind: "success",
@@ -361,6 +403,34 @@ describe("activation lifecycle — command behavior", () => {
     });
     assert.equal(second.injected.length, 1);
     assert.equal(first.injected.length, 1);
+    // Each chat owns its own scoped tool surface — no cross-session names.
+    assert.equal(first.ctx?.tools.registeredNames().length, 6);
+    assert.equal(second.ctx?.tools.registeredNames().length, 6);
+    assert.equal(ctx.toolNames().length, 1); // request_access, global by design
+  });
+
+  it("the context-less fallback is single-session: a second chat hits the host duplicate error (ticket 91)", () => {
+    const ctx = createFullCtx();
+    apply(ctx, { enabled: true });
+    // Context-less agents take the plugin-level global fallback
+    // (src/plugin.ts:480-486). That shape holds ONE tool surface, so a second
+    // dispatcher session collides on the same names. Live hosts cannot reach
+    // this (every agent loop mints `agent.ctx`), but the offline suite must
+    // not pretend the fallback scales: the shipped registry throws, and the
+    // old permissive fake silently REPLACED the first session's closures
+    // (mis-routing its calls). Pinned loud, not silent.
+    const first = createAgent("s-1");
+    ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent: first });
+    assert.equal(ctx.toolNames().length, 7);
+
+    assert.throws(
+      () =>
+        ctx.runCommand({
+          commandId: DISPATCHER_START_COMMAND,
+          agent: createAgent("s-2"),
+        }),
+      /tool "spawn_worker" is already registered/,
+    );
   });
 
   it("activation in a child chat is refused with not-top-level copy", () => {

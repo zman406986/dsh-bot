@@ -122,8 +122,10 @@ function createAgent(
  * - `commands.register` throws
  *   `command "X" is already registered …` on a duplicate name; the disposer
  *   unregisters only its own definition (Finding 2);
- * - `tools.register` coexists by unique name and returns the exact disposer
- *   (the contract the deferred dispatcher surface relies on).
+ * - `tools.register` throws `tool "X" is already registered …` on a
+ *   duplicate name (ticket 91; dsh-tools lib/index.js:2538) and otherwise
+ *   coexists by unique name, returning the exact disposer (the contract the
+ *   deferred dispatcher surface relies on).
  *
  * Each `applyHostPlugin` call records the disposers created during it as a
  * per-plugin "fiber" so a test can unload one plugin (HMR) and leave the
@@ -236,10 +238,11 @@ function createHostCtx() {
     commands: {
       register(definition: CommandDefinitionLike) {
         if (commands.has(definition.name)) {
+          // Verbatim shipped wording (dsh-commands lib/index.js:82).
           throw new Error(
             `command "${definition.name}" is already registered (for a ` +
-              `per-agent variant, mount a command-injected plugin under that ` +
-              `agent's agent.ctx)`,
+              `per-agent variant, mount a command-injected plugin under ` +
+              `that agent's \`agent.ctx\`)`,
           );
         }
         commands.set(definition.name, definition);
@@ -261,6 +264,17 @@ function createHostCtx() {
         name: string;
         execute: (args: unknown, exec?: unknown) => Promise<unknown>;
       }) {
+        // Ticket 91: the tool registry is fail-loud on a duplicate name too
+        // (dsh-tools lib/index.js:2538, same NamedEntries factory) — a
+        // second plugin claiming a tool name must not silently replace the
+        // first's definition.
+        if (tools.has(definition.name)) {
+          throw new Error(
+            `tool "${definition.name}" is already registered (for a ` +
+              `per-agent variant, register through that agent's ` +
+              `\`agent.ctx\` instead)`,
+          );
+        }
         tools.set(definition.name, definition);
         const unregister = () => {
           if (tools.get(definition.name) === definition) {
@@ -778,6 +792,39 @@ describe("coexistence — host face: fail-loud claims (Findings 1 and 2)", () =>
       ctx.runCommand({ commandId: FOREIGN.command, agent }),
       FOREIGN_COMMAND_RESULT,
     );
+  });
+
+  it("a duplicate tool name fails loud; the first claimant's definition stays live (ticket 91)", async () => {
+    const ctx = createHostCtx();
+    applyForeignHostPlugin(ctx);
+    applyDispatcherHost(ctx, { enabled: true });
+
+    // Activate so the dispatcher's own tool names are on the surface.
+    const agent = createAgent("s-1");
+    ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // A latecomer tries to register over both plugins' tool names.
+    for (const name of ["spawn_worker", FOREIGN.tool]) {
+      assert.throws(
+        () =>
+          ctx.tools.register({
+            name,
+            execute: async () => ({ ok: false }),
+          }),
+        new RegExp(`tool "${name}" is already registered`),
+      );
+    }
+
+    // The first claimant's definition is untouched: the dispatcher tool still
+    // executes (it was not replaced by the interloper).
+    const spawn = ctx.tool("spawn_worker");
+    assert.ok(spawn);
+    const value = (await spawn.execute(
+      { stream_key: "s", title: "T", prompt: "P" },
+      { agent: { session: { id: "s-1" } } },
+    )) as { ok: boolean };
+    assert.equal(value.ok, true);
   });
 });
 
