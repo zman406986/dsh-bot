@@ -15,18 +15,20 @@ work (S9).
 
 ## What to do (research/design ticket)
 
-- [ ] Re-verify what the reference's peer/multi-agent messaging actually does from the research
+- [x] Re-verify what the reference's peer/multi-agent messaging actually does from the research
       notes (org-chart edges, recent-conversation markers — cite file:line; never open the
-      reference tree).
-- [ ] Re-base ticket 14's inbox/priority-lane design onto per-dispatcher sessions (keying per
-      session, not one process-global lane).
-- [ ] Design the outbound send: async fire-and-forget; optional priority interrupt of non-user
+      reference tree). — Done in the Design 2026-09-19 comment §1.
+- [x] Re-base ticket 14's inbox/priority-lane design onto per-dispatcher sessions (keying per
+      session, not one process-global lane). — Audited; already keyed (76); isolation pins
+      specified in the Design comment §4.
+- [x] Design the outbound send: async fire-and-forget; optional priority interrupt of non-user
       work; last-wins semantics do not apply across peers (per-peer steer is a dispatcher-internal
-      concern).
-- [ ] **C14 is binding:** no org chart, no group rooms, no routines — the tier is point-to-point
+      concern). — Design comment §2.
+- [x] **C14 is binding:** no org chart, no group rooms, no routines — the tier is point-to-point
       messaging only. **C15 is binding:** peer messages are a wake source into the receiving
-      dispatcher's existing single-wake-kind pipeline, not a new wake kind class.
-- [ ] Draft implementation ACs once 67 and 72 land.
+      dispatcher's existing single-wake-kind pipeline, not a new wake kind class. — C14 sort
+      recorded (retire group|broadcast); Design comment §3.
+- [x] Draft implementation ACs once 67 and 72 land. — Chunked ACs; Design comment §5.
 
 ## Constraints
 
@@ -93,3 +95,219 @@ does not spawn sub-tickets)**
   surface (that is in-scope conformance, not a new exception); priority interrupt must never
   interrupt a user-driven turn (14's rules already pin this — reuse, don't re-design).
 - **Size:** M (design); implementation L → decompose at dispatch time.
+
+### 2026-09-19 — agent (Design 2026-09-19: outbound per-session send, C14 sort, chunked ACs)
+
+Design pass complete. Headline: the inbound half is already per-dispatcher and keyed (76 landed);
+the design adds a **sixth dispatcher tool** for point-to-point outbound send on the existing
+per-session scoped surface, **retires the pre-C14 group|broadcast shapes as conformance**, and
+chunks implementation into 3 offline slices + a live-only slice for the 45/33 lane. The PRD's
+"Phase 2 optional" header wording is stale, not a live conflict — ADR-0002 (accepted) resolved
+§15.5 in-scope and ADR-0018 lists the peer tier in-scope, so the smallest honest scope here is
+**inbound (shipped) + one outbound tool; no hub, no directory, no transport work**.
+
+#### §1 Verified inventory (cited; honest gaps recorded, not simulated)
+
+Exists today (all per-dispatcher since 76):
+
+- Accept/dedupe authority: `src/core/peer-inbox.ts:35` `send(sessionId, envelope)`, `:37`
+  `listPending(sessionId)`, `:44` `markDelivered`, `:46` `has`; per-session state
+  `:122-139`; cap 64 `:16`; sender-scoped dedupe index `:57-60`; idempotent re-accept
+  `:166-192`; refusal reasons (invalid-envelope / unknown-target / inbox-full /
+  message-id-reuse) `:50-58`. NOTE: `unknown-target` exists in the ack vocabulary but is
+  **never produced** — `send` lazily creates state for any session id (`:132-139`), so today a
+  send to a nonexistent session acks ok and sits unread forever. Recorded gap; §2 fixes it.
+- Core API: `src/core/multitask.ts:239` `sendPeer(sessionId, envelope): PeerSendAck`, `:241`
+  `listPendingPeers`, `:245` `peerInbox`; wiring `:965-980` (inbox accept →
+  `wakeBus.enqueuePeer` with `effectivePeerPriority`); drain marks rows delivered `:318-325`.
+- Wake path (C15-clean): `src/core/wake-bus.ts:14-30` — `peer` is a source **inside** the
+  single existing wake vocabulary, not a new kind class; per-session priority/normal deques
+  `:166-169`; flush rank `:302-336`; user-preemption reclaim `:343-368`; `enqueuePeer`
+  `:455-511` — fail-closed user ownership `:459-462`, priority interrupts non-user turns only
+  `:470-484`, workers never interrupted `:105-108`.
+- Interrupt seam: `src/core/dsh-host.ts:34` optional `requestDispatcherInterrupt?`, soft
+  fallback wired `src/core/multitask.ts:311-317`. Honest limitation: the live adapter's
+  fallback is a no-op, so on the live host a priority peer currently **wins the next flush**
+  rather than aborting a mid-turn (recorded in code, not simulated away).
+- Hidden-turn copy: `src/core/policy/assembler.ts:200-227` `assemblePeerWakeTurn` —
+  other-assistant cue, renders `fromName (fromAgentId)` per notice. This rendering is the
+  model-visible discovery surface a replying dispatcher reads the sender's id from.
+- Worker barrier: structural (ADR-0019 scope chains), `src/adapter/dispatcher-tools.ts:4-10`;
+  core-side pin `test/multitask-peer.test.ts:340`.
+- Scoped registration (76): `src/plugin.ts:429-458` `activateToolSurface` — the closure IS the
+  session; `src/adapter/dispatcher-tools.ts:152-178` registers every def from
+  `createDispatcherTools`.
+
+Does NOT exist: any outbound dispatcher send tool. Ticket 14's resolved comment lists
+"dispatcher `send_peer` tool" out of MVP; `createDispatcherTools` returns exactly five defs
+(`src/core/tools.ts:244,340,437,468,523`; names `src/core/policy/prompts.ts:8-12`), and no
+model-visible surface exposes peer session ids.
+
+Reference verification (from the notes only; reference tree not opened):
+
+- `docs/research/reference-behavior-notes.md:60` — worker runs exclude the peer-message tool
+  (workers are leaves; our conformances match).
+- `:86-100` — direct peer messaging exists only between top-level agents; fire-and-forget: the
+  send returns a delivery ack; the reply arrives later as its own message waking a fresh turn.
+- `:126-145` — explicit priority flag: priority 1:1 goes front-of-queue **and** interrupts the
+  recipient's running turn, never a user-driven one; interrupted work is re-queued, re-drivable,
+  deduped; **priority is 1:1 only** — group posts ignore it.
+- `:133` — the reference's "broadcast" is the **user** messaging all their agents (a distinct
+  user cue), not a peer-tier send.
+- `:70`, `:88` (`always-on-dispatcher-behavior.md`) — org-chart edges/recent-conversation
+  markers visualize the hub we excluded (C14); cited only for what the tier is NOT.
+- **Thin-depth caveat (recorded, per AC 1):** the notes are "clear for 1:1 peer priority;
+  partial for the broadcast/channel lanes … not traced end-to-end" (`:143`). The design builds
+  only on the 1:1 material; the partially-traced area (group/broadcast) is precisely the area
+  §3 retires, so no design weight rests on thin evidence.
+
+#### §2 Outbound design: per-session send tool
+
+**Tool.** A sixth dispatcher tool, name ours: `SEND_PEER_TOOL = "send_peer"` (constant in
+`src/core/policy/prompts.ts`, appended to `DISPATCHER_TOOL_NAMES`). Schema (authored as
+`ToolParameterNode`, serialized per ticket 45):
+- `to_session` (string, required) — target **dispatcher session id**.
+- `text` (string, required, non-empty; max length refused inline — see gaps below).
+- `priority` (boolean, optional, default false) — 1:1 lane choice.
+
+The handler mints `messageId` (unique per send; the dedupe index stays an internal guarantee,
+not a model burden) and defaults `conversationId` to a constant (`"direct"` — the opaque
+forward-compat slot stays inert). `fromAgentId`/`fromName` = the sender's **own session id**
+from the registration closure (`getSessionId()`, `dispatcher-tools.ts:141`) — no `from` arg,
+so a dispatcher cannot spoof a sibling.
+
+**Registry (per 76).** The def is added to `createDispatcherTools`; `activateToolSurface`
+needs zero changes (it registers every def through the activated agent's scoped
+`agent.ctx.tools`, `plugin.ts:452-455`). Per-agent visibility is the fence: a worker or sibling
+cannot see the tool at all (host `UNKNOWN_TOOL`) — no execute-time gate, no new registration
+path. The "five dispatcher tools" comments (`plugin.ts:384`, `dispatcher-tools.ts:1-2`) get a
+count touch-up.
+
+**Addressing.** Target = the peer's dispatcher session id. How the sender learns it (no
+directory — C13 territory, see §6): (a) a peer wake turn renders the sender's
+`fromAgentId` (`assembler.ts:212-213`), so a recipient can reply to the id it sees; (b) the
+user supplies/pastes an id via the composer, with ticket 79's roster rows (keyed by session id)
+as the human-side source. There is no discovery tool by design: discovery would be a roster
+of peers, which C13 excludes.
+
+**Ack semantics (A4, direct send).** The tool result is the existing structural `PeerSendAck`
+(`peer-types.ts:37-58`). `ok:true` means exactly: **accepted into the target's inbox and wake
+lane; the target's next turn will see it** — inbox insert, never user delivery, never a reply,
+never "the peer read it". Copy must not promise more. Failures render honest refusal copy via
+`renderStructured` (`dispatcher-tools.ts:41-75`) with **no retry affordance and no queueing**
+(A4 + the conservative U-A reading per ticket 82): a failed send is reported, full stop.
+
+**New small core seam — liveness check.** `MultitaskOptions` gains optional
+`isLiveDispatcherSession?: (sessionId: string) => boolean`; `sendPeer` consults it for the
+`to_session` before accept and refuses with `unknown-target` (finally produced) when false;
+`self_session === to_session` refuses with a new `self-target` ack reason (a self-send would
+enqueue a peer wake into the sender's own inbox — a self-loop with no reference warrant; thin
+evidence, refused as the honest default). The plugin wires the callback to
+`lifecycle.isDispatcherSession(id)`; core tests inject a fake; absent callback keeps current
+behavior (core stays host-agnostic, wiring lives adapter-side). Offline-testable both ways.
+
+**Optional priority interrupt (non-user-only).** `priority:true` on 1:1 →
+`effectivePeerPriority` → front-of-queue plus interrupt of a live turn whose owner is
+`"peer"` or `"worker-settled"` — i.e. background worker-settle turns and prior peer turns.
+"Non-user-only" means precisely: a user-driven turn (owner `"user"`) or **unknown** ownership
+is never interrupted (fail closed, `wake-bus.ts:459-462`); interrupted non-user work re-queues
+re-drivable and deduped (`:343-368`, tests `multitask-peer.test.ts:202-261`); in-flight workers
+keep running (`wake-bus.ts:105-108`). Warrant: S9 (`PRD:75`),
+`reference-behavior-notes.md:130-131`, ADR-0002 — **imitation, no new exception**. Mechanism
+reuses the existing optional `requestDispatcherInterrupt` seam with its recorded no-op
+fallback. Last-wins does not apply across peers: B8 steer is dispatcher-internal; peer
+messages are fresh turns, never mid-turn injections (the priority interrupt is a run
+interrupt + re-queue, not a steer).
+
+#### §3 C14 sort of the shipped group|broadcast targets
+
+Binding citations: ADR-0018 exception item 7 (C14: "no org chart, no routines/automations
+subsystem, no per-agent memory, **no group rooms**"; the list is exhaustive — anything not on
+it is imitated) and this ticket's own contract ("the tier is point-to-point messaging only").
+The reference HAS group rooms and broadcast (`reference-behavior-notes.md:96,132-133,139`), so
+excluding them is a deviation — and C14 **is** the recorded exception covering it. Shipping
+group targets would contradict the exception list; retiring them is **in-scope conformance**
+(triage's wording), not a new exception.
+
+| Shipped surface | Disposition | Rationale |
+|---|---|---|
+| `PeerTarget` kind `"group"` (`peer-types.ts:7-10`) | **Retire** | Remove from the union, inbox validation (`peer-inbox.ts:96-99`), `priorityAckFields` (`:113-115`), label (`:88-89`), and the priority-target check (`peer-types.ts:79-81` → `priority` alone). No producer or consumer exists (no outbound tool ever shipped; wake copy renders the label only). Tests `multitask-peer.test.ts:99-142`, `peer-inbox.test.ts:120-172` rewrite with the shapes. |
+| `PeerTarget` kind `"broadcast"` | **Retire** | The reference broadcast is the user-to-all-agents cue (`:133`) — not a peer-tier send at all; the dispatcher-facing semantic is empty under C14 + point-to-point. Ack reason `"broadcast-target"` retires with it. |
+| Ack fields `priorityHonored` + reasons `"group-target"|"broadcast-target"` (`peer-types.ts:42-47`) | **Retire** | They only ever reported the target check; 1:1 priority is always honored. ok-ack reduces to `{ok, messageId, acceptedAtMs}`. |
+| `conversationId` (`peer-types.ts:19-24`) | **Fence (keep, inert)** | Opaque forward-compat carrier; threading/replies UI is U-B-excluded client-side. Kept as schema, default-minted, never surfaced. |
+| `priority` flag (1:1) | **Expose** | The tier's one optional semantics, S9-backed; after retirement it is inherently 1:1. |
+
+Ticket-14 tension resolved: ticket 14's group/broadcast ACs were authored against the
+pre-ADR-0018 feature-inventory posture (ADR-0004); ADR-0018's preamble supersedes wherever
+conflicting, and its exception list is the definition of done. Ticket 14 stays resolved as
+shipped (history intact); this ticket carries the retirement delta. Alternative considered and
+rejected: fence-only (keep types, never expose) — `multitask.sendPeer` is a public core API, so
+a fenced-but-accepted group envelope would still enqueue, wake, and deliver: shipped,
+unreachable-by-tool, live-by-API surface with dead ack branches, which is exactly the ambiguity
+a C14 sort exists to remove.
+
+#### §4 Isolation audit (offline two-dispatcher inbox/wake)
+
+Pinned today: inbox session independence at the module level (`test/peer-inbox.test.ts:202`
+"sessions are independent"); scoped tool surfaces + per-session handler routing
+(`test/multi-dispatcher.test.ts:309,336`); stream-key domains `:378`; per-session roster
+publish `:398`; per-session policy rows `:538`. The peer suites are **single-session**:
+`test/wake-bus-peer.test.ts:10` and `test/multitask-peer.test.ts:14` both fix
+`SESSION = "session-1"`.
+
+Missing (new offline pin, expected pass — a failure here is a bug to fix, not new design), as
+`test/multi-dispatcher-peer.test.ts`, two sessions A/B through one Multitask + FakeDshHost:
+1. A `sendPeer`s to B: `requestDispatcherWakeup` fires for **B only**; A gains no wake, no
+   inbox rows, no state.
+2. `listPendingPeers(A)` stays empty while B holds the row — no cross-session leakage.
+3. Draining B's peer wake marks **B's** rows delivered; a same-messageId row in A (sender-
+   scoped index) is untouched — delivered flags are per-session.
+4. B mid non-user turn + priority peer from A: interrupt and turn-ownership changes touch B
+   only; `getTurnOwner(A)`/`isBusy(A)` unchanged.
+5. B mid **user** turn + priority from A: queued, no interrupt, per existing rules — pinned
+   across two sessions, not just one.
+6. Post-retirement: a group/broadcast envelope is refused at accept (pins the §3 sort).
+
+#### §5 Chunked implementation ACs (triage sizes implementation L; chunks split here)
+
+- **Chunk 1 — core sort + isolation (offline, M).** Retire group|broadcast per §3 (schema,
+  inbox, wake-bus comments, label; tests rewritten); add `isLiveDispatcherSession` knob +
+  `unknown-target`/`self-target` production; land `test/multi-dispatcher-peer.test.ts` §4.
+  AC: full suite green offline (S8); no behavioral change for 1:1 traffic.
+- **Chunk 2 — tool + policy copy (offline, M).** Sixth def `send_peer` in
+  `createDispatcherTools` + `TOOL_DESCRIPTIONS` copy (fire-and-forget wording: "returns an
+  acceptance ack; the reply, if any, arrives later as its own turn — never wait"); handler
+  mints messageId/conversationId, maps ack to honest summary; text over the inline max refused
+  with `invalid-envelope` detail. ACs (offline): handler→`sendPeer` round-trip ack; unknown/
+  self target refusal copy; priority honored only as 1:1 lane choice; scoped-surface test
+  shows the new tool visible to the dispatcher session and absent from worker scope.
+- **Chunk 3 — client placement (offline, S).** Ticket 79's roster rows are the id source: add
+  a copy-session-id affordance on dispatcher rows; ticket 80's reduction shows peer-cue turns
+  for their session honestly (the wake turn is a hidden dispatcher turn — verify the surface
+  does not present it as user speech). AC: component tests per the 79/80 test patterns.
+- **Chunk 4 — live two-dispatcher verification (45/33 lane ONLY, S).** Live-only ACs, gated on
+  ADR-0019 sign-off (ticket-76 precedent): two dispatchers activated; A's model calls
+  `send_peer` with B's session id; B opens a peer-cue turn; the priority variant interrupts
+  B's non-user turn and never a user-driven turn; a bad-id send yields honest refusal copy
+  with no retry. Trivial tasks only, kill timers per AGENTS.md.
+
+#### §6 Honest gaps + human escalations
+
+- **Gap (recorded):** reference peer evidence is clear for 1:1 priority only (`:143`); no
+  design weight rests on the partially-traced lanes. **Gap (recorded):** the reference clamps
+  peer text to 8000 chars (`:156`); our inbound path assembles peer text raw today
+  (`assembler.ts:215-224`) and no clamp exists — Chunk 2 refuses over-max inline (U-F), and a
+  follow-up may apply the same bound on the inbound accept edge.
+- **Escalation 1 (ready-for-human, low-stakes confirmation — not a new exception request):**
+  directory-less addressing. The reference ships a peer directory
+  (`reference-behavior-notes.md:94`; PRD §7.6 "Directory" row); this design addresses peers by
+  dispatcher session id with no directory, reading that as covered by C13 ("no agent-identity
+  roster … dispatchers exist — via sessions"). If the human reads C13 as scoped to identity
+  *surfaces* only, a one-line ADR-0018 annotation ("no peer directory; peer addressing is
+  session ids") should be recorded before/with Chunk 1.
+- **No escalation needed for:** priority interrupt (S9 + `:130-131`, imitation); direct
+  fire-and-forget send (A4 conformant); group|broadcast retirement (conformance under C14).
+- **Note (no action this ticket):** PRD §7.6 still headers "Phase 2 — peer agents (optional)"
+  and §1 "(optional Phase 2)" post-rebase; ADR-0002 (accepted) resolved §15.5 in-scope and
+  ADR-0018 lists the tier in-scope (`PRD:408` carries the resolution). Stale wording, not a
+  live conflict — fold into the next PRD-wordsmith batch.
