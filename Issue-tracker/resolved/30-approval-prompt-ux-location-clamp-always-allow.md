@@ -1,7 +1,7 @@
 # 30 — Approval prompt UX: location line, clamped detail, session always-allow, expired/secret copy
 
 **Blocked by:** None — builds on the shipped ticket-23 prompt pump.
-**Status:** open
+**Status:** resolved
 
 ## Problem
 
@@ -109,3 +109,15 @@ copy, and secret-stored copy verbatim via `src/client/approval-cards.ts` +
 `approval-pane.tsx`). Per the supersession record above this ticket remains
 the live answer surface until 69's L1 wires the card resolve transport; the
 relay/policy work here never retires.
+
+### 2026-09-20 — RESOLVED (W17 closure sweep): card anatomy live-observed in Session B-5; supersession record stands; moved open/ → resolved/
+
+**Verified.** All boxes ticked; implementation (`0e2e9fa`) + the wildcard always-allow security rework (`7c90a25`, RED-verified, independently re-verified OVERALL PASS) merged to main in `400450f`. The 2026-09-19 supersession record stands: the constant location line re-based to 71 AC-4's per-producer-kind map (`e9f18ab`), the prompt-pathway rendering re-hosted by 81's cards (`9bcdd4d`/`1acb918`), with the option set, session rows + clearance (U-D-exact), wildcard fence, clamped detail, expired copy, and secret-stored copy re-hosted as-is; the relay/policy work never retires. This ticket's closure gating — "stays the live answer surface until 69's L1 wires the card resolve transport" — is DISCHARGED: 69 L1 was LIVE-VERIFIED in Session B-5 and ticked 2026-09-20 (W14). Ticket 30's own live observation landed in the same session (record on ticket 33; evidence `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-20\session-B5\`): the real prompt surface showed the full option set (Allow / "Always allow (this session)" / Deny, all present and enabled), the location line "Runs on your computer." (71's local entry), the zh secret-stored copy (数值始终安全存储——…), and the target field carrying the credential NAME (names-never-values held); the parked card resolved through the round-trip inside the ADR-0008 clock. Offline gates at closure: `npm run typecheck` clean (both configs); `npm test` 1125 pass / 0 fail / 272 suites.
+
+**Remaining nuances (recorded deferrals, not open defects):**
+- Clamp-cut and expired-copy paths NOT exercised live (no >240-char bait sent in the B-5 lane; the resolve beat the ADR-0008 timeout) — both offline-pinned; re-exercise recipes are recorded in `session-B5/README.md`. Nothing live contradicted them.
+- FLAG-2 from ticket 33's Gate-2 copy read (2026-09-19): the approval strings ship en-only (the host-rendered `ctx.userQuestions.ask` pathway has no zh seat) — a localization feature, not a parity-contract violation (the locale dictionary is 93 = 93); noted for when the pathway gains a zh seat.
+- The parked-worker `delivered:true` field value flagged in B-5 belongs to the obligation layer (ticket 58's model), not this ticket's ACs; observation recorded on 33's B-5 comment.
+
+Moved `Issue-tracker/open/30-approval-prompt-ux-location-clamp-always-allow.md` →
+`Issue-tracker/resolved/`, `**Status:**` → resolved. No other file moved. (W17 sweep order 27→28→29→31→30 honored; this was the last of the five.)
