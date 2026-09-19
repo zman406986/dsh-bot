@@ -199,3 +199,50 @@ the projection's input record (`{ok, worker_id}` from the tool-result message,
 reduction never runs live. Offline pins exist; the live render is unproven. The served bundle
 carries the full wiring (`projectDispatchCard` ×2, `applyRelayTruth` ×3 —
 `session-B2/driver/w11-32-bundle.json.out.json`). No box moved; dispositions belong to the sweep.
+
+### 2026-09-20 — agent (W19, FINDING 2 pinned AND fixed: the durable record never carried the structured result; the adapter now attaches it — merge f8067c3)
+
+Issue reference: ticket 33's Session B-2 comment 2026-09-20 (commit `39a0dca`), FINDING 2 —
+logged there per the tracker rule; no new ticket filed. Branch `wt/approval-relay-live-fixes`,
+fix commit **`ec105ae`**, merge **`f8067c3`**.
+
+**Root cause (host-source pinned, offline reproducible):** of the two hypotheses recorded live,
+"the reduction never ran live" is out (tool rows render from the same window) and the input
+shape is the one that failed — by HOST DESIGN, not by accident. The durable `tool/result` event
+carries the tool's RENDERED text plus an OPTIONAL presentation projection, and NEVER the
+structured `value`: `dsh-agent-loop/lib/index.js:697-712` (`appendToolResult`) spreads only
+`result.meta` into the event; `dsh-tools/lib/index.js:3428` builds that `meta` solely from
+`output.presentationMeta` (top-level calls). No registered dispatcher tool defined one, so the
+record's `message.content` was the spawn ack prose (`renderStructured` prefers `ack`),
+`toolResultRecord` found no `meta` and no JSON text, and `projectDispatchCard` honestly
+returned null — zero cards from two settled live spawns. The offline fixtures had passed only
+because they inlined the structured result as JSON text, a shape the real host never produces.
+
+**Fix:** `toRegisterableTool` now attaches `structuredPresentationMeta` — the structured result
+minus the model-facing prose fields (`ack` embeds the whole worker prompt; `summary` the
+rendered table; `note`) — as every dispatcher tool's `output.presentationMeta`, so the durable
+record's `meta` IS the structured half the client reducer already reads FIRST. All six tools
+benefit: toolview rows gain real outcomes/rows live too (B-2's check_workers rows rendered
+args-only). No core/relay change; B3 surfaces untouched.
+
+**RED-check:** dropping only the `presentationMeta:` wiring line → the two adapter pins fail
+("every registered dispatcher tool carries output.presentationMeta", "toRegisterableTool output
+attaches the presentation projection") → re-applied → green.
+
+**Pins added:** host-faithful `tool/result` fixtures (rendered prose + `meta`, exact
+`appendToolResult` shape) projecting spawned / gated (`approval-allowed` from the record's own
+`gated` marker) / refused (`approval-refused`) cards through the real reduction; plus a
+REGRESSION PIN that the exact B-2 live shape (prose only, no `meta`) still degrades honestly —
+no card, no fabricated fields — so a future reducer regression cannot silently "fix" itself by
+guessing from prose.
+
+**Gates on merged main:** typecheck clean (both configs); `npm test` **1118/271/0** (baseline
+1108/270/0).
+
+**How to verify live (B-4 or any later session):** spawn one worker through the dispatcher;
+select the dispatcher row; the settled `spawn_worker` row must now carry a `[data-card-kind=
+"worker-dispatch"]` element above it with `outcome` (spawned worker id) and `gating="ungated"`
+(shipped posture is EMPTY — `gated: true`/`approval-allowed` still needs W12's L3 posture lane).
+This rides the SAME rebuild the FINDING-1 contract fix rides: rebuild + profile remove/re-add
+before boot (stale-profile trap), then the card should render with zero extra LLM cost beyond
+the one trivial spawn.

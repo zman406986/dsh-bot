@@ -681,3 +681,50 @@ appears in tests only); shipped posture stays EMPTY; Q1 not relitigated.
 L3/L4 through the real `ctx.approval` waterfall and posture auto-answer) and Q1's human
 signature. The live-only question this pass could not answer: whether the shipped client approval
 composer still answers under the wrapper's root frame.
+
+### 2026-09-20 — agent (W19, FINDING 1 from live Session B-2: root cause pinned at the worker contract; registration surface ruled OUT; fix landed + RED-checked)
+
+Issue reference: ticket 33's Session B-2 comment 2026-09-20 (commit `39a0dca`), FINDING 1 —
+logged there per the tracker rule; no new ticket filed. Merge **`f8067c3`** (branch
+`wt/approval-relay-live-fixes`, commits `ec105ae`/`ef30cf8`).
+
+**Root cause — the registration hypothesis is DISPROVEN; the gap is model-facing.** Host-source
+read (installed `@deepseek-ai/*` 0.1.5-rc.2, never the reference tree): tool visibility is
+`ScopedLayers.merge(scope)` = the GLOBAL layer plus the scope-parent chain
+(`dsh-scope/lib/index.js:158-186`); scope tags are minted only by agent loops (`createScope`,
+`:287-305`), so the plugin ctx is UNSCOPED and `request_access`'s plugin-level registration
+lands in the global layer — which reaches EVERY agent's view, workers included. The surface
+selection was already locked offline (`test/activation-lifecycle.test.ts:536` "request_access
+stays global", `test/multi-dispatcher.test.ts:373`), and the tool→park relay round-trip is
+pinned end to end (`test/approval-feed-composition.test.ts` drives the real tool). Nothing
+about registration explains 3/3 skipped asks.
+
+What nothing pinned was the worker MODEL's information: the worker contract
+(`src/worker/prompt.ts`) never mentioned `request_access` at all, while its Autonomy section
+said "Never wait for a reply" and its Limits said the final answer is the ONLY channel back —
+and the host's own injected delegation statement tells every child that approval-requiring
+operations "are rejected automatically" and to state limitations in the reply. Three instructed
+workers skipping an undocumented ask tool that the whole surrounding prompt stack discourages
+in spirit is the observed failure mode; a model-compliance explanation was recorded live, and
+the contract was its mechanism.
+
+**Fix (new copy, adapted; `ef30cf8`):** the contract gains an "Asking for access" section —
+call `request_access` once (class/target/reason; credential NAME only, never a value), then
+end the turn and stop; the parent's answer arrives as the next message; a denial is final,
+never retried. Autonomy now names the ask as the ONE exception to no-wait; Limits names both
+channels back. The host-guarantee non-restatement discipline holds (no "approval" /
+"permission scope" wording; Safety stays the last section; no `{{`/`}}`).
+
+**RED-check:** reverting `src/worker/prompt.ts` to main's pre-fix version → 4 pins fail
+(headings + 3 new contract pins; 19 pass / 4 fail) → re-applied → 23/0 green in the file.
+
+**Gates on merged main:** `npm run typecheck` clean (both configs); `npm test` **1118 pass /
+0 fail / 271 suites** (baseline 1108/270/0). B3 holds (no `access-relay.ts`/`access-types.ts`
+delta); no posture seed; Q1 untouched.
+
+**What a B-4 live session can now verify (L1/L2 lane):** an instructed worker actually CALLS
+`request_access` (firehose `tool/call` row on the worker session), a pending ask appears
+(`settings/describe` `pendingAsks` non-empty; roster snapshot v4), the card renders inline,
+`/dispatcher-resolve` round-trips, and the row's blocked marker shows while waiting. If a
+worker STILL skips the call with the documented contract, the remaining suspects are host-side
+visibility (needs a worker-toolset diagnostic surface) — record, do not guess.
