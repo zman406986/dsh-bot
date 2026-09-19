@@ -72,7 +72,7 @@ Copy policy (exception B9): every string above is new or adapted copy in our loc
 - **68 (onboarding):** the first-run flow is a wrapper surface — it renders inside our frame (or the `main` page during staging) and can use the shipped `settings.onboarding` list slot only if our frame does not displace the settings surface at that stage. "Seen" persistence rides our settings namespace; U-A forbids sign-in/account beats.
 - **69 (auto-review):** approval cards render in the wrapper's conversation surface (ticket 80's), fed by the access relay's pending asks; the classifier layer is new core work. U-D binding (session-scoped always-allow).
 - **70 (peer tier):** peers are dispatcher sessions, so the sidebar roster is where peer presence lands; point-to-point only (C14), peer messages are a wake source into the existing pipeline (C15). Blocked by 76's session keying in the same way the sidebar is.
-- **71 (remote computer):** remote-box approval cards are 69's card system with location labels in our surface; computer/browser worker types flow through the dispatched-worker wake pipeline (C15). dsh host capability is the blocker check, per that ticket.
+- **71 (remote computer):** remote-box approval cards are 69's card system with location labels in our surface; computer/browser worker types flow through the dispatched-worker wake pipeline (C15). dsh host capability is the blocker check, per that ticket. **Resolved 2026-09-19: the check failed and the area is descoped as capability-blocked (ADR-0018 U-I); only the location-label slice lives on.**
 
 ## Consequences
 

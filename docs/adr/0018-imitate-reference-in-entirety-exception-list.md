@@ -13,7 +13,7 @@ We imitate the reference product in its entirety — behavior, product experienc
 - **We build the whole UI**: a GUI wrapper around dsh, the way the reference is its own product shell. Presence, the composer, panels, and every surface are ours. This voids the capsule-as-one-additive-overlay-entry approach (ADR-0013) and re-scopes the UI epic (tickets 27–35, 46, 49).
 - **Multiple dispatchers are real**: each dispatcher gets its own dsh session (human-identified capability). This voids ADR-0003's single-bound-parent consequence and ADR-0009 option C's deferral. Verification item: the earlier research blocked multi-activation on process-global tool registration — the wrapper/sessions need per-session tool scopes or generalized session-keyed gating.
 - **No dispatcher mode or toggle**: the wrapper window / expanded surface *is* the dispatcher; everything typed there goes to the dispatcher(s) living there. Always-on, like the reference.
-- **In scope, formerly excluded**: onboarding first-run flow; classifier-gated auto-review; the peer tier (dispatcher-to-dispatcher messaging); the remote computer / bots' desktop area (dedicated computer/browser worker types, remote-box approval surfaces with location labels, recording/teaching, remote/cloud jobs).
+- **In scope, formerly excluded**: onboarding first-run flow; classifier-gated auto-review; the peer tier (dispatcher-to-dispatcher messaging); the remote computer / bots' desktop area (dedicated computer/browser worker types, remote-box approval surfaces with location labels, recording/teaching, remote/cloud jobs) — **re-scoped 2026-09-19: capability-blocked at the host, exception U-I below; only the location-label slice stays live.**
 - **Conformances confirmed** (shared with the reference, not deviations): workers are leaves — the reference's worker runs exclude the spawn, management, user-message, and peer-message tools (`docs/research/reference-behavior-notes.md:60`; refutes the older Gap-8 nested-subagent claim); workers never address the user; the todo list is the dispatcher's private ledger; stops are conversational.
 
 ## The exception list (the complete set of deviations)
@@ -39,6 +39,7 @@ Everything below is where we deliberately do **not** imitate the reference. This
 17. **U-F** — Context hygiene by clamping inline, not by spilling large outputs to storage with prompt-side references.
 18. **U-G** — No runtime agent management: dispatchers are not created/cloned/kickstarted by agents at runtime; no agent create/update tools or profiles.
 19. **U-H** — No per-stream usage/token accounting, no action audit trail, no local content-search index.
+20. **U-I** — The remote computer / bots' desktop area is **capability-blocked at the host** (no remote-execution, computer-use, or browser-automation face exists; ticket 71's AC-1 read-only gate, 2026-09-19). Not a design choice — nothing to imitate yet. The capability-independent slice survives: per-producer-kind location labels, local by default. Re-opens if dsh ships a remote-exec capability family. *(Agent-recorded 2026-09-19 as a dispatched overnight ruling, subject to human reversal; ticket 71.)*
 
 ## Consequences
 

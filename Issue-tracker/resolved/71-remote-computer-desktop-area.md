@@ -1,8 +1,8 @@
 # 71 — Remote computer / bots' desktop area (ADR-0018 in-scope area)
 
-**Status:** blocked — capability gate FAILED (AC-1, 2026-09-19): the dsh host exposes no remote-execution / computer-use / browser-automation face (verdict + citations in the gate comment below). Awaiting the human decision: host-seam request vs descope-with-gaps.
-**Labels:** ready-for-human
-**Blocked by:** human decision (see the 2026-09-19 gate comment). Previously: none for the gated research pass — 67 resolved (ADR-0020); the absent-branch halt pre-sanctioned by the triage brief and this ticket's no-fantasy constraint has now executed.
+**Status:** resolved — descoped-with-gaps (dispatched overnight ruling 2026-09-19): the area is recorded capability-blocked at the host in ADR-0018's exception list (new item **U-I**); the capability-independent location-label slice already shipped via ticket 81 (commit `e9f18ab`). See the 2026-09-19 resolution comment.
+**Labels:** ready-for-agent
+**Blocked by:** none. Previously: human decision (a) host-seam request vs (b) descope-with-gaps — ruled (b) by the overnight dispatch; re-opens if dsh ships a remote-exec capability family.
 **Related:** ADR-0018 (in scope: "the remote computer / bots' desktop area (dedicated computer/browser worker types, remote-box approval surfaces with location labels, recording/teaching, remote/cloud jobs)"; exceptions C15, U-D), `docs/research/always-on-dispatcher-behavior.md` area 6 (remote-box cards), 30 (location-line re-base), `docs/research/prd-vs-reference-capability-gaps.md` (remote-box notes)
 
 ## Problem
@@ -29,10 +29,12 @@ exception list constraining it.
 - [x] Recording/teaching: scope what "recording a computer session for replay/teaching" means on
       dsh; mark what has no honest seam rather than inventing one.
       (2026-09-19: GAP — no honest seam exists; AC-5 in the gate comment.)
-- [ ] Draft implementation ACs once 67's vehicle is decided.
+- [x] Draft implementation ACs once 67's vehicle is decided.
       (Gated out for this pass 2026-09-19: AC-1 verified no host capability, and the brief
       scopes implementation ACs to capabilities that verified — none of this area's did.
-      The capability-independent AC-4 label design is recorded and folded into 81.)
+      The capability-independent AC-4 label design is recorded and folded into 81.
+      **Closed 2026-09-19 under the descope-with-gaps ruling below: no implementation ACs
+      are drafted — there is nothing to implement against, and AC-4 shipped as code (e9f18ab).**)
 
 ## Constraints
 
@@ -249,3 +251,57 @@ through the `locationFor` hook (`src/client/approval-cards.ts`,
 and that no remote line renders while only local kinds exist. Capability
 truth unchanged: AC-1's gate verdict stands, the ticket stays blocked on the
 human (a)-vs-(b) decision — the map is naming, not a claim.
+
+### 2026-09-19 — agent (RESOLVED: descope-with-gaps ruling; ADR-0018 ledger entry U-I)
+
+**Ruling: option (b) descope-with-gaps.** The area is recorded as capability-blocked in
+ADR-0018's exception list; nothing here stays open idling on a host lane that may never
+answer. This is a *dispatched overnight ruling* (human unattended, delegated judgement) and is
+recorded as reversible — the human may overturn it, and option (a) remains available at any
+time with no work lost.
+
+Why (b) over (a):
+
+1. **The evidence already supports it and needs no new dependency.** The gate verdict is firm,
+   not UNCLEAR (AC-1 above): no remote-execution / computer-use / browser-automation face
+   exists in ~180 installed `@deepseek-ai/*` packages. Independently, this project's own
+   capability research reached the same conclusion long before the wrapper era:
+   `docs/research/prd-vs-reference-capability-gaps.md:4` scopes the project to "local dsh
+   deployment; ... remote box / computer-use infrastructure excluded" and `:82` lists "remote
+   sandbox & computer-use (box, VNC, recording/teaching) ... browser/computer tooling" as
+   present-in-reference but deliberately excluded — a capability-honest exclusion, not an
+   oversight. `always-on-dispatcher-behavior.md:105` marks the reference area "covered
+   shallowly". No doc anywhere records a dsh remote-exec capability.
+2. **Option (a) buys nothing actionable now.** A host-seam request ("ask the dsh host lane for
+   a remote-exec capability family") is a wish to a party outside this project, with no
+   timeline; holding a ticket open on it converts a resolved capability fact into an indefinite
+   blocker, which the overnight brief forbids.
+3. **Descoping loses nothing that was alive.** ADR-0018:16 re-admitted the area "in scope",
+   but AC-1 showed that admission was aspirational until a host seam exists. The one
+   capability-independent slice — per-producer-kind location labels — is already shipped
+   (`e9f18ab`: `approvalLocationLineFor` in `src/adapter/access-prompt.ts`, `locationFor` hook
+   in `src/client/approval-cards.ts`), and remains live under U-I.
+4. **Reversal is additive.** If dsh later ships a remote-exec capability family, U-I is deleted
+   (or re-scoped) and this ticket re-opens with ACs 2/3/4/5 already on record — no rework.
+
+**Applied: ADR-0018 ledger entry (matching the existing exception-list row format).**
+`docs/adr/0018-imitate-reference-in-entirety-exception-list.md` gains item **20. U-I** — "The
+remote computer / bots' desktop area is capability-blocked at the host … Not a design choice —
+nothing to imitate yet. The capability-independent slice survives: per-producer-kind location
+labels, local by default. Re-opens if dsh ships a remote-exec capability family." The row
+carries the agent-recorded / overnight-dispatched / subject-to-reversal note inline, matching
+the ADR's existing dated-ruling annotations. For internal consistency the ADR's "In scope,
+formerly excluded" line (line 16) gains a pointer to U-I, since leaving it unqualified would
+re-state the now-re-scoped admission. ADR-0018 is otherwise untouched; its accepted text and
+the human's 2026-09-18 ruling are not altered — this is a ledger entry recording a capability
+fact, exactly the "designed not to spec against fantasy" outcome this ticket's own constraint
+demands.
+
+**AC dispositions:** AC-1 (gate verdict ABSENT, blocker recorded) — closed by the gate comment
+above. AC-2 (reference verification table) — closed. AC-3 (exception sort C15/U-D/labels-IN) —
+closed. AC-4 (location-label re-base) — closed as design; shipped as code via 81 (`e9f18ab`).
+AC-5 (recording/teaching GAP) — closed. The remaining "draft implementation ACs" box is now
+ticked as resolved-with-nothing-to-draft. No live-only ACs exist to hand to the 45/33 lane.
+
+**Reversal path:** to overturn, delete/amend U-I in ADR-0018, re-open this ticket, and (for
+option (a)) file the host-seam request. Nothing else needs changing.
