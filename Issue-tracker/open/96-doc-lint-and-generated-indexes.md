@@ -64,3 +64,68 @@ Ticket 97 depends on nothing here being merged first, but its guides will add `r
 
 Triaged 2026-09-20 by the overnight team-lead run: `ready-for-agent`. Next in the overnight work
 order (W1–W5: tooling, first catches + indexes, independent verification).
+
+### 2026-09-20 — W1 implementation (overnight run, tooling pass)
+
+**Built and merged (branch `wt/doc-lint-96`, commits `2a452fa` + `c2eca32`, merge `690916f`):**
+
+- `tools/doc-lint.mjs` — zero-dep orientation-doc linter, data-driven: 6 rules
+  (`orientation-path-resolution`, `orientation-required-citation`,
+  `orientation-forbidden-claim`, `tracker-status-agreement`, `open-index-freshness`,
+  `adr-index-row-freshness`). Extension points are data tables — `DOC_EXPECTATIONS`
+  (mustCite/forbid with written reasons), `PATH_ALLOWLIST` (12 entries, each with a reason),
+  `CONFIG`, and the `RULES` registry. Machine-readable `--json`; human default; exit codes
+  0 clean / 1 findings / 2 usage.
+- `tools/doc-lint.mjs --self-test` — the tool's own test, 35/35 green, runs only against
+  `tools/fixtures/doc-lint/repo/` (a fixture repo with one rot instance per rule). It enforces
+  per-rule fixture coverage, allowlist negatives, and generator round-trips (stale→fresh,
+  byte-identical regeneration, ADR prose preservation) in a temp copy — the real docs are
+  never touched.
+- `tools/issue-index.mjs` — deterministic generator for `Issue-tracker/open-issue-index.md`
+  (id/slug/title/labels from the H1 + `**Labels:**` line, status from the folder; 11 rows).
+  Default writes; `--check` exits 1 when missing/stale; `--json`.
+- `tools/adr-index.mjs` — merge-rule regenerator for `docs/adr/README.md`, per the ticket:
+  the generator owns only the ROW SET (file exists ⟺ row exists, sorted); every existing row
+  LINE is reused verbatim so the hand-maintained status prose (0016 retraction, 0005/0009/0013
+  supersession notes, pending-sign-off notes) can never be flattened; new files get a row
+  synthesized from the file's H1 + `**Status:**` line; all non-table prose byte-preserved;
+  CRLF preserved. **Proven on the real README: regeneration is byte-identical (20 rows,
+  `git diff` empty), so the merge state already holds.**
+- `npm run lint:docs` wired (`node tools/doc-lint.mjs && node tools/issue-index.mjs --check &&
+  node tools/adr-index.mjs --check`). No other script touched. Zero new dependencies
+  (node:fs/path/url/os only); all tools run from any cwd.
+
+**How to run:** `node tools/doc-lint.mjs [--json|--self-test]`, `node tools/issue-index.mjs
+[--check]`, `node tools/adr-index.mjs [--check]`, or `npm run lint:docs`.
+
+**Known-catches count on the pre-W2 tree: 16 findings across 6 rules** (all expected; W2 fixes
+the docs). Breakdown:
+- `orientation-path-resolution` (6): the 4 dead `docs/agents/*` cites in AGENTS.md (lines
+  70/76/80/84), plus 2 beyond the filing list — README.md:51 cites `dev/cordis.dev.patch.yml`
+  which does not exist (only `dev/cordis.web.patch.yml` is committed), and
+  research/research.md:22 cites `docs/adr/0001-choose-go-for-core.md` (the repo's real 0001 is
+  typescript-in-process).
+- `orientation-required-citation` (3): AGENTS.md cites none of `Issue-tracker/issue-tracker.md`,
+  `agent.md`, `research/research.md`.
+- `orientation-forbidden-claim` (3): AGENTS.md line 3 "no application code, package manifest…";
+  AGENTS.md line 70 tracker-lives-under-`.scratch/`; README.md line 7 "Ticket 01 scaffold …
+  Host adapter and tools land in later tickets".
+- `tracker-status-agreement` (3): tickets **43, 52, 54 sit in `resolved/` with
+  `**Status:** open`** — found by the new check, not by the filing audit. W2 should re-point or
+  relabel these (mechanical fix, same class).
+- `open-index-freshness` (1): the generated open-index does not exist yet — W2 generates and
+  commits it, then a second run must produce no diff.
+- `adr-index-row-freshness` (0): already clean.
+
+**Gates (recorded on merged main `690916f`):** `npm run typecheck` clean (both tsconfigs);
+`npm test` = **1108 pass / 270 suites / 0 fail** (matches the 14ee7a9 baseline); self-test 35/35.
+Offline-verified only; no live lane involved.
+
+**Notes for W2:** (1) AGENTS.md is git-ignored (local-only, .gitignore line 3) — lint reads the
+working tree, so the guard still works, but W2's AGENTS.md fixes will not produce a tracked
+diff. (2) The allowlist exists because not every missing path is rot (convention names like
+`CONTEXT-MAP.md`, profile-layer filenames like `cordis.patch.yml`, status-folder shorthand
+`open/`); extend it only with a written reason. (3) Ticket 97's `read-before-*.md` naming check
+should be added as a new rule + fixture when 97 lands (the RULES registry + self-test coverage
+enforcement make that mechanical). Ticket stays open — W2 (first catches + indexes) and W3
+(independent verification) remain.
