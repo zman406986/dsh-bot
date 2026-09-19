@@ -235,3 +235,7 @@ Caveat recorded honestly: the expanded capsule CARD composition kept the dormant
 (roster-keyed composition, ticket 32's model) while the flag mirror read `on` — the watch
 and the flag clause are proven; the card-pitch behavior is flagged for triage in ticket 44's
 pass-2 comment. The offline-gate AC 2 stays for the offline pass owner to tick.
+
+### 2026-09-19 — one-line note
+
+Mooted by 78 cutover (a44084a): capsule retired.

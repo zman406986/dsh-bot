@@ -159,3 +159,7 @@ clause should decide whether the flag flip satisfies it or the roster-keyed card
 (ticket 44's pass-2 comment) is the honest reading. Also confirmed again this pass: WMI
 `powershell -Command "& timer.ps1"` processes never execute; all kill timers were node-internal
 (verified in tasklist at launch).
+
+### 2026-09-19 — one-line note
+
+Mooted by 78 cutover (a44084a): capsule retired.

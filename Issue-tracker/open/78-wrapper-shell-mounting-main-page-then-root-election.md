@@ -13,15 +13,26 @@
       one entry, id stability), matching the existing overlay/toolview test style.
       Evidence: `src/client/shell-mount.ts` + `index.ts` `mountShellPage` + commit 8fcffad
       (2026-09-19 comment below).
-- [ ] Cutover slice: register the shell into the `root` single slot (dynamic entry — lower
+- [x] Cutover slice: register the shell into the `root` single slot (dynamic entry — lower
       priority than the shipped frame; abdication falls back to the shipped app, ADR-0020's
       failsafe). Same offline pinning style for the registration contract.
-      *(Awaiting cutover — executes only AFTER ticket 80's conversation surface lands; see the
-      2026-09-19 comment. The fail-safe election rule itself is already pinned offline as pure
-      functions in `shell-mount.ts` (`shellCellWinner`), and a test pins that NOTHING registers
-      into `root` while staging stands.)*
-- [ ] Retire the capsule overlay entry at the cutover (the chip/panel vehicle, not the assets).
-      *(Awaiting cutover — same gate as above; the staging launcher chip retires alongside it.)*
+      Evidence: `shellRootRegistration()` in `src/client/shell-mount.ts` (single-slot
+      `{name: "root", locale}` — no id/key, matching the runtime catalog's own documented
+      example, dsh-cordis-client-runner `lib/client.js:3514-3520`, `registerOptions: []`;
+      the shipped AppFrame registers the same way, ui-layout `lib/client.js:524-531`) + the
+      `ctx.slots.inject(ROOT_FRAME_SLOT, …)` composition in `index.ts` (commit `94e6127`).
+      The election's LIVE half (frame swap visually, HMR fiber behavior, fallback-on-crash
+      in a real browser) is NOT claimed from offline work — awaiting live pass 3
+      (2026-09-19 comment below).
+- [x] Retire the capsule overlay entry at the cutover (the chip/panel vehicle, not the assets).
+      Evidence: commit `a44084a` — the capsule's `shell.overlay` inject AND the staging
+      launcher chip's inject + `layout` watch are removed from `index.ts`; no
+      `shell.overlay` registration remains (pinned by test across the scaffold, shell-mount,
+      coexistence, toolviews, roster-panel, and capsule-chip suites). Sources stay
+      (`capsule.tsx`, `capsule-store.ts`, `shell.tsx` launcher, `shell-mount.ts` launcher
+      contracts — retired-vehicle assets; dead-code disposition is the 65/66/73 lane's).
+      *(Executed 2026-09-19, after ticket 80's conversation surface and 84's inject
+      declarations landed.)*
 
 ## Constraints
 
@@ -133,3 +144,45 @@ profile, host 0.1.5-rc.1, commit `c56e69d` tree, client bundle 157,823 bytes).
   contract + chip are real); the live visual confirmation of the three-pane `main` page and
   the cutover ACs remain open and now additionally await 84. No cutover ACs were touched.
 - **2026-09-19**: 84 landed (`154e7c7`) — shell page open unblocked for live pass 3.
+
+### 2026-09-19 — agent (CUTOVER landed: root election + capsule/launcher retirement; commits 94e6127 + a44084a)
+
+Both cutover ACs executed offline (post-80/84 prerequisites). **Ticket stays `open/`:** its
+Constraints route the election's live half to the live lane, and they are NOT claimed —
+**awaiting live pass 3** (frame swap renders visually; HMR swap reverses cleanly in a real
+client; a crashed entry abdicates and the stock app frame takes the cell back; onboarding/
+conversation/roster seats work inside the elected frame).
+
+- **Root election (94e6127).** `shellRootRegistration()` = `{name: "root",
+  locale: "multitask-dispatcher"}` — a single slot takes no id/key/order; the shape matches
+  the runtime slot catalog's own documented example (`ctx.slots.inject('root', () =>
+  ctx.slots.register({name: 'root'}, …))`, registerOptions `[]`, dsh-cordis-client-runner
+  `lib/client.js:3514-3520`) and the shipped AppFrame's own registration (adds `locale` +
+  child-seat declarations we deliberately omit — our frame is self-contained; ui-layout
+  `lib/client.js:524-531`). The priority field is host-assigned ("Page-local shadowing rank.
+  A later registration receives a lower priority.", runner `lib/client.js:383`) — the model
+  constant `SHELL_ROOT_DYNAMIC_PRIORITY = 1` stays as the relative-order contract only. The
+  entry mounts the SAME `mountShellPage` composition as the `main` page (feed binding,
+  conversation window, seat projection, onboarding seat — one shared onboarding store).
+- **Abdication paths (real, not just the pure fn).** Unload/HMR: the inject controller rides
+  the caller's fiber, so the fiber cascade sweeps the entry (`registry.d.ts:77-83`) — pinned
+  offline: teardown empties `root`, `shellCellWinner` over the surviving cell hands it to the
+  shipped frame; re-apply restores the identical contract. Crash: the per-entry boundary
+  abdicates shadowing entries and "the outlet re-renders onto the cell's next survivor"
+  (dsh-client-ui-renderer `lib/client.js:507-514`) — host-side, live-pass-3 confirmation.
+- **Retirement (a44084a).** The capsule `shell.overlay` inject, the launcher `shell.overlay`
+  inject, and the launcher's `ctx.inject(["layout"])` watch are gone from the composition; the
+  strict-host pin now expects exactly one runtime inject request (`["settingsScope"]`).
+  Registration inject count 5 → 4 (toolview, settings card, `main`, `root`). The `main` page
+  registration STAYS (its staging AC is ticked history; contract untouched): while the frame
+  election stands it is dormant (invisible; if the shadowed frame's child declarations
+  collapse, the documented collapse/re-declare mechanics park it safely), and on abdication it
+  self-restores — safe under either reading of the catalog's "every seat the frame declares
+  gone". Locale keys untouched by the cutover (no copy change).
+- **Assets kept.** Capsule/launcher sources, stores, and copy remain exported and fed by the
+  one settings watch (re-host inventory per ADR-0020; disposition = 65/66/73). Ticket 81's
+  capsule-retirement bullet is overtaken by this slice's retirement AC (its approval-cards
+  work is unaffected).
+- **Gates:** `npm test` 1016 pass / 0 fail (250 suites, both commits); `npm run typecheck`
+  clean (both configs); `npm run build:client` green (client\index.js, 158,103 → 138,259
+  bytes across the two commits).

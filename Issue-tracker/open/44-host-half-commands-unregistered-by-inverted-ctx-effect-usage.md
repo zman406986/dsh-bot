@@ -226,3 +226,7 @@ composition appears roster-keyed, which reads as misleading while the dispatcher
 honesty; (3) NEW defect found on this boot, unrelated to this ticket's fix: the shell
 launcher chip cannot open the `main` page (uninjected `ctx.layout`/`ctx.sessions` reads
 throw) — filed as ticket 84.
+
+### 2026-09-19 — one-line note
+
+Mooted by 78 cutover (a44084a): capsule retired.
