@@ -1185,3 +1185,35 @@ live-verified where the tickets demanded it, across sessions B-1…B-5/C with ev
       explicitly SUBJECT TO HUMAN REVERSAL.
 
 Both open tickets carry `**Labels:** ready-for-human` as of this wrap.
+
+### 2026-09-20 — verifier-verdict persistence (orchestrator bookkeeping): W8 / W20 / W24 verdicts were reported to the orchestrator only; persisted here now
+
+Three independent-verifier verdicts from tonight's run were delivered to the orchestrator but never
+written into the repo. The W18 wrap above flagged W8 as "no record anywhere"; W20 and W24 were
+post-plan items with no PLAN line at all. All three ran and concluded as recorded below — this
+comment closes that gap (no gates re-run for this record; the latest recorded run stands: typecheck
+clean, 1125/272/0, lint green, at final HEAD `4dab80b`).
+
+- **W8 — independent verifier of the L3 approval-seam wiring (ticket 69's W7 work, merge
+  `14ee7a9`): ACCEPTED.** Topology confirmed (merge `14ee7a9` ← `261fe34`; tracker comment
+  `0fc20a5`, ticket-69-only); all 5 new tests assert as claimed; gates re-run at the time:
+  1108/270/0; the RED-check was executed by the verifier itself (dropped toolDeps wiring → source
+  pin fails with the intended message, behavior pins green, restored byte-identical, 12/12);
+  B3 empty-diff vs `e069b8a` (posture files under `src/core/`); no seeder; Q1 untouched.
+  Superseded in substance by later work — B-3's live seam check + W22's offline pins at
+  1125/272/0.
+- **W20 — independent verifier of W19's FINDING 1/2 fixes (merge `f8067c3`): ACCEPTED.** Diff
+  content matches the claims (prompt section exact; `structuredPresentationMeta` at the sole
+  registration site, stripping ack/summary/note; zero node_modules changes); gates re-run:
+  1118/271/0; RED-check on the wiring line executed (2/12 named pins fail → restored
+  byte-identical → green); B3 holds; no seeder; tracker comments `3826525` match diff reality.
+- **W24 — git-integrity audit of the concurrent W13/W22 handoff: INTEGRITY-OK.** `ae9cf4c` is a
+  true fast-forward ancestor of HEAD; no commits lost (superseded resets `7afc4f6`/`b66162c`
+  fully contained in the final pair); zero out-of-scope files; this ticket's session records each
+  present exactly once (the B-3 cherry-pick duplication resolved to one record); rulings +
+  ADR-0010 untouched; worktrees sane. Audited at HEAD `4ebe484`, gates 1125/272/0.
+
+This record also discharges the W18 caveat's W8 item ("the dispatch itself never happened" — it
+did, and its verdict now stands persisted). PLAN.md's missing disposition lines (W3/W5/W6/W8/W15
+plus post-plan W20/W24) are filled in the same bookkeeping pass; PLAN remains untracked scratch
+per the run's convention.
