@@ -1,6 +1,6 @@
 # 68 — Onboarding first-run flow (ADR-0018 in-scope area)
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Blocked by:** none — 67 resolved (ADR-0020); 77 resolved; 78's staging mount landed (the cutover slice stays open but does not gate this ticket: the flow is built in-shell, cutover-proof — see the 2026-09-19 triage comment)
 **Related:** ADR-0018 (in scope: "onboarding first-run flow"), `docs/research/always-on-dispatcher-behavior.md` area 1 (first-run sequence), 32 (composition polish — its coherence goal re-bases here)
@@ -208,3 +208,43 @@ On a fresh throwaway profile boot (85 fixed, shell as root, zero pageerrors):
 ### 2026-09-19 — one-line note
 
 87 landed (5da8a54) — ready for live re-confirm.
+
+### 2026-09-19 — live pass 5, Session A: AC 5 TICKED — the first-run walk ran post-cutover inside the elected frame; ticket RESOLVED
+
+Evidence root: `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-19\evidence\A\`; shots under
+`C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-19\shots\`. Real host boot
+(`@deepseek-ai/dsh@0.1.5-rc.1`, throwaway `multitask` profile, port 8877), Playwright headless
+chromium, **zero LLM turns**, clean teardown (`teardown-port-and-pids.txt`; stock `web` profile
+byte-identical — `web-profile-before.md5` / `web-profile-after.md5`).
+
+- [x] **AC 5 — first-run visual pass in a real browser, post-cutover.** The walk ran INSIDE the
+  elected `root` frame (the staging `main` page is dormant behind it):
+  - beats observed `intro → background → tools → first → handoff`:
+    `A3-03-probe-beat1.json.out.json` (`data-onboarding="beats"`, beat `intro`, `第 1 步`,
+    primary `下一步`), `A3-05c-probe-after-1.json.out.json` (`background`),
+    `A3-05c-probe-after-2.json.out.json` (`tools`), `A3-05c-probe-after-3.json.out.json`
+    (`first`), `A3-06c-probe-handoff.json.out.json` (`handoff`, primary `开始使用`);
+    shots `shots/A3-01-onboarding-beat1.png`, `shots/A3-02-onboarding-beat5.png`.
+  - settled state after `开始使用`: `A3-08-probe-settled.json.out.json`
+    (`data-onboarding="settled"`, body carries `选择一个调度会话以查看其工作。`,
+    `saveFailed: 0`); `status-after-A3-walk.json` → `log: []` (zero pageerror/console-error).
+- **Honest note — the walk window was reopened, not found open.** The profile already carried
+  `onboarding.seen: true` from pass 4, so before the walk the agent cleared it through the
+  host's own client-visible RPC: `settings/update` with `onboarding: null`
+  (`A3-clear-seen.json.in` / `.out.json` — HTTP 200, `value.onboarding: null`, revision 2).
+  Recorded, not hidden: a deliberate probe-window reset, no product defect involved.
+- **The seen write landed on the wire and serves back.** `settings/mutate` with
+  `ops:[{"op":"set","path":["onboarding"],"value":{"seen":true}}]`, HTTP 200
+  (`A3-09-reqlog-dump.json.out.json`; raw `reqlog-A3-walk.json`); `settings/describe` serves
+  `value.onboarding = {seen:true}` (revision 3, `A3-10-describe-ours.json.out.json`); the record
+  stands at teardown (`settings-after-A4.yaml`). The pass-4 hazard's fallback (a host-side
+  schema field) was again NOT needed.
+- **Suppression half:** covered by 87's three clean reloads in the same session
+  (`A4-01c-probe.json.out.json`, `A4-02c-probe.json.out.json`, `A4-03c-probe.json.out.json`
+  all `settled`; delete round-trip `A4-11-probe-after-delete.json.out.json`) — see 87's closing
+  comment. Unchanged from pass 4: the "≥1 dispatcher session" mirror clause could not be
+  isolated live (the sidebar rows render 状态不可用 — no dispatcher mirrors in this namespace),
+  and nothing here changes that.
+
+ACs 1–4 were closed offline (commit 247b33d comment above); AC 5 closes here. Nothing else was
+open on this ticket — moving to `Issue-tracker/resolved/` with `**Status:** resolved`.
