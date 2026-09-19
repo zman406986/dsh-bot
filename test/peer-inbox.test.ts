@@ -10,7 +10,6 @@ import {
   samePeerPayload,
   toPeerNotice,
   type PeerEnvelope,
-  type PeerTarget,
 } from "../src/core/peer-types.js";
 
 const SESSION = "session-1";
@@ -37,7 +36,9 @@ describe("peer inbox — accept / ack (AC: fire-and-forget + ack)", () => {
     assert.equal(result.ack.ok, true);
     assert.ok(result.ack.ok);
     assert.equal(result.ack.messageId, "msg-1");
-    assert.equal(result.ack.priorityHonored, true);
+    // Ticket 70 §3: the ok ack reduces to {ok, messageId, acceptedAtMs}.
+    assert.equal("priorityHonored" in result.ack, false);
+    assert.equal("reason" in result.ack, false);
     assert.equal(typeof result.ack.acceptedAtMs, "number");
     assert.equal(result.appended, true);
     assert.equal(inbox.pendingCount(SESSION), 1);
@@ -117,57 +118,54 @@ describe("peer inbox — accept / ack (AC: fire-and-forget + ack)", () => {
   });
 });
 
-describe("peer inbox — group / broadcast ignore priority (AC + S9)", () => {
-  it("a group envelope with priority:true is accepted normally and ack says priority was not honored", () => {
+describe("peer inbox — C14 retirement (ticket 70 §3: point-to-point only)", () => {
+  it("a group envelope is refused as invalid-envelope; nothing is appended", () => {
     const inbox = createPeerInbox();
     const result = inbox.send(
       SESSION,
       envelope({
-        to: { kind: "group", groupId: "team-1" },
+        to: { kind: "group", groupId: "team-1" } as unknown as PeerEnvelope["to"],
         priority: true,
       }),
     );
-    assert.equal(result.ack.ok, true);
-    assert.ok(result.ack.ok);
-    assert.equal(result.ack.priorityHonored, false);
-    assert.equal(result.ack.reason, "group-target");
-    assert.equal(inbox.pendingCount(SESSION), 1);
+    assert.equal(result.ack.ok, false);
+    assert.ok(!result.ack.ok);
+    assert.equal(result.ack.reason, "invalid-envelope");
+    assert.equal(inbox.pendingCount(SESSION), 0);
   });
 
-  it("a broadcast envelope with priority:true is accepted normally with broadcast-target", () => {
+  it("a broadcast envelope is refused as invalid-envelope", () => {
     const inbox = createPeerInbox();
     const result = inbox.send(
       SESSION,
-      envelope({ to: { kind: "broadcast" }, priority: true }),
+      envelope({ to: { kind: "broadcast" } as unknown as PeerEnvelope["to"] }),
     );
-    assert.equal(result.ack.ok, true);
-    assert.ok(result.ack.ok);
-    assert.equal(result.ack.priorityHonored, false);
-    assert.equal(result.ack.reason, "broadcast-target");
+    assert.equal(result.ack.ok, false);
+    assert.ok(!result.ack.ok);
+    assert.equal(result.ack.reason, "invalid-envelope");
+    assert.equal(inbox.pendingCount(SESSION), 0);
   });
 
-  it("non-priority 1:1 reports priorityHonored true (nothing was asked)", () => {
+  it("a target without an agentId is refused; the ok ack carries no priority fields", () => {
     const inbox = createPeerInbox();
-    const result = inbox.send(SESSION, envelope({ priority: false }));
-    assert.equal(result.ack.ok, true);
-    assert.ok(result.ack.ok);
-    assert.equal(result.ack.priorityHonored, true);
-    assert.equal(result.ack.reason, undefined);
+    const bare = inbox.send(
+      SESSION,
+      envelope({ to: { kind: "agent", agentId: "" } }),
+    );
+    assert.equal(bare.ack.ok, false);
+    assert.ok(!bare.ack.ok);
+    assert.equal(bare.ack.reason, "invalid-envelope");
+
+    const ok = inbox.send(SESSION, envelope({ priority: false }));
+    assert.equal(ok.ack.ok, true);
+    assert.ok(ok.ack.ok);
+    assert.equal("priorityHonored" in ok.ack, false);
+    assert.equal("reason" in ok.ack, false);
   });
 
-  it("effectivePeerPriority is true only for 1:1 priority envelopes", () => {
+  it("effectivePeerPriority is the 1:1 flag itself after the retirement", () => {
     assert.equal(effectivePeerPriority(envelope({ priority: true })), true);
     assert.equal(effectivePeerPriority(envelope({ priority: false })), false);
-    assert.equal(
-      effectivePeerPriority(
-        envelope({ to: { kind: "group", groupId: "g" }, priority: true }),
-      ),
-      false,
-    );
-    assert.equal(
-      effectivePeerPriority(envelope({ to: { kind: "broadcast" }, priority: true })),
-      false,
-    );
   });
 });
 
@@ -223,19 +221,19 @@ describe("peer types — payload identity and notices", () => {
   });
 
   it("toPeerNotice carries the effective priority flag, not the wire flag", () => {
-    const group = envelope({
-      to: { kind: "group", groupId: "g" },
-      priority: true,
-    });
-    const notice = toPeerNotice(group, effectivePeerPriority(group));
+    const notice = toPeerNotice(envelope({ priority: true }), false);
     assert.equal(notice.priority, false);
     assert.equal(notice.messageId, "msg-1");
     assert.equal(notice.conversationId, "conv-1");
   });
 
-  it("PeerTarget kinds stay distinct — agent id never equals a group id", () => {
-    const agent: PeerTarget = { kind: "agent", agentId: "x" };
-    const group: PeerTarget = { kind: "group", groupId: "x" };
-    assert.equal(samePeerPayload(envelope({ to: agent }), envelope({ to: group })), false);
+  it("samePeerPayload distinguishes targets by agent id", () => {
+    const a = envelope({ to: { kind: "agent", agentId: "x" } });
+    const b = envelope({ to: { kind: "agent", agentId: "y" } });
+    assert.equal(samePeerPayload(a, b), false);
+    assert.equal(
+      samePeerPayload(a, envelope({ to: { kind: "agent", agentId: "x" } })),
+      true,
+    );
   });
 });

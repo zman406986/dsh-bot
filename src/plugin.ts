@@ -244,6 +244,13 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     ...(accessTimeoutMs !== undefined
       ? { access: { timeoutMs: accessTimeoutMs } }
       : {}),
+    // Ticket 70 §2: the send_peer liveness fence is the activation truth —
+    // a peer send to a session that is not a live dispatcher refuses with
+    // `unknown-target` instead of acking into a phantom inbox. `lifecycle`
+    // is assigned below; the closure only runs once sends happen, never
+    // during apply (same pattern as onRosterChanged).
+    isLiveDispatcherSession: (sessionId) =>
+      lifecycle.isDispatcherSession(sessionId),
     // Ticket 21: mirror roster-affecting transitions into the settings
     // namespace. `lifecycle` is assigned below — the closure only runs once
     // activation exists, never during apply. ADR-0019: the gate is

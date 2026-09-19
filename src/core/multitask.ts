@@ -111,6 +111,16 @@ export interface MultitaskOptions {
    * tests can reach the bound in one step instead of looping the whole loop.
    */
   readonly maxRedrives?: number;
+  /**
+   * Ticket 70 §2: liveness check consulted by `sendPeer` for the TARGET
+   * session id before accept. When it returns false the send is refused with
+   * `unknown-target` (the shipped lazy-inbox used to silently ack a send to
+   * a nonexistent session into a phantom inbox — this is the deliberate,
+   * design-recorded behavior change for sloppy senders). Absent callback
+   * keeps the current behavior: the core stays host-agnostic, the plugin
+   * wires `lifecycle.isDispatcherSession`. Offline-testable both ways.
+   */
+  readonly isLiveDispatcherSession?: (sessionId: string) => boolean;
 }
 
 /**
@@ -232,9 +242,11 @@ export interface Multitask {
    */
   readonly wakeBus: WakeBus;
   /**
-   * Fire-and-forget peer accept (ticket 14). Returns a structural ack
-   * only — never a reply. Newly accepted envelopes join the priority or
-   * normal lane after the target check; delivery is wake-bus + host followup.
+   * Fire-and-forget peer accept (ticket 14; fences ticket 70 §2). Returns a
+   * structural ack only — never a reply. Newly accepted envelopes join the
+   * priority or normal lane by the 1:1 priority flag; delivery is wake-bus +
+   * host followup. Self-targets refuse unconditionally; unknown targets
+   * refuse when `isLiveDispatcherSession` is wired.
    */
   sendPeer(sessionId: string, envelope: PeerEnvelope): PeerSendAck;
   /** Undelivered peer envelopes for a session (status tools / tests). */
@@ -279,6 +291,7 @@ export function createMultitask(
   options?: MultitaskOptions,
 ): Multitask {
   const durability = options?.durability;
+  const isLiveDispatcherSession = options?.isLiveDispatcherSession;
   const workers = new Map<string, WorkerRecord>();
   /**
    * Live (non-terminal) worker per stream, keyed `(parentSessionId, streamKey)`
@@ -963,13 +976,37 @@ export function createMultitask(
     wakeBus,
     todos: todoLedger,
     sendPeer(sessionId: string, envelope: PeerEnvelope): PeerSendAck {
+      // Ticket 70 §2 fences, BEFORE the inbox (whose lazy per-session state
+      // would otherwise materialize a phantom target). Self-target is
+      // unconditional: the sender's claimed session (the id the adapter
+      // stamps from the registration closure) equal to the target session is
+      // a self-loop with no reference warrant — refused as the honest
+      // default. Unknown-target is produced only when the host wired the
+      // liveness knob; absent callback keeps the shipped behavior.
+      if (envelope.fromAgentId === sessionId) {
+        return {
+          ok: false,
+          messageId: envelope.messageId,
+          reason: "self-target",
+          detail:
+            "the target dispatcher session is the sender's own session; peer messages to yourself are refused",
+        };
+      }
+      if (isLiveDispatcherSession !== undefined && !isLiveDispatcherSession(sessionId)) {
+        return {
+          ok: false,
+          messageId: envelope.messageId,
+          reason: "unknown-target",
+          detail: `no live dispatcher session "${sessionId}" — the message was not delivered`,
+        };
+      }
       const result = peerInbox.send(sessionId, envelope);
       if (!result.ack.ok || !result.appended) {
         // Refusal or idempotent re-accept: never enqueue a second row.
         return result.ack;
       }
-      // Lane placement uses effective priority (target-checked), not the
-      // wire flag alone — group/broadcast always land in the normal lane.
+      // Lane placement uses the effective priority — the 1:1 flag itself
+      // after the C14 retirement (ticket 70 §3).
       const priority = effectivePeerPriority(envelope);
       wakeBus.enqueuePeer({
         sessionId,

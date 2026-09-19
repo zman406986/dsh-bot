@@ -84,7 +84,7 @@ export interface EnqueueAccessNoticeInput {
 export interface EnqueuePeerInput {
   readonly sessionId: string;
   readonly notice: PeerNotice;
-  /** Already target-checked (priority && to.kind === "agent"). */
+  /** Already the caller's effective lane choice (1:1 priority; ticket 70 §3). */
   readonly effectivePriority: boolean;
 }
 
@@ -165,7 +165,7 @@ interface SessionWakeState {
   pendingAccessNotices: AccessNotice[];
   /** Priority peer notices (1:1 effective-priority) in FIFO order. */
   priorityPeers: PeerNotice[];
-  /** Normal peer notices (non-priority 1:1 + all group/broadcast). */
+  /** Normal peer notices (non-priority 1:1; group/broadcast retired, ticket 70 §3). */
   normalPeers: PeerNotice[];
   /** Wake already prepared for the next (or current) turn. */
   ready: WakeEvent | null;

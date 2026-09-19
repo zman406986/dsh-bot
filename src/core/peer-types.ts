@@ -1,13 +1,17 @@
 /**
- * Peer envelope schema (ticket 14 / design-14 §2).
+ * Peer envelope schema (ticket 14 / design-14 §2; C14 sort ticket 70 §3).
  * New types only — no reference identifiers.
  */
 
-/** How a peer message is addressed. */
-export type PeerTarget =
-  | { readonly kind: "agent"; readonly agentId: string }
-  | { readonly kind: "group"; readonly groupId: string }
-  | { readonly kind: "broadcast" };
+/**
+ * How a peer message is addressed. Post-C14 (ADR-0018 exception 7, ticket 70
+ * §3) the tier is point-to-point only: the shipped `group` / `broadcast`
+ * shapes are RETIRED — the reference's broadcast is the user-to-all-agents
+ * cue, not a peer-tier send, and group rooms are excluded outright. The
+ * discriminant stays on the shape so a later in-scope widening is not a
+ * breaking schema change; today `kind` is always `"agent"`.
+ */
+export type PeerTarget = { readonly kind: "agent"; readonly agentId: string };
 
 /** One peer message. Immutable after accept. */
 export interface PeerEnvelope {
@@ -17,34 +21,37 @@ export interface PeerEnvelope {
   readonly fromName: string;
   readonly to: PeerTarget;
   /**
-   * Conversation / thread slot (forward-compatibility). Opaque in MVP;
-   * carried through ack, wake, and transcript so a later threaded hub
-   * is not a breaking schema change.
+   * Conversation / thread slot (forward-compatibility). C14 sort (ticket 70
+   * §3): FENCED — kept in the schema, default-minted by the outbound tool,
+   * never surfaced as a threading concept (U-B excludes threads/replies);
+   * carried opaquely so a later in-scope hub would not be a breaking change.
    */
   readonly conversationId: string;
   readonly text: string;
   /** Reserved. MVP is text-first; empty array or omitted. */
   readonly imageRefs?: readonly string[];
   /**
-   * 1:1 only. Ignored when `to.kind` is group/broadcast (AC + S9).
+   * The tier's one optional semantics (S9): the 1:1 lane choice. Inherently
+   * 1:1 after the C14 retirement — group/broadcast targets no longer exist.
    * Never interrupts a user-owned dispatcher turn.
    */
   readonly priority: boolean;
   readonly createdAtMs: number;
 }
 
-/** Fire-and-forget accept result. Never carries the dispatcher's reply. */
+/**
+ * Fire-and-forget accept result. Never carries the dispatcher's reply.
+ * Ticket 70 §3: the ok branch reduces to `{ok, messageId, acceptedAtMs}` —
+ * `priorityHonored` + the `group-target`/`broadcast-target` reasons retired
+ * with the shapes they reported on (1:1 priority is always honored). The
+ * failure reasons gain `self-target` (ticket 70 §2); `unknown-target` is
+ * finally produced once the liveness knob is wired.
+ */
 export type PeerSendAck =
   | {
       readonly ok: true;
       readonly messageId: string;
       readonly acceptedAtMs: number;
-      /**
-       * False when the envelope asked for priority but policy refused it
-       * (group/broadcast target). Sender is told priority did not interrupt.
-       */
-      readonly priorityHonored: boolean;
-      readonly reason?: "group-target" | "broadcast-target";
     }
   | {
       readonly ok: false;
@@ -53,7 +60,8 @@ export type PeerSendAck =
         | "invalid-envelope"
         | "unknown-target"
         | "inbox-full"
-        | "message-id-reuse";
+        | "message-id-reuse"
+        | "self-target";
       readonly detail: string;
     };
 
@@ -73,23 +81,17 @@ export interface PeerNotice {
 }
 
 /**
- * Effective priority after the target check (design-14 §3.2).
- * Group/broadcast always land in the normal lane.
+ * Effective priority (design-14 §3.2, post-C14 ticket 70 §3). The target
+ * check retired with the group/broadcast shapes: the flag IS the lane
+ * choice on a 1:1 tier.
  */
 export function effectivePeerPriority(envelope: PeerEnvelope): boolean {
-  return envelope.priority && envelope.to.kind === "agent";
+  return envelope.priority;
 }
 
 /** Stable label for ack/copy (not a wire id). */
 export function peerTargetLabel(to: PeerTarget): string {
-  switch (to.kind) {
-    case "agent":
-      return `agent ${to.agentId}`;
-    case "group":
-      return `group ${to.groupId}`;
-    case "broadcast":
-      return "broadcast";
-  }
+  return `agent ${to.agentId}`;
 }
 
 /** Map an accepted envelope onto a wake notice. */
@@ -130,14 +132,7 @@ export function samePeerPayload(
 }
 
 function targetsEqual(a: PeerTarget, b: PeerTarget): boolean {
-  if (a.kind !== b.kind) return false;
-  if (a.kind === "agent" && b.kind === "agent") {
-    return a.agentId === b.agentId;
-  }
-  if (a.kind === "group" && b.kind === "group") {
-    return a.groupId === b.groupId;
-  }
-  return a.kind === "broadcast" && b.kind === "broadcast";
+  return a.kind === b.kind && a.agentId === b.agentId;
 }
 
 function imageRefsEqual(

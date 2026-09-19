@@ -1,7 +1,10 @@
 /**
- * Plugin-owned peer inbox (ticket 14 / design-14 §3, §5).
+ * Plugin-owned peer inbox (ticket 14 / design-14 §3, §5; C14 sort ticket 70).
  * Dedupe index + delivered flags + cap. Lanes live on the wake bus;
- * this module is the accept/delivery authority.
+ * this module is the accept/delivery authority. The `unknown-target` and
+ * `self-target` refusals are NOT produced here — they are the multitask
+ * `sendPeer` liveness/self fences (ticket 70 §2); the inbox stay pure of
+ * host knowledge (absent knob = current behavior).
  */
 
 import {
@@ -49,7 +52,6 @@ export interface PeerInbox {
 interface PeerRow {
   readonly key: string;
   readonly envelope: PeerEnvelope;
-  readonly priorityHonored: boolean;
   readonly acceptedAtMs: number;
   delivered: boolean;
 }
@@ -85,38 +87,16 @@ function validateEnvelope(
     return { ok: false, detail: "priority must be a boolean" };
   }
   // Runtime guard for untrusted host-edge input; PeerTarget is already typed.
+  // C14 sort (ticket 70 §3): only the 1:1 shape is admitted — the retired
+  // group/broadcast kinds refuse here as invalid-envelope.
   const to = envelope.to as Partial<PeerTarget> | null | undefined;
-  if (to == null || typeof to !== "object" || typeof to.kind !== "string") {
-    return { ok: false, detail: "to must be a peer target" };
+  if (to == null || typeof to !== "object" || to.kind !== "agent") {
+    return { ok: false, detail: `unknown target kind "${String(to?.kind)}"` };
   }
-  if (to.kind === "agent") {
-    if (!isPresent((to as { agentId?: unknown }).agentId)) {
-      return { ok: false, detail: "to.agentId is required" };
-    }
-  } else if (to.kind === "group") {
-    if (!isPresent((to as { groupId?: unknown }).groupId)) {
-      return { ok: false, detail: "to.groupId is required" };
-    }
-  } else if (to.kind !== "broadcast") {
-    return { ok: false, detail: `unknown target kind "${String(to.kind)}"` };
+  if (!isPresent((to as { agentId?: unknown }).agentId)) {
+    return { ok: false, detail: "to.agentId is required" };
   }
   return { ok: true };
-}
-
-function priorityAckFields(envelope: PeerEnvelope): {
-  priorityHonored: boolean;
-  reason?: "group-target" | "broadcast-target";
-} {
-  if (!envelope.priority) {
-    return { priorityHonored: true };
-  }
-  if (envelope.to.kind === "group") {
-    return { priorityHonored: false, reason: "group-target" };
-  }
-  if (envelope.to.kind === "broadcast") {
-    return { priorityHonored: false, reason: "broadcast-target" };
-  }
-  return { priorityHonored: true };
 }
 
 interface SessionInboxState {
@@ -182,10 +162,6 @@ export function createPeerInbox(options?: PeerInboxOptions): PeerInbox {
             ok: true,
             messageId: envelope.messageId,
             acceptedAtMs: existing.acceptedAtMs,
-            priorityHonored: existing.priorityHonored,
-            ...(priorityAckFields(existing.envelope).reason !== undefined
-              ? { reason: priorityAckFields(existing.envelope).reason }
-              : {}),
           },
           appended: false,
         };
@@ -204,11 +180,9 @@ export function createPeerInbox(options?: PeerInboxOptions): PeerInbox {
       }
 
       const acceptedAtMs = Date.now();
-      const ackFields = priorityAckFields(envelope);
       const row: PeerRow = {
         key,
         envelope,
-        priorityHonored: ackFields.priorityHonored,
         acceptedAtMs,
         delivered: false,
       };
@@ -218,10 +192,6 @@ export function createPeerInbox(options?: PeerInboxOptions): PeerInbox {
           ok: true,
           messageId: envelope.messageId,
           acceptedAtMs,
-          priorityHonored: ackFields.priorityHonored,
-          ...(ackFields.reason !== undefined
-            ? { reason: ackFields.reason }
-            : {}),
         },
         appended: true,
       };

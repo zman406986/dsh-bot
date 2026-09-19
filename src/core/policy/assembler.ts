@@ -216,7 +216,9 @@ export function assemblePeerWakeTurn(
       sections.push("");
       sections.push(`### ${notice.fromName} (${notice.fromAgentId})`);
       sections.push(`- Target: ${peerTargetLabel(notice.to)}`);
-      sections.push(`- Conversation: ${notice.conversationId}`);
+      // Ticket 70 §3: `conversationId` is FENCED — kept in the schema,
+      // never surfaced (a threading concept is U-B-excluded). The reply
+      // address a peer turn needs is the sender's session id above.
       sections.push(`- Priority: ${notice.priority ? "yes" : "no"}`);
       sections.push(`- Received: ${notice.createdAtMs}`);
       sections.push(`- Message id: ${notice.messageId}`);

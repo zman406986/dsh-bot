@@ -60,7 +60,9 @@ describe("multitask peer — fire-and-forget send + ack (AC)", () => {
     assert.equal(ack.ok, true);
     assert.ok(ack.ok);
     assert.equal(ack.messageId, "msg-1");
-    assert.equal(ack.priorityHonored, true);
+    // Ticket 70 §3: the ok ack reduces to {ok, messageId, acceptedAtMs} —
+    // `priorityHonored` retired with the shapes it reported on.
+    assert.equal("priorityHonored" in ack, false);
     // Structural only — no reply payload field exists on the ack.
     assert.equal("reply" in ack, false);
     assert.deepEqual(host.wakeCalls, [SESSION]);
@@ -96,47 +98,41 @@ describe("multitask peer — fire-and-forget send + ack (AC)", () => {
   });
 });
 
-describe("multitask peer — group ignores priority (AC + S9 / ADR-0002)", () => {
-  it("group priority lands in the normal lane and the sender is told", async () => {
+describe("multitask peer — C14 retirement (ticket 70 §3: point-to-point only)", () => {
+  it("a group envelope is refused at accept; nothing enqueues or wakes", async () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
 
-    // Mid user turn so the message stays queued.
-    multitask.wakeBus.noteTurnStarted(SESSION, "user");
     const ack = multitask.sendPeer(
       SESSION,
       envelope({
-        to: { kind: "group", groupId: "team-1" },
+        to: { kind: "group", groupId: "team-1" } as unknown as PeerEnvelope["to"],
         priority: true,
       }),
     );
 
-    assert.equal(ack.ok, true);
-    assert.ok(ack.ok);
-    assert.equal(ack.priorityHonored, false);
-    assert.equal(ack.reason, "group-target");
+    assert.equal(ack.ok, false);
+    assert.ok(!ack.ok);
+    assert.equal(ack.reason, "invalid-envelope");
+    assert.equal(multitask.listPendingPeers(SESSION).length, 0);
+    assert.deepEqual(host.wakeCalls, []);
     assert.deepEqual(host.interruptDispatcherCalls, []);
-    assert.equal(multitask.wakeBus.peek(SESSION), undefined);
-
-    multitask.wakeBus.noteTurnEnded(SESSION);
-    const wake = multitask.wakeBus.drain(SESSION);
-    assert.equal(wake?.source, "peer");
-    assert.equal(wake?.peerMessages?.[0]?.priority, false);
+    assert.equal(multitask.wakeBus.drain(SESSION), undefined);
   });
 
-  it("broadcast priority is acked with broadcast-target and does not interrupt", async () => {
+  it("a broadcast envelope is refused at accept — the reference broadcast is a user cue, not a peer send", async () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
 
-    multitask.wakeBus.noteTurnStarted(SESSION, "worker-settled");
     const ack = multitask.sendPeer(
       SESSION,
-      envelope({ to: { kind: "broadcast" }, priority: true }),
+      envelope({ to: { kind: "broadcast" } as unknown as PeerEnvelope["to"] }),
     );
-    assert.equal(ack.ok, true);
-    assert.ok(ack.ok);
-    assert.equal(ack.reason, "broadcast-target");
-    assert.deepEqual(host.interruptDispatcherCalls, []);
+    assert.equal(ack.ok, false);
+    assert.ok(!ack.ok);
+    assert.equal(ack.reason, "invalid-envelope");
+    assert.equal(multitask.listPendingPeers(SESSION).length, 0);
+    assert.deepEqual(host.wakeCalls, []);
   });
 });
 
@@ -271,7 +267,7 @@ describe("multitask peer — envelope carries sender, target, conversation (AC)"
         messageId: "m-conv",
         fromAgentId: "alpha",
         fromName: "Alpha",
-        to: { kind: "group", groupId: "crew" },
+        to: { kind: "agent", agentId: "omega" },
         conversationId: "thread-9",
         text: "status?",
       }),
@@ -282,7 +278,9 @@ describe("multitask peer — envelope carries sender, target, conversation (AC)"
     assert.ok(notice);
     assert.equal(notice.fromAgentId, "alpha");
     assert.equal(notice.fromName, "Alpha");
-    assert.deepEqual(notice.to, { kind: "group", groupId: "crew" });
+    assert.deepEqual(notice.to, { kind: "agent", agentId: "omega" });
+    // Schema-fenced carrier (ticket 70 §3): still carried on the envelope
+    // and notice, never surfaced in rendered copy.
     assert.equal(notice.conversationId, "thread-9");
     assert.equal(notice.text, "status?");
   });
@@ -309,9 +307,10 @@ describe("peer hidden-turn copy (AC: other-assistant cue, never the user)", () =
     assert.ok(text.includes("not from the user"));
     assert.ok(text.includes("Peer A"));
     assert.ok(text.includes("peer-a"));
-    assert.ok(text.includes("conv-1"));
     assert.ok(text.includes("payload body"));
     assert.ok(text.includes("Priority: yes"));
+    // Ticket 70 §3: the fenced conversationId is never surfaced.
+    assert.equal(text.includes("conv-1"), false);
     // Must not present as a user message.
     assert.equal(text.includes("The user said"), false);
   });
