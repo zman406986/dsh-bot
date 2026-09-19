@@ -1,31 +1,33 @@
 /**
- * Wrapper shell STAGING mount (ticket 78, ADR-0020 slice 2 — the staging
- * half only; `docs/adr/0020` "Staging" paragraph).
+ * Wrapper shell mount (ticket 78, ADR-0020 slice 2 — staging AND cutover
+ * contracts; `docs/adr/0020` "Staging" paragraph).
  *
  * ADR-0020's vehicle is our own client module registering our own
- * application frame over the shipped dsh client runtime. The election is
- * staged: the shell first surfaces as a keyed `main` page (the layout's page
+ * application frame over the shipped dsh client runtime. The election was
+ * staged: the shell first surfaced as a keyed `main` page (the layout's page
  * surface — key ours by default, the only shipped key being
  * `"conversation"`), opened through the verified
  * `ctx.layout.selectPanel(panelId)` verb (ui-layout `lib/client.js:399-412`;
  * `wrapper-vehicle-seams.md` Finding 5, `dsh-capsule-seams.md` Seam 4's
- * status correction). Only AFTER the surfaces are real (ticket 80's
- * conversation surface) does the registration flip into the `root` single
- * slot — and that cutover slice, plus retiring the capsule/launcher overlay
- * entries, is deliberately NOT in this module: nothing here registers into
- * `root` (pinned by test).
+ * status correction). With the surfaces real (ticket 80's conversation
+ * surface landed), the CUTOVER slice registers the frame into the `root`
+ * single slot: {@link shellRootRegistration} is that contract and the live
+ * composition registers it in `index.ts` (the capsule/launcher overlay
+ * retirement rides the same slice).
  *
  * Fail-safe posture (ADR-0020 property 2, pinned offline where possible):
- * the future `root` registration is DYNAMIC, and dsh's documented cell
+ * the `root` registration is DYNAMIC, and dsh's documented cell
  * election takes "the first live (non-abdicated) entry … in priority order"
  * with dynamic entries at a lower priority value than the shipped one
  * (`dsh-client-ui-renderer/lib/types/client/registry.d.ts:24-27, 156-164`).
  * Our frame therefore wins the cell exactly while it stays live; a crash
  * abdicates and the stock dsh app takes the cell back — the degradation mode
  * of "the whole UI is ours" is the ordinary product, never a blank window.
- * {@link shellCellWinner} pins that election rule as a pure decision for the
- * cutover slice's contract tests; the live frame swap / HMR / fallback
- * behavior itself stays live-only (tickets 45/33) and is NOT claimed here.
+ * {@link shellCellWinner} pins that election rule as a pure decision, and
+ * the fake-fiber tests pin the unload abdication path (teardown empties the
+ * cell; the shipped frame is the surviving winner); the live frame swap /
+ * HMR / fallback behavior itself stays live-only (tickets 45/33) and is NOT
+ * claimed here.
  *
  * This module is pure registration data + pure decisions: no React, no DOM,
  * no Cordis. Tests assert it directly (offline, S8), matching the
@@ -185,21 +187,63 @@ export function createShellLauncherLayout(
  * The `root` single slot (dsh-owned; occupied by the shipped AppFrame). Its
  * contract note says "DO NOT register here" — coexistence etiquette for
  * add-on plugins that ADR-0020 deliberately retires for the wrapper shell at
- * the CUTOVER, with the fail-safe below as the recorded safety argument.
- * Nothing registers into it today (pinned by test); this constant is the
- * cutover slice's named target, kept next to the election rule it rides on.
+ * the CUTOVER, with the fail-safe below as the recorded safety argument. The
+ * cutover registers the wrapper shell frame here as the DYNAMIC entry (the
+ * {@link shellRootRegistration} contract, composed in `index.ts`); the
+ * shipped `main` keyed page is NOT claimed by it — the election shadows the
+ * frame, never a keyed page the shipped composition covers.
  */
 export const ROOT_FRAME_SLOT = "root";
 
 /**
- * The priority value the cutover registration will carry. dsh assigns
- * dynamic registrations a LOWER priority value than the shipped frame's
- * (dsh-owned, unspecified) value — that is exactly what makes the dynamic
- * entry win a shadowed cell while live (`registry.d.ts:24-27`). Only the
- * relative order is contract; the shipped frame's actual number is not ours
- * to know.
+ * The priority value the cutover registration carries — as a MODEL. The host
+ * assigns dynamic registrations a LOWER shadowing rank than the shipped
+ * frame's ("Page-local shadowing rank. A later registration receives a lower
+ * priority.", dsh-cordis-client-runner lib/client.js:383; the priority field
+ * itself is host-assigned and absent from our registration options), and
+ * that relative order is exactly what makes the dynamic entry win a shadowed
+ * cell while live (`registry.d.ts:24-27`). Only the relative order is
+ * contract; the shipped frame's actual number is not ours to know.
  */
 export const SHELL_ROOT_DYNAMIC_PRIORITY = 1;
+
+/**
+ * Registration options for the `root` single-slot entry (the cutover's
+ * dynamic frame election). A single slot takes NO `id` and NO `key` — the
+ * cell has one occupant per election — and the runtime catalog's own example
+ * for `root` is exactly `ctx.slots.inject('root', () =>
+ * ctx.slots.register({ name: 'root' }, component))` with
+ * `registerOptions: []` (dsh-cordis-client-runner lib/client.js:3514-3520);
+ * the shipped AppFrame registers the same way, adding only its `locale` and
+ * the child-slot declarations our self-contained frame does not need
+ * (`{name: "root", locale: "common", children, store}`, dsh-client-ui-layout
+ * lib/client.js:524-531). We add the same `locale` so the entry declares our
+ * namespace, matching every other registration this module ships.
+ */
+export interface ShellRootRegistrationOptions {
+  /** The dsh-owned single slot (the shadowing election's target). */
+  readonly name: string;
+  /** Locale namespace declared on the entry so the kit's `t` seat binds. */
+  readonly locale: string;
+}
+
+/**
+ * Build the wrapper shell frame's `root` registration options (stable,
+ * pure). This is the ADR-0020 cutover registration: DYNAMIC (no priority
+ * field — the host assigns the lower shadowing rank), so the frame wins the
+ * cell exactly while it stays live, and abdication — a render crash through
+ * the per-entry boundary ("for shadowing kinds the report abdicates the
+ * entry, the outlet re-renders onto the cell's next survivor",
+ * dsh-client-ui-renderer lib/client.js:507-514) or module unload/HMR (the
+ * caller's-fiber cascade, `registry.d.ts:77-83`) — hands the cell back to
+ * the shipped app frame.
+ */
+export function shellRootRegistration(): ShellRootRegistrationOptions {
+  return {
+    name: ROOT_FRAME_SLOT,
+    locale: LOCALE_NAMESPACE,
+  };
+}
 
 /** One entry competing for a slot cell (the fail-safe model's input). */
 export interface ShellCellEntry {

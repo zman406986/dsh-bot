@@ -50,7 +50,11 @@ import {
   SHELL_OVERLAY_SLOT,
   type SlotRegistrationOptions,
 } from "../src/client/overlay.js";
-import { SHELL_LAUNCHER_ENTRY_ID } from "../src/client/shell-mount.js";
+import {
+  ROOT_FRAME_SLOT,
+  SHELL_LAUNCHER_ENTRY_ID,
+  shellRootRegistration,
+} from "../src/client/shell-mount.js";
 import {
   TOOLVIEW_TOOL_NAMES,
   TOOL_CALL_TOOLVIEW_SLOT,
@@ -820,6 +824,61 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
 });
 
 describe("coexistence — client face: additive lists and keyed cells (Finding 5)", () => {
+  it("the cutover's root election: one dynamic entry from the dispatcher, foreign modules untouched", () => {
+    const ctx = createClientCtx();
+    applyForeignClientPlugin(ctx);
+    const dispatcherFiber = applyClientPluginInFiber(
+      ctx,
+      applyDispatcherClient,
+    );
+
+    // The `root` SINGLE slot is the ticket-78 cutover's target: exactly one
+    // inject from the dispatcher, one dynamic entry with the pinned
+    // single-slot contract (no id/key — the catalog's documented shape).
+    const roots = ctx.injects.filter(
+      (record) => record.parent === ROOT_FRAME_SLOT,
+    );
+    assert.equal(roots.length, 1, "one `root` inject");
+    assert.equal(roots[0]!.entries.length, 1, "one dynamic root entry");
+    assert.deepEqual(roots[0]!.entries[0]!.options, shellRootRegistration());
+    // The foreign plugin registers nothing into the single slot — its
+    // surfaces stay additive (list) or keyed.
+    for (const record of ctx.injects) {
+      if (record.parent === ROOT_FRAME_SLOT) continue;
+      for (const entry of record.entries) {
+        assert.notEqual(
+          (entry.options as { name: string }).name,
+          ROOT_FRAME_SLOT,
+        );
+      }
+    }
+    // Foreign cells unmolested by the election.
+    assert.equal(
+      ctx.entriesAt(TOOL_CALL_TOOLVIEW_SLOT).length,
+      TOOLVIEW_TOOL_NAMES.length + 1,
+    );
+    assert.deepEqual([...ctx.locales.keys()].sort(), [
+      FOREIGN.localeNs,
+      LOCALE_NAMESPACE,
+    ]);
+
+    // Unload (HMR) of ONLY the dispatcher fiber empties the single cell —
+    // the shipped app frame is the surviving occupant again — while every
+    // foreign registration stays exactly as it was.
+    dispatcherFiber.dispose();
+    assert.deepEqual(
+      ctx.injects.filter((record) => record.parent === ROOT_FRAME_SLOT),
+      [],
+    );
+    assert.deepEqual(ctx.entriesAt(TOOL_CALL_TOOLVIEW_SLOT).map((e) => (e.options as { key?: string }).key), [
+      FOREIGN.tool,
+    ]);
+    assert.deepEqual(ctx.entriesAt(SHELL_OVERLAY_SLOT).map((e) => (e.options as SlotRegistrationOptions).id), [
+      FOREIGN.overlayEntryId,
+    ]);
+    assert.deepEqual([...ctx.locales.keys()], [FOREIGN.localeNs]);
+  });
+
   it("shell.overlay holds both plugins' entries additively, order-sorted", () => {
     const ctx = createClientCtx();
     applyForeignClientPlugin(ctx);

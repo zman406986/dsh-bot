@@ -1,13 +1,14 @@
 /**
- * Ticket 78 — wrapper shell STAGING mount (ADR-0020 slice 2, staging half).
+ * Ticket 78 — wrapper shell mount (ADR-0020 slice 2: staging contracts +
+ * the CUTOVER's root-frame election).
  *
- * Offline only (S8): the staging registration contracts pinned over fakes in
+ * Offline only (S8): the registration contracts pinned over fakes in
  * the established overlay/toolview style — inject → register, one entry, id
  * stability — plus the page-open decision and the pure root fail-safe model.
- * The `root` election itself (frame swap, HMR fiber behavior,
- * fallback-on-crash in a real browser) is live-only (tickets 45/33) and is
- * deliberately NOT claimed here; this suite pins that NOTHING registers into
- * `root` yet (the cutover waits for ticket 80's conversation surface).
+ * The `root` election's REGISTRATION is pinned here (one dynamic entry,
+ * contract options, unload abdication over fakes); the election's LIVE half
+ * (frame swap, HMR fiber behavior, fallback-on-crash in a real browser) is
+ * live-only (tickets 45/33) and is deliberately NOT claimed here.
  *
  * No browser, no network, no real Cordis — the fake mirrors the shipped
  * effect/inject semantics the scaffold suite documents (cordis
@@ -42,6 +43,7 @@ import {
   shellCellWinner,
   shellLauncherRegistration,
   shellPageRegistration,
+  shellRootRegistration,
   shellSeatHostsPanel,
   shellSeatPanelState,
   type ShellCellEntry,
@@ -301,32 +303,71 @@ describe("shell staging mount — apply() over the fake seams", () => {
     assert.deepEqual(capsule.options, rosterOverlayRegistration());
   });
 
-  it("flips nothing into `root` — the election stays with the cutover slice", () => {
+  it("registers exactly one `root` entry — the cutover's dynamic election", () => {
     const ctx = createMountCtx();
     apply(ctx);
-    assert.equal(
-      ctx.injects.find((record) => record.parent === ROOT_FRAME_SLOT),
-      undefined,
-      "no `root` inject in staging",
+    const roots = ctx.injects.filter(
+      (record) => record.parent === ROOT_FRAME_SLOT,
     );
+    assert.equal(roots.length, 1, "one `root` inject controller");
+    assert.equal(roots[0]!.entries.length, 1, "one dynamic root entry");
+    const entry = roots[0]!.entries[0]!;
+    assert.deepEqual(entry.options, shellRootRegistration());
+    assert.equal(typeof entry.component, "function");
+    // The single-slot shape: no `id`, no `key`, no `order` — the runtime
+    // catalog's own `root` example passes only `{name}` (runner
+    // lib/client.js:3514-3520); the shadowing priority is host-assigned.
+    assert.deepEqual(entry.options, {
+      name: "root",
+      locale: "multitask-dispatcher",
+    });
+    assert.deepEqual(shellRootRegistration(), shellRootRegistration());
+    // The shipped `conversation` main key is still never claimed — the
+    // election shadows the FRAME, never a keyed page.
     for (const record of ctx.injects) {
-      for (const entry of record.entries) {
-        assert.notEqual(
-          (entry.options as { name: string }).name,
-          ROOT_FRAME_SLOT,
-          "no entry registered into the root slot",
-        );
+      for (const other of record.entries) {
+        const options = other.options as { name: string; key?: string };
+        if (options.name === MAIN_PAGE_SLOT) {
+          assert.notEqual(options.key, SHIPPED_MAIN_PAGE_KEY);
+        }
       }
     }
   });
 
-  it("fiber teardown (HMR) reverses every staging registration; re-apply restores the identity", () => {
+  it("unload abdicates the cell: teardown empties `root`; the shipped frame is the surviving winner", () => {
     const ctx = createMountCtx();
     apply(ctx);
-    // Five declaration waits: shell.overlay (capsule), tool.call.toolview,
-    // settings.plugin.item, the launcher's shell.overlay, and `main`.
-    assert.equal(ctx.injects.length, 5);
+    assert.equal(
+      ctx.injects.filter((record) => record.parent === ROOT_FRAME_SLOT)
+        .length,
+      1,
+    );
+
+    // The caller's-fiber cascade (registry.d.ts:77-83) sweeps the entry with
+    // the fiber: nothing of ours stays live in the single cell.
+    ctx.runFiberTeardown();
+    assert.equal(ctx.injects.length, 0);
+
+    // The documented election over the surviving cell hands it back to the
+    // shipped app frame (the pure model of the abdicated dynamic entry).
+    const ours: ShellCellEntry = {
+      entryId: "multitask-dispatcher-shell-frame",
+      priority: SHELL_ROOT_DYNAMIC_PRIORITY,
+      abdicated: true,
+    };
+    const shipped: ShellCellEntry = { entryId: "dsh-app-frame", priority: 10 };
+    assert.equal(shellCellWinner([ours, shipped]), shipped);
+  });
+
+  it("fiber teardown (HMR) reverses every registration incl. the dynamic root entry; re-apply restores the identity", () => {
+    const ctx = createMountCtx();
+    apply(ctx);
+    // Six declaration waits: shell.overlay (capsule), tool.call.toolview,
+    // settings.plugin.item, the launcher's shell.overlay, `main`, and `root`
+    // (the cutover's frame election).
+    assert.equal(ctx.injects.length, 6);
     assert.equal(findInject(ctx, MAIN_PAGE_SLOT).entries.length, 1);
+    assert.equal(findInject(ctx, ROOT_FRAME_SLOT).entries.length, 1);
 
     ctx.runFiberTeardown();
     assert.equal(ctx.injects.length, 0);
@@ -334,11 +375,15 @@ describe("shell staging mount — apply() over the fake seams", () => {
     // A fresh fiber (post-HMR apply) registers the same contract again —
     // same slot, same key, no accumulation.
     apply(ctx);
-    assert.equal(ctx.injects.length, 5);
+    assert.equal(ctx.injects.length, 6);
     const main = ctx.injects.find(
       (record) => record.parent === MAIN_PAGE_SLOT,
     );
     assert.deepEqual(main?.entries[0]?.options, shellPageRegistration());
+    const root = ctx.injects.find(
+      (record) => record.parent === ROOT_FRAME_SLOT,
+    );
+    assert.deepEqual(root?.entries[0]?.options, shellRootRegistration());
   });
 });
 
@@ -593,7 +638,7 @@ describe("shell staging mount — seat projection primitives", () => {
   });
 });
 
-describe("root fail-safe — the cutover's election contract (pinned, not registered)", () => {
+describe("root fail-safe — the cutover's election contract (pure model + unload path)", () => {
   const shipped: ShellCellEntry = {
     entryId: "dsh-app-frame",
     // The shipped frame's priority value is dsh-owned; only "higher than any
@@ -605,7 +650,7 @@ describe("root fail-safe — the cutover's election contract (pinned, not regist
     priority: SHELL_ROOT_DYNAMIC_PRIORITY,
   };
 
-  it("names the cutover slot; the staging registration never touches it", () => {
+  it("names the cutover slot; the keyed main page is a different slot", () => {
     assert.equal(ROOT_FRAME_SLOT, "root");
     assert.notEqual(MAIN_PAGE_SLOT, ROOT_FRAME_SLOT);
   });

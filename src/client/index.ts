@@ -42,10 +42,11 @@
  * 7. the wrapper shell page itself (ticket 78, ADR-0020 staging): one keyed
  *    `main` entry under OUR key (the only shipped key is `conversation`),
  *    binding the shell store to the sessions feed and hosting the existing
- *    roster panel in the right seat. The `root` frame election and the
- *    capsule retirement are the CUTOVER slice — deliberately absent until
- *    ticket 80's conversation surface has landed (nothing here registers
- *    into `root`; pinned by test).
+ *    roster panel in the right seat. The `root` frame election (item 10) is
+ *    the CUTOVER slice — it executes only after ticket 80's conversation
+ *    surface has landed; at the cutover the page registration STAYS (the
+ *    pinned staging contract), dormant behind the frame election and
+ *    self-restoring on abdication.
  * 8. the wrapper conversation pane (ticket 80, ADR-0020 slice 4): the main
  *    seat renders the selected session's text-only conversation — replay +
  *    live turns from the session's verified event window
@@ -61,6 +62,11 @@
  *    `onboarding` seen record OR ≥1 dispatcher mirror key (`roster.<id>`,
  *    tickets 76/79) suppresses; a corrupt/unreadable record FAILS OPEN — the
  *    flow shows, it is never silently hidden.
+ * 10. the wrapper shell frame's ROOT election (ticket 78 CUTOVER,
+ *    ADR-0020 property 2): one DYNAMIC `root` entry that displaces the
+ *    shipped AppFrame exactly while it stays live and abdicates back to it
+ *    on crash (per-entry boundary) or unload (fiber cascade). The
+ *    capsule/launcher overlay entries retire at this same cutover.
  *
  * Ticket 40 binds the capsule/panel intents to ticket 36's verified seams
  * at THIS composition point and nowhere else: the narrow CommandTransport
@@ -122,11 +128,13 @@ import { createPluginSettingsCard } from "./settings-card.js";
 import { createRosterPanel } from "./panel.js";
 import {
   MAIN_PAGE_SLOT,
+  ROOT_FRAME_SLOT,
   SHELL_PAGE_KEY,
   createShellLauncherLayout,
   openShellPage,
   shellLauncherRegistration,
   shellPageRegistration,
+  shellRootRegistration,
   shellSeatHostsPanel,
   shellSeatPanelState,
 } from "./shell-mount.js";
@@ -455,6 +463,43 @@ export function applyClientModule(
     });
     return ctx.slots.register(
       shellPageRegistration(),
+      createDispatcherShell(t, mount.store, mount.hosts),
+    );
+  });
+
+  // ── Cutover: the frame election (ticket 78, ADR-0020 property 2) ──
+
+  // The wrapper shell frame registers into the `root` single slot as a
+  // DYNAMIC entry. The host assigns dynamically registered entries a LOWER
+  // shadowing rank than the shipped frame's ("Page-local shadowing rank. A
+  // later registration receives a lower priority.", dsh-cordis-client-runner
+  // lib/client.js:383; the priority field is host-assigned — our options
+  // carry none), and the outlet renders "the first live (non-abdicated)
+  // entry … in priority order" (`registry.d.ts:156-164`) — so our frame wins
+  // the cell exactly while it stays live. Fail-safe: a render crash
+  // abdicates the entry through the per-entry boundary and "the outlet
+  // re-renders onto the cell's next survivor" (dsh-client-ui-renderer
+  // lib/client.js:507-514) — the shipped app frame takes the cell back;
+  // module unload/HMR sweeps the entry with the caller's-fiber cascade
+  // (`registry.d.ts:77-83`). The registration shape is the runtime catalog's
+  // own documented example (`{name: "root"}`, `registerOptions: []`,
+  // runner lib/client.js:3514-3520; the shipped AppFrame adds `locale` and
+  // its child-seat declarations — dsh-client-ui-layout lib/client.js:524) —
+  // no id, no key, and NO `children`: the frame is self-contained (its
+  // sidebar/main/right seats are our own React seats, never host slot
+  // outlets). The same `mountShellPage` composition powers this frame and
+  // the `main` page above (one onboarding store shared — the suppression
+  // input is one fact, never two); the shipped `conversation` main key is
+  // still never claimed, and the frame swap / HMR fiber behavior /
+  // fallback-on-crash confirmation stays with the live lane (tickets 45/33).
+  ctx.slots.inject(ROOT_FRAME_SLOT, () => {
+    const t = ctx.locale.bind(LOCALE_NAMESPACE);
+    const mount = mountShellPage(ctx, {
+      store: onboarding,
+      onSeen: writeOnboardingSeen,
+    });
+    return ctx.slots.register(
+      shellRootRegistration(),
       createDispatcherShell(t, mount.store, mount.hosts),
     );
   });

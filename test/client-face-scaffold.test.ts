@@ -485,10 +485,11 @@ describe("client face scaffold — apply over fake client seams", () => {
   it("fiber teardown (HMR/unload) reverses the namespace and the entry; re-apply restores", () => {
     const ctx = createClientCtx();
     apply(ctx);
-    // Five declaration waits: shell.overlay (capsule, ticket 38),
+    // Six declaration waits: shell.overlay (capsule, ticket 38),
     // tool.call.toolview (ticket 24), settings.plugin.item (ticket 47), the
-    // launcher's second shell.overlay inject, and `main` (both ticket 78).
-    assert.equal(ctx.injects.length, 5);
+    // launcher's second shell.overlay inject, `main` (both ticket 78), and
+    // the cutover's `root` frame election (ticket 78).
+    assert.equal(ctx.injects.length, 6);
     assert.equal(overlayInject(ctx).entries.length, 1);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
 
@@ -499,7 +500,7 @@ describe("client face scaffold — apply over fake client seams", () => {
 
     // A fresh fiber (post-HMR apply) registers everything again.
     apply(ctx);
-    assert.equal(ctx.injects.length, 5);
+    assert.equal(ctx.injects.length, 6);
     assert.equal(overlayInject(ctx).entries.length, 1);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
   });

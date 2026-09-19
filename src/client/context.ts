@@ -25,13 +25,33 @@ import type { ToolviewRegistrationOptions } from "./toolviews.js";
 import type { SettingsCardRegistrationOptions } from "./settings-card-store.js";
 import type { ConversationSourceLike } from "./conversation-store.js";
 
-/** Any slot entry this module registers: list entries (id/order) or keyed
+/** Any slot entry this module registers: list entries (id/order), keyed
  * entries such as the `tool.call.toolview` toolviews (key) and the
- * `settings.plugin.item` settings card (key). */
+ * `settings.plugin.item` settings card (key), keyed `main` pages (key), and
+ * single-slot entries such as the cutover's `root` frame (no id/key — the
+ * single cell elects one occupant; the dynamic entry's shadowing priority is
+ * host-assigned, `registry.d.ts:24-27`). */
 export type SlotEntryOptions =
   | SlotRegistrationOptions
   | ToolviewRegistrationOptions
-  | SettingsCardRegistrationOptions;
+  | SettingsCardRegistrationOptions
+  | SingleSlotRegistrationOptions;
+
+/**
+ * One SINGLE-slot entry's registration options (the ticket-78 cutover's
+ * `root` frame; built by `shellRootRegistration` in `shell-mount.ts`, which
+ * owns the contract and its citations). No `id` and no `key`: a single slot
+ * has one elected occupant, and the runtime catalog's own `root` example
+ * passes only `{name}` (dsh-cordis-client-runner lib/client.js:3514-3520).
+ * Declared here structurally — this module is the context's type seat and
+ * `shell-mount.ts` already imports from it.
+ */
+export interface SingleSlotRegistrationOptions {
+  /** The dsh-owned single slot key (e.g. `root`). */
+  readonly name: string;
+  /** Locale namespace declared on the entry so the kit's `t` seat binds. */
+  readonly locale: string;
+}
 
 /** `ctx.slots` surface used by this scaffold. */
 export interface SlotsServiceLike {
