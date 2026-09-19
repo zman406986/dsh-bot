@@ -1,7 +1,7 @@
 # 27 — Presence enrichment: snapshot v2, status dots/ring, blocked-with-reason, landed marker, activity lines
 
 **Blocked by:** None — builds on the shipped ticket-21 roster overlay (may start immediately).
-**Status:** open
+**Status:** resolved
 
 ## Problem
 
@@ -161,3 +161,16 @@ reachable in the wrapper (the mirror feed updates a live-open page) but
 requires NEW client state (per-session seen watermarks) — that is new scope
 needing its own ticket, not a rationale re-decree; recorded here so the sweep
 sees it was considered, not missed.
+
+### 2026-09-20 — RESOLVED (W17 closure sweep): live evidence + both re-opened ADR-0010 rationales recorded; moved open/ → resolved/
+
+**Verified.** Implementation complete and independently verified offline (worktree `clone/always-on-dispatcher` commit `f09f19d`, 534 pass / 0 fail; verdict restated per ticket 17's handover note; merged to main in `400450f`), then re-based onto the wrapper vehicle per ADR-0018/ADR-0020 (ticket 64): the snapshot v2 fail-closed contract, observer-timeliness projections, and the pure view model survive as the wrapper presence surface's design input (sidebar presence shipped by 79). Live pass 5 Session C (record `ae9cf4c` on ticket 33; evidence `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-20\session-C\`, whose README maps every artifact to its claim): snapshot v2 semantics (`blocked`/`delivered`/`startedAtMs`/`toolCallCount`), dots (needs-you/unavailable/idle), the landed marker, derived activity lines, and fail-closed stale degradation all LIVE-VERIFIED. The two rationales ADR-0010 explicitly re-opened were decided 2026-09-20 as dated agent rulings below, SUBJECT TO HUMAN REVERSAL per the Q1 pattern: (1) delivered/landed semantics — keep the shipped flag, re-glossed as "user-visible at least once"; (2) presence markers stay pull-only honest state markers. Offline gates at closure: `npm run typecheck` clean (both configs); `npm test` 1125 pass / 0 fail / 272 suites.
+
+**Remaining nuances (recorded deferrals, not open defects):**
+- Animated running ring: NOT-CAPTURED live (poll gap — the worker ran ~10–15 s between polls); offline-pinned only, not claimed live.
+- Blocked marker on the worker panel: NOT-TRIGGERED in this ticket's own lane (offline-pinned). Corroboration, not a worker-panel capture: the same localized blocked-with-reason phrase rendered LIVE on the session row in Session B-5 (69's L2, ticked there).
+- Durable markers carry no delivered bit, so a post-restart panel says "not delivered yet" until the wake reconciles (design-flagged in ruling 1; a marker-level delivered bit would be a durable-marker field addition — the design-17 conflict-8 stop-and-raise path).
+- If the human reverses ruling 2 and wants the reference-style unseen-badge, that is new client state (per-session seen watermarks) — new scope, own ticket; recorded on 27 and 28.
+
+Moved `Issue-tracker/open/27-presence-enrichment-snapshot-v2-status-dots-blocked-reason.md` →
+`Issue-tracker/resolved/`, `**Status:**` → resolved. No other file moved. (W17 sweep order 27 first — 28's blocked-by discharges with this move.)
