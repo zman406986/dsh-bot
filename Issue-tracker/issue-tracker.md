@@ -8,6 +8,7 @@ Issues and specs for this repo live as markdown files under `Issue-tracker/` at 
 Issue-tracker/
 ├── issue-tracker.md      ← this file
 ├── open/                 ← active, not yet done
+├── open-issue-index.md   ← generated from open/ by tools/issue-index.mjs — never hand-edit
 ├── deferred/             ← parked; revisit later
 ├── resolved/             ← finished and accepted
 └── cancelled/            ← closed without shipping
