@@ -9,6 +9,11 @@
  * and the real plugin apply() publishing through a fake settings provider
  * on activation and on roster-affecting transitions (now including
  * access-ask park). No network, no LLM, no running dsh.
+ *
+ * Fake-vs-host (ticket 91): the settings-provider fake's `commands.register`
+ * and `tools.register` throw on a duplicate name with the shipped wording
+ * (`@deepseek-ai/dsh-commands/lib/index.js:82`,
+ * `@deepseek-ai/dsh-tools/lib/index.js:2538`).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -992,6 +997,22 @@ function createSettingsAwareCtx() {
     { execute: (args: unknown, exec?: unknown) => Promise<unknown> }
   >();
   const updates: unknown[] = [];
+  const claimedNamespaces = new Set<string>();
+  // Settings-provider fake: a second claim of one namespace fails loud
+  // (shipped rule, dsh-settings lib/index.js:283).
+  const settingsProvider = {
+    installSection(_owner: unknown, ns: string) {
+      if (claimedNamespaces.has(ns)) {
+        throw new Error(`settings namespace "${ns}" is already registered`);
+      }
+      claimedNamespaces.add(ns);
+      return {
+        update(value: unknown) {
+          updates.push(value);
+        },
+      };
+    },
+  };
   let nextChild = 1;
 
   const fire = (name: string, payload: unknown) => {
@@ -1017,17 +1038,7 @@ function createSettingsAwareCtx() {
     },
     inject(services: readonly string[], callback: (child: unknown) => void) {
       if (services.includes("settings")) {
-        callback({
-          settings: {
-            installSection() {
-              return {
-                update(value: unknown) {
-                  updates.push(value);
-                },
-              };
-            },
-          },
-        });
+        callback({ settings: settingsProvider });
       }
     },
     on(name: string, cb: (payload: never) => void) {
@@ -1037,6 +1048,15 @@ function createSettingsAwareCtx() {
     },
     commands: {
       register(definition: { name: string; handler: (invocation: unknown) => unknown }) {
+        // Shipped rule (ticket 91): duplicate command name throws
+        // (dsh-commands lib/index.js:82, NamedEntries factory).
+        if (commands.has(definition.name)) {
+          throw new Error(
+            `command "${definition.name}" is already registered (for a ` +
+              `per-agent variant, mount a command-injected plugin under ` +
+              `that agent's \`agent.ctx\`)`,
+          );
+        }
         commands.set(definition.name, definition);
       },
     },
@@ -1046,6 +1066,15 @@ function createSettingsAwareCtx() {
         name: string;
         execute: (args: unknown, exec?: unknown) => Promise<unknown>;
       }) {
+        // Shipped rule (ticket 91): duplicate tool name throws
+        // (dsh-tools lib/index.js:2538, NamedEntries factory).
+        if (tools.has(definition.name)) {
+          throw new Error(
+            `tool "${definition.name}" is already registered (for a ` +
+              `per-agent variant, register through that agent's ` +
+              `\`agent.ctx\` instead)`,
+          );
+        }
         tools.set(definition.name, definition);
         return () => {
           tools.delete(definition.name);
@@ -1087,6 +1116,8 @@ function createSettingsAwareCtx() {
     },
     fire,
     updates,
+    settingsInstallSection: (ns: string) =>
+      settingsProvider.installSection({}, ns),
     tool: (name: string) => tools.get(name),
     runCommand(commandId: string, agent?: AgentLike): unknown {
       const command = commands.get(commandId);
@@ -1102,6 +1133,7 @@ function createSettingsAwareCtx() {
     tool(name: string): { execute: (args: unknown, exec?: unknown) => Promise<unknown> } | undefined;
     runCommand(commandId: string, agent?: AgentLike): unknown;
     readonly updates: unknown[];
+    settingsInstallSection(ns: string): { update(value: unknown): void };
   };
 }
 
@@ -1255,5 +1287,45 @@ describe("roster snapshot — plugin publishes through the settings namespace", 
     pluginApply(ctx, { enabled: false });
     assert.equal(updates.length, 0);
     assert.throws(() => ctx.runCommand(DISPATCHER_START_COMMAND), /command not registered/);
+  });
+});
+
+describe("roster snapshot — host duplicate-registration rule (ticket 91)", () => {
+  it("apply throws the host duplicate-command error when a command name is taken", () => {
+    const ctx = createSettingsAwareCtx();
+    ctx.commands.register({
+      name: DISPATCHER_START_COMMAND,
+      handler: () => ({ kind: "success", text: "foreign" }),
+    });
+
+    assert.throws(
+      () => pluginApply(ctx, { enabled: true }),
+      new RegExp(
+        `command "${DISPATCHER_START_COMMAND}" is already registered`,
+      ),
+    );
+  });
+
+  it("the fake tool registry throws the host duplicate-tool error on a taken name", () => {
+    const ctx = createSettingsAwareCtx();
+    const tool = { name: "deliver_result", execute: async () => ({ ok: true }) };
+    ctx.tools.register(tool);
+
+    assert.throws(
+      () => ctx.tools.register(tool),
+      /tool "deliver_result" is already registered/,
+    );
+  });
+
+  it("the settings fake throws on a duplicate namespace claim (dsh-settings:283)", () => {
+    const ctx = createSettingsAwareCtx();
+    const install = ctx.settingsInstallSection;
+    assert.ok(install);
+    install("multitask-dispatcher");
+
+    assert.throws(
+      () => install("multitask-dispatcher"),
+      /settings namespace "multitask-dispatcher" is already registered/,
+    );
   });
 });

@@ -1,3 +1,12 @@
+/**
+ * Adapter dispatcher-tool surface: `registerDispatcherTools` over a capture
+ * context (per-session routing, stream-key uniqueness, tool shapes).
+ *
+ * Fake-vs-host (ticket 91): the capture `tools.register` throws on a
+ * duplicate name with the shipped wording
+ * (`@deepseek-ai/dsh-tools/lib/index.js:2538`, the `NamedEntries` duplicate
+ * factory) — the six dispatcher tool names are registered exactly once.
+ */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { FakeDshHost } from "../src/core/fake-host.js";
@@ -26,6 +35,16 @@ function createToolsCaptureCtx(): AdapterContext & {
       schemas: () => registered.map((tool) => ({ name: tool.name })),
       register(definition: unknown) {
         const tool = definition as RegisterableTool;
+        // Shipped rule (ticket 91): a duplicate tool name throws
+        // (dsh-tools lib/index.js:2538, NamedEntries factory) — the shipped
+        // six-tool surface must register each name exactly once.
+        if (registered.some((t) => t.name === tool.name)) {
+          throw new Error(
+            `tool "${tool.name}" is already registered (for a per-agent ` +
+              `variant, register through that agent's \`agent.ctx\` ` +
+              `instead)`,
+          );
+        }
         registered.push(tool);
         const dispose = () => {
           const at = registered.indexOf(tool);
@@ -66,6 +85,22 @@ function createToolsCaptureCtx(): AdapterContext & {
 }
 
 describe("adapter dispatcher tool registration", () => {
+  it("the capture registry throws the host duplicate-tool error (ticket 91 pin)", () => {
+    const ctx = createToolsCaptureCtx();
+    const tool = {
+      name: "spawn_worker",
+      description: "d",
+      parameters: {},
+      execute: async () => ({}),
+    } as unknown as RegisterableTool;
+    ctx.tools.register(tool);
+
+    assert.throws(
+      () => ctx.tools.register(tool),
+      /tool "spawn_worker" is already registered/,
+    );
+  });
+
   it("registers the six tools when ctx.tools.register exists", () => {
     const ctx = createToolsCaptureCtx();
     const host = new FakeDshHost();

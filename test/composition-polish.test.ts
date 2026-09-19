@@ -6,6 +6,12 @@
  * apply(); the real client store/view model consumes the mirrored snapshots.
  * No network, no LLM, no running dsh.
  *
+ * Fake-vs-host (ticket 91): the fake `commands.register` / `tools.register`
+ * throw on a duplicate name with the shipped wording
+ * (`@deepseek-ai/dsh-commands/lib/index.js:82`,
+ * `@deepseek-ai/dsh-tools/lib/index.js:2538`) — the dormant-registration
+ * matrix below must hold under the real fail-loud registries.
+ *
  * Four composition contracts:
  * 1. **Activation copy** — the presence hint is appended exactly once to the
  *    success copy, and the host copy and the client locale faces stay one
@@ -106,6 +112,7 @@ function createCompositionCtx() {
   >();
   const tables = new Map<string, Map<string, unknown>>();
   const updates: unknown[] = [];
+  const claimedNamespaces = new Set<string>();
   const asks: unknown[] = [];
   let nextChild = 1;
 
@@ -152,7 +159,15 @@ function createCompositionCtx() {
       if (services.includes("settings")) {
         callback({
           settings: {
-            installSection() {
+            installSection(_owner: unknown, ns: string) {
+              // Shipped rule (ticket 91): a second claim of the same
+              // namespace throws (dsh-settings lib/index.js:283).
+              if (claimedNamespaces.has(ns)) {
+                throw new Error(
+                  `settings namespace "${ns}" is already registered`,
+                );
+              }
+              claimedNamespaces.add(ns);
               return {
                 update(value: unknown) {
                   updates.push(value);
@@ -176,6 +191,15 @@ function createCompositionCtx() {
     },
     commands: {
       register(definition: CommandDefinitionLike) {
+        // Shipped rule (ticket 91): duplicate command name throws
+        // (dsh-commands lib/index.js:82, NamedEntries factory).
+        if (commands.has(definition.name)) {
+          throw new Error(
+            `command "${definition.name}" is already registered (for a ` +
+              `per-agent variant, mount a command-injected plugin under ` +
+              `that agent's \`agent.ctx\`)`,
+          );
+        }
         commands.set(definition.name, definition);
         return () => {
           commands.delete(definition.name);
@@ -188,6 +212,15 @@ function createCompositionCtx() {
         name: string;
         execute: (args: unknown, exec?: unknown) => Promise<unknown>;
       }) {
+        // Shipped rule (ticket 91): duplicate tool name throws
+        // (dsh-tools lib/index.js:2538, NamedEntries factory).
+        if (tools.has(definition.name)) {
+          throw new Error(
+            `tool "${definition.name}" is already registered (for a ` +
+              `per-agent variant, register through that agent's ` +
+              `\`agent.ctx\` instead)`,
+          );
+        }
         tools.set(definition.name, definition);
         return () => {
           tools.delete(definition.name);
@@ -640,5 +673,40 @@ describe("composition polish — locale validation + literal sweep (§8)", () =>
       );
     }
     assert.ok(LOCALE_NAMESPACE.length > 0);
+  });
+});
+
+describe("composition polish — host duplicate-registration rule (ticket 91)", () => {
+  it("apply throws the host duplicate-command error when a command name is taken", () => {
+    const ctx = createCompositionCtx();
+    ctx.commands.register({
+      name: DISPATCHER_START_COMMAND,
+      description: "foreign claimant",
+      handler: () => ({ kind: "success", text: "foreign" }),
+    });
+
+    assert.throws(
+      () => pluginApply(ctx, { enabled: true }),
+      new RegExp(
+        `command "${DISPATCHER_START_COMMAND}" is already registered`,
+      ),
+    );
+  });
+
+  it("the fake tool registry throws the host duplicate-tool error on a taken name", () => {
+    const ctx = createCompositionCtx();
+    const tools = ctx.tools as unknown as {
+      register(definition: {
+        name: string;
+        execute: () => Promise<unknown>;
+      }): () => void;
+    };
+    tools.register({ name: "spawn_worker", execute: async () => ({}) });
+
+    assert.throws(
+      () =>
+        tools.register({ name: "spawn_worker", execute: async () => ({}) }),
+      /tool "spawn_worker" is already registered/,
+    );
   });
 });
