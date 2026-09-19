@@ -12,10 +12,10 @@
 Work happens per the workflow doc: tests/greps run in the worktree checkout `C:\Users\TZhen\Desktop\dsh-bot-always-on`; the recorded review comment and ticket-17 close-out land on MAIN.
 
 - [ ] **Gate 1 — clean-room identifier grep** over the full `main...clone/always-on-dispatcher` diff per `docs/research/clean-room-license-audit.md`: case-insensitive `rg` for `sand`, `executor`, `MessageSubagent`, `SAND_MULTITASK_*` and reconstruction basenames across every touched file (source, prompts, copy strings, comments, test fixtures, compiled client output). Only intentional `FORBIDDEN_VOCAB` negative-test fixtures may hit, in `test/` only.
-- [ ] **Manual copy read:** read every new prompt asset, locale string, and user-visible copy line added by 27–32; confirm original expression (design-17 §7 is the only sanctioned source) and en/zh key parity.
+- [x] **Manual copy read:** read every new prompt asset, locale string, and user-visible copy line added by 27–32; confirm original expression (design-17 §7 is the only sanctioned source) and en/zh key parity. **(Done 2026-09-19 — see the Gate-2 comment: 93 en = 93 zh, validator clean, per-string PASS verdicts with file:line, 2 low-severity FLAGs recorded with recommendations.)**
 - [ ] **Gate 2 — offline tests green in the worktree:** `npm test` 0 fail and `npm run typecheck` clean (both configs), no network/LLM/running dsh (S8); record the counts.
 - [x] **Gate 3 — full-diff provenance review:** a human-free review of the complete branch diff for structural/phrasing/protocol borrow from the reference tree (per workflow §3), findings appended as a dated comment on `Issue-tracker/open/17-behavior-clone-reference-always-on-dispatcher.md` on MAIN. **(Done 2026-09-19 in its re-scoped form — no-verbatim-copy review; `docs/research/no-verbatim-copy-review-2026-09-19.md`, pointer on ticket 17.)**
-- [ ] Confirm the §5 conflict markers were honored: spot-check each `revisit-before-merge` row of design-17 §5 against the landed code (e.g. no stop control, no todo board, no second wake kind, session "always" rows cleared) and record each check in the review comment.
+- [x] Confirm the §5 conflict markers were honored: spot-check each `revisit-before-merge` row of design-17 §5 against the landed code (e.g. no stop control, no todo board, no second wake kind, session "always" rows cleared) and record each check in the review comment. **(Done: rows 1–8 recorded PASS 2026-09-18 on ticket 17's review comment; the four named examples re-verified against today's tree 2026-09-19 with file:line in the Gate-2 comment below.)**
 - [ ] Merge `clone/always-on-dispatcher` → `main` (squash or merge, implementer's choice) with every message referencing the closed ticket numbers (e.g. `17.27`–`17.33`); then `npm ci` on main so `node_modules` matches the lockfile, and re-run the suite once on main.
 - [ ] Close tickets 27–33 (and ticket 17 Phase 3) with dated comments carrying commit hashes; never `git add -A` at any step.
 
@@ -308,3 +308,187 @@ One commit: `9126909` ("Closeout batch: 46/49/84 (+34/32/29 partial) — evidenc
 **Remaining open list post-pass-5 (one-line disposition):** 17 — last (Phase 3, after children). 27/28 — live presence confirm + the two re-opened ADR-0010 rationales. 29 — pass-5 firehose only. 30 — waits on 69's L1; else the fallback answer surface decision. 31 — pass-5 restart observation. 33 — this closeout (part 2 = the closures above + the refinement loop). 48 — launcher-drift residual: `-Sync` ahead-refusal exercise still unrun. 68 — pass-5 AC5. 69 — L1 + Q1 (human). 71 — human: seam vs descope. 78 — pass-5 root election/HMR. 81 — settings re-home call + 88 live re-confirm. 82 — human: U-A retry ruling. 86 — fake-vs-host hygiene pass. 89 — asset deletion (offline-complete in `d25d6ef`; ACs unticked).
 
 After pass 5: execute 33 part 2 (dated closures with commit hashes for 17/27/28/29/30/31/48/78 + the outside-map set) and continue the refinement loop. No remote push happened anywhere; session artifacts stay outside the repo under `C:\Users\TZhen\Desktop\dsh-live-*`.
+
+### 2026-09-19 — Gate 2 manual copy read EXECUTED (AC2 ticked) + AC5 confirmed; AC1 stays unticked (voided)
+
+**Scope read.** Every prompt asset, locale string, and user-visible copy line added by tickets 27–32,
+plus the copy added by 70/77/78/79/80/81/68 that landed on the same surfaces (78/81/89 named in the
+brief; 70/77/79/80/68 read because they own live keys in the same dictionary). Method: (1) mechanical
+en/zh parity, (2) a line-by-line read of every added string against its ticket requirement, (3) a
+`file:line` verdict per string. No reference material was opened; design-17 §7 was the comparison
+source for the 27–32 drafts.
+
+**1. en/zh parity — PASS, mechanical.** One locale dictionary ships (`src/client/overlay.ts:115`,
+registered once at `src/client/index.ts:236`; no second dictionary exists anywhere in `src/`).
+`validateLocaleDictionary` (`src/client/overlay.ts:421-454`) asserts both faces present, every value a
+string, and identical key sets. Executed directly against the shipped module:
+
+```
+en keys: 93   zh keys: 93
+validator problems: []   en-only: []   zh-only: []
+```
+
+Counts: **93 en keys, 93 zh keys, 0 problems** (the 2026-09-18 merge record's 49 = 49 predates
+tickets 47/68/70/77–81; ticket 89 deleted the capsule-era keys from BOTH faces, so parity held through
+the deletion). Cross-check beyond the validator: every literal `t("…")` key referenced in `src/client/`
+resolves in the dictionary (23 literal keys, 0 missing); the remaining 70 keys are referenced through
+key constants (`settings-card-store.ts:85-98`, `conversation.tsx:161-176`, `approval-pane.tsx:85-93`,
+`onboarding.ts:146-167`, `toolviews.ts:90+`, `actions.ts:175-181`) — all present in both faces.
+
+**2. The read — verdicts (en line cited; zh twin on the line after each en block).**
+
+*Tickets 27/28 — roster/panel copy (`src/client/overlay.ts:117-134`):* `roster.title` "Workers" :117
+PASS · `roster.empty` "No workers yet. Ask the dispatcher to start some." :118 PASS (plain language,
+no invented state) · `roster.unavailable` "Worker status is unavailable right now." :119 PASS (states
+unavailability without a remedy it cannot offer — **consistent with ticket 82's ruling: no retry
+affordance, no reconnect wording anywhere in the dictionary**) · `roster.loading` :120 PASS ·
+`roster.blocked.{tool,credential,network,filesystem,other}` :121-128 PASS (names only — the credential
+variant says "use the credential \"{target}\"", never a value; matches design-17 §7 drafts) ·
+`roster.landed` "Result ready — not delivered yet" :129 PASS (the delivered flag, stated exactly) ·
+`roster.activity.toolcalls` :130 PASS · `roster.section.{active,needs-you,finished}` :131-133 +
+`roster.finished.count` :134 PASS (all four match the §7 drafts verbatim).
+
+*Ticket 29/80 — streaming/conversation copy (`src/client/overlay.ts:214-229`):* `shell.conv.waiting`
+"History has not arrived for this session yet." :214 PASS · `shell.conv.unavailable` :215 PASS ·
+`shell.conv.empty` :217 PASS — **the three are distinct facts, which is the AC's own requirement**
+(unknown ≠ unavailable ≠ empty) · `shell.conv.more` :218 PASS · `shell.conv.role-user/assistant`
+:219-220 PASS · `shell.conv.working` "working…" :221 PASS · `shell.conv.interrupted` "(interrupted)"
+:222 PASS (carries the host transcript's own `interrupted` flag, `conversation-store.ts:375`; it is a
+transcript fact, never a claim about a worker's outcome) · `shell.conv.attachment-only` :223 PASS ·
+`shell.conv.tool-running/tool-failed` :224-225 PASS · `shell.conv.send/sending` :226-227 PASS ·
+`shell.conv.no-channel` "No send channel is reachable in this runtime." :228 PASS ·
+`shell.conv.send-failed` "The send failed — the message was not delivered." :229 PASS (no optimism, no
+retry).
+
+*Ticket 30 — approval copy (`src/adapter/access-prompt.ts`):* `ACCESS_PROMPT_ALLOW` "Allow" :84 PASS ·
+`ACCESS_PROMPT_ALWAYS_ALLOW` "Always allow (this session)" :91 PASS (**U-D exact** — the parenthetical
+is the scope claim and the code keeps it: session rows are cleared per session,
+`src/plugin.ts:571-574`, and the wildcard fence degrades an always-shaped answer to a one-shot allow,
+`src/adapter/resolve-command.ts:180-187`) · `ACCESS_PROMPT_DENY` "Deny" :94 PASS ·
+`ACCESS_PROMPT_DENY_DETAIL` :100 PASS (worker-facing, deliberately plain) · `APPROVAL_LOCATION_LOCAL`
+"Runs on your computer." :110 PASS · `APPROVAL_LOCATION_REMOTE` :120-121 PASS — **unreachable today
+and honestly labelled as such** (ticket 71's gate: no remote-exec face exists; the map resolves the
+remote line only for the two reference worker kinds, `:131-161`, so no shipped ask can claim remote) ·
+`APPROVAL_EXPIRED_COPY` :170-171 PASS (deny-by-default stated as fact) · `APPROVAL_SECRET_STORED_COPY`
+:178-179 PASS (names-never-values kept: the string names the credential, carries no value) ·
+`approvalDetailOmissionMarker` "… [+{count} more characters]" :188-189 PASS (the clamp is visible
+rather than silent; clamp bound `:185`).
+
+*Ticket 31 — restart honesty:* `RESTART_NOTICE_HEADING` / `RESTART_DEGRADED_NOTICE`
+(`src/adapter/restart-notice.ts:26`, `:33-35`) PASS — "Nothing was restored and nothing was replayed"
+is the honest degraded answer · unknown-state line `:53-62` PASS — states unknown, "nothing was
+replayed", and (ticket 59's added clause) that the stream keys are still held, so the refusal that
+follows reads as the invariant, not as a bug · restored line `:72-75` PASS. All four are
+dispatcher-facing (the agent narrates for the user), and none claims a stopped worker produced a
+result. Policy rules: `src/core/policy/prompts.ts:95` ("…Never claim a stopped worker produced a
+result.") PASS and `:97` (no board/milestone view) PASS — both verbatim from design-17 §7's drafts,
+and both are the only milestone/board mentions in `src/` (grep: 2 hits, the rule + its comment).
+
+*Ticket 32 — activation copy (`src/adapter/activation-command.ts`):* `ACTIVATION_PRESENCE_HINT`
+:36-37 PASS — names where presence lives and sets the delivery expectation; it is the ONE string kept
+in lockstep with the dictionary (`src/client/overlay.ts:154-155` en + zh `:309-310`, asserted by
+`test/composition-polish.test.ts`) · `DISPATCHER_START_SUCCESS` :40-42 PASS · `…_ALREADY_HERE` :45-46
+PASS · `…_NOT_TOP_LEVEL` :55-56 PASS · `…_UNRESOLVED` :60-61 PASS (refuses, never guesses).
+
+*Tickets 77/78/79 — shell chrome (`src/client/overlay.ts:197-209`):* `shell.title` :197,
+`shell.sidebar.label` :198, `shell.empty` :199, `shell.noselection` :200, `shell.conversation.pending`
+:201-202 PASS (the last is the honest no-seat fallback: since ticket 80 the pane is a host seat, and
+the line shows only when a composition mounts the shell without it) · `shell.row.{working,needs-you,
+finished}` :203-205 PASS (counts, formatted) · `shell.row.presence-unavailable` :206 PASS (**the
+ticket-82 ruling's live surface**: a stale/corrupt/absent mirror renders this chip — no retry, no
+reconnect banner; pinned by the shell's own "failure states are retry-less" test) ·
+`shell.row.copy-id` :209 PASS (ticket 70; the id is what a peer addresses).
+
+*Ticket 68 — onboarding (`src/client/overlay.ts:238-258`):* five beats + `next`/`done`/`skip`/`step`
++ `save-failed` :238-258 PASS. Spot-judged: `intro.body` "This window is the dispatch shell…" PASS
+(describes the shipped frame, no account/sign-in beat — U-A gap honoured) · `background.body` PASS
+(single worker kind only, no background-command/remote-job promise — C15) · `tools.body` PASS
+(approval gate stated as fact, no always-allow persistence claimed) · `first.body` PASS (user-driven
+creation only — U-G) · `save-failed` :257-258 PASS (one honest line, retry-less). Note recorded rather
+than glossed: `handoff.body`'s "This introduction does not repeat." is an absolute, and the
+`save-failed` line is the qualifier for the case where it is not true; both render on the same pane,
+so the pair is honest. No edit made.
+
+*Ticket 81 — approval-card chrome (`src/client/overlay.ts:268-279`):* `shell.approval.target` :268
+PASS · `secret-promise` :269-270 PASS · `unavailable` :271-272 PASS (a pending card with no resolve
+seat says so instead of offering dead buttons) · `no-channel` :273-274 and `failed` :275-276 PASS
+(both end "nothing was changed" — honest, retry-less) · `shell.dispatch.gating` "Gate" :279 PASS
+(label only; the value renders the projection's frozen vocabulary verbatim) · `submitted` :277-278
+**FLAG (low)** — see below.
+
+*Ticket 70 — peer copy (`src/client/overlay.ts:146-147`, `src/core/policy/prompts.ts:39`):*
+`toolview.field.peer` "To session" / `toolview.field.priority` "Priority" PASS (labels only; the peer
+message body never renders on the row) · `SEND_PEER_TOOL` description PASS ("Failed sends are reported
+and dropped — there is no queue and no retry." is true of the shipped path:
+`src/core/tool-results.ts:266-278`).
+
+*Ticket 89 — deletions:* the capsule-era keys (38/39/40/41/42 blocks) are gone from **both** faces in
+the same commit, so the key sets stayed identical; verified by the 93 = 93 count above and by the
+absence of any orphaned `t("…")` reference (0 missing keys).
+
+**3. FLAGs (2, both low severity; neither fixed — see why per item).**
+
+- **FLAG-1 — `shell.approval.submitted` over-promises a card update.**
+  `src/client/overlay.ts:277-278`: "Answer sent — this card updates when the dispatcher confirms."
+  The shipped relay feed does **not** carry settled states: `src/client/approval-feed.ts:12-19` says a
+  card "LEAVES when the relay settles it", and resolved/expired card states ride notices "which this
+  channel does not carry". So today the card is *removed* from the pending list, not updated.
+  **Recommended fix (not applied):** reword to a claim true on both paths — e.g. "Answer sent — the
+  card clears once the dispatcher has the answer." — *or* wire the notice feed the store already
+  supports (`projectAccessAskCards` settles cards from notices, `src/client/approval-cards.ts:182-207`,
+  pinned by its own tests) so the existing wording becomes true. **Why not fixed here:** the two fixes
+  are not equivalent (copy change vs feed change) and the store's notice projection is shipped, tested
+  code — the copy describes the designed settle path; choosing between "reword" and "wire the feed" is
+  ticket 69/81's call, not a copy-edit. A copy change made here would silently pick one.
+
+- **FLAG-2 — the ticket-30 approval strings are en-only; no zh face exists for them.**
+  The five user-visible approval strings (`Allow`, `Always allow (this session)`, `Deny`,
+  "Runs on your computer.", the expired copy, the secret-stored reassurance, the omission marker)
+  live only as English constants in `src/adapter/access-prompt.ts:84-189`; grep for their design-17 §7
+  zh drafts returns zero hits anywhere in `src/`. They surface to the human through
+  `ctx.userQuestions.ask` (`:245-247`), so a zh user sees English approval copy.
+  **This is NOT a violation of the parity contract as written** (the contract is over the locale
+  dictionary, which is 93 = 93 and passes), and it is not introduced by 27–32 — ticket 30 shipped it
+  this way. Recorded because AC2 asks for a real read, and a mechanical parity check cannot see it.
+  **Recommended fix (not applied):** carry zh beside each constant (or route the strings through the
+  locale face) when the prompt pathway gains a zh seat; note it on ticket 30's supersession record.
+  **Why not fixed here:** it is a localization feature, not a copy defect — the host prompt pathway
+  renders server-side with no zh seat, so a two-line constant pair would be dead text.
+
+**4. Boundaries observed, recorded not ticked.** (a) The copy is honest about the code everywhere;
+where the *code* still carries the pre-ADR-0018 feature flag (`src/plugin.ts:54` `enabled`, and the
+settings card that edits it, `src/client/overlay.ts:184-190`), the card's wording states the flag's
+real behaviour ("it applies to new chats. The chat you are in keeps the flag it started with") — PASS
+as copy. The flag's existence against ADR-0018's "no flag, always-on" is a code/architecture item with
+no removal ticket found in the tracker; it belongs to the re-base's remaining work, not to this gate.
+(b) No string in the dictionary or in `src/` promises a roster retry affordance, a reconnect banner,
+or a "stopped" claim for a worker that produced a result — the ticket-82 ruling's wording check.
+
+**5. AC5 — `§5 conflict markers honored` — CONFIRMED, ticking.** The confirmation genuinely exists:
+the 2026-09-18 comment on `Issue-tracker/open/17-…md` (rows 1–8 spot-checked PASS, with row 4's
+required "default-activation not adopted by choice" note) is the review comment AC5 asks for, and it
+was re-verified against today's tree, not just cited:
+
+- row 1 **no stop control** — PASS. `src/client/shell.tsx:46` ("the shell never spawns, steers, stops,
+  or sends"), `src/client/conversation.tsx:20` ("NO stop/cancel"), and no stop affordance in any
+  client surface; stops stay conversational (`src/core/policy/prompts.ts:95`).
+- row 2 **no todo board** — PASS. `src/client/panel.tsx:99,200-201`: a muted `__row-todo` chip only.
+- row 3 **no milestone surface/prompt implication** — PASS. The only mentions in `src/` are the
+  prohibitive rule and its comment (`src/core/policy/prompts.ts:96-97`).
+- row 5 **session "always" rows cleared** — PASS. `src/plugin.ts:571-574`
+  (`clearSessionAccessPolicy(sessionId)` on deactivation) plus `:673` (all sessions on unload).
+- row 6 **no second producer kind** — PASS. `src/core/roster-snapshot.ts:120-121,373` admits exactly
+  `kind: "worker"` and rejects others at parse. Note for accuracy: the wake bus's *turn sources* now
+  include `peer`/`timer` (`src/core/wake-bus.ts:14-28`) — that is C15-sanctioned (a peer message is a
+  wake source into the existing pipeline, not a new roster producer kind) and does not touch row 6's
+  subject, which is the ledger/panel producer vocabulary.
+- rows 4/7/8/9 — as recorded 2026-09-18 (row 4's note stands; 7 and 8 are standing/future-triggered;
+  9 carries no revisit marker).
+
+**AC dispositions from this pass.** **AC2 — ticked** (read executed, parity mechanical and clean,
+FLAGs recorded with recommendations; no fix applied, so nothing to re-verify). **AC5 — ticked** (above).
+**AC1 — left UNTICKED and superseded** (voided as a ship gate by ADR-0018; the no-verbatim-copy review
+is its successor and is already recorded, 2026-09-19). **AC6/AC7 — untouched** (merge and closure
+work; the merge itself landed `400450f` long before this pass). Gate 2 (AC3) was not run as a new
+pass — no code changed here; the standing counts on this branch are `npm test` 1044 pass / 0 fail /
+256 suites, `npm run typecheck` clean (both configs), both re-run for the record.
