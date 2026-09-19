@@ -129,3 +129,53 @@ diff. (2) The allowlist exists because not every missing path is rot (convention
 should be added as a new rule + fixture when 97 lands (the RULES registry + self-test coverage
 enforcement make that mechanical). Ticket stays open — W2 (first catches + indexes) and W3
 (independent verification) remain.
+
+### 2026-09-20 — W2 implementation (overnight run, first catches + indexes)
+
+**All 16 known catches fixed, plus one late tooling catch. Branch `wt/doc-lint-96-fixes`; merges
+`b6ca9ac` + `c6668a4` (branch commits `7faa45b`, `a28ec40`, `49f5953`, `2f9c540`).**
+
+- `orientation-path-resolution` (6): AGENTS.md's four dead `docs/agents/*` cites repointed at the
+  real homes — tracker section → `Issue-tracker/issue-tracker.md`; triage-labels and domain-docs
+  sections → `agent.md` (both conventions live there); research section → `research/research.md`.
+  README.md: `dev/cordis.dev.patch.yml` → `dev/cordis.web.patch.yml` (and the overlay invocation
+  now reads `--profile web`, per that patch file's own header — the transient overlay targets the
+  web route; the persistent multitask-profile route is the paragraph above). research/research.md:22:
+  `docs/adr/0001-choose-go-for-core.md` → `docs/adr/0001-typescript-in-process-multitask-core.md`,
+  with the sentence now stating the real citation (0001 → `docs/research/dsh-extension-surface.md`).
+- `orientation-required-citation` (3): satisfied by the same repointing — AGENTS.md now cites
+  `Issue-tracker/issue-tracker.md`, `agent.md`, and `research/research.md`.
+- `orientation-forbidden-claim` (3): AGENTS.md line 3 "greenfield / no application code" replaced
+  with a truthful current-state paragraph (TypeScript Cordis plugin; `src/` core/adapter/worker/
+  client plus the `client/` wrapper shell; npm-driven typecheck/offline tests/build); the adjacent
+  stale "Root currently has only the PRD and one reference tree" sentence went with it. AGENTS.md's
+  tracker-location claim → `Issue-tracker/<status>/`, `.scratch/` described as scratch-only, per the
+  tracker guide. README.md Status section rewritten as an honest implemented-and-offline-tested
+  paragraph with no rot-prone counts.
+- `tracker-status-agreement` (3): tickets 43/52/54 `**Status:** open` → `**Status:** resolved`.
+  Each file's closure is recorded in dated in-file comments (43: all five ACs ticked with live-pass
+  evidence; 52: "Q3 discharged; ticket resolved"; 54: "resolved by the team lead"). None looked
+  genuinely unresolved; no file moved.
+- `open-index-freshness` (1): `Issue-tracker/open-issue-index.md` generated (11 rows, GENERATED
+  header) and committed; the layout block in `Issue-tracker/issue-tracker.md` now lists it.
+  Regenerating produces no diff.
+- `adr-index-row-freshness` (0): already clean; `docs/adr/README.md` untouched.
+
+**Late catch, fixed in tooling (rule adjustment):** on merged main, `npm run lint:docs` flagged the
+fresh index STALE — git autocrlf had rewritten the committed LF to CRLF at checkout, and the
+byte-exact freshness compare treated the checkout artifact as content drift. `issue-index.mjs` now
+renders and checks against the existing file's dominant EOL (mirroring adr-index.mjs); 3 new
+self-test checks cover the CRLF round-trip (fresh under CRLF; rewrite preserves the style; drifted
+content still flags). Docs were correct; the tool was brittle.
+
+**Gates on final main (`c6668a4`):** `npm run typecheck` clean (both tsconfigs); `npm test` =
+**1108 pass / 270 suites / 0 fail**; `npm run lint:docs` GREEN and idempotent (second run, no
+diff); `doc-lint.mjs --self-test` **38/38** (35 → 38: the three CRLF checks keep per-rule fixture
+coverage for the adjusted check).
+
+**Notes for W3:** (1) AGENTS.md is git-ignored — its fixes exist only in the working tree (no
+tracked diff, expected; the linter reads the tree, so the guard still holds). (2) The self-test
+total is now 38, not 35. (3) Known and deliberately out of scope: AGENTS.md's PRD table still says
+"Not TypeScript" for the core language while ADR-0001 rules TypeScript-in-process — left for
+ticket 97 / W4's authority-stack pass; no lint rule covers it today. Ticket stays open for W3
+independent verification.
