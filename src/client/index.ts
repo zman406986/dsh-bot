@@ -741,10 +741,11 @@ export function mountShellPage(
     // The main seat: the text-only conversation surface (ticket 80), bound
     // to the reduced event-window store and the two verified host actions.
     // Send rides the capsule's OWN verified plain-prompt sink (ticket 40's
-    // transport: `sessions.scope(id).conversation.send` — one sink, never a
-    // parallel channel, A4: the host owns the journal); older pages ride the
-    // scoped `loadOlder()` (Finding 7). NO cancel affordance exists — the
-    // ticket's area-7 rule; the scoped cancel verb stays deliberately
+    // transport, shape corrected by ticket 92:
+    // `sessions.scope(id).get("conversation").send(text)` — one sink, never
+    // a parallel channel, A4: the host owns the journal); older pages ride
+    // the scoped `loadOlder()` (Finding 7). NO cancel affordance exists —
+    // the ticket's area-7 rule; the scoped cancel verb stays deliberately
     // unused (recorded on the ticket). The pane factory's output IS the
     // component (ticket 88: rendered by the shell, never called by it).
     conversation: conversationPane,

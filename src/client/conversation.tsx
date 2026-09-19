@@ -208,10 +208,17 @@ function Composer(props: {
         disabled={sending}
         onChange={(event) => setText(event.target.value)}
         onKeyDown={(event) => {
-          if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-            event.preventDefault();
-            submit();
-          }
+          if (event.key !== "Enter") return;
+          // The shipped composer's own gesture map (ticket 92): plain Enter
+          // submits, Shift+Enter keeps the line break, and the accelerated
+          // Ctrl/Meta+Enter chord submits too — `resolveSubmitMode(…, "enter",
+          // …)` is the composer's plain-Enter submission path
+          // (dsh-client-ui-conversation lib/client.js:15995, :16023) while
+          // the modified chord is its accelerated gesture (:15990-15996).
+          // An IME composition's Enter confirms the candidate, never sends.
+          if (event.shiftKey || event.nativeEvent.isComposing) return;
+          event.preventDefault();
+          submit();
         }}
       />
       <div className={`${CONVERSATION_CLASS}__bar`}>

@@ -17,12 +17,19 @@
  * Also here: the scoped `loadOlder()` request (Finding 7: the pagination
  * verb — `IConversation.loadOlder` scope-addressed through
  * `sessions.scope(id)`; failures land in the host's snapshot state, the
- * window is the only truth this surface reads).
+ * window is the only truth this surface reads). The verb is resolved and
+ * called through `actions.ts`'s `scopedConversation` helper — ticket 92
+ * (live, 2026-09-19): a service PROPERTY read on a session-scope context
+ * throws on the live host (`cannot get property "conversation" without
+ * inject`), and a DETACHED verb reference loses the service tracker's
+ * `this.ctx` rebinding, so both the resolution and the call must go through
+ * the scoped face.
  *
  * Structural shapes only (no import from `@deepseek-ai/*`); offline tests
  * drive it over fakes (S8), same discipline as `shell-feed.ts`.
  */
 import type { ClientSessionsLike } from "./context.js";
+import { scopedConversation } from "./actions.js";
 import type { ShellSelection } from "./shell-store.js";
 import {
   type ConversationSourceLike,
@@ -106,22 +113,24 @@ export function bindConversationFeed(
 
 /**
  * Request one older history page for a session through the verified scoped
- * verb (`sessions.scope(id).conversation.loadOlder()`, Finding 7). The
- * window is the only truth: the pane renders no outcome copy for this
- * request (silence until the window changes — no optimistic "loaded" claim,
- * no retry control); `hasMore` keeps the affordance while the host says
- * more remains. Errors are contained (the verb's own failures land in the
- * host's snapshot state) — this helper never throws.
+ * verb (`sessions.scope(id)` → `scoped.get("conversation").loadOlder()`,
+ * Finding 7; ticket 92 corrected the access shape). The window is the only
+ * truth: the pane renders no outcome copy for this request (silence until
+ * the window changes — no optimistic "loaded" claim, no retry control);
+ * `hasMore` keeps the affordance while the host says more remains. Errors
+ * are contained (the verb's own failures land in the host's snapshot state)
+ * — this helper never throws.
  */
 export function requestOlder(
   sessions: ClientSessionsLike | undefined,
   sessionId: string,
 ): void {
-  const actx = sessions?.scope(sessionId);
-  const load = actx?.conversation?.loadOlder;
-  if (actx == null || typeof load !== "function") return;
   try {
-    void load().catch(() => {});
+    const face = scopedConversation(sessions?.scope(sessionId));
+    if (face === undefined || typeof face.loadOlder !== "function") return;
+    // Method receiver, not a detached reference: the host's session tag
+    // rides the call receiver (ticket 92).
+    void face.loadOlder().catch(() => {});
   } catch {
     // contained: honest absence of change, never a crash
   }

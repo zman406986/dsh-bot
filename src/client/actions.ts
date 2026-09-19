@@ -30,12 +30,17 @@
  *   for conversational text: `CommandRuntime.execute` returns `undefined`
  *   when the line parses as no command, so a conversational line would
  *   silently do nothing there. The sink is the host-documented
- *   scope-addressed face — a root-scope plugin addresses a session via
- *   `ctx.sessions.scope(id)` and that scope's `conversation.send(text)`
- *   (the host's own guidance: "address one via
- *   ctx.sessions.scope(id).conversation"), the same scope-addressing
- *   mechanism ticket 36 verified for the input resolver. This is the path
- *   the wrapper shell's conversation composer rides (ticket 80).
+ *   scope-addressed face: `ctx.sessions.scope(id)` resolves the session's
+ *   Agent-scoped context, and the service is reached from it through the
+ *   **service-method boundary** — `scoped.get("conversation")` — the host's
+ *   own scoped call shape. Ticket 92 (live, 2026-09-19) proved the PROPERTY
+ *   read (`scoped.conversation`) cannot work there: the cordis context proxy
+ *   resolves a service property by walking the fiber chain
+ *   (`cordis/lib/index.js:672-694`), and the scope fiber injects nothing, so
+ *   the walk reaches the root fiber and throws `cannot get property
+ *   "conversation" without inject` — the whole send died before the sink was
+ *   reached. See {@link scopedConversation} for the citations. This is the
+ *   path the wrapper shell's conversation composer rides (ticket 80).
  *
  * **Per-row steer affordance** — prefill only, per seam 3's verdict:
  * `ctx.conversation.input.for(actx).setDraft(text)` writes
@@ -60,6 +65,8 @@ import type {
   ClientConversationLike,
   ClientRemoteLike,
   ClientSessionsLike,
+  ScopedAgentContextLike,
+  ScopedConversationLike,
 } from "./context.js";
 import type { AccessAskCard, AccessAskOptionChoice } from "./approval-cards.js";
 import type { ApprovalResolveOutcome } from "./approval-pane.js";
@@ -129,6 +136,74 @@ export interface TransportSources {
 }
 
 /**
+ * Resolve the scoped conversation face from a session-scope context — the
+ * ONE verified shape (ticket 92, 2026-09-19):
+ *
+ * ```ts
+ * const scoped = sessions.scope(sessionId);       // Agent-scoped ctx (tagged)
+ * const conversation = scoped.get("conversation"); // service-method boundary
+ * ```
+ *
+ * The host's own scoped call sites do exactly this:
+ * `dsh-client-ui-conversation/lib/client.js:16500-16506`
+ * (`scopedConversation`: `sessions.scope(id)` → `scoped.get("conversation")`)
+ * and `:14375-14377` (the queue dock). Why not the property read:
+ *
+ * - The cordis context proxy resolves a service PROPERTY read by walking the
+ *   FIBER chain from the accessing context (`cordis/lib/index.js:672-694`).
+ *   The scope fiber is the no-op `agentScope` plugin
+ *   (`dsh-api-session-controller/lib/types/client/scope.js:21-36`) — it
+ *   injects nothing — so the walk leaves the sessions plugin's fiber, reaches
+ *   the root fiber, and `fiber.runtime === null` throws
+ *   `cannot get property "conversation" without inject` (`lib/index.js:690`).
+ *   The conversation service is provided by a CHILD plugin of the
+ *   conversation module's fiber (`dsh-client-ui-conversation/lib/client.js
+ *   :16837`), so it is never on the scope fiber's ancestor chain. The live
+ *   composer send died exactly here (ticket 92: `sendPrompt`'s
+ *   `actx?.conversation` threw; `src/client/index.ts`'s catch produced the
+ *   honest `failed` line, no model turn).
+ * - `ctx.get(name)` (cordis `reflect.get`, `lib/index.js:762-764`) resolves
+ *   through the isolate-keyed service store with NO fiber walk, and still
+ *   wraps the value with the ACCESSING context (`getTraceable(this.ctx, …)`,
+ *   `lib/index.js:763`), so the host's `scopeOf(this.ctx)` tag check
+ *   (`dsh-client-ui-conversation/lib/client.js:3170-3181`) finds the session
+ *   id and the scope-addressed verbs work.
+ *
+ * The property read remains ONLY as a structural fallback for a runtime whose
+ * context has no `get` (offline fakes, a non-cordis host); it is not a
+ * verified live shape, and a throwing read degrades to `undefined` (the
+ * caller's honest absence) rather than escaping as a crash.
+ *
+ * The returned face must be used as a METHOD receiver (`face.send(text)`,
+ * `face.loadOlder()`): the host rebinds `this.ctx` to the accessing scope
+ * through the service tracker, so a detached verb reference loses the tag.
+ */
+export function scopedConversation(
+  actx: ScopedAgentContextLike | undefined,
+): ScopedConversationLike | undefined {
+  if (actx == null) return undefined;
+  const faceOf = (value: unknown): ScopedConversationLike | undefined =>
+    typeof value === "object" && value !== null
+      ? (value as ScopedConversationLike)
+      : undefined;
+  if (typeof actx.get === "function") {
+    // The verified live shape: `get` resolving nothing means the service is
+    // genuinely absent here — never fall through to the property read.
+    try {
+      return faceOf(actx.get("conversation"));
+    } catch {
+      return undefined;
+    }
+  }
+  try {
+    return faceOf(actx.conversation);
+  } catch {
+    // A host-shaped scope whose property read throws (the live behaviour).
+    return undefined;
+  }
+}
+
+/**
  * The real transport over the verified seams (ticket 36 §2), composed once
  * in `src/client/index.ts` and injectable for tests via fake sources.
  * Every method reports `no-channel` rather than throwing when the service
@@ -155,11 +230,12 @@ export function bindCommandTransport(sources: TransportSources): CommandTranspor
     async sendPrompt(sessionId, text) {
       const sessions = sources.sessions();
       if (sessions === undefined) return { kind: "no-channel" };
-      const actx = sessions.scope(sessionId);
-      const sink = actx?.conversation;
-      if (actx == null || typeof sink?.send !== "function") {
+      const sink = scopedConversation(sessions.scope(sessionId));
+      if (sink === undefined || typeof sink.send !== "function") {
         return { kind: "no-channel" };
       }
+      // Called AS A METHOD of the scoped face: the host's tracker rebinding
+      // (and with it the session tag) rides the call receiver.
       await sink.send(text);
       return { kind: "sent" };
     },
