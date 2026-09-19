@@ -248,3 +248,7 @@ retained assets listed in this ticket's AC 3 and "Assets kept" note (`capsule.ts
 `capsule-store.ts`, `shell.tsx` launcher, `shell-mount.ts` launcher contracts, `capsule.*`
 copy) plus 81's unrendered-toolview question. No action needed in 78 — this comment only
 re-points the lane reference so it outlives the moved files.
+
+### 2026-09-19 — one-line note
+
+88 landed (d242d18) — ready for live re-confirm.
