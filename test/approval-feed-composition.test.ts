@@ -24,6 +24,15 @@
  *   → the card leaves; answering again is honestly refused.
  *
  * Offline only (S8): no Cordis, no browser, no DOM, no network, no LLM.
+ *
+ * Ticket 93 host shape (2026-09-19): the fake settings provider models the
+ * installed host — `register(ns, schema, {base})` returns the owner scope
+ * (`@deepseek-ai/dsh-settings/lib/index.js:281-315`) while
+ * `installSection(...)` returns VOID (`:327-343`;
+ * `lib/types/index.d.ts:228`). The earlier fake handed a writable scope back
+ * through `installSection`, a host that does not exist: it let a dead roster
+ * channel pass 1,000+ offline tests. With the host shape modeled, dropping
+ * the scope starves this suite exactly as it starved the live surface.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -58,15 +67,22 @@ import {
 
 /**
  * The single settings document both halves share. The host end is the owner
- * scope `installSection` returns (`update(partial)`); the client end is the
- * `settingsScope.bind({namespace})` snapshot. The live host merges `update`
- * into the namespace document and re-serves it to the bound scopes; that is
- * exactly what this does — nothing else.
+ * scope the shipped `settings.register(ns, schema, {base})` returns
+ * (`@deepseek-ai/dsh-settings/lib/index.js:281-315`; `update(partial)`); the
+ * client end is the `settingsScope.bind({namespace})` snapshot. The live host
+ * merges `update` into the namespace document and re-serves it to the bound
+ * scopes; that is exactly what this does — nothing else.
+ *
+ * Ticket 93 host shape: the scope comes from `register`, NOT from
+ * `installSection` — the live `installSection` returns VOID
+ * (`dsh-settings/lib/index.js:327-343`; types `:228`). A fake that handed the
+ * scope back through `installSection` modeled a host that does not exist and
+ * hid a dead roster channel (see the host fake below).
  */
 interface SettingsBridge {
   readonly document: Record<string, unknown>;
   readonly subscribers: Set<() => void>;
-  update(partial: unknown): void;
+  update(partial: unknown): Promise<void>;
 }
 
 function createSettingsBridge(): SettingsBridge {
@@ -75,7 +91,10 @@ function createSettingsBridge(): SettingsBridge {
   return {
     document,
     subscribers,
-    update(partial: unknown) {
+    // The host scope's `update` is ASYNC (dsh-settings
+    // lib/types/index.d.ts:105-108): the merge lands synchronously here, the
+    // promise settles after — the shape a caller must handle.
+    async update(partial: unknown) {
       if (typeof partial !== "object" || partial === null) return;
       for (const [key, value] of Object.entries(partial)) {
         document[key] = value;
@@ -143,16 +162,23 @@ function createHostCtx(bridge: SettingsBridge) {
     },
     // The optional settings service: the section installs and its owner
     // scope writes into the SHARED document (the roster mirror's write path).
+    // Host shape (ticket 93): `register` returns the scope; `installSection`
+    // returns VOID (dsh-settings lib/index.js:327-343, types :228) — it is
+    // modeled here so a regression that reaches for its return value starves
+    // exactly as it did live (zero `roster.*` keys, ticket 93).
     inject(services: readonly string[], callback: (child: unknown) => void) {
       if (!services.includes("settings")) return;
       callback({
         settings: {
-          installSection() {
+          register() {
             return {
-              update(value: unknown) {
-                bridge.update(value);
+              async update(value: unknown) {
+                await bridge.update(value);
               },
             };
+          },
+          installSection() {
+            // No scope: the live host discards it. Return value is void.
           },
         },
       });
@@ -243,6 +269,12 @@ function createHostCtx(bridge: SettingsBridge) {
       return command.handler(invocation as never) as CommandResultLike;
     },
     sendMessageCalls,
+    // Ticket 93: the plugin's unload/HMR teardown (every effect disposer,
+    // reverse order — the fiber cascade) so a test can drive
+    // `clearAllSessions` through the real path.
+    runTeardown() {
+      for (const dispose of [...disposers].reverse()) dispose();
+    },
   };
   return ctx as typeof ctx & AdapterContext;
 }
@@ -494,6 +526,53 @@ describe("ticket 69 L1 — the offline composition pin (real apply → real watc
       kind: "error",
       text: dispatcherResolveNoPendingAsk(spawned.worker_id),
     });
+  });
+
+  it("ticket 93: the real channel publishes BOTH mirror families into the document, and unload clears the session key", async () => {
+    // The live-found failure: `installSection` returns void on the host, so
+    // the owner scope never attached and ZERO `roster.*` keys ever reached
+    // the document (settings/describe stayed at the three config keys).
+    // This pin drives the real channel through the real `register`-returned
+    // scope and asserts the keys the wrapper's read side needs.
+    const bridge = createSettingsBridge();
+    const host = createHostCtx(bridge);
+    pluginApply(host, {
+      enabled: true,
+      accessRequestTimeoutMs: ACCESS_TIMEOUT_MS,
+    });
+    host.runCommand({
+      commandId: DISPATCHER_START_COMMAND,
+      agent: topLevelAgent("s-1"),
+    });
+    await flush();
+
+    // The activation publish landed under the legacy key...
+    const legacy = publishedRoster(bridge);
+    assert.equal(legacy?.dispatcherSessionId, "s-1");
+    // ...AND under the per-session mirror key the shell store reads.
+    const mirror = parseRosterSnapshot(
+      bridge.document[rosterSessionKey("s-1")],
+    );
+    assert.equal(mirror?.dispatcherSessionId, "s-1");
+    assert.equal(mirror?.workers.length, 0);
+
+    // A real spawn republishes both families in one write.
+    const spawn = host.tool("spawn_worker");
+    assert.ok(spawn);
+    await spawn.execute(
+      { stream_key: "k-93", title: "Channel worker", prompt: "P." },
+      { agent: { session: { id: "s-1" } } },
+    );
+    const afterSpawn = parseRosterSnapshot(
+      bridge.document[rosterSessionKey("s-1")],
+    );
+    assert.equal(afterSpawn?.workers.length, 1);
+
+    // Plugin unload/HMR (the fiber cascade): no mirror key outlives the
+    // plugin — the host writes `null`, which the client reads as "not a
+    // dispatcher here anymore" (ticket 79's clear contract).
+    host.runTeardown();
+    assert.equal(bridge.document[rosterSessionKey("s-1")], null);
   });
 
   it("the composition detaches its mounts from the hub with the client fiber", async () => {

@@ -3,12 +3,18 @@
  *
  * Unit tests, no network / LLM / real dsh host.
  * Covers: freeze semantics, disabled early-return, settings always installed,
- * onChange runtime no-op, policy gate, schema defaults.
+ * settings writes are runtime no-ops, policy gate, schema defaults.
  *
  * Fake-vs-host (ticket 91): the stub `commands.register` / `tools.register`
  * are fail-loud on a duplicate name, like the shipped `NamedEntries` tables
  * (`@deepseek-ai/dsh-commands/lib/index.js:82`,
  * `@deepseek-ai/dsh-tools/lib/index.js:2538`).
+ *
+ * Fake-vs-host (ticket 93): the stub settings provider models the shipped
+ * scope contract — `register(ns, schema, options?)` returns the owner scope
+ * (`@deepseek-ai/dsh-settings/lib/index.js:281-315`) while
+ * `installSection(...)` returns VOID (`:327-343`;
+ * `lib/types/index.d.ts:228`).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -20,7 +26,6 @@ import {
   installMultitaskSettingsSection,
   SETTINGS_NAMESPACE,
   type SettingsProviderLike,
-  type SettingsSectionHooksLike,
 } from "../src/adapter/settings-section.js";
 import { DISPATCHER_START_COMMAND } from "../src/adapter/activation-command.js";
 import { DISPATCHER_STEER_COMMAND } from "../src/adapter/steer-command.js";
@@ -33,8 +38,8 @@ import type {
 interface StubSettingsCall {
   ns: string;
   schema: unknown;
-  entry: unknown;
-  hooks: SettingsSectionHooksLike<unknown>;
+  /** Composition base layer handed to `register` (host `:281-315`). */
+  base: unknown;
 }
 
 function createStubCtx(options?: {
@@ -49,23 +54,33 @@ function createStubCtx(options?: {
   disposers: Array<() => void>;
   listeners: Map<string, Array<(payload: never) => void>>;
   settingsCalls: StubSettingsCall[];
+  /** Every value written through the registered owner scope's `update`. */
+  settingsWrites: unknown[];
   registeredTools: Array<{ name: string }>;
   registeredCommands: CommandDefinitionLike[];
   settings?: SettingsProviderLike;
+  /** The owner scope the plugin's own `register` call received (ticket 93). */
+  settingsScope?: { update(value: unknown): Promise<void> };
 } {
   const disposers: Array<() => void> = [];
   const listeners = new Map<string, Array<(payload: never) => void>>();
   const tables = new Map<string, Map<string, unknown>>();
   const settingsCalls: StubSettingsCall[] = [];
+  const settingsWrites: unknown[] = [];
   const registeredTools: Array<{ name: string }> = [];
   const registeredCommands: CommandDefinitionLike[] = [];
+  let settingsScope: { update(value: unknown): Promise<void> } | undefined;
 
   const ctx: ReturnType<typeof createStubCtx> = {
     disposers,
     listeners,
     settingsCalls,
+    settingsWrites,
     registeredTools,
     registeredCommands,
+    get settingsScope() {
+      return settingsScope;
+    },
     // Cordis effect contract (ticket 44): `execute` runs at apply; a returned
     // function — or each value a generator yields — is the unload disposer.
     effect(execute: () => unknown, label?: string) {
@@ -193,15 +208,42 @@ function createStubCtx(options?: {
 
   if (options?.withSettings === true) {
     const claimedNamespaces = new Set<string>();
+    const claim = (
+      ns: string,
+      schema: unknown,
+      base: unknown,
+    ): { update(value: unknown): Promise<void> } => {
+      // Shipped rule (ticket 91): a second claim of the same namespace
+      // throws (dsh-settings lib/index.js:283).
+      if (claimedNamespaces.has(ns)) {
+        throw new Error(`settings namespace "${ns}" is already registered`);
+      }
+      claimedNamespaces.add(ns);
+      settingsCalls.push({ ns, schema, base });
+      const scope = {
+        // The host scope's `update` is ASYNC (dsh-settings
+        // lib/types/index.d.ts:105-108).
+        async update(value: unknown) {
+          settingsWrites.push(value);
+        },
+      };
+      settingsScope = scope;
+      return scope;
+    };
     ctx.settings = {
-      installSection(owner, ns, schema, entry, hooks) {
-        // Shipped rule (ticket 91): a second claim of the same namespace
-        // throws (dsh-settings lib/index.js:283).
-        if (claimedNamespaces.has(ns)) {
-          throw new Error(`settings namespace "${ns}" is already registered`);
-        }
-        claimedNamespaces.add(ns);
-        settingsCalls.push({ ns, schema, entry, hooks });
+      // Host rule (ticket 93): `register(ns, schema, options?)` is the
+      // SCOPE-RETURNING API (dsh-settings lib/index.js:281-315); the scope
+      // `{get, watch, update, replace}` is built at `:298-314`.
+      register(ns: string, schema: unknown, opts?: { base?: unknown }) {
+        return claim(ns, schema, opts?.base);
+      },
+      // Host rule (ticket 93): `installSection(...)` returns VOID — it
+      // registers through `register` and DISCARDS the scope
+      // (dsh-settings lib/index.js:327-343; the shipped type is
+      // `installSection(…): void`, lib/types/index.d.ts:228). A caller that
+      // uses its return value gets `undefined`, exactly as on the live host.
+      installSection(_owner: unknown, ns: string) {
+        claim(ns, undefined, undefined);
       },
     };
   }
@@ -328,14 +370,18 @@ describe("feature flag — freeze semantics (ADR-0005)", () => {
 });
 
 describe("feature flag — settings section always installed", () => {
-  it("settings section is installed when enabled:true", () => {
+  it("settings namespace is registered when enabled:true", () => {
     const ctx = createStubCtx({ withSettings: true });
     apply(ctx, { enabled: true });
     assert.equal(ctx.settingsCalls.length, 1);
     assert.equal(ctx.settingsCalls[0]?.ns, SETTINGS_NAMESPACE);
+    // The composition entry rides as the base layer (host `register`'s
+    // `options.base`, dsh-settings lib/index.js:281-315) so a cleared field
+    // reverts to the shipped default.
+    assert.deepEqual(ctx.settingsCalls[0]?.base, { enabled: true });
   });
 
-  it("settings section is installed when enabled:false", () => {
+  it("settings namespace is registered when enabled:false", () => {
     const ctx = createStubCtx({ withSettings: true });
     apply(ctx, { enabled: false });
     assert.equal(ctx.settingsCalls.length, 1);
@@ -349,7 +395,7 @@ describe("feature flag — settings section always installed", () => {
     });
   });
 
-  it("installMultitaskSettingsSection uses the multitask-dispatcher namespace", () => {
+  it("installMultitaskSettingsSection uses the multitask-dispatcher namespace and claims it through register", () => {
     const calls: StubSettingsCall[] = [];
     const ctx = {
       inject(
@@ -359,34 +405,37 @@ describe("feature flag — settings section always installed", () => {
         if (services.includes("settings")) callback(ctx);
       },
       settings: {
-        installSection(
-          _owner: unknown,
-          ns: string,
-          schema: unknown,
-          entry: unknown,
-          hooks: SettingsSectionHooksLike<unknown>,
-        ) {
-          calls.push({ ns, schema, entry, hooks });
+        // Ticket 93: the host's scope-returning API. `installSection`
+        // returns void on the live host (`dsh-settings/lib/index.js:327-343`)
+        // — a product that relies on its return starves, so this stub has no
+        // installSection at all: the call would be a TypeError.
+        register(ns: string, schema: unknown, opts?: { base?: unknown }) {
+          calls.push({ ns, schema, base: opts?.base });
+          return { async update() {} };
         },
       },
     };
     installMultitaskSettingsSection(ctx, Config, { enabled: true });
     assert.equal(calls.length, 1);
     assert.equal(calls[0]?.ns, "multitask-dispatcher");
+    assert.deepEqual(calls[0]?.base, { enabled: true });
   });
 });
 
-describe("feature flag — onChange is a runtime no-op", () => {
-  it("calling onChange after a true-start does not tear down the session", () => {
+describe("feature flag — settings writes are a runtime no-op", () => {
+  it("a persisted settings write after a true-start does not tear down the session", () => {
     const ctx = createStubCtx({ withTools: true, withSettings: true });
     apply(ctx, { enabled: true });
 
-    const hooks = ctx.settingsCalls[0]?.hooks;
-    assert.ok(hooks);
-    assert.equal(typeof hooks.onChange, "function");
-
-    // Simulate a settings UI write that persists enabled:false for next session.
-    hooks.onChange?.();
+    // ADR-0005: the plugin passes NO change hooks to the provider (the
+    // host's `register` takes no hooks at all — `installSection`'s
+    // setSource/onChange bookkeeping was the old seam and is gone, ticket
+    // 93). A settings write therefore cannot reach the running session.
+    assert.deepEqual(Object.keys(ctx.settingsCalls[0] ?? {}).sort(), [
+      "base",
+      "ns",
+      "schema",
+    ]);
 
     // Running session unchanged: no teardown, commands still present.
     assert.equal(ctx.registeredCommands.length, 3);
@@ -394,17 +443,15 @@ describe("feature flag — onChange is a runtime no-op", () => {
     assert.ok(ctx.listeners.has("agent/status"));
   });
 
-  it("setSource thunk is accepted and does not reconfigure the frozen flag", () => {
+  it("a settings-document write does not reconfigure the frozen flag", async () => {
     const ctx = createStubCtx({ withSettings: true });
     apply(ctx, { enabled: true });
 
-    const hooks = ctx.settingsCalls[0]?.hooks;
-    assert.ok(hooks);
-    // Provider may call setSource with a live thunk; we ignore it.
-    assert.doesNotThrow(() => {
-      hooks.setSource?.(() => ({ enabled: false }));
-    });
-    // Session still enabled-path wired (dormant with both commands).
+    // The registered scope is the only write path the plugin holds; drive a
+    // write that flips `enabled:false` for the NEXT session and confirm the
+    // running session is untouched (frozen flag, ADR-0005).
+    await ctx.settingsScope?.update({ enabled: false });
+    assert.deepEqual(ctx.settingsWrites, [{ enabled: false }]);
     assert.equal(ctx.registeredCommands.length, 3);
   });
 });
@@ -412,17 +459,16 @@ describe("feature flag — onChange is a runtime no-op", () => {
 describe("feature flag — no off-while-running", () => {
   it("there is no API path that disables a running dispatcher mid-session", () => {
     // Structural guarantee: apply is the only entry, and it freezes the flag.
-    // The settings onChange callback is a no-op (tested above). No exported
+    // The plugin holds no live config reference and no settings change hook
+    // (ticket 93 removed the `installSection` seam entirely). No exported
     // function mutates a running Multitask's enabled state, and the command
     // surface has no deactivate verb (activation is once per session).
     const ctx = createStubCtx({ withTools: true, withSettings: true });
-    apply(ctx, { enabled: true });
-    const hooks = ctx.settingsCalls[0]?.hooks;
+    const config = { enabled: true };
+    apply(ctx, config);
 
-    // Even a full onChange + setSource storm leaves the session intact.
-    hooks?.setSource?.(() => ({ enabled: false }));
-    hooks?.onChange?.();
-    hooks?.onChange?.();
+    // Even a config mutation storm leaves the session intact.
+    config.enabled = false;
 
     assert.equal(ctx.registeredCommands.length, 3);
     assert.equal(ctx.registeredCommands[0]?.name, DISPATCHER_START_COMMAND);

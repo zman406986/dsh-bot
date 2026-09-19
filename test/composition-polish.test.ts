@@ -159,9 +159,13 @@ function createCompositionCtx() {
       if (services.includes("settings")) {
         callback({
           settings: {
-            installSection(_owner: unknown, ns: string) {
-              // Shipped rule (ticket 91): a second claim of the same
-              // namespace throws (dsh-settings lib/index.js:283).
+            // Settings-provider fake: the shipped scope contract
+            // (ticket 93). `register(ns, schema, options?)` RETURNS the owner
+            // scope (dsh-settings lib/index.js:281-315) while
+            // `installSection(...)` returns VOID (`:327-343`;
+            // types :228); a second claim of one namespace fails loud
+            // (shipped rule, dsh-settings lib/index.js:283).
+            register(ns: string) {
               if (claimedNamespaces.has(ns)) {
                 throw new Error(
                   `settings namespace "${ns}" is already registered`,
@@ -169,10 +173,20 @@ function createCompositionCtx() {
               }
               claimedNamespaces.add(ns);
               return {
-                update(value: unknown) {
+                // The host scope's `update` is ASYNC (dsh-settings
+                // lib/types/index.d.ts:105-108).
+                async update(value: unknown) {
                   updates.push(value);
                 },
               };
+            },
+            installSection(_owner: unknown, ns: string) {
+              if (claimedNamespaces.has(ns)) {
+                throw new Error(
+                  `settings namespace "${ns}" is already registered`,
+                );
+              }
+              claimedNamespaces.add(ns);
             },
           },
         });

@@ -148,19 +148,32 @@ function createMultiCtx(seam?: UserQuestionsLike) {
   const spawnedParents: Array<{ childId: string; parentSessionId: string }> = [];
   const updates: Array<Record<string, unknown>> = [];
   const claimedNamespaces = new Set<string>();
-  // Settings-provider fake: a second claim of one namespace fails loud
-  // (shipped rule, dsh-settings lib/index.js:283).
+  // Settings-provider fake: the shipped scope contract (ticket 93).
+  // - `register(ns, schema, options?)` RETURNS the owner scope
+  //   (dsh-settings lib/index.js:281-315).
+  // - `installSection(...)` returns VOID (dsh-settings lib/index.js:327-343;
+  //   types :228).
+  // - a second claim of one namespace fails loud (shipped rule,
+  //   dsh-settings lib/index.js:283).
+  const claim = (ns: string): { update(value: unknown): Promise<void> } => {
+    if (claimedNamespaces.has(ns)) {
+      throw new Error(`settings namespace "${ns}" is already registered`);
+    }
+    claimedNamespaces.add(ns);
+    return {
+      // The host scope's `update` is ASYNC (dsh-settings
+      // lib/types/index.d.ts:105-108).
+      async update(value: unknown) {
+        updates.push(value as Record<string, unknown>);
+      },
+    };
+  };
   const settingsProvider = {
+    register(ns: string) {
+      return claim(ns);
+    },
     installSection(_owner: unknown, ns: string) {
-      if (claimedNamespaces.has(ns)) {
-        throw new Error(`settings namespace "${ns}" is already registered`);
-      }
-      claimedNamespaces.add(ns);
-      return {
-        update(value: unknown) {
-          updates.push(value as Record<string, unknown>);
-        },
-      };
+      claim(ns);
     },
   };
   let nextChild = 1;
@@ -302,6 +315,7 @@ function createMultiCtx(seam?: UserQuestionsLike) {
     updates,
     installSettingsSection: (ns: string) =>
       settingsProvider.installSection({}, ns),
+    registerSettingsNamespace: (ns: string) => settingsProvider.register(ns),
     commandNames: () => [...commands.keys()],
     globalToolNames: () => [...tools.keys()],
     globalTool: (name: string) => tools.get(name),
@@ -698,11 +712,21 @@ describe("multi-dispatcher — host duplicate-registration rule (ticket 91)", ()
 
   it("the settings fake throws on a duplicate namespace claim (dsh-settings:283)", () => {
     const multi = createMultiCtx();
-    multi.ctx.installSettingsSection("multitask-dispatcher");
+    // The product's claim path is `register` (ticket 93).
+    multi.ctx.registerSettingsNamespace("multitask-dispatcher");
 
     assert.throws(
-      () => multi.ctx.installSettingsSection("multitask-dispatcher"),
+      () => multi.ctx.registerSettingsNamespace("multitask-dispatcher"),
       /settings namespace "multitask-dispatcher" is already registered/,
+    );
+  });
+
+  it("the settings fake models installSection as void (ticket 93)", () => {
+    const multi = createMultiCtx();
+    // Host shape (dsh-settings lib/index.js:327-343; types :228).
+    assert.equal(
+      multi.ctx.installSettingsSection("multitask-dispatcher"),
+      undefined,
     );
   });
 });
