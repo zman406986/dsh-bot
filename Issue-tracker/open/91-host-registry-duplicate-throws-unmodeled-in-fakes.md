@@ -1,4 +1,4 @@
-# 90 — Host registry duplicate-name throws are unmodeled in the apply-driving fakes
+# 91 — Host registry duplicate-name throws are unmodeled in the apply-driving fakes
 
 **Status:** open
 **Labels:** ready-for-agent
@@ -74,6 +74,10 @@ fake's header comment.
 - Filed by the ticket-86 agent (2026-09-19) from the AC1 inventory; the
   inventory rows are `Issue-tracker/open/86-fake-vs-host-client-contract-gaps-44-45-84-85-class.md`
   ("Comments", rows 16/17/19).
+- Renumbered 90 → 91 at the merge train (2026-09-19): a parallel workstream
+  filed `90-restart-honesty-carried-verifier-findings.md` in the same window;
+  the merge kept that one at 90 and moved this file to 91. The ticket-86
+  inventory references were updated to match.
 - The per-agent scoped registry (`agent.ctx.tools`, `dsh-tools` same
   `NamedEntries`) is in scope for the same reason: the access tool and the
   per-session tool surfaces register there.

@@ -16,7 +16,7 @@ Work happens per the workflow doc: tests/greps run in the worktree checkout `C:\
 - [ ] **Gate 2 — offline tests green in the worktree:** `npm test` 0 fail and `npm run typecheck` clean (both configs), no network/LLM/running dsh (S8); record the counts.
 - [x] **Gate 3 — full-diff provenance review:** a human-free review of the complete branch diff for structural/phrasing/protocol borrow from the reference tree (per workflow §3), findings appended as a dated comment on `Issue-tracker/open/17-behavior-clone-reference-always-on-dispatcher.md` on MAIN. **(Done 2026-09-19 in its re-scoped form — no-verbatim-copy review; `docs/research/no-verbatim-copy-review-2026-09-19.md`, pointer on ticket 17.)**
 - [x] Confirm the §5 conflict markers were honored: spot-check each `revisit-before-merge` row of design-17 §5 against the landed code (e.g. no stop control, no todo board, no second wake kind, session "always" rows cleared) and record each check in the review comment. **(Done: rows 1–8 recorded PASS 2026-09-18 on ticket 17's review comment; the four named examples re-verified against today's tree 2026-09-19 with file:line in the Gate-2 comment below.)**
-- [ ] Merge `clone/always-on-dispatcher` → `main` (squash or merge, implementer's choice) with every message referencing the closed ticket numbers (e.g. `17.27`–`17.33`); then `npm ci` on main so `node_modules` matches the lockfile, and re-run the suite once on main.
+- [x] Merge `clone/always-on-dispatcher` → `main` (squash or merge, implementer's choice) with every message referencing the closed ticket numbers (e.g. `17.27`–`17.33`); then `npm ci` on main so `node_modules` matches the lockfile, and re-run the suite once on main. **(Done — merge `400450f` 2026-09-18 with post-merge gates green (701/0/185, `npm ci` clean, typecheck clean, `build:client` 64,658 B); the box was left unticked then deliberately. Ticked 2026-09-19 with the part-2 merge train landed on main — merges `7ec5c1f`/`2cad4ce`/`4add534`/`d0bd81f` — and gates re-run on merged main: 1049/0/257, typecheck clean, `build:client` 161,087 B. `npm ci` cited, not re-run: `node_modules` is junction-shared with five live worktrees. See the 2026-09-19 AC6 comment below.)**
 - [ ] Close tickets 27–33 (and ticket 17 Phase 3) with dated comments carrying commit hashes; never `git add -A` at any step.
 
 ## Constraints
@@ -492,3 +492,36 @@ is its successor and is already recorded, 2026-09-19). **AC6/AC7 — untouched**
 work; the merge itself landed `400450f` long before this pass). Gate 2 (AC3) was not run as a new
 pass — no code changed here; the standing counts on this branch are `npm test` 1044 pass / 0 fail /
 256 suites, `npm run typecheck` clean (both configs), both re-run for the record.
+
+### 2026-09-19 — AC6 ticked: merge landed (`400450f`) + part-2 merge train landed; post-merge gates green
+
+AC6's substance was already satisfied on 2026-09-18 by the `--no-ff` merge at **`400450f`** with the
+post-merge gates recorded above: `npm ci` clean from the lockfile (0 vulnerabilities), `npm test`
+**701 pass / 0 fail / 185 suites**, `npm run typecheck` clean on both configs, `npm run build:client`
+green (`client/index.js` 64,658 B). The box was deliberately left unticked then. It is ticked now,
+with two additions:
+
+1. **Part-2 merge train landed on main** (all `--no-ff`, explicit-path staging, no rebase):
+   `wt/48` → **`7ec5c1f`** (ticket 48 resolved, ticket-file only); `wt/docs` → **`2cad4ce`**
+   (tickets 82 + 71 resolved, ticket 33 Gate-2 copy read + AC2/AC5, new ticket 90 restart-honesty);
+   `wt/86` → **`4add534`** (fake-vs-host contract inventory + 5 HIGH alignments); `wt/89` →
+   **`d0bd81f`** (ticket 89 resolved: capsule-retirement read-through, stale-comment fixes).
+   No manual conflict resolution was needed: `test/client-shell-mount.test.ts` (touched by both
+   wt/86 and wt/89) auto-merged, and the result was diff-verified against both branch tips — wt/86's
+   corrected keyed/list collision wording (host `SlotCore.register` text) and wt/89's dead
+   `ClientLayoutLike` import removal + structural layout typing are both present.
+2. **Ticket-number collision resolved at the train:** wt/86 and wt/docs both filed a ticket 90;
+   the host-registry one is renumbered **90 → 91**
+   (`Issue-tracker/open/91-host-registry-duplicate-throws-unmodeled-in-fakes.md`) with its header
+   and every ticket-86 inventory reference updated; the restart-honesty one stays at 90.
+   `Issue-tracker/` now has no duplicate ticket numbers.
+
+**Gates re-run on merged main (2026-09-19, offline, this tree):** `npm test` **1049 pass / 0 fail /
+257 suites** (0 cancelled/skipped/todo); `npm run typecheck` clean (`tsconfig.json` and
+`tsconfig.client.json`); `npm run build:client` green (`client/index.js` 161,087 bytes).
+`npm ci` was NOT re-run for this train: `node_modules` is junction-shared with five live agent
+worktrees, so the 2026-09-18 clean-install result stands as the recorded evidence.
+
+**Still open on this ticket:** AC1 (left unticked, superseded — see the previous comment), AC3
+(Gate 2 in the worktree, unrun as a separate pass), AC7 (close tickets 27–33 + ticket 17 Phase 3
+with dated comments carrying commit hashes).
