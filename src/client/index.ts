@@ -15,10 +15,11 @@
  * property the module's inject list does not declare, wherever the read
  * happens (`cannot get property "X" without inject` — ticket 84). So the
  * always-shipped faces we read (`sessions`, `remote`, `conversation`) are
- * declared here; `layout` and `settingsScope` are genuinely OPTIONAL faces
- * reached through the runtime `ctx.inject([...])` wrapper instead (tickets
- * 46/84) — a hard declaration would hold the whole module PENDING when they
- * are absent.
+ * declared here; `settingsScope` is the one genuinely OPTIONAL face, reached
+ * through the runtime `ctx.inject([...])` wrapper instead (tickets 46/84) — a
+ * hard declaration would hold the whole module PENDING when it is absent.
+ * (The launcher's optional `layout` face and its `ctx.inject(["layout"])`
+ * watch were DELETED with the launcher; ticket 89, 2026-09-19.)
  *
  * What registers (design-16 §4.2/§5):
  * 1. the `multitask-dispatcher` locale namespace ({en, zh});
@@ -32,7 +33,8 @@
  *    copy, and component were retained briefly as re-host assets and are now
  *    DELETED outright (ticket 89, 2026-09-19) — nothing consumed them.
  * 4. the per-tool call views (ticket 24): keyed `tool.call.toolview` entries
- *    for the five dispatcher wire tool names — unclaimed keys, so additive-
+ *    for the six dispatcher wire tool names (five at 24; `send_peer` joined
+ *    under ticket 70) — unclaimed keys, so additive-
  *    safe against the shipped composition (research Finding 5);
  * 5. the plugin's settings card (ticket 47): one keyed `settings.plugin.item`
  *    entry whose `key` is our settings namespace, so the shipped
@@ -345,8 +347,17 @@ export function applyClientModule(
   // one entry per dispatcher wire tool name. Keys are the plugin-owned core
   // tool names (ticket 11) — unclaimed by the shipped composition, so each
   // cell is ours by default and the generic row remains the fallback shape.
-  // All five registrations ride the same inject controller: fiber unload
+  // All six registrations ride the same inject controller: fiber unload
   // disposes the controller and every entry with it (HMR-safe).
+  //
+  // Ticket 89 (2026-09-19) — these STAY: while the `root` frame is elected
+  // they are registered but unrendered (the frame displaces the shipped chat;
+  // the ticket-80 pane renders its tool rows from the event window instead).
+  // The live consumer is the OTHER state: on abdication the shipped frame
+  // retakes the `root` cell and its chat renders `tool.call.toolview` keyed
+  // by wire tool name — these entries are what keeps OUR rows there instead
+  // of the generic fallback. Deleting them would change a reachable (live-
+  // pass-4-proven) fallback surface. Justification on ticket 89, AC 3.
   ctx.slots.inject(TOOL_CALL_TOOLVIEW_SLOT, () => {
     const t = ctx.locale.bind(LOCALE_NAMESPACE);
     for (const toolName of TOOLVIEW_TOOL_NAMES) {

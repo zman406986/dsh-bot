@@ -24,7 +24,6 @@ import { apply, mountShellPage } from "../src/client/index.js";
 import { createApprovalRelayFeed } from "../src/client/approval-feed.js";
 import type {
   ClientContext,
-  ClientLayoutLike,
   ClientSessionsLike,
 } from "../src/client/context.js";
 import {
@@ -86,8 +85,10 @@ function snapshot(
 
 /**
  * Fake the client face the way the shipped Cordis runtime behaves (same
- * semantics as the scaffold suite's fake), plus optional `sessions` and
- * `layout` faces for the shell composition.
+ * semantics as the scaffold suite's fake), plus an optional `sessions` face
+ * for the shell composition and a `layout` face kept only as the
+ * host-inject-guard tripwire below (the real face and its contract type were
+ * deleted with the staging launcher — ticket 89, 2026-09-19).
  *
  * Ticket 85 (2026-09-19): the slots fake models the shipped SlotCore
  * registry's collision rule — one global cell per slot name, entries kept
@@ -105,7 +106,8 @@ function snapshot(
  */
 function createMountCtx(services: {
   sessions?: ClientSessionsLike;
-  layout?: ClientLayoutLike;
+  /** The retired launcher face, typed structurally (its contract type is gone). */
+  layout?: { selectPanel(panelId: string): void };
 } = {}) {
   const locales = new Map<string, unknown>();
   const cells = new Map<
@@ -303,7 +305,7 @@ function createSessionsFake(initial: ShellFeedSnapshotLike = {}) {
 /** Layout fake: records selectPanel calls, or throws like the host does. */
 function createLayoutFake(mode: "ok" | "throws" = "ok") {
   const calls: string[] = [];
-  const layout: ClientLayoutLike = {
+  const layout: { selectPanel(panelId: string): void } = {
     selectPanel(panelId: string) {
       if (mode === "throws") {
         throw new Error(
@@ -618,14 +620,15 @@ describe("shell staging mount — host inject guard semantics (ticket 84)", () =
     }) as unknown as ClientContext;
   }
 
-  it("apply() never bare-reads the optional layout face — even when a fake hands one", () => {
+  it("apply() never bare-reads the retired layout face — even when a fake hands one", () => {
     // The live-pass-2 kill: `ctx.layout` was read bare (at click time by the
     // since-deleted staging launcher — ticket 89) and the host's context
-    // proxy threw. The launcher that watched `layout` retired at the cutover,
-    // so the module no longer requests the face at all — but the guard
-    // contract must hold regardless: over a context that throws on exactly
-    // that read — with a layout fake SITTING on the context, so only a bare
-    // read can reach it — the composition must still apply cleanly.
+    // proxy threw. The launcher's face and its contract type are gone, so the
+    // module cannot request it at all — but the guard contract must hold
+    // regardless, as the tripwire against re-introducing such a read: over a
+    // context that throws on exactly that property — with a layout fake
+    // SITTING on it, so only a bare read can reach it — the composition must
+    // still apply cleanly.
     const { layout } = createLayoutFake();
     const ctx = createMountCtx({ layout });
     const guarded = guardCtx(ctx);
