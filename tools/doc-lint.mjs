@@ -49,6 +49,10 @@ export const CONFIG = {
     'Issue-tracker/issue-tracker.md',
     'research/research.md',
     'docs/adr/README.md',
+    // Ticket 97: the tracked rulebook + read-before guides are orientation docs too.
+    'docs/agents-rulebook.md',
+    'read-before-running-live-and-browser-tests.md',
+    'read-before-reference-tree-work.md',
   ],
   trackerDir: 'Issue-tracker',
   trackerStatuses: ['open', 'deferred', 'resolved', 'cancelled'],
@@ -88,6 +92,9 @@ export const DOC_EXPECTATIONS = [
   {
     doc: 'AGENTS.md',
     mustCite: [
+      { path: 'docs/agents-rulebook.md', because: 'the tracked rulebook is the durable home of the authority stack and moved-rule register; the AGENTS.md stub must point at it (ticket 97)' },
+      { path: 'read-before-running-live-and-browser-tests.md', because: 'the live/browser-test rules moved there from AGENTS.md (ticket 97); the stub must route readers to them' },
+      { path: 'read-before-reference-tree-work.md', because: 'the reference-tree policy moved there from AGENTS.md (ticket 97); the stub must route readers to it' },
       { path: 'Issue-tracker/issue-tracker.md', because: 'the tracker guide is the tracker authority; AGENTS.md must point at it, not at docs/agents/* (ticket 96)' },
       { path: 'agent.md', because: 'the domain-docs and triage-label conventions live in agent.md (ticket 96)' },
       { path: 'research/research.md', because: 'the research-notes convention lives at research/research.md (ticket 96)' },
@@ -101,7 +108,27 @@ export const DOC_EXPECTATIONS = [
         pattern: /Issues and specs live[^.\n]*\.scratch\//i,
         because: 'tickets live in Issue-tracker/<status>/ per Issue-tracker/issue-tracker.md; .scratch/ holds scratch specs during active work only (ticket 96)',
       },
+      {
+        pattern: /Not TypeScript\.(\*\*)? Prefer Go/i,
+        because: 'the "Not TypeScript. Prefer Go…" constraint row is superseded by accepted ADR-0001 (TypeScript in-process core); the row survives only in the rulebook register, marked superseded (ticket 97)',
+      },
+      {
+        pattern: /S7\s*\/\s*PRD §12|grep the shipped tree for reconstruction identifiers/i,
+        because: 'the S7 clean-room identifier grep is voided as a ship gate (ADR-0018, human-ruled 2026-09-18); it must not reappear as a live requirement (ticket 97)',
+      },
     ],
+  },
+  {
+    doc: 'docs/agents-rulebook.md',
+    mustCite: [
+      { path: 'PRD-dsh-multitask-dispatcher.md', because: 'the PRD is stack level 3 and the reading order routes to it (ticket 97)' },
+      { path: 'docs/adr/README.md', because: 'the ADR index is how the stack levels 1–2 are reached (ticket 97)' },
+      { path: 'CONTEXT.md', because: 'the glossary is stack level 5 (ticket 97)' },
+      { path: 'read-before-running-live-and-browser-tests.md', because: 'the live/browser-test guide is a level-6 home the register points at (ticket 97)' },
+      { path: 'read-before-reference-tree-work.md', because: 'the reference-tree guide is a level-6 home the register points at (ticket 97)' },
+      { path: 'Issue-tracker/issue-tracker.md', because: 'the tracker guide holds the log-before-implementing rule (ticket 97)' },
+    ],
+    forbid: [],
   },
   {
     doc: 'README.md',
