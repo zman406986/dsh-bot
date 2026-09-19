@@ -406,11 +406,38 @@ function applyForeignHostPlugin(
  * Client-face fake (ClientContext) — per-fiber slot/locale collection. *
  * -------------------------------------------------------------------- */
 
+/**
+ * Ticket 85 (2026-09-19): the slots fake models the shipped SlotCore
+ * registry's collision rule — one global cell per slot name, entries kept
+ * sorted ASCENDING by `(priority ?? 0)`, and `register` THROWS on a
+ * same-(priority ?? 0) collision along the entry's identity axis (single:
+ * every entry; keyed: same `key`; list: same `id`) with the host's error
+ * wording ("… at priority N — register at a different priority to shadow it
+ * (lowest renders)"). An absent priority defaults to 0 exactly like the
+ * shipped code, so the ticket-85 live crash (no-priority root register vs
+ * the shipped frame) now fails offline. The per-entry dispose (register's
+ * return, run by the inject controller on fiber teardown) removes the entry,
+ * so unload/HMR frees the cell like the shipped registry's cascade.
+ * (dsh-web-frontend `dist/assets/index-BKQ_L1z6.js`, SlotCore.register +
+ * `entriesOfSlot`, minified.)
+ */
 function createClientCtx() {
   const locales = new Map<string, unknown>();
+  const cells = new Map<
+    string,
+    Array<{
+      options: Record<string, unknown>;
+      component: unknown;
+      dispose(): void;
+    }>
+  >();
   const injects: Array<{
     parent: string;
-    entries: Array<{ options: unknown; component: unknown }>;
+    entries: Array<{
+      options: Record<string, unknown>;
+      component: unknown;
+      dispose(): void;
+    }>;
   }> = [];
   const injectControllers: Array<() => void> = [];
   const effectDisposers: Array<() => void> = [];
@@ -426,22 +453,90 @@ function createClientCtx() {
     },
     slots: {
       inject(parent: string, callback: () => unknown) {
-        const record = { parent, entries: [] };
+        const record = { parent, entries: [] as typeof injects[number]["entries"] };
         injects.push(record);
         callback();
         const controller = () => {
           const at = injects.indexOf(record);
           if (at >= 0) injects.splice(at, 1);
-          record.entries.length = 0;
+          for (const entry of record.entries.splice(0)) entry.dispose();
         };
         injectControllers.push(controller);
         return controller;
       },
-      register(options: unknown, component: unknown) {
+      register(rawOptions: unknown, component: unknown) {
         const owner = injects.at(-1);
         assert.ok(owner, "slots.register outside of slots.inject (fake)");
-        owner.entries.push({ options, component });
-        return () => {};
+        const options = rawOptions as {
+          name: string;
+          key?: string;
+          id?: string;
+          priority?: number;
+        };
+        assert.equal(
+          typeof options.name,
+          "string",
+          "slot options need a string `name` (fake)",
+        );
+        const cell = cells.get(options.name) ?? [];
+        cells.set(options.name, cell);
+        const priority = options.priority ?? 0;
+        const collision = cell.find((entry) => {
+          const other = entry.options as {
+            key?: string;
+            id?: string;
+            priority?: number;
+          };
+          if (options.key !== undefined) {
+            return other.key === options.key && (other.priority ?? 0) === priority;
+          }
+          if (options.id !== undefined) {
+            return other.id === options.id && (other.priority ?? 0) === priority;
+          }
+          return (other.priority ?? 0) === priority;
+        });
+        if (collision !== undefined) {
+          // Host wording per kind (SlotCore.register's single/keyed/list
+          // cases; the registrant suffix is omitted — the fake has none).
+          const kind =
+            options.key !== undefined
+              ? "keyed slot"
+              : options.id !== undefined
+                ? "list slot"
+                : "single slot";
+          const axis =
+            options.key !== undefined
+              ? ` for key "${options.key}"`
+              : options.id !== undefined
+                ? ` with id "${options.id}"`
+                : "";
+          throw new Error(
+            `${kind} "${options.name}" already has a registration${axis} ` +
+              `at priority ${priority} — register at a different priority ` +
+              `to shadow it (lowest renders)`,
+          );
+        }
+        const entry = {
+          options: { ...rawOptions } as Record<string, unknown>,
+          component,
+          dispose: () => {},
+        };
+        cell.push(entry);
+        // Insert-time ascending (priority ?? 0) sort, stable for ties —
+        // first registered first — exactly the shipped registry's order.
+        cell.sort(
+          (a, b) =>
+            ((a.options.priority as number | undefined) ?? 0) -
+            ((b.options.priority as number | undefined) ?? 0),
+        );
+        entry.dispose = () => {
+          const ownerAt = owner.entries.indexOf(entry);
+          if (ownerAt >= 0) owner.entries.splice(ownerAt, 1);
+          const cellAt = cell.indexOf(entry);
+          if (cellAt >= 0) cell.splice(cellAt, 1);
+        };
+        owner.entries.push(entry);
+        return entry.dispose;
       },
     },
     locale: {
@@ -465,6 +560,10 @@ function createClientCtx() {
     injects,
     effectDisposers,
     injectControllers,
+    /** The slot's live cell in host election order (ascending priority). */
+    slotCell(name: string) {
+      return (cells.get(name) ?? []).map((entry) => ({ ...entry.options }));
+    },
     entriesAt(parent: string) {
       return injects
         .filter((record) => record.parent === parent)
@@ -512,6 +611,7 @@ function createClientCtx() {
     }>;
     effectDisposers: Array<() => void>;
     injectControllers: Array<() => void>;
+    slotCell(name: string): Array<Record<string, unknown>>;
     entriesAt(parent: string): Array<{
       options: unknown;
       component: unknown;
@@ -832,7 +932,10 @@ describe("coexistence — client face: additive lists and keyed cells (Finding 5
 
     // The `root` SINGLE slot is the ticket-78 cutover's target: exactly one
     // inject from the dispatcher, one dynamic entry with the pinned
-    // single-slot contract (no id/key — the catalog's documented shape).
+    // single-slot contract (no id/key — the catalog's documented shape) and
+    // the explicit shadowing priority (ticket 85 — pinned via the
+    // shellRootRegistration deepEqual below; the collision itself is pinned
+    // in client-shell-mount.test.ts over the throwing cell model).
     const roots = ctx.injects.filter(
       (record) => record.parent === ROOT_FRAME_SLOT,
     );

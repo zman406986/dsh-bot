@@ -6,9 +6,11 @@
  * the established overlay/toolview style — inject → register, one entry, id
  * stability — plus the page-open decision and the pure root fail-safe model.
  * The `root` election's REGISTRATION is pinned here (one dynamic entry,
- * contract options, unload abdication over fakes); the election's LIVE half
- * (frame swap, HMR fiber behavior, fallback-on-crash in a real browser) is
- * live-only (tickets 45/33) and is deliberately NOT claimed here.
+ * contract options incl. the explicit shadowing priority — ticket 85,
+ * collision-throwing fakes, unload abdication over fakes); the election's
+ * LIVE half (frame swap, HMR fiber behavior, fallback-on-crash in a real
+ * browser) is live-only (tickets 45/33) and is deliberately NOT claimed
+ * here.
  *
  * No browser, no network, no real Cordis — the fake mirrors the shipped
  * effect/inject semantics the scaffold suite documents (cordis
@@ -89,15 +91,41 @@ function snapshot(
  * Fake the client face the way the shipped Cordis runtime behaves (same
  * semantics as the scaffold suite's fake), plus optional `sessions` and
  * `layout` faces for the shell composition.
+ *
+ * Ticket 85 (2026-09-19): the slots fake models the shipped SlotCore
+ * registry's collision rule — one global cell per slot name, entries kept
+ * sorted ASCENDING by `(priority ?? 0)`, and `register` THROWS on a
+ * same-(priority ?? 0) collision along the entry's identity axis (single:
+ * every entry; keyed: same `key`; list: same `id`) with the host's error
+ * wording ("… at priority N — register at a different priority to shadow it
+ * (lowest renders)"). An absent priority defaults to 0 exactly like the
+ * shipped code, so the ticket-85 live crash (no-priority root register vs
+ * the shipped frame) now fails offline. The per-entry dispose (register's
+ * return, run by the inject controller on fiber teardown) removes the entry,
+ * so unload/HMR frees the cell like the shipped registry's cascade.
+ * (dsh-web-frontend `dist/assets/index-BKQ_L1z6.js`, SlotCore.register +
+ * `entriesOfSlot`, minified.)
  */
 function createMountCtx(services: {
   sessions?: ClientSessionsLike;
   layout?: ClientLayoutLike;
 } = {}) {
   const locales = new Map<string, unknown>();
+  const cells = new Map<
+    string,
+    Array<{
+      options: Record<string, unknown>;
+      component: unknown;
+      dispose(): void;
+    }>
+  >();
   const injects: Array<{
     parent: string;
-    entries: Array<{ options: unknown; component: unknown }>;
+    entries: Array<{
+      options: Record<string, unknown>;
+      component: unknown;
+      dispose(): void;
+    }>;
   }> = [];
   const injectControllers: Array<() => void> = [];
   const effectDisposers: Array<() => void> = [];
@@ -113,22 +141,90 @@ function createMountCtx(services: {
     },
     slots: {
       inject(parent: string, callback: () => unknown) {
-        const record = { parent, entries: [] };
+        const record = { parent, entries: [] as typeof injects[number]["entries"] };
         injects.push(record);
         callback();
         const controller = () => {
           const at = injects.indexOf(record);
           if (at >= 0) injects.splice(at, 1);
-          record.entries.length = 0;
+          for (const entry of record.entries.splice(0)) entry.dispose();
         };
         injectControllers.push(controller);
         return controller;
       },
-      register(options: unknown, component: unknown) {
+      register(rawOptions: unknown, component: unknown) {
         const owner = injects.at(-1);
         assert.ok(owner, "slots.register outside of slots.inject (fake)");
-        owner.entries.push({ options, component });
-        return () => {};
+        const options = rawOptions as {
+          name: string;
+          key?: string;
+          id?: string;
+          priority?: number;
+        };
+        assert.equal(
+          typeof options.name,
+          "string",
+          "slot options need a string `name` (fake)",
+        );
+        const cell = cells.get(options.name) ?? [];
+        cells.set(options.name, cell);
+        const priority = options.priority ?? 0;
+        const collision = cell.find((entry) => {
+          const other = entry.options as {
+            key?: string;
+            id?: string;
+            priority?: number;
+          };
+          if (options.key !== undefined) {
+            return other.key === options.key && (other.priority ?? 0) === priority;
+          }
+          if (options.id !== undefined) {
+            return other.id === options.id && (other.priority ?? 0) === priority;
+          }
+          return (other.priority ?? 0) === priority;
+        });
+        if (collision !== undefined) {
+          // Host wording per kind (SlotCore.register's single/keyed/list
+          // cases; the registrant suffix is omitted — the fake has none).
+          const kind =
+            options.key !== undefined
+              ? "keyed slot"
+              : options.id !== undefined
+                ? "list slot"
+                : "single slot";
+          const axis =
+            options.key !== undefined
+              ? ` for key "${options.key}"`
+              : options.id !== undefined
+                ? ` with id "${options.id}"`
+                : "";
+          throw new Error(
+            `${kind} "${options.name}" already has a registration${axis} ` +
+              `at priority ${priority} — register at a different priority ` +
+              `to shadow it (lowest renders)`,
+          );
+        }
+        const entry = {
+          options: { ...rawOptions } as Record<string, unknown>,
+          component,
+          dispose: () => {},
+        };
+        cell.push(entry);
+        // Insert-time ascending (priority ?? 0) sort, stable for ties —
+        // first registered first — exactly the shipped registry's order.
+        cell.sort(
+          (a, b) =>
+            ((a.options.priority as number | undefined) ?? 0) -
+            ((b.options.priority as number | undefined) ?? 0),
+        );
+        entry.dispose = () => {
+          const ownerAt = owner.entries.indexOf(entry);
+          if (ownerAt >= 0) owner.entries.splice(ownerAt, 1);
+          const cellAt = cell.indexOf(entry);
+          if (cellAt >= 0) cell.splice(cellAt, 1);
+        };
+        owner.entries.push(entry);
+        return entry.dispose;
       },
     },
     locale: {
@@ -152,13 +248,20 @@ function createMountCtx(services: {
     // Test surface.
     locales,
     injects,
+    /** The slot's live cell in host election order (ascending priority). */
+    slotCell(name: string) {
+      return (cells.get(name) ?? []).map((entry) => ({ ...entry.options }));
+    },
     runFiberTeardown() {
       for (const dispose of [...effectDisposers, ...injectControllers]) {
         dispose();
       }
     },
   };
-  return ctx as typeof ctx & ClientContext & { runFiberTeardown(): void };
+  return ctx as typeof ctx & ClientContext & {
+    runFiberTeardown(): void;
+    slotCell(name: string): Array<Record<string, unknown>>;
+  };
 }
 
 /** Sessions-feed fake: snapshot swaps + open-verb recording + dispose counts. */
@@ -321,12 +424,16 @@ describe("shell staging mount — apply() over the fake seams", () => {
     const entry = roots[0]!.entries[0]!;
     assert.deepEqual(entry.options, shellRootRegistration());
     assert.equal(typeof entry.component, "function");
-    // The single-slot shape: no `id`, no `key`, no `order` — the runtime
-    // catalog's own `root` example passes only `{name}` (runner
-    // lib/client.js:3514-3520); the shadowing priority is host-assigned.
+    // The single-slot shape: no `id`, no `key`, and — since ticket 85
+    // (2026-09-19) — the EXPLICIT shadowing priority. The cutover's original
+    // no-priority options defaulted to 0, collided with the shipped frame's
+    // own effective 0 (dsh-client-ui-layout lib/client.js:524-531 registers
+    // `{name: "root", …}` with no priority), and the shipped register THREW,
+    // killing the whole loader entry (live pass 3).
     assert.deepEqual(entry.options, {
       name: "root",
       locale: "multitask-dispatcher",
+      priority: -1,
     });
     assert.deepEqual(shellRootRegistration(), shellRootRegistration());
     // The shipped `conversation` main key is still never claimed — the
@@ -339,6 +446,108 @@ describe("shell staging mount — apply() over the fake seams", () => {
         }
       }
     }
+  });
+
+  it("the constant IS the registration's priority and is below the shipped frame's 0 (ticket 85)", () => {
+    // The ticket-78 cutover shipped SHELL_ROOT_DYNAMIC_PRIORITY as a model
+    // constant only; ticket 85 threads it onto the options AND flips it to
+    // the verified direction: the shipped SlotCore keeps entries sorted
+    // ascending by `(priority ?? 0)` and renders the first live entry
+    // ("lowest renders"), so shadowing the frame requires a value BELOW its
+    // effective 0 — and equal to it THROWS.
+    assert.equal(SHELL_ROOT_DYNAMIC_PRIORITY, -1);
+    assert.equal(
+      shellRootRegistration().priority,
+      SHELL_ROOT_DYNAMIC_PRIORITY,
+      "the live registration carries the constant",
+    );
+    assert.ok(
+      shellRootRegistration().priority < 0,
+      "strictly below the shipped frame's effective priority 0",
+    );
+  });
+
+  it("the fake models the host collision: a no-priority `root` register THROWS at priority 0 (the ticket-85 live crash, offline)", () => {
+    const ctx = createMountCtx();
+    // Seed the cell the way the shipped runtime stands: the AppFrame already
+    // in `root` at its effective priority 0 (its registration carries no
+    // priority; dsh-client-ui-layout lib/client.js:524-531).
+    ctx.slots.inject(ROOT_FRAME_SLOT, () => {
+      ctx.slots.register({ name: ROOT_FRAME_SLOT }, function ShippedAppFrame() {});
+    });
+    // The pre-85 registration shape — options WITHOUT a priority, what
+    // `shellRootRegistration` shipped at the cutover — must fail loudly
+    // OFFLINE (the 84/85 lesson: fakes teach the host's contract, not a
+    // gentler one). The live pass-3 loader entry died on exactly this throw.
+    assert.throws(
+      () =>
+        ctx.slots.inject(ROOT_FRAME_SLOT, () => {
+          ctx.slots.register({ name: ROOT_FRAME_SLOT }, function Latecomer() {});
+        }),
+      /single slot "root" already has a registration at priority 0 — register at a different priority to shadow it \(lowest renders\)/,
+    );
+    // An EXPLICIT same-priority registration collides too — the host rule is
+    // the priority VALUE, not the field's absence.
+    assert.throws(
+      () =>
+        ctx.slots.inject(ROOT_FRAME_SLOT, () => {
+          ctx.slots.register(
+            { name: ROOT_FRAME_SLOT, priority: 0 },
+            function SamePriority() {},
+          );
+        }),
+      /already has a registration at priority 0/,
+    );
+    // …and a different priority shadows instead of throwing — the shipped
+    // contract the cutover's -1 rides.
+    assert.doesNotThrow(() =>
+      ctx.slots.inject(ROOT_FRAME_SLOT, () => {
+        ctx.slots.register(
+          { name: ROOT_FRAME_SLOT, priority: -1 },
+          function Shadow() {},
+        );
+      }),
+    );
+  });
+
+  it("the explicit priority shadows the seeded frame; the cell order and shellCellWinner agree with the host rule", () => {
+    const ctx = createMountCtx();
+    ctx.slots.inject(ROOT_FRAME_SLOT, () => {
+      ctx.slots.register({ name: ROOT_FRAME_SLOT }, function ShippedAppFrame() {});
+    });
+    // With the explicit -1 there is no collision: the register succeeds and
+    // shadows the frame.
+    apply(ctx);
+    assert.deepEqual(ctx.slotCell(ROOT_FRAME_SLOT), [
+      // Ascending (priority ?? 0) — ours first, the shipped frame second:
+      // the host's insert-time stable sort (SlotCore.register).
+      { name: "root", locale: "multitask-dispatcher", priority: -1 },
+      { name: "root" },
+    ]);
+    // The pure election decision over the host-shaped cell (first live
+    // entry in ascending priority order) picks ours exactly as the shipped
+    // `entriesOfSlot` scan would.
+    const cellEntries: ShellCellEntry[] = ctx
+      .slotCell(ROOT_FRAME_SLOT)
+      .map((options, index) => ({
+        entryId: `cell-${index}`,
+        priority: (options.priority as number | undefined) ?? 0,
+      }));
+    assert.equal(shellCellWinner(cellEntries)?.priority, -1);
+
+    // Teardown (unload/HMR) frees the cell — both fibers' controllers sweep
+    // their entries — and a fresh apply registers -1 again with no stale
+    // collision (the freed cell cannot throw).
+    ctx.runFiberTeardown();
+    assert.deepEqual(ctx.slotCell(ROOT_FRAME_SLOT), []);
+    assert.doesNotThrow(() => apply(ctx));
+    assert.equal(ctx.slotCell(ROOT_FRAME_SLOT).length, 1);
+    assert.equal(
+      (
+        ctx.slotCell(ROOT_FRAME_SLOT)[0] as { priority?: number }
+      ).priority,
+      SHELL_ROOT_DYNAMIC_PRIORITY,
+    );
   });
 
   it("unload abdicates the cell: teardown empties `root`; the shipped frame is the surviving winner", () => {
@@ -357,12 +566,15 @@ describe("shell staging mount — apply() over the fake seams", () => {
 
     // The documented election over the surviving cell hands it back to the
     // shipped app frame (the pure model of the abdicated dynamic entry).
+    // Ticket 85 (2026-09-19): the shipped frame's effective priority is 0 —
+    // verified (its registration carries none; `?? 0`), not just "ours to
+    // guess" — and ours is the explicit -1.
     const ours: ShellCellEntry = {
       entryId: "multitask-dispatcher-shell-frame",
       priority: SHELL_ROOT_DYNAMIC_PRIORITY,
       abdicated: true,
     };
-    const shipped: ShellCellEntry = { entryId: "dsh-app-frame", priority: 10 };
+    const shipped: ShellCellEntry = { entryId: "dsh-app-frame", priority: 0 };
     assert.equal(shellCellWinner([ours, shipped]), shipped);
   });
 
@@ -651,9 +863,13 @@ describe("shell staging mount — seat projection primitives", () => {
 describe("root fail-safe — the cutover's election contract (pure model + unload path)", () => {
   const shipped: ShellCellEntry = {
     entryId: "dsh-app-frame",
-    // The shipped frame's priority value is dsh-owned; only "higher than any
-    // dynamic registration" is contract (registry.d.ts:24-27).
-    priority: 10,
+    // Ticket 85 (2026-09-19): the shipped frame's effective priority is 0 —
+    // it registers `{name: "root", …}` with no priority and the shipped
+    // SlotCore defaults `(priority ?? 0)` (dsh-client-ui-layout
+    // lib/client.js:524-531 + the web frontend's SlotCore.register; also
+    // pinned by the live pass-3 error text "already has a registration at
+    // priority 0").
+    priority: 0,
   };
   const ours: ShellCellEntry = {
     entryId: "multitask-dispatcher-shell-frame",

@@ -375,10 +375,21 @@ export function createApprovalCardsStore(options: {
       }
       emit({
         kind: "ready",
+        // Conditional spreads (not bare `options.X`): with
+        // exactOptionalPropertyTypes an optional-prop read is `T | undefined`
+        // and may not be assigned to the projection's optional `locationFor?`/
+        // `workerTitleOf?` props. Runtime behavior unchanged — undefined was
+        // already the "absent" value inside the projection's defaults.
+        // (2026-09-19, ticket 85 agent: HEAD 9bcdd4d shipped this call and
+        // `npm run typecheck` went red for every agent in the tree.)
         cards: projectAccessAskCards(pending, notices, {
           remembered,
-          locationFor: options.locationFor,
-          workerTitleOf: options.workerTitleOf,
+          ...(options.locationFor !== undefined && {
+            locationFor: options.locationFor,
+          }),
+          ...(options.workerTitleOf !== undefined && {
+            workerTitleOf: options.workerTitleOf,
+          }),
         }),
       });
     },

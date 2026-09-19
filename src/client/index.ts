@@ -146,6 +146,10 @@ import {
 } from "./conversation-store.js";
 import { bindConversationFeed, requestOlder } from "./conversation-feed.js";
 import {
+  createApprovalCardsStore,
+  type ApprovalCardsStore,
+} from "./approval-cards.js";
+import {
   createConversationPane,
   type ConversationSendOutcome,
 } from "./conversation.js";
@@ -383,22 +387,30 @@ export function applyClientModule(
 
   // ── Cutover: the frame election (ticket 78, ADR-0020 property 2) ──
 
-  // The wrapper shell frame registers into the `root` single slot as a
-  // DYNAMIC entry. The host assigns dynamically registered entries a LOWER
-  // shadowing rank than the shipped frame's ("Page-local shadowing rank. A
-  // later registration receives a lower priority.", dsh-cordis-client-runner
-  // lib/client.js:383; the priority field is host-assigned — our options
-  // carry none), and the outlet renders "the first live (non-abdicated)
-  // entry … in priority order" (`registry.d.ts:156-164`) — so our frame wins
-  // the cell exactly while it stays live. Fail-safe: a render crash
-  // abdicates the entry through the per-entry boundary and "the outlet
-  // re-renders onto the cell's next survivor" (dsh-client-ui-renderer
-  // lib/client.js:507-514) — the shipped app frame takes the cell back;
-  // module unload/HMR sweeps the entry with the caller's-fiber cascade
-  // (`registry.d.ts:77-83`). The registration shape is the runtime catalog's
-  // own documented example (`{name: "root"}`, `registerOptions: []`,
-  // runner lib/client.js:3514-3520; the shipped AppFrame adds `locale` and
-  // its child-seat declarations — dsh-client-ui-layout lib/client.js:524) —
+  // The wrapper shell frame registers into the `root` single slot carrying an
+  // EXPLICIT shadowing priority (ticket 85, 2026-09-19 — the cutover first
+  // shipped no priority and the loader entry died: the shipped register
+  // defaults an absent priority to 0, the shipped AppFrame's own effective
+  // value (it registers `{name: "root", locale: "common", …}` with no
+  // priority — dsh-client-ui-layout lib/client.js:524-531), and THROWS on
+  // that collision: "single slot \"root\" already has a registration at
+  // priority 0 … — register at a different priority to shadow it (lowest
+  // renders)", the live pass-3 error). The caller's options reach that
+  // registry unchanged (the browser bundle has no priority allocator — the
+  // runner-side `allocatePriority` auto-assignment does not apply here), so
+  // `SHELL_ROOT_DYNAMIC_PRIORITY` (-1) is sent on the registration.
+  // Direction verified from the shipped SlotCore: entries sort ASCENDING by
+  // `(priority ?? 0)` at insert and the outlet renders the first live
+  // (non-abdicated) entry ("lowest renders";
+  // `registry.d.ts:156-164`) — so -1 shadows the frame exactly while our
+  // entry stays live. Fail-safe: a render crash abdicates the entry through
+  // the per-entry boundary and "the outlet re-renders onto the cell's next
+  // survivor" (dsh-client-ui-renderer lib/client.js:507-514) — the shipped
+  // app frame takes the cell back; module unload/HMR sweeps the entry with
+  // the caller's-fiber cascade (`registry.d.ts:77-83`). The registration
+  // shape is otherwise the runtime catalog's own documented example
+  // (`{name: "root"}`, `registerOptions: []`, runner lib/client.js:3514-3520;
+  // the shipped AppFrame adds `locale` and its child-seat declarations) —
   // no id, no key, and NO `children`: the frame is self-contained (its
   // sidebar/main/right seats are our own React seats, never host slot
   // outlets). The same `mountShellPage` composition powers this frame and
@@ -447,6 +459,12 @@ export interface ShellPageMount {
   readonly seat: RosterStore;
   /** The conversation store feeding the main seat (ticket 80). */
   readonly conversation: ConversationStore;
+  /**
+   * Ticket 81: the approval-cards store behind the conversation pane's
+   * "Needs you" area. Unfed until a relay-truth feed lands (ticket 69 L1);
+   * exposed so that wiring can ride this mount without a second store.
+   */
+  readonly approvals: ApprovalCardsStore;
   /** Host seats handed to `createDispatcherShell`. */
   readonly hosts: ShellHosts;
 }
@@ -469,6 +487,12 @@ export function mountShellPage(
   const store = createDispatcherShellStore();
   const seat = createRosterStore();
   const conversation = createConversationStore();
+  // Ticket 81: the approval-cards store (the "Needs you" area's data seam).
+  // No relay-truth feed is wired client-side yet — the store stays `unfed`
+  // and the pane renders no cards area (honest unknown, never a fabricated
+  // "nothing needs you"). The feed + resolve transport into
+  // `Multitask.resolveAccess` are ticket 69's live lane (L1).
+  const approvals = createApprovalCardsStore();
   let binding: ShellFeedBinding | undefined;
 
   // Feed binding (ticket 79's projection, wired at THIS composition point —
@@ -510,9 +534,11 @@ export function mountShellPage(
   });
 
   // The pane factory: bound once to the translate seat, the conversation
-  // store, and the two verified actions. Called per render with the selected
-  // session id (the shell's main seat), the same seat pattern as the hosted
-  // roster panel.
+  // store, and the two verified actions — plus ticket 81's approvals seat
+  // (the cards store; the resolve transport is L1's, so no actions are
+  // passed and a fed pending card would say so honestly). Called per render
+  // with the selected session id (the shell's main seat), the same seat
+  // pattern as the hosted roster panel.
   const conversationPane = createConversationPane(
     ctx.locale.bind(LOCALE_NAMESPACE),
     conversation,
@@ -529,6 +555,7 @@ export function mountShellPage(
       },
       onLoadOlder: (sessionId) => requestOlder(ctx.sessions, sessionId),
     },
+    { cards: approvals },
   );
 
   // The hosted panel's per-row steer affordance uses the same verified
@@ -607,5 +634,5 @@ export function mountShellPage(
     onboarding: onboardingPane,
   };
 
-  return { store, seat, conversation, hosts };
+  return { store, seat, conversation, approvals, hosts };
 }

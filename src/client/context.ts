@@ -29,8 +29,9 @@ import type { ConversationSourceLike } from "./conversation-store.js";
  * entries such as the `tool.call.toolview` toolviews (key) and the
  * `settings.plugin.item` settings card (key), keyed `main` pages (key), and
  * single-slot entries such as the cutover's `root` frame (no id/key — the
- * single cell elects one occupant; the dynamic entry's shadowing priority is
- * host-assigned, `registry.d.ts:24-27`). */
+ * single cell elects one occupant; the entry carries an EXPLICIT shadowing
+ * priority — ticket 85: an absent priority defaults to 0, collides with the
+ * shipped frame, and the host register THROWS). */
 export type SlotEntryOptions =
   | SlotRegistrationOptions
   | ToolviewRegistrationOptions
@@ -43,6 +44,10 @@ export type SlotEntryOptions =
  * owns the contract and its citations). No `id` and no `key`: a single slot
  * has one elected occupant, and the runtime catalog's own `root` example
  * passes only `{name}` (dsh-cordis-client-runner lib/client.js:3514-3520).
+ * `priority` is REQUIRED (ticket 85, 2026-09-19): the shipped single-slot
+ * register defaults an absent priority to 0 — the shipped AppFrame's own
+ * effective value — and throws on that collision instead of shadowing; the
+ * entry must carry the explicit lower value.
  * Declared here structurally — this module is the context's type seat and
  * `shell-mount.ts` already imports from it.
  */
@@ -51,6 +56,11 @@ export interface SingleSlotRegistrationOptions {
   readonly name: string;
   /** Locale namespace declared on the entry so the kit's `t` seat binds. */
   readonly locale: string;
+  /**
+   * The explicit shadowing priority (ticket 85): lower value renders first
+   * ("lowest renders"); `-1` shadows the shipped frame's effective 0.
+   */
+  readonly priority: number;
 }
 
 /** `ctx.slots` surface used by this scaffold. */
