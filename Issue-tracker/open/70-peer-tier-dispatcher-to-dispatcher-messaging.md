@@ -37,6 +37,15 @@ work (S9).
 
 ## Comments
 
+### 2026-09-19 — agent (claim: implementation chunks 1–3, offline)
+
+Claimed for chunks 1–3 per the Design 2026-09-19 comment §5: chunk 1 core C14 sort +
+two-dispatcher isolation pins; chunk 2 `send_peer` tool + policy copy; chunk 3 client
+placement (79 copy-id affordance, 80 peer-cue honesty). Chunk 4 (live two-dispatcher
+verification) stays unticked — 45/33 lane only. Escalation 1 (directory-less addressing
+annotation) remains open with the ticket; proceeding per the dispatch ruling (the design
+already resolved the reading).
+
 ### 2026-09-19 — agent (vehicle hand-off from 67)
 
 Vehicle decided (draft): **ADR-0020**. Placement: peers are dispatcher sessions, so the
