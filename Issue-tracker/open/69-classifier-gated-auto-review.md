@@ -2,10 +2,10 @@
 
 **Status:** open
 **Labels:** ready-for-human
-**Q1:** ruled 2026-09-19 (overnight dispatched ruling, agent — subject to human reversal): the
-shipped default posture stays **EMPTY**; no Config/settings-seeded posture. Ruled by an autonomous
-agent, not a human signature. Evidence + reversal path in the "Q1 ruled" comment at the end of
-this file.
+**Q1:** ruled 2026-09-19 (overnight dispatched ruling, agent — subject to human reversal); **CONFIRMED
+2026-09-20** (operator-delegated agent ruling, still subject to human reversal — see the dated ruling
+comments at the end of this file): the shipped default posture stays **EMPTY**; no
+Config/settings-seeded posture. Evidence + reversal path in the "Q1 ruled" comment.
 **Blocked by:** none — 67 resolved (ADR-0020); the 72 clause resolved by 76 (relay keying DID change: per-session policy rows + per-session prompt pump landed — the design incorporates it; see the 2026-09-19 triage comment). Rendering home 81 depends on THIS ticket's design, not the reverse.
 **Related:** ADR-0018 (in scope: "classifier-gated auto-review"; exception U-D), `docs/research/always-on-dispatcher-behavior.md` area 6, 30 (the shipped session-scoped always-allow + prompt UX), 13/23 (access relay + prompt pump), ADR-0008
 
@@ -72,9 +72,16 @@ classifier; ADR-0018 brings the area in scope.
       is read through §2's decision model — an allow row marks the dispatch class gated
       (the seam decides); a deny row auto-denies without asking a human to confirm what
       policy already decided. Documented at the gate.
-- [ ] A7. Card projections (§3 shapes): pure-function unit tests. — 2026-09-19: handed to
+- [x] A7. Card projections (§3 shapes): pure-function unit tests. — 2026-09-19: handed to
       chunk B; the projection module itself is the 81 contract (B1 freezes the shapes), so
       its tests land with that module, not in this chunk.
+      (**TICKED 2026-09-20 (W28 closure):** the box's own condition — pure-function unit
+      tests over the §3 shapes — is met by the pins enumerated in the U-D ruling below:
+      `test/approval-cards.test.ts` (22 tests — exact shapes, secret-ask derivation,
+      posture-denied-as-policy-denied with the self-naming detail, option degradation,
+      clamp math, notice joins, replay-safety; B1's evidence, commit `9bcdd4d`), which is
+      exactly the module this box anticipated handing the tests to. Ticked per the
+      evidence-gated rule: a box is ticked where recorded evidence meets its own wording.)
 
 ### Chunk B — 81-contract (offline; rendering itself is 81)
 
@@ -929,3 +936,130 @@ produces the same honest refusal as an absent service, so a gated dispatch can n
 dispatcher turn regardless of posture content. FINDING 5 (the already-persisted open turn on
 cf5249cf and the lost open-turn reconcile) is a DIFFERENT mechanism — not covered here. L3/L4
 remain BLOCKED-no-seeder for live verification; this pass claims the offline half only.
+
+### 2026-09-20 — AGENT RULING — SUBJECT TO HUMAN REVERSAL (2026-09-20 overnight run, operator-delegated): Q1 CONFIRMED — the posture default stays EMPTY; every ask surfaces to the human resolver
+
+Recorded in the repo's reversible-agent-ruling idiom (the 2026-09-19 Q1 precedent): an autonomous
+agent's decision, taken in the CONSERVATIVE direction under the operator's explicit delegation for
+this wrap-up run ("trust your own judgement"), logged so a human can reverse it with a signature
+rather than re-derive it.
+
+**Ruling: Q1 is CONFIRMED as ruled 2026-09-19.** The shipped default posture stays **EMPTY**; no
+auto-answering of access/credential asks ships; every ask surfaces to the human resolver.
+
+Grounded in this ticket's own Q1 text (§6, verbatim): *"Should any non-empty default/Config-seeded
+posture ever ship?"* — answered NO on both halves by the 2026-09-19 ruling (default EMPTY; no
+Config/settings-seeded posture, ever, without amending ADR-0018's exception list). Confirmation
+grounds:
+
+1. **This is the conservative direction.** Reversing Q1 would authorize automatic answers to
+   credential-access asks — decisions no operator has signed. The asymmetric-cost argument from
+   the 2026-09-19 ruling stands: a posture auto-answer delivered to a worker cannot be
+   un-delivered, while enabling one later is a cheap, deliberate act. Between "ship nothing
+   unsigned" and "ship an unsigned auto-answer", the former is the only conservative choice.
+2. **The B-series live evidence contradicts nothing in EMPTY.** The live-verified lanes all ran
+   with human-in-the-loop resolve: L1/L2 (Session B-5) worked exactly as an EMPTY posture
+   predicts — the worker parked a real credential ask, every access-ask/secret-ask card surfaced
+   to the human resolver, `/dispatcher-resolve` routed the human's answer, and nothing
+   auto-answered. FINDING 1 (B-2) was a worker-contract gap, not a posture gap; FINDING 3/4/5
+   are wedge mechanics (ruled on separately below), not posture-content arguments.
+3. **U-D already names the excluded thing** (see the re-affirmation ruling below): a
+   Config-seeded posture is "a settings-managed rule store" by name.
+
+**Consequence recorded:** the classifier-gated gate stays **built and armed but never
+auto-answers** while the posture is EMPTY — the posture table, the consent-miss composition
+(A1), the dispatch gate (A6), W7's plugin-built seam, and W26's deadline bound all ship, and a
+posture row would flow through them unchanged, but no shipped path creates a row. Re-enabling
+auto-review (any posture content) is a deliberate human act, via the reversal path recorded
+2026-09-19: an explicit in-session user act needs no ADR change; a Config-seeded/non-empty
+default needs a human amendment of ADR-0018's U-D with a signature.
+
+### 2026-09-20 — AGENT RULING — SUBJECT TO HUMAN REVERSAL (2026-09-20 overnight run, operator-delegated): U-D / posture lane RE-AFFIRMED — no seeder ships; L3/L4 recorded VOID-BY-POLICY, coverage = the offline pins
+
+Same delegation and idiom as the Q1 confirmation above; conservative direction.
+
+**Ruling: U-D is re-affirmed — no posture seeder ships in product code.** U-D's own wording
+(ADR-0018:37, as quoted in the 2026-09-19 Q1 ruling): *"'Always allow' approval rules are
+session-scoped, not persisted; no settings-managed rule store, no dedicated local
+tool-permission controller."* This ticket's own checklist item already made it binding
+("**U-D is binding:** 'always allow' rules stay session-scoped — no persisted rule store, no
+settings-managed controller"), and B-3's live recon (ticket 33's Session B-3 record, commit
+`f8035b9`) proved the shipped tree conforms: `reviewPosture.set` has ZERO callers in `src/`
+(tests only); the 9 live host commands, the settings document, and the adapter carry zero
+posture exposure.
+
+**Recorded consequence, per the ticket-33 AC1/S7 void precedent** (33's closure, 2026-09-20:
+"AC1 — left UNTICKED, superseded … voided as a ship gate by ADR-0018 … intentionally not
+performed as written"): under the confirmed EMPTY posture, the apply()-level gated round-trip
+(**L3** — dispatch approval pausing through the real `ctx.approval` waterfall) and posture
+auto-answer (**L4** — allow → no card; deny → honest self-naming notice, live) are
+**structurally unreachable in live operation**: their precondition is a posture row, and no
+live path can create one without a human act. Their ACs are therefore recorded **VOID-BY-POLICY,
+not unmet** — the boxes stay unticked (no action was performed live), and this record is why
+their being unticked is not open work.
+
+**Coverage that DOES stand (the offline pins, enumerated concretely):**
+
+- **W7's seam pins** — `test/dispatch-approval.test.ts`, suite "plugin wiring:
+  dispatchApprovalSeamFor — apply()'s own seam over the injected ctx.approval" (5 tests,
+  RED-checked; merge `14ee7a9`): the `gated: true` round-trip over an INJECTED `ctx.approval`
+  (allowed-once proceeds; exactly one ask carrying the activated agent, `spawn_worker` tool
+  name, dispatch title/stream key); rejected/cancelled/unavailable each refuse honestly
+  (`auto-review-refused`); absent-seam fail-closed with the turn settling (the Q2 no-wedge pin
+  through the plugin's own builder); posture-miss never reaches the service; source-level
+  wiring pin on the `requestDispatchApproval: dispatchApprovalSeamFor(...)` line.
+- **W22's park/settle pins** — `test/worker-ask-park.test.ts` (7 tests, RED-checked; merge
+  `c8849a7`): `request_access` parks the TOOL call, never the turn-end — execute stays pending
+  while the ask sits in the relay, including the B-4 live repro over FakeDshHost + the REAL
+  `subagent/end` settle path; the ADR-0008 bounded-block test (the tool settles on the armed
+  timeout deny, never wedges).
+- **W26's bounded-ask pins** — `test/dispatch-approval.test.ts`, suite "deadline (FINDING 3):
+  an unanswered ctx.approval ask cannot wedge the turn" (5 tests, RED-checked; merge
+  `987c241`): an ask the answerer never returns refuses at the ADR-0008 deadline (seam level
+  and end-to-end through the real spawn gate, both under a 2 s node:test cap); an answer
+  before the deadline is unchanged; a post-deadline service rejection surfaces no unhandled
+  rejection; source pin that the deadline default is `DEFAULT_ACCESS_TIMEOUT_MS`.
+- **W19's projection pins** — `test/adapter-dispatcher-tools.test.ts` (12 tests; merge
+  `f8067c3`): `structuredPresentationMeta` attach pins + host-faithful `tool/result` fixtures
+  (exact `appendToolResult` shape) projecting spawned / gated (`approval-allowed` from the
+  record's own marker) / refused (`approval-refused`) cards through the real reduction, plus
+  the B-2 regression pin that a prose-only record (no meta) still degrades honestly; and
+  `test/approval-cards.test.ts` (22 tests; `9bcdd4d`) pinning the §3 frozen shapes.
+- Plus the L1 offline composition pin — `test/approval-feed-composition.test.ts` (5 tests;
+  merge `61ddf61`): real watch → hub → mounted store → real `/dispatcher-resolve` → core
+  `Multitask.resolveAccess`, with fiber-discipline teardown pins.
+
+A human who later rules posture content into existence (Q1's reversal path) re-opens L3/L4 as
+ordinary live work with these pins already holding the mechanism; nothing needs re-deriving.
+
+### 2026-09-20 — AGENT RULING — SUBJECT TO HUMAN REVERSAL (2026-09-20 overnight run, operator-delegated): wedge family HANDLED — FINDING 3 fixed, FINDING 5 repaired at the data level, durable systemic work = deferred ticket 98
+
+Same delegation and idiom as the rulings above; conservative direction. The two live wedge
+mechanisms recorded in the W14 pointer above (FINDING 3 / FINDING 5) are dispositioned:
+
+1. **FINDING 3 — FIXED (W26).** An unanswered host approval ask wedged the dispatcher turn
+   (Session B-3; ticket 33 record `f8035b9`) because the fail-closed pins assumed the service
+   RETURNS. Merge **`987c241`** (fix `4dc5185` + pins `2e5e9fd`; ticket comment `45dc5b2`):
+   `ctx.approval.request` is bounded by the relay's ADR-0008 deadline
+   (`DEFAULT_ACCESS_TIMEOUT_MS`, injectable `timeoutMs`, no new Config surface) and collapses
+   at the deadline to the seam's established fail-closed `unavailable` refusal
+   (`auto-review-refused` record). RED-checked (2 fail → 17/17); gates 1130/273/0.
+2. **FINDING 5's corrupted state — REPAIRED AT THE DATA LEVEL (W27).** Session cf5249cf's
+   persisted open turn + parked inbox send (which ate sends silently across restarts) were
+   repaired with the host stopped: byte-exact backup (md5 `55480b31…`), minimal
+   assertion-guarded repair (open turn closed exactly as the host's own fold does on
+   `turn/end`; pendingCalls cleared; B-4's parked send cleared so activation could not burn
+   tokens driving it), after md5 `ba48ff9f…`. Record:
+   `.scratch/_overnight-2026-09-20/wedge-cleanup-W27.md`; ticket-33 comment in `1553ff6`.
+3. **Durable systemic work — FILED and DEFERRED (ticket 98).** The two structural halves
+   behind the family — wrapper-frame approval answering (the shipped composer ships but does
+   not answer under the ADR-0020 wrapper root frame) and activation-time open-turn
+   reconciliation — live in `Issue-tracker/deferred/98-wrapper-frame-approval-answer-and-open-
+   turn-reconcile.md` (`needs-info`), with recorded revisit triggers (wrapper-frame staging
+   per ADR-0020).
+
+**No open ticket carries wedge-family debt:** with this ticket and 81 resolved on this date,
+every wedge pointer resolves to the W26 fix, the W27 repair record, or ticket 98 — all
+recorded, none open-and-unowned. Reversal path: a human who wants the family treated as open
+work re-opens 98 (it is deferred, not deleted) or files anew; nothing in the shipped tree
+changes under this ruling.
