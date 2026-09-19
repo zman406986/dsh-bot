@@ -66,3 +66,93 @@ Filed together with ticket 96 from an outside audit. Evidence gathered this pass
 
 Triaged 2026-09-20 by the overnight team-lead run: `ready-for-agent`. Next in the overnight work
 order (W4 implementation + W5 independent verification, after 96's tooling lands).
+
+### 2026-09-20 — agent (W4 implementation: rulebook decomposed, stack recorded; stays open for W5 verifier)
+
+**What moved where.** The line-by-line inventory is the **moved-rule register** in
+`docs/agents-rulebook.md` §Moved-rule register — 30 register rows covering every rule line of the
+old file's 11 sections, none deleted. Counts: **6 moved unmodified** (read-PRD-before-work;
+never-commit-into-the-reference-tree; the browser-test block (authorization + dsh key + trivial
+tasks); the kill-timer block; the network/proxy line; the log-an-issue-before-implementing rule)
+→ `read-before-running-live-and-browser-tests.md`, `read-before-reference-tree-work.md`,
+`docs/agents-rulebook.md` §Environment & network, and `Issue-tracker/issue-tracker.md`
+("Before implementing anything", moved this date, unmodified). **6 stayed as pointers** (intro
+state; tracker layout; triage labels; domain docs; research notes; non-goals) — their homes
+already exist (`Issue-tracker/issue-tracker.md`, `agent.md`, `research/research.md`, PRD §2) and
+were reused, no parallel docs created. **15 became pointers to higher authority** (the
+reference-tree ruling rows → ADR-0018 B9 / PRD §3/§17; constraints rows → ADR-0018 exceptions
+A5/B8/B9, A2-note, PRD §6.2/§6.5/§7/§15; definition-of-working → PRD §4 S1/S5/S8; the
+PRD-preference rule kept but scoped below levels 1–2). **3 marked superseded/voided, not
+rewritten** (below). `AGENTS.md` is now a thin pointer stub: current state, reading order,
+type-of-work table, stack summary, non-goals pointer, and a safety one-liner routing live-test
+work to the guide. Honest note: `AGENTS.md` is git-ignored (`.gitignore` line 3), so the stub is
+local-only — that is precisely why the durable homes are the tracked files above; recorded as a
+feature of the decomposition, not a workaround. Source notes ("moved from AGENTS.md <section>,
+2026-09-20, unmodified") are carried in both guides and the register.
+
+**Final authority stack** — flagged in the rulebook as "proposed order, verified against recorded
+practice — human reversal possible"; one practice citation per level:
+
+1. **Human explicit override** — ADR-0018 "accepted (human-ruled, 2026-09-18) — the master rule"
+   (`docs/adr/0018-imitate-reference-in-entirety-exception-list.md`); the 2026-09-18
+   reference-tree accepted-risk ruling (exception B9); ADR-0016's retraction shows an override
+   striking even a signed ADR.
+2. **Accepted ADRs** — accepted ADR-0001 over the "Not TypeScript" row
+   (`docs/adr/0001-typescript-in-process-multitask-core.md`); ADR-0018 supersedes accepted
+   0005/0009 by name.
+3. **The PRD as amended** — ADR-0018 voided the PRD's flag/S7 requirements (ticket-64 batch, PRD
+   §15/§4 strikethroughs); PRD §8 had already resolved TypeScript while AGENTS.md still said
+   otherwise (ADR-0001 Context records it).
+4. **Draft ADRs** (`-draft-nonhuman-approved`) — ADR-0017: "Nothing is re-litigated until the
+   text is signed … no existing code or ticket is retired on the strength of this draft alone"
+   (`docs/adr/README.md`); ADR-0020 exists only to pick accepted ADR-0018's vehicle.
+5. **`CONTEXT.md`** — its 2026-09-19 amendment notes conform the glossary upward to ADR-0018.
+6. **`AGENTS.md` + the `read-before-*.md` guides** — the register rows yield to ADR-0001/0018;
+   "Implementation is ticketed separately (ticket 76) per repo rule" (`docs/adr/README.md`,
+   draft-0019 note) shows a process rule binding an ADR follow-up.
+7. **Recorded ticket rulings** — ticket 69's Q1, "ruled 2026-09-19 (overnight dispatched ruling,
+   agent — subject to human reversal)" (`Issue-tracker/open/69-classifier-gated-auto-review.md`);
+   the U-I re-scope "Agent-recorded 2026-09-19 as a dispatched overnight ruling, subject to human
+   reversal" (recorded in ADR-0018's exception U-I, ticket 71).
+8. **Research notes** — ADR-0001 cites `docs/research/dsh-extension-surface.md` as its evidence
+   base; the note itself "takes no side".
+
+**Deltas from this ticket's proposed 7-level sketch** (adjusted to match recorded practice):
+(a) draft ADRs are pulled out of the "accepted ADRs" level into their own level **below the PRD**,
+because the record shows an unsigned draft does not move the PRD (ADR-0017's suspension of
+PRD-first resolutions takes effect only on signing); (b) two adjacencies are untested by any
+recorded conflict and are flagged as such in the rulebook: `CONTEXT.md` vs draft ADRs, and
+`AGENTS.md`/guides vs ticket rulings (the sketch's order kept there). No inventory finding
+lacked a recorded decision, so the stop-and-ask human escalation was not triggered.
+
+**Superseded-row marking.** The constraints-table row "**Not TypeScript.** Prefer Go, else
+Python or Rust. …" is preserved verbatim in the register, **marked superseded** with a pointer to
+`docs/adr/0001-typescript-in-process-multitask-core.md` (the exact row ticket 96 flagged for this
+ticket). Also marked, not rewritten: the open-decisions paragraph (stale — PRD §15 is fully
+resolved/voided; ADR-0006's Consequences had already recorded that AGENTS.md must not name an
+open §15 item, so the local file had drifted) and the S7 legal-QA line (voided by ADR-0018; the
+S7 self-contradiction, ADR-0001-vs-row, and the ADR-0016 fabricated-premise retraction are cited
+in the rulebook as the settled conflicts the stack exists to settle).
+
+**Cross-pointers and lint.** Rewired: `CONTEXT.md`'s B9 cite now points at
+`read-before-reference-tree-work.md`; a dated AGENTS.md-pointer note was added to
+`docs/adr/README.md` (accepted ADR texts untouched, per the 2026-09-19 ticket-74 note pattern —
+older ADR prose saying "see AGENTS.md" resolves through the stub to the new homes). The doc lint
+was extended for the new doc class (rulebook + both guides added as orientation docs; `AGENTS.md`
+mustCite-guarded on the three new homes; row-shaped forbid guards for the superseded
+"Not TypeScript. Prefer Go…" row and the S7 grep line, so the register's verbatim quotes and the
+stub's settled-conflict mention stay legal). Per-rule fixture coverage unchanged (no new rules);
+self-test stayed green.
+
+**Gates (on merged main):** `npm run lint:docs` green and idempotent — doc-lint 0 findings across
+6 rules, issue-index fresh (11 rows), adr-index fresh (20 rows); doc-lint `--self-test` 38/38;
+`npm run typecheck` clean (both tsconfigs); `npm test` **1108 / 270 / 0** (assertions / suites /
+fail — matches baseline).
+
+**Commits:** branch `wt/agents-rulebook-97`: `5d83187` (guides), `f78676f` (rulebook),
+`5d6bdcf` (CONTEXT.md + ADR-README pointer rewires), `268106f` (doc-lint); `--no-ff` merge
+**`b574410`**; on main directly (ticket-33 precedent): `b9b61a7` (tracker rule moves home) and
+this comment.
+
+**Stays open** for the W5 independent verifier (no-rule-lost diff of old vs new AGENTS.md against
+the register, stack-vs-practice check, pointer resolution, lint re-run) and the W17/W18 sweep.
