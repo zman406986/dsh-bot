@@ -181,24 +181,26 @@ function createMountCtx(services: {
           return (other.priority ?? 0) === priority;
         });
         if (collision !== undefined) {
-          // Host wording per kind (SlotCore.register's single/keyed/list
-          // cases; the registrant suffix is omitted — the fake has none).
+          // Host wording per kind, verbatim from SlotCore.register (the
+          // registrant suffix is omitted — the fake has none): single says
+          // "already has a registration", keyed "already has an entry for
+          // key", list "already has an entry with id". Ticket 86 corrected
+          // the keyed/list text (it had reused the single-slot phrasing).
+          const target =
+            options.key !== undefined
+              ? `already has an entry for key "${options.key}"`
+              : options.id !== undefined
+                ? `already has an entry with id "${options.id}"`
+                : "already has a registration";
           const kind =
             options.key !== undefined
               ? "keyed slot"
               : options.id !== undefined
                 ? "list slot"
                 : "single slot";
-          const axis =
-            options.key !== undefined
-              ? ` for key "${options.key}"`
-              : options.id !== undefined
-                ? ` with id "${options.id}"`
-                : "";
           throw new Error(
-            `${kind} "${options.name}" already has a registration${axis} ` +
-              `at priority ${priority} — register at a different priority ` +
-              `to shadow it (lowest renders)`,
+            `${kind} "${options.name}" ${target} at priority ${priority} — ` +
+              `register at a different priority to shadow it (lowest renders)`,
           );
         }
         const entry = {

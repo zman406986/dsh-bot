@@ -26,6 +26,13 @@ import {
 } from "../src/client/overlay.js";
 import { CLIENT_MODULE_ID, wrapClientBundle } from "../src/client/wrapper.js";
 import { buildClient } from "../scripts/build-client.js";
+import {
+  MAIN_PAGE_SLOT,
+  ROOT_FRAME_SLOT,
+  SHELL_ROOT_DYNAMIC_PRIORITY,
+} from "../src/client/shell-mount.js";
+import { TOOL_CALL_TOOLVIEW_SLOT, TOOLVIEW_TOOL_NAMES } from "../src/client/toolviews.js";
+import { SETTINGS_PLUGIN_ITEM_SLOT } from "../src/client/settings-card-store.js";
 
 /**
  * Fake the client face the way the shipped Cordis runtime behaves:
@@ -38,15 +45,55 @@ import { buildClient } from "../scripts/build-client.js";
  *   (the "declaration now exists" moment) and hands the test a controller
  *   disposer representing fiber teardown;
  * - `ctx.slots.register(options, component)` records the entry owned by the
- *   active inject controller and returns its exact disposer;
+ *   active inject controller, runs the SHIPPED SlotCore collision rule, and
+ *   returns its exact disposer;
  * - `ctx.locale.register(ns, dict)` records the namespace; `bind(ns)` curries
  *   a `t` seat over the recorded dictionary.
+ *
+ * Ticket 86 (2026-09-19): the slots fake now models the shipped SlotCore
+ * register rule, the same semantics the ticket-85 fix taught the
+ * shell-mount/coexistence fakes — ONE global cell per slot name, entries kept
+ * sorted ASCENDING by `(priority ?? 0)`, and a same-`(priority ?? 0)`
+ * registration along the entry's identity axis THROWS with the host's exact
+ * wording. Before this, the fake accepted a no-priority `root` register: the
+ * pre-85 cutover shipped exactly that and the live loader entry died (pass 3).
+ *
+ * Verified against the installed 0.1.5-rc.1 client (read-only,
+ * `dsh-web-frontend/dist/assets/index-BKQ_L1z6.js`, minified SlotCore):
+ * - `a = t.priority ?? 0` — an absent priority defaults to ZERO;
+ * - `single`: `entries.find(g => (g.options.priority ?? 0) === a)` → throw
+ *   `single slot "X" already has a registration at priority N — register at a
+ *   different priority to shadow it (lowest renders)`;
+ * - `keyed`: `requires options.key`, then a same-`key`+same-priority entry
+ *   throws `keyed slot "X" already has an entry for key "K" at priority N …`;
+ * - `list`: `requires options.id`, then a same-`id`+same-priority entry
+ *   throws `list slot "X" already has an entry with id "I" at priority N …`;
+ * - entries sort at insert (`(m.options.priority ?? 0) - (g.options.priority
+ *   ?? 0)`) and the outlet renders the first live entry — "lowest renders"
+ *   (`dsh-client-ui-renderer/lib/types/client/registry.d.ts:156-164`).
+ *
+ * The registrant suffix (` (registered by X)`) is omitted: the fake has no
+ * registrant identity. `kind` is inferred from the options shape (key →
+ * keyed, id → list, else single) because the shipped kind comes from the slot
+ * catalog, which has no offline stand-in.
  */
 function createClientCtx() {
   const locales = new Map<string, unknown>();
+  const cells = new Map<
+    string,
+    Array<{
+      options: Record<string, unknown>;
+      component: unknown;
+      dispose(): void;
+    }>
+  >();
   const injects: Array<{
     parent: string;
-    entries: Array<{ options: SlotRegistrationOptions; component: unknown }>;
+    entries: Array<{
+      options: Record<string, unknown>;
+      component: unknown;
+      dispose(): void;
+    }>;
   }> = [];
   const injectControllers: Array<() => void> = [];
   const effectDisposers: Array<() => void> = [];
@@ -62,23 +109,100 @@ function createClientCtx() {
     },
     slots: {
       inject(parent: string, callback: () => unknown) {
-        const record = { parent, entries: [] };
+        const record = { parent, entries: [] as typeof injects[number]["entries"] };
         injects.push(record);
-        callback();
+        try {
+          callback();
+        } catch (error) {
+          // A throwing registration leaves no half-installed declaration;
+          // the host's effect failure unwinds the same way.
+          const at = injects.indexOf(record);
+          if (at >= 0) injects.splice(at, 1);
+          throw error;
+        }
         const controller = () => {
           const at = injects.indexOf(record);
           if (at >= 0) injects.splice(at, 1);
-          record.entries.length = 0;
+          for (const entry of record.entries.splice(0)) entry.dispose();
         };
         injectControllers.push(controller);
         return controller;
       },
-      register(options: SlotRegistrationOptions, component: unknown) {
+      register(rawOptions: unknown, component: unknown) {
         const owner = injects.at(-1);
         assert.ok(owner, "slots.register outside of slots.inject (fake)");
-        const entry = { options, component };
+        const options = rawOptions as {
+          name: string;
+          key?: string;
+          id?: string;
+          priority?: number;
+        };
+        assert.equal(
+          typeof options.name,
+          "string",
+          "slot options need a string `name` (fake)",
+        );
+        const cell = cells.get(options.name) ?? [];
+        cells.set(options.name, cell);
+        const priority = options.priority ?? 0;
+        // The shipped kind (single/keyed/list) comes from the slot catalog and
+        // also decides which identity option is REQUIRED (`options.key` for
+        // keyed, `options.id` for list); offline the catalog has no stand-in,
+        // so the kind is inferred from the options shape and the `requires
+        // options.key`/`requires options.id` preconditions are not modeled.
+        const collision = cell.find((entry) => {
+          const other = entry.options as {
+            key?: string;
+            id?: string;
+            priority?: number;
+          };
+          if (options.key !== undefined) {
+            return other.key === options.key && (other.priority ?? 0) === priority;
+          }
+          if (options.id !== undefined) {
+            return other.id === options.id && (other.priority ?? 0) === priority;
+          }
+          return (other.priority ?? 0) === priority;
+        });
+        if (collision !== undefined) {
+          // Host wording per kind, verbatim (the registrant suffix omitted).
+          const target =
+            options.key !== undefined
+              ? `already has an entry for key "${options.key}"`
+              : options.id !== undefined
+                ? `already has an entry with id "${options.id}"`
+                : "already has a registration";
+          const kind =
+            options.key !== undefined
+              ? "keyed slot"
+              : options.id !== undefined
+                ? "list slot"
+                : "single slot";
+          throw new Error(
+            `${kind} "${options.name}" ${target} at priority ${priority} — ` +
+              `register at a different priority to shadow it (lowest renders)`,
+          );
+        }
+        const entry = {
+          options: { ...rawOptions } as Record<string, unknown>,
+          component,
+          dispose: () => {},
+        };
+        cell.push(entry);
+        // Insert-time ascending `(priority ?? 0)` sort — the shipped order.
+        cell.sort(
+          (a, b) =>
+            ((a.options.priority as number | undefined) ?? 0) -
+            ((b.options.priority as number | undefined) ?? 0),
+        );
+        entry.dispose = () => {
+          const ownerAt = owner.entries.indexOf(entry);
+          if (ownerAt >= 0) owner.entries.splice(ownerAt, 1);
+          const cellAt = cell.indexOf(entry);
+          if (cellAt >= 0) cell.splice(cellAt, 1);
+        };
         owner.entries.push(entry);
-        return () => {};
+        return entry.dispose;
       },
     },
     locale: {
@@ -100,13 +224,20 @@ function createClientCtx() {
     // Test surface.
     locales,
     injects,
+    cells,
     runFiberTeardown() {
       for (const dispose of [...effectDisposers, ...injectControllers]) {
         dispose();
       }
     },
   };
-  return ctx as typeof ctx & ClientContext & { runFiberTeardown(): void };
+  return ctx as typeof ctx & ClientContext & {
+    runFiberTeardown(): void;
+    cells: Map<
+      string,
+      Array<{ options: Record<string, unknown>; component: unknown }>
+    >;
+  };
 }
 
 /** The service faces the host guards with the inject requirement (ticket 84). */
@@ -479,6 +610,114 @@ describe("client face scaffold — apply over fake client seams", () => {
     apply(ctx);
     assert.equal(ctx.injects.length, 4);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
+  });
+});
+
+describe("client face scaffold — shipped slot register semantics (ticket 86)", () => {
+  it("the root frame registers at the explicit shadowing priority, over the shipped frame's 0", () => {
+    // The shipped AppFrame holds the `root` cell at ITS effective
+    // `priority ?? 0` (no priority declared — dsh-client-ui-layout
+    // lib/client.js:524-531). The cutover's frame must therefore register
+    // BELOW it: the fake throws on a same-priority single-slot collision, so
+    // this test is the offline detector for the ticket-85 live crash (the
+    // pre-85 registration carried no priority and the loader entry died).
+    const ctx = createClientCtx();
+    ctx.slots.inject(ROOT_FRAME_SLOT, () =>
+      ctx.slots.register({ name: ROOT_FRAME_SLOT }, "shipped-app-frame"),
+    );
+
+    assert.doesNotThrow(() => apply(ctx));
+
+    const cell = ctx.cells.get(ROOT_FRAME_SLOT) ?? [];
+    assert.equal(cell.length, 2, "our frame and the shipped frame share the cell");
+    // Ascending `(priority ?? 0)`: ours is first — "lowest renders".
+    assert.equal(cell[0]?.options.name, ROOT_FRAME_SLOT);
+    assert.equal(cell[0]?.options.locale, LOCALE_NAMESPACE, "our frame declares our locale");
+    assert.equal(cell[0]?.options.priority, SHELL_ROOT_DYNAMIC_PRIORITY);
+    assert.equal(cell[0]?.options.priority, -1);
+    assert.equal(cell[1]?.component, "shipped-app-frame");
+    assert.equal(cell[1]?.options.priority, undefined, "shipped frame declares no priority");
+  });
+
+  it("a no-priority root registration collides with the shipped frame and throws", () => {
+    // The negative control: the exact pre-85 shape (no priority → `?? 0`)
+    // must fail LOUD here. Without the collision rule this fake accepted it
+    // and the divergence only surfaced live (pass 3).
+    const ctx = createClientCtx();
+    ctx.slots.inject(ROOT_FRAME_SLOT, () =>
+      ctx.slots.register({ name: ROOT_FRAME_SLOT }, "shipped-app-frame"),
+    );
+    assert.throws(
+      () =>
+        ctx.slots.inject(ROOT_FRAME_SLOT, () =>
+          ctx.slots.register({ name: ROOT_FRAME_SLOT }, "regressed-frame"),
+        ),
+      {
+        message:
+          'single slot "root" already has a registration at priority 0 — ' +
+          "register at a different priority to shadow it (lowest renders)",
+      },
+    );
+  });
+
+  it("keyed entries collide on the same key at the same priority, host wording", () => {
+    // The shipped keyed case: `keyed slot "X" already has an entry for key
+    // "K" at priority N …` (SlotCore.register, keyed branch). Our toolview
+    // keys are plugin-owned and disjoint, so `apply` registers six distinct
+    // keys without collision — a duplicate key is the detector.
+    const ctx = createClientCtx();
+    apply(ctx);
+    const toolviewCell = ctx.cells.get(TOOL_CALL_TOOLVIEW_SLOT) ?? [];
+    assert.equal(toolviewCell.length, TOOLVIEW_TOOL_NAMES.length);
+
+    assert.throws(
+      () =>
+        ctx.slots.inject(TOOL_CALL_TOOLVIEW_SLOT, () =>
+          ctx.slots.register(
+            { name: TOOL_CALL_TOOLVIEW_SLOT, key: TOOLVIEW_TOOL_NAMES[0] },
+            "duplicate-toolview",
+          ),
+        ),
+      {
+        message:
+          `keyed slot "${TOOL_CALL_TOOLVIEW_SLOT}" already has an entry for ` +
+          `key "${TOOLVIEW_TOOL_NAMES[0]}" at priority 0 — register at a ` +
+          "different priority to shadow it (lowest renders)",
+      },
+    );
+    // A DIFFERENT key stays additive (per-key cells — the coexistence rule).
+    assert.doesNotThrow(() =>
+      ctx.slots.inject(TOOL_CALL_TOOLVIEW_SLOT, () =>
+        ctx.slots.register(
+          { name: TOOL_CALL_TOOLVIEW_SLOT, key: "shipped_other_tool" },
+          "foreign-toolview",
+        ),
+      ),
+    );
+  });
+
+  it("the registered entries land in their declared slot cells", () => {
+    const ctx = createClientCtx();
+    apply(ctx);
+    assert.equal(ctx.cells.get(TOOL_CALL_TOOLVIEW_SLOT)?.length, TOOLVIEW_TOOL_NAMES.length);
+    assert.equal(ctx.cells.get(SETTINGS_PLUGIN_ITEM_SLOT)?.length, 1);
+    assert.equal(ctx.cells.get(MAIN_PAGE_SLOT)?.length, 1);
+    assert.equal(ctx.cells.get(ROOT_FRAME_SLOT)?.length, 1);
+    // No shell.overlay entry survives the ticket-78 cutover.
+    assert.equal(ctx.cells.get(SHELL_OVERLAY_SLOT), undefined);
+  });
+
+  it("fiber teardown frees every cell; a re-apply cannot collide with the dead fiber", () => {
+    const ctx = createClientCtx();
+    apply(ctx);
+    ctx.runFiberTeardown();
+    for (const cell of ctx.cells.values()) {
+      assert.equal(cell.length, 0, "teardown disposes each entry's cell slot");
+    }
+    // If teardown left the cell occupied, this re-apply would throw the
+    // single-slot/keyed collision — the host unload cascade is the contract.
+    assert.doesNotThrow(() => apply(ctx));
+    assert.equal(ctx.cells.get(TOOL_CALL_TOOLVIEW_SLOT)?.length, TOOLVIEW_TOOL_NAMES.length);
   });
 });
 
