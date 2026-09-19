@@ -443,6 +443,19 @@ function selfTest(fixtureRoot) {
     check('open-index generation idempotent (byte-identical second run)', first === second);
     check('open-index excludes moved ticket 04', !first.includes('04-moved-ticket'));
 
+    // autocrlf resilience: a git checkout that flips LF (blob) → CRLF (disk) is a
+    // checkout artifact, not staleness — only content drift may flag. Normalize to LF
+    // first so this is deterministic regardless of the checkout's own EOL style.
+    const lfIndex = first.replace(/\r\n/g, '\n');
+    const crlfIndex = lfIndex.replace(/\n/g, '\r\n');
+    fs.writeFileSync(openIndexPath, crlfIndex, 'utf8');
+    const crlfCheck = checkIssueIndex(tmp);
+    check('open-index fresh under CRLF checkout (autocrlf artifact)', crlfCheck.ok === true, crlfCheck.reason);
+    writeIssueIndex(tmp);
+    check('open-index rewrite preserves CRLF style', fs.readFileSync(openIndexPath, 'utf8') === crlfIndex);
+    fs.writeFileSync(openIndexPath, crlfIndex.replace('open ticket', 'OPEN TICKET'), 'utf8');
+    check('CRLF index with drifted content still detected stale', checkIssueIndex(tmp).ok === false);
+
     check('fixture adr index stale before write (0002 row missing)', checkAdrIndex(tmp).ok === false);
     writeAdrIndex(tmp);
     const adrAfter = checkAdrIndex(tmp);

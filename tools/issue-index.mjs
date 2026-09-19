@@ -15,7 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { repoRootOf, readTextIfExists } from './lib.mjs';
+import { repoRootOf, readTextIfExists, detectEol } from './lib.mjs';
 
 export const ISSUE_INDEX_VERSION = '1.0.0';
 export const OPEN_DIR_REL = 'Issue-tracker/open';
@@ -59,8 +59,8 @@ function escapeCell(text) {
   return text.replace(/\|/g, '\\|');
 }
 
-/** Render the index body (pure function of the ticket list). */
-export function renderIssueIndex(tickets) {
+/** Render the index body (pure function of the ticket list + line ending). */
+export function renderIssueIndex(tickets, eol = '\n') {
   const n = tickets.length;
   const lines = [
     `<!-- GENERATED FILE — tools/issue-index.mjs v${ISSUE_INDEX_VERSION}; do not edit by hand. Regenerate: node tools/issue-index.mjs -->`,
@@ -78,12 +78,17 @@ export function renderIssueIndex(tickets) {
       `| ${t.num} | [${t.num}-${t.slug}](${link}) | ${escapeCell(t.title)} | ${t.status} | ${escapeCell(t.labels)} |`
     );
   }
-  return lines.join('\n') + '\n';
+  return lines.join(eol) + eol;
 }
 
 export function generateIssueIndex(rootDir) {
   const tickets = listOpenTickets(rootDir);
-  return { relPath: OPEN_INDEX_REL, content: renderIssueIndex(tickets), tickets };
+  // Match an existing file's dominant line ending (mirrors adr-index.mjs): a git
+  // autocrlf checkout stores LF in the blob but puts CRLF on disk, and that checkout
+  // artifact must never read as index staleness — only content drift is staleness.
+  const existing = readTextIfExists(path.join(rootDir, OPEN_INDEX_REL));
+  const eol = existing === null ? '\n' : detectEol(existing);
+  return { relPath: OPEN_INDEX_REL, content: renderIssueIndex(tickets, eol), tickets };
 }
 
 export function checkIssueIndex(rootDir) {
