@@ -21,6 +21,12 @@ Issue-tracker/
 - Comments and conversation history append to the bottom of the file under a `## Comments` heading
 - Feature specs and design notes may still live under `.scratch/<feature-slug>/` during active work; when a ticket ships or dies, move the ticket file into the matching `Issue-tracker/` status folder
 
+## Before implementing anything
+
+**Project rule: always log an issue into the tracker before implementing anything.** No implementation work starts without a corresponding ticket file under `Issue-tracker/open/`, even for small changes.
+
+_(Moved here from `AGENTS.md` §Agent skills → Issue tracker, 2026-09-20, unmodified — ticket 97; the tracker guide is this rule's home.)_
+
 ## When a skill says "publish to the issue tracker"
 
 Create a new file under `Issue-tracker/open/` (use another status folder only if it is already known to be deferred, resolved, or cancelled).
