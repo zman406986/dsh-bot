@@ -2,7 +2,7 @@
 
 # Open ticket index
 
-Generated from `Issue-tracker/open/*.md` — 11 open tickets. The row set is owned by the folder, so a ticket that moves cannot leave a stale row behind (ticket 96). Titles and labels mirror each ticket's own lines.
+Generated from `Issue-tracker/open/*.md` — 9 open tickets. The row set is owned by the folder, so a ticket that moves cannot leave a stale row behind (ticket 96). Titles and labels mirror each ticket's own lines.
 
 | # | Ticket | Title | Status | Labels |
 |---|---|---|---|---|
@@ -15,5 +15,3 @@ Generated from `Issue-tracker/open/*.md` — 11 open tickets. The row set is own
 | 33 | [33-closeout-cleanroom-lqa-provenance-review-merge](open/33-closeout-cleanroom-lqa-provenance-review-merge.md) | Close-out: clean-room LQA gate + full-diff provenance review + merge to main (ticket 17) | open |  |
 | 69 | [69-classifier-gated-auto-review](open/69-classifier-gated-auto-review.md) | Classifier-gated auto-review (ADR-0018 in-scope area) | open | ready-for-agent |
 | 81 | [81-wrapper-approval-cards-and-capsule-retirement](open/81-wrapper-approval-cards-and-capsule-retirement.md) | Wrapper approval cards + capsule retirement (ADR-0020 slice 5) | open | ready-for-agent |
-| 96 | [96-doc-lint-and-generated-indexes](open/96-doc-lint-and-generated-indexes.md) | Doc lint + generated indexes: make the orientation docs provably honest | open | ready-for-agent |
-| 97 | [97-decompose-agents-rulebook-with-explicit-authority-stack](open/97-decompose-agents-rulebook-with-explicit-authority-stack.md) | Decompose the AGENTS.md rulebook + add an explicit authority stack | open | ready-for-agent |

@@ -1,6 +1,6 @@
 # 97 — Decompose the AGENTS.md rulebook + add an explicit authority stack
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Blocked by:** none (logically pairs with ticket 96 — its doc lint then guards the new structure; neither blocks the other)
 **Related:** `docs/adr/README.md` (ADR-0016 retraction — the motivating case), ADR-0001, ADR-0018, ticket 64 (PRD amendments), ticket 69's Q1 ruling (an example of a recorded agent ruling), sibling-repo pattern cited below as device-specific evidence
@@ -44,11 +44,11 @@ Follow the sibling repo's pattern (device-specific absolute path, sibling repo "
 
 ## What to do
 
-- [ ] Inventory every rule currently in `AGENTS.md`, line by line, into a move/stay table (kept in this ticket's comments or a colophon in the new AGENTS.md) so "no rule lost" is checkable.
-- [ ] Write the `read-before-*.md` guides; rewrite `AGENTS.md` as the short pointer rulebook (reading order, type-of-work table, authority stack).
-- [ ] Record the authority stack, verify the proposed order against the repo's records, and adjust with reasons where this ticket's sketch is wrong.
-- [ ] Rewire cross-pointers so nothing dangles (`docs/adr/README.md`, `agent.md`, `Issue-tracker/issue-tracker.md`, `research/research.md`, `README.md`), then run ticket 96's doc lint (once it exists) clean — if 96 has not landed, do the pointer check by hand and say so in the closing comment.
-- [ ] Done means: `AGENTS.md` visibly shorter, every old rule located (moved or stayed, none deleted), the stack present with at least one settled past conflict cited.
+- [x] Inventory every rule currently in `AGENTS.md`, line by line, into a move/stay table (kept in this ticket's comments or a colophon in the new AGENTS.md) so "no rule lost" is checkable. **(Done — the moved-rule register in `docs/agents-rulebook.md` §Moved-rule register, 30 rows; no-rule-lost independently re-checked 2026-09-20, W14 — see the closing comment.)**
+- [x] Write the `read-before-*.md` guides; rewrite `AGENTS.md` as the short pointer rulebook (reading order, type-of-work table, authority stack). **(Done — both guides + the ~50-line stub verified on disk 2026-09-20, W14.)**
+- [x] Record the authority stack, verify the proposed order against the repo's records, and adjust with reasons where this ticket's sketch is wrong. **(Done — 8-level stack, practice-cited per level, deltas (a)/(b) recorded in the W4 comment; re-verified 2026-09-20, W14.)**
+- [x] Rewire cross-pointers so nothing dangles (`docs/adr/README.md`, `agent.md`, `Issue-tracker/issue-tracker.md`, `research/research.md`, `README.md`), then run ticket 96's doc lint (once it exists) clean — if 96 has not landed, do the pointer check by hand and say so in the closing comment. **(Done — 96 landed first; lint 0 findings; re-run green 2026-09-20, W14.)**
+- [x] Done means: `AGENTS.md` visibly shorter, every old rule located (moved or stayed, none deleted), the stack present with at least one settled past conflict cited. **(Verified 2026-09-20, W14 — see the closing comment below.)**
 
 ## Constraints
 
@@ -156,3 +156,45 @@ this comment.
 
 **Stays open** for the W5 independent verifier (no-rule-lost diff of old vs new AGENTS.md against
 the register, stack-vs-practice check, pointer resolution, lint re-run) and the W17/W18 sweep.
+
+### 2026-09-20 — RESOLVED (W14 closure): no-rule-lost, stack-vs-practice, pointers, and lint independently verified by a fresh verification pass; moved open/ → resolved/
+
+**Delivered (chain record).** W4: `docs/agents-rulebook.md` — the 8-level authority stack
+(practice-cited per level, untested adjacencies flagged, deltas from the sketch recorded with
+reasons), the settled-conflict citations (S7 self-contradiction, the "Not TypeScript" row vs
+ADR-0001, the PRD-preference claim vs ADR-0018, plus the ADR-0016 fabricated-premise retraction
+as the motivating case), and the 30-row moved-rule register (none deleted; superseded/voided rows
+marked, not rewritten) — plus `read-before-running-live-and-browser-tests.md`,
+`read-before-reference-tree-work.md`, the thin AGENTS.md pointer stub, the CONTEXT.md and
+ADR-README pointer rewires, and the doc-lint extension for the new doc class (merge `b574410`,
+branch commits `5d83187`/`f78676f`/`5d6bdcf`/`268106f`; main-direct `b9b61a7` tracker-rule move;
+dated comment `66f16d8`).
+
+**Verification (2026-09-20, W14 — independent of W4).** Honesty note: the overnight PLAN's W5
+verifier dispatch never landed a comment on this ticket, so this closure records the equivalent
+pass, run fresh today by an agent that did not implement W4:
+
+- **No rule lost:** the moved-rule register (30 rows) was checked against the
+  pre-decomposition AGENTS.md text (session-start snapshot). Every section — Source of truth,
+  Reference-tree copying policy, Implementation constraints (all 8 table rows), Open decisions,
+  Definition of working, Non-goals, Browser self-testing, Kill timers, Network, and the four
+  Agent-skills sections — and every rule line is accounted for (moved unmodified / pointer /
+  marked superseded-voided); none found missing.
+- **Guides + stub on disk:** both `read-before-*.md` guides exist with source notes and the moved
+  rules (live-test authorization + dsh-key rule + trivial-tasks rule + the kill-timer block;
+  ADR-0018 B9 pointer with the no-restatement discipline); AGENTS.md is a ~50-line pointer stub
+  (visibly shorter) whose cites resolve; `docs/agents-rulebook.md` is tracked (the durability
+  feature, since AGENTS.md is git-ignored).
+- **Stack matches recorded practice:** accepted ADRs above the PRD (ADR-0018 voided PRD
+  requirements; the ticket-64 amendments ride with the PRD), draft ADRs below the PRD
+  (ADR-0017's sign-gate), ticket rulings above research notes — i.e. the W4 deltas are exactly
+  the recorded ones. No ruled decision re-opened: the rulebook settles S7, ADR-0001, and the
+  ADR-0016 retraction without re-arguing them.
+- **Pointers + lint:** `npm run lint:docs` GREEN (doc-lint 0 findings across 6 rules — the lint
+  guards the stub's mustCite homes and the superseded-row/voided-S7 forbid rules), self-test
+  38/38, idempotent (generator re-run, no diff).
+- Offline gates re-run on main this date for the record: `npm run typecheck` clean (both
+  tsconfigs); `npm test` **1125 pass / 0 fail / 272 suites**.
+
+Moved `Issue-tracker/open/97-decompose-agents-rulebook-with-explicit-authority-stack.md` →
+`Issue-tracker/resolved/`, `**Status:**` → `resolved`. No other file moved.

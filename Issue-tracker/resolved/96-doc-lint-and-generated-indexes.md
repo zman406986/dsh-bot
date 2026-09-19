@@ -1,6 +1,6 @@
 # 96 — Doc lint + generated indexes: make the orientation docs provably honest
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Blocked by:** none
 **Related:** ticket 97 (its `read-before-<activity>.md` guides add naming surface this lint can later check), sibling-repo tooling cited below as device-specific evidence
@@ -44,7 +44,7 @@ Checks to port:
 - [ ] Fix the first catches as part of this ticket (they are the lint's shakedown, and they are already known-stale): repoint all four dead `docs/agents/*` citations in `AGENTS.md` to the real homes; delete or correct the false line-3 "no application code / package manifest / build-test toolchain" claim; correct the tracker section (tickets live in `Issue-tracker/`, `.scratch/` is scratch specs during active work); rewrite `README.md`'s **Status** section, which still describes "Ticket 01 scaffold … Host adapter and tools land in later tickets" — replace with an honest current-state paragraph (always-on dispatcher plugin, wrapper shell, ~95 tickets of history; keep it npm-surface appropriate).
 - [ ] Generate the open-queue index (suggest `Issue-tracker/open-issue-index.md`, per the `<subject>-index.md` naming for generated listings) and add it to the layout block in `Issue-tracker/issue-tracker.md` in the same change.
 - [ ] Decide and record the ADR-index merge rule (generator owns rows; human prose preserved per ADR number), then bring `docs/adr/README.md` to that state and prove a regenerate produces no unwanted prose loss.
-- [ ] Done means: `node tools/doc-lint.mjs` (and each generator, then a `--check`-style rerun) exits clean on the fixed tree, and **a second run produces no diff**.
+- [x] Done means: `node tools/doc-lint.mjs` (and each generator, then a `--check`-style rerun) exits clean on the fixed tree, and **a second run produces no diff**. **(Verified 2026-09-20, W14 — see the closing comment below.)**
 
 ## Constraints
 
@@ -179,3 +179,34 @@ total is now 38, not 35. (3) Known and deliberately out of scope: AGENTS.md's PR
 "Not TypeScript" for the core language while ADR-0001 rules TypeScript-in-process — left for
 ticket 97 / W4's authority-stack pass; no lint rule covers it today. Ticket stays open for W3
 independent verification.
+
+### 2026-09-20 — RESOLVED (W14 closure): lint + generators verified green and idempotent by a fresh independent verification pass; moved open/ → resolved/
+
+**Delivered (chain record).** W1 tooling: `tools/doc-lint.mjs` (6 data-driven rules),
+`tools/issue-index.mjs`, `tools/adr-index.mjs` (zero deps; the ADR generator owns only the row
+set and preserves hand-maintained status prose), `npm run lint:docs` wired, self-test green
+(merge `690916f`, branch commits `2a452fa`/`c2eca32`, dated comment `0b1ceca`). W2 first catches +
+indexes: all 16 known catches fixed — the 4 dead `docs/agents/*` cites repointed, the false
+"no application code" claim deleted, the `.scratch/` tracker claim corrected, README Status
+rewritten, tickets 43/52/54 status agreement fixed, `Issue-tracker/open-issue-index.md` generated
+and committed — plus one late tooling fix (EOL-aware index freshness; self-test 35→38) (merges
+`b6ca9ac` + `c6668a4`, branch commits `7faa45b`/`a28ec40`/`49f5953`/`2f9c540`, dated comment
+`18833d5`).
+
+**Verification (2026-09-20, W14 — independent of W1/W2).** Honesty note: the overnight PLAN's W3
+verifier dispatch never landed a comment on this ticket, so this closure records the equivalent
+pass, run fresh today by an agent that executed neither W1 nor W2: `npm run lint:docs` GREEN
+(doc-lint 0 findings across 6 rules; issue-index fresh — 11 rows before this closure's move, 9
+after regeneration; adr-index fresh, 20 rows); `doc-lint.mjs --self-test` 38/38; **idempotence —
+both generators re-run in place, `git diff` empty** (second run produces no diff — this ticket's
+own done-condition, the box above is ticked from this check); ADR status prose preserved (0005 /
+0009 supersession notes, the 0013 vehicle note, and the 0016 fabricated-premise retraction all
+verified present in `docs/adr/README.md`; prose preservation is also self-test-covered); AGENTS.md
+claims verified against disk (thin pointer stub citing the real homes: `Issue-tracker/
+issue-tracker.md`, `agent.md`, `research/research.md`) and README.md's Status section verified
+rewritten as an honest implemented-and-offline-tested paragraph. Offline gates re-run on main
+this date for the record: `npm run typecheck` clean (both tsconfigs); `npm test` **1125 pass /
+0 fail / 272 suites**.
+
+Moved `Issue-tracker/open/96-doc-lint-and-generated-indexes.md` → `Issue-tracker/resolved/`,
+`**Status:**` → `resolved`. No other file moved.
