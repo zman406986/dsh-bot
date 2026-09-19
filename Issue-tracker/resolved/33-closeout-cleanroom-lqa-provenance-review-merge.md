@@ -1217,3 +1217,43 @@ This record also discharges the W18 caveat's W8 item ("the dispatch itself never
 did, and its verdict now stands persisted). PLAN.md's missing disposition lines (W3/W5/W6/W8/W15
 plus post-plan W20/W24) are filled in the same bookkeeping pass; PLAN remains untracked scratch
 per the run's convention.
+
+### 2026-09-20 — W27 wedge cleanup (FINDING 5): the persisted-open-turn session cf5249cf REPAIRED at the data layer with the host stopped; wedge-family durable work filed as deferred ticket 98
+
+**Cleanup done (not manual steps).** Store located: the dsh host's session-projection checkpoint
+`C:\Users\TZhen\.dsh\storages\session_projcache\sessions\session-cf5249cf-….json` (doc-shaped,
+`{version:7, record:{identity, rows}}`; the authoritative event log
+`~/.dsh/sessions/--…-Interastral-Peace-Casino--/session-cf5249cf…/session.v3.jsonl.zstd` was
+inspected read-only — header + seq 1..431, log head == checkpoint watermark — and NOT modified).
+Pre-conditions verified immediately before the write: port 8877 no LISTENING line, zero dsh
+processes (CIM command-line sweep). Byte-exact backup first (md5 match), then a minimal,
+assertion-guarded repair closing the persisted open turn exactly as the host's own fold does on
+`turn/end`, with the healthy `cd03250b` checkpoint as the field-pattern reference:
+`turnBoundary.openTurnStartSeq` 415 → `null` (+ `lastStepBoundary` → `{kind:"end", seq:427}`),
+`sessionStats.pendingCalls` `{call_00_NTSF…}` → `{}` (B-3's parked pwsh call),
+`subagentTiming.pendingTurnStart` key removed, and `inbox.next-turn` cleared of B-4's parked
+probe send (id `14f5dcbc…`) — the last one load-bearing: activation drives parked input, so
+leaving it parked would have burned live LLM tokens on first activation. Post-repair: JSON
+re-parse verified (the same format check the host applies before schema validation), identity
+block + all other rows asserted byte-equal to the backup, touched values validated against the
+row schemas read from host source (`turnBoundary` v2 / `inbox` v1 / `sessionStats` v1 /
+`subagentTiming` strict). Before md5 `55480b31a5ef5522d4d0efa12d24ac76` / after md5
+`ba48ff9f96c8eeb42f18cabffcc980d1`; 23 diff lines, all inside the four touched rows. Full record
+(store layout, schema/semantics pins with host source refs, minimal-diff table, hashes, residual
+risk): `.scratch/_overnight-2026-09-20/wedge-cleanup-W27.md`; backup kept beside it.
+
+**Durable work filed, then deferred:** ticket **98** (`Issue-tracker/deferred/98-wrapper-frame-
+approval-answer-and-open-turn-reconcile.md`) carries both systemic fixes — (a) render/answer
+host-level approval prompts inside the wrapper frame (B-3 FINDING 3's face; the shipped composer
+ships but does not answer under the ADR-0020 wrapper root frame), and (b) activation-time
+reconcile of persisted-open-turns — narrate + close, and disposition any parked inbox honestly
+instead of eating sends forever (31's rebuild-honesty territory). Deferred with rationale: no
+operator impact under current defaults after this cleanup; design input needed on wrapper-frame
+approval rendering. Trigger conditions recorded on 98 (wrapper-frame staging per ADR-0020).
+
+**Wedge-family handling now stands at three legs:** (1) W26's deadline fix on the seam side
+(unanswered-host-ask timer, in flight by another agent as of this comment — prior art: W22's
+merged park-vs-settlement fix `c8849a7`, B-5-verified), (2) this W27 data repair of the one live
+wedge instance, (3) deferred ticket 98 for the systemic halves. No AC box
+on any ticket is ticked by this cleanup; ticket 69's AC boxes untouched. Tracker-only commit,
+direct to main, explicit paths per tonight's practice.
