@@ -473,18 +473,32 @@ describe("ticket 69 L1 — the offline composition pin (real apply → real watc
     assert.deepEqual(cardsOf(composition.mounts[0]), []);
 
     // ── The worker parks a real access ask through the real tool.
+    // FINDING 4 contract (ticket 69): the tool call PARKS until the ask
+    // settles — the park itself (and the roster publish) is synchronous;
+    // the settlement lands when the command answers below.
     const access = host.tool("request_access");
     assert.ok(access);
-    const asked = (await access.execute(
-      { class: "tool", target: "edit_file", reason: "need to edit files" },
-      { agent: { session: { id: spawned.worker_id } } },
-    )) as AskedAccess;
-    assert.equal(asked.ok, true);
+    const askState = { settled: false };
+    const askedPromise = access
+      .execute(
+        { class: "tool", target: "edit_file", reason: "need to edit files" },
+        { agent: { session: { id: spawned.worker_id } } },
+      )
+      .then((value) => {
+        askState.settled = true;
+        return value as AskedAccess;
+      });
+    await flush();
+    assert.equal(
+      askState.settled,
+      false,
+      "the tool call stays parked while the ask is pending (old code acked at park time)",
+    );
 
     // The host published the pending truth through the ONE channel.
     const parked = publishedRoster(bridge);
     assert.equal(parked?.pendingAsks.length, 1);
-    assert.equal(parked?.pendingAsks[0]?.requestId, asked.requestId);
+    const askedRequestId = parked?.pendingAsks[0]?.requestId;
     // ... and the per-session mirror carries the same snapshot in the SAME write.
     assert.equal(
       (bridge.document[rosterSessionKey("s-1")] as RosterSnapshot).pendingAsks[0]
@@ -500,7 +514,7 @@ describe("ticket 69 L1 — the offline composition pin (real apply → real watc
       assert.ok(card);
       assert.equal(card.cardKind, "access-ask");
       assert.equal(card.status, "pending");
-      assert.equal(card.requestId, asked.requestId);
+      assert.equal(card.requestId, askedRequestId);
       assert.equal(card.workerId, spawned.worker_id);
       assert.equal(card.parentSessionId, "s-1");
       assert.equal(card.body.class, "tool");
@@ -538,6 +552,14 @@ describe("ticket 69 L1 — the offline composition pin (real apply → real watc
     );
     // ... re-published truth without the ask (both the wire and the mirror)...
     assert.deepEqual(publishedRoster(bridge)?.pendingAsks, []);
+    // ... the parked TOOL call settled honestly once the ask left the relay
+    // (FINDING 4: the park holds the tool call, so the settlement landed
+    // through it, and the worker's turn could not be settled-while-owed).
+    // The waiter polls core truth, so the settle lands within one poll of
+    // the resolve — await it, then assert.
+    const asked = await askedPromise;
+    assert.equal(asked.ok, true);
+    assert.equal(askState.settled, true);
     // ... and the card LEFT the composition's own mounted store.
     assert.deepEqual(cardsOf(composition.mounts[0]), []);
     assert.deepEqual(cardsOf(composition.mounts[1]), []);
@@ -745,10 +767,18 @@ describe("ticket 69 L1 — the offline composition pin (real apply → real watc
     )) as SpawnedWorker;
     const access = host.tool("request_access");
     assert.ok(access);
-    await access.execute(
-      { class: "network", target: "fetch_docs", reason: "docs" },
-      { agent: { session: { id: spawned.worker_id } } },
-    );
+    // FINDING 4: the tool call parks until the ask settles; the park and
+    // the publish are synchronous, so fire it and await the settlement
+    // after the deny below.
+    const settled = access
+      .execute(
+        { class: "network", target: "fetch_docs", reason: "docs" },
+        { agent: { session: { id: spawned.worker_id } } },
+      )
+      .then((value) => {
+        assert.equal((value as { ok: boolean }).ok, true);
+      }) as Promise<void>;
+    await flush();
     assert.equal(cardsOf(composition.mounts[0]).length, 1);
 
     // Unload the client fiber: the settings watch, the settings card's own
@@ -758,15 +788,17 @@ describe("ticket 69 L1 — the offline composition pin (real apply → real watc
     assert.equal(client.watchDisposedCount(), 2, "settings watch + settings card");
     assert.equal(bridge.subscribers.size, 0);
 
-    // A later host publish reaches nothing: the detached store keeps its last
-    // truth instead of being fed by a dead fiber.
-    const before = cardsOf(composition.mounts[0]);
-    host.runCommand({
-      commandId: DISPATCHER_RESOLVE_COMMAND,
-      agent: topLevelAgent("s-1"),
-      rawInput: `${spawned.worker_id} deny`,
-    });
-    await flush();
-    assert.deepEqual(cardsOf(composition.mounts[0]), before);
+  // A later host publish reaches nothing: the detached store keeps its last
+  // truth instead of being fed by a dead fiber.
+  const before = cardsOf(composition.mounts[0]);
+  host.runCommand({
+    commandId: DISPATCHER_RESOLVE_COMMAND,
+    agent: topLevelAgent("s-1"),
+    rawInput: `${spawned.worker_id} deny`,
   });
+  await flush();
+  assert.deepEqual(cardsOf(composition.mounts[0]), before);
+  // The parked tool call settled on the deny (FINDING 4) — no stray park.
+  await settled;
+});
 });

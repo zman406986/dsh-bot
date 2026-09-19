@@ -33,7 +33,7 @@ import {
   type SettingsInjectContext,
   type StorageDomainDurability,
 } from "./adapter/index.js";
-import { registerWorkerAccessTool } from "./adapter/worker-access-tool.js";
+import { registerWorkerAccessTool, createPendingAskSettleWaiter } from "./adapter/worker-access-tool.js";
 import { createWorkerAgentDef } from "./worker/agent-def.js";
 
 /**
@@ -466,6 +466,10 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   const acquireGlobalAccessTool = (): void => {
     accessToolHolders += 1;
     if (globalAccessDisposer !== null) return;
+    // The relay's pending-set read, shared by the duplicate-ask refusal and
+    // the FINDING 4 settle waiter below — one truth, one lambda.
+    const pendingAskOf = (workerId: string): boolean =>
+      multitask.listPendingAccess().some((t) => t.workerId === workerId);
     // T13: worker-only request_access tool. Emits structured asks into the
     // core. Registered on the plugin-level ctx — workers of every dispatcher
     // session resolve it through the global layer.
@@ -478,11 +482,22 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
           if (sessionId === null) return null;
           return host.owns(sessionId) ? sessionId : null;
         },
-        hasPendingAsk: (workerId) =>
-          multitask.listPendingAccess().some((t) => t.workerId === workerId),
+        hasPendingAsk: pendingAskOf,
         emit: (event) => {
           host.emitAccessRequest(event);
         },
+        // Ticket 69 (live FINDING 4, ticket 33 Session B-4): the ask parks
+        // the TOOL call, not the turn-end — execute stays pending while the
+        // ask sits in the relay, so the worker's turn cannot finish and dsh
+        // settlement cannot mark the worker completed+delivered while a
+        // decision is owed (the core's settle path drops a pending ticket,
+        // which is exactly how the live ask was lost). The wait is bounded
+        // by core truth: the relay ends every ticket (explicit resolve, the
+        // armed ADR-0008 timeout deny, or a stop/settle clear), so the tool
+        // always settles honestly and can never out-wait its own park.
+        awaitSettled: createPendingAskSettleWaiter({
+          isPending: pendingAskOf,
+        }),
       },
     });
   };

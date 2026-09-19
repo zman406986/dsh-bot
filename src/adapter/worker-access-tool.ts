@@ -2,6 +2,21 @@
  * Worker-side `request_access` tool (ticket 13).
  * Core-adjacent handler + adapter registration.
  * New copy only. Never invents a user channel; the parent answers.
+ *
+ * Ticket 69 (live FINDING 4, ticket 33 Session B-4 record): the W19
+ * stop-and-wait contract and dsh settlement semantics conflict when the
+ * tool resolves at park time — the worker ends its turn, the host settles
+ * it, and the core's settle path drops the pending ticket
+ * (`multitask.ts` "Settle wins over a pending access ask"), so the ask is
+ * lost while the dispatcher narrates a parked worker. The fix parks the
+ * TOOL CALL, not the turn-end: with the `awaitSettled` dep wired, execute
+ * stays pending until the ask leaves core truth, the worker's turn cannot
+ * finish, and settlement cannot eat the ask. The host tool model supports
+ * this — per-tool call limits are opt-in
+ * (`@deepseek-ai/dsh-tool-call-timeout-policy`: tools without a configured
+ * limit are never cut off), and the wait itself is bounded by core truth:
+ * the relay ends every ticket (explicit resolve, the armed ADR-0008
+ * timeout deny, or a stop/settle clear).
  */
 
 import type { AccessClass, AccessRequestBody } from "../core/access-types.js";
@@ -32,6 +47,19 @@ export interface RequestAccessResult {
   readonly summary: string;
   readonly requestId?: string;
 }
+
+/**
+ * The result summary when the tool call was parked until the ask settled
+ * (the `awaitSettled` shape). The decision itself arrives as the worker's
+ * next message — the relay's deliver path; the deny copy is
+ * `wrapAccessDecision`'s. This summary covers the settle AND the clear
+ * (stop/timeout) cases honestly: a cleared ask delivers no message.
+ */
+export const ASK_SETTLED_SUMMARY =
+  "Your access ask is settled. The parent's decision arrives as your next " +
+  "message — continue from it. If no message comes, the ask was cancelled " +
+  "(the worker was stopped or the wait expired): do not retry the same ask; " +
+  "adjust the plan or end with a final report explaining what was blocked.";
 
 /** Validate args into an AccessRequestBody. Throws on bad input. */
 export function toAccessRequestBody(args: {
@@ -86,6 +114,18 @@ export interface WorkerAccessToolDeps {
     body: AccessRequestBody;
     createdAtMs: number;
   }) => void;
+  /**
+   * Ticket 69 (FINDING 4): when provided, execute AWAITS this after
+   * emitting and resolves only once the emitted ask is no longer pending
+   * in core truth — the ask parks the TOOL CALL, not the turn-end, so the
+   * worker's turn stays open and host settlement cannot mark the worker
+   * completed+delivered while a decision is owed. The promise MUST
+   * terminate: every relay ticket ends (explicit resolve, the armed
+   * ADR-0008 timeout deny, or a stop/settle clear). Absent, the legacy
+   * park-ack shape is kept (pure-handler callers with no core truth to
+   * watch — the tests that exercise this handler directly).
+   */
+  readonly awaitSettled?: (workerId: string, requestId: string) => Promise<void>;
   /** Injectable id factory + clock for tests. */
   readonly newRequestId?: () => string;
   readonly now?: () => number;
@@ -130,12 +170,63 @@ export function createRequestAccessHandler(deps: WorkerAccessToolDeps) {
       body,
       createdAtMs: now(),
     });
+    if (deps.awaitSettled !== undefined) {
+      // FINDING 4: hold the tool call open while the ask is parked. The
+      // model's turn cannot end mid-tool-call, so dsh settlement never
+      // fires here — the ask survives until a real decision (or its
+      // timeout/stop clear) lands.
+      await deps.awaitSettled(workerId, requestId);
+      return {
+        ok: true,
+        requestId,
+        summary: ASK_SETTLED_SUMMARY,
+      };
+    }
     return {
       ok: true,
       requestId,
       summary:
         "Access request sent to the parent. Stop and wait for a parent message; do not retry the same ask.",
     };
+  };
+}
+
+export interface PendingAskSettleWaiterOptions {
+  /**
+   * Core truth: whether the worker still has a pending ask. Backed by the
+   * relay's pending list (`Multitask.listPendingAccess`) — the same read
+   * the `hasPendingAsk` refusal uses.
+   */
+  readonly isPending: (workerId: string) => boolean;
+  /** Poll interval in ms. Default 100 (a tiny array scan; no LLM cost). */
+  readonly pollMs?: number;
+  /** Injectable delay for tests. Default a real setTimeout promise. */
+  readonly delay?: (ms: number) => Promise<void>;
+}
+
+/**
+ * The plugin's `awaitSettled` implementation (FINDING 4): watch core truth
+ * until the ask leaves the relay's pending set. Polling — deliberately: the
+ * relay ends every ticket through resolve, the armed ADR-0008 timeout deny,
+ * or a stop/settle clear, and each of those flips this predicate without a
+ * plugin-visible event, so watching the truth directly is the only
+ * no-new-core-seam way to cover every unblock path (including the parent
+ * session deactivating mid-ask). The wait therefore always terminates.
+ */
+export function createPendingAskSettleWaiter(
+  options: PendingAskSettleWaiterOptions,
+): (workerId: string, requestId: string) => Promise<void> {
+  const pollMs = options.pollMs ?? 100;
+  const delay =
+    options.delay ??
+    ((ms: number) =>
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, ms);
+      }));
+  return async (workerId: string) => {
+    while (options.isPending(workerId)) {
+      await delay(pollMs);
+    }
   };
 }
 
