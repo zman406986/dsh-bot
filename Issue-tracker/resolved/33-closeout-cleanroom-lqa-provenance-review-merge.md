@@ -1151,3 +1151,37 @@ re-run: typecheck clean, 1125/272/0). AC7's sweep itself (27–33 + 17 closures)
 
 Moved `Issue-tracker/open/33-closeout-cleanroom-lqa-provenance-review-merge.md` →
 `Issue-tracker/resolved/`, `**Status:**` → resolved. Ticket 17 (the umbrella) closes next and last.
+
+### 2026-09-20 — SESSION WRAP (overnight run, W18) — 9 of 11 open tickets resolved; open set {69, 81} is human-gated
+
+Independent W18 verification of the W17 sweep PASSED on every check (folder/Status agreement across
+all nine closures; cited commit hashes resolve; live evidence roots exist on disk; no box ticked
+without recorded evidence — 33 AC7, 30's anatomy, 81's checkbox 4 `dc887b7` spot-checked; AC1 still
+unticked-voided; Q1 recorded, never re-litigated; gates re-run this date: `npm run typecheck` clean,
+`npm test` **1125/272/0**, `npm run lint:docs` green + idempotent, self-test 38/38; reference tree
+untouched). One bookkeeping caveat recorded honestly: PLAN.md lacks disposition lines for its
+verifier/contingency items W3/W5/W6/W8/W15 — W3/W5's non-execution is remediated and recorded (W14's
+fresh verification, on the 96/97 closures), W6's substance exists (the verification-debt comment
+above), W15 is moot (W9 REACHABLE); **W8** (W7's independent verifier dispatch) has no record
+anywhere — its substance is covered indirectly (B-3's live seam check + every later gate run) but
+the dispatch itself never happened. Flagged for the human, nothing fixed.
+
+**Tonight's totality (details live in the tickets and comments above — linked, not repeated):**
+overnight run 2026-09-20 resolved **9 of 11** open tickets — 27 `48937b9`, 28 `a03615b`, 29
+`83e0b85`, 31 `eb05ac5`, 30 `d450cdd`, 33 `933b287`, 17 `4b83b52`, plus 96/97 `2f4c783` — all
+live-verified where the tickets demanded it, across sessions B-1…B-5/C with evidence under
+`C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-20\`; offline gates 1125/272/0 at final HEAD
+`4dab80b`; doc-lint tooling landed (96) with the AGENTS.md rulebook decomposition (97).
+
+**Remaining open set {69, 81} — exact human actions needed:**
+- (a) Rule on 69's Q1 (posture default EMPTY — confirm or reverse; reversal path recorded on 69).
+- (b) Decide the posture-lane/no-seeder policy (U-D) that gates 69 L3/L4 and 81's gated-card
+      anatomy (`gated:true` unobservable until a human-decided posture act exists).
+- (c) Wedge family FINDING 3/5 (persisted open turn survives restart, eats sends; unanswered host
+      ask wedges the dispatcher turn) — design decision needed; pointers on 69 (`75425da`), records
+      here (B-3/B-4/C).
+- (d) Optional sign-off sweep on draft ADRs 0010–0013/0015–0017/0019–0020 and the agent rulings
+      recorded tonight (27 ×2, 28 stand-in, 81 settings re-home, 69 park-vs-settlement) — all
+      explicitly SUBJECT TO HUMAN REVERSAL.
+
+Both open tickets carry `**Labels:** ready-for-human` as of this wrap.

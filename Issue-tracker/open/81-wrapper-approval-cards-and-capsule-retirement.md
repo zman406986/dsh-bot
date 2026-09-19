@@ -1,7 +1,7 @@
 # 81 — Wrapper approval cards + capsule retirement (ADR-0020 slice 5)
 
 **Status:** open
-**Labels:** ready-for-agent
+**Labels:** ready-for-human
 **Blocked by:** 80 (cards render in the conversation surface), 69 (classifier gating design — this ticket is the wrapper-side rendering, 69 owns the gating design)
 **Related:** ADR-0020 (inventory rows: approvals), 13/23/30 (relay + prompt UX re-host), 45/33 (live lane)
 

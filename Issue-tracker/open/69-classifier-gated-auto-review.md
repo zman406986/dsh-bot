@@ -1,7 +1,7 @@
 # 69 — Classifier-gated auto-review (ADR-0018 in-scope area)
 
 **Status:** open
-**Labels:** ready-for-agent
+**Labels:** ready-for-human
 **Q1:** ruled 2026-09-19 (overnight dispatched ruling, agent — subject to human reversal): the
 shipped default posture stays **EMPTY**; no Config/settings-seeded posture. Ruled by an autonomous
 agent, not a human signature. Evidence + reversal path in the "Q1 ruled" comment at the end of

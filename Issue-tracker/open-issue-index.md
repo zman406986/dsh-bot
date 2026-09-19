@@ -6,5 +6,5 @@ Generated from `Issue-tracker/open/*.md` — 2 open tickets. The row set is owne
 
 | # | Ticket | Title | Status | Labels |
 |---|---|---|---|---|
-| 69 | [69-classifier-gated-auto-review](open/69-classifier-gated-auto-review.md) | Classifier-gated auto-review (ADR-0018 in-scope area) | open | ready-for-agent |
-| 81 | [81-wrapper-approval-cards-and-capsule-retirement](open/81-wrapper-approval-cards-and-capsule-retirement.md) | Wrapper approval cards + capsule retirement (ADR-0020 slice 5) | open | ready-for-agent |
+| 69 | [69-classifier-gated-auto-review](open/69-classifier-gated-auto-review.md) | Classifier-gated auto-review (ADR-0018 in-scope area) | open | ready-for-human |
+| 81 | [81-wrapper-approval-cards-and-capsule-retirement](open/81-wrapper-approval-cards-and-capsule-retirement.md) | Wrapper approval cards + capsule retirement (ADR-0020 slice 5) | open | ready-for-human |
