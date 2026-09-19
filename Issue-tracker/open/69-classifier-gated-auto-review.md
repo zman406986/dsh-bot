@@ -831,3 +831,28 @@ only where a recorded artifact meets the box's own wording; the close/dispositio
   remains outstanding — untouched here).
 
 No file moved; per the PLAN's end-state this ticket stays open regardless of live outcomes.
+
+### 2026-09-20 — W14 wedge-family pointer (FINDING 3 + FINDING 5): two recorded live wedge mechanisms — pointers only, no fix claims, no scope decisions
+
+- **FINDING 3 (live pass 5 Session B-3; full record on ticket 33, commit `f8035b9`):** an
+  unanswered host approval ask WEDGES the dispatcher turn. Under preset `workspace-write` an
+  escalation-shaped dispatcher task produced NO ask surface anywhere over a ~3-minute window
+  (hidden DOM included) — the host approval composer ships in the served bundle
+  (`dsh-client-ui-approval` ×4) but does not answer under the wrapper root frame — the turn stayed
+  `进行中`, the file was never created. This sharpens **Q2**: the fail-closed offline pins assume
+  the seam/service RETURNS an outcome; live, the answerer can be absent-and-silent, and dispatch
+  approvals ride the seam's own cancellation with no core timer. W22's park fix (this ticket)
+  covers the ACCESS-relay seam only and explicitly does NOT cover this seam (recorded in the W22
+  comment above).
+- **FINDING 5 (live pass 5 Session B-4, commit `7ac8edc`; re-confirmed read-only across two boots
+  in Session C, `ae9cf4c`, and pre-boot in Session B-5):** session cf5249cf's persisted OPEN turn
+  survives host restart (`openTurnStartSeq: 415`, `lastStepBoundary {kind:start, seq:427}`,
+  `lastTurn: 18`, parked pending call) and new sends park in the session inbox `next-turn` behind
+  it forever — the session silently eats sends. Read-only evidence:
+  `session-B4/probes/w21-wedge-cf5249cf-turnboundary.json`,
+  `session-C/probes/w13-cf5249cf-turnboundary.json`; every later lane avoided activating that
+  session.
+
+Full records live on ticket 33 (the closeout ticket); this pointer makes the wedge family visible
+on the ticket that owns the seams. No fix is claimed for either mechanism and no scope decision is
+made here (W17/human).
