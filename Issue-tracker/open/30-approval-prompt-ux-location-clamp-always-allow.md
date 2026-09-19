@@ -98,3 +98,14 @@ shipped approval surface until 81's re-host lands.
   secret-stored reassurance copy.
 - This ticket's "Status stays open, re-scoped" holds: it is the fallback approval surface until
   81 ships; only then do its rendering checkboxes retire (its relay/policy work never retires).
+
+### 2026-09-19 — agent (81's card re-host landed; this ticket's re-hosted items now have a second surface)
+
+Commits e9f18ab (71 AC-4 location map — the constant line became the map's
+local entry; the prompt pathway resolves through the map, shipped output
+byte-identical) and 9bcdd4d/1acb918 (the wrapper's approval cards
+re-hosting THIS ticket's option set, wildcard fence, clamped detail, expired
+copy, and secret-stored copy verbatim via `src/client/approval-cards.ts` +
+`approval-pane.tsx`). Per the supersession record above this ticket remains
+the live answer surface until 69's L1 wires the card resolve transport; the
+relay/policy work here never retires.

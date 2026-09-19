@@ -7,18 +7,55 @@
 
 ## What to do
 
-- [ ] Render the access relay's pending asks as inline cards in the wrapper's conversation
+- [x] Render the access relay's pending asks as inline cards in the wrapper's conversation
       surface: re-host ticket 30's prompt anatomy (plain-language title, clamped detail with
       omission marker, resolve actions, stale/pending fencing, session-scoped always-allow —
       U-D binding). Secret asks keep the never-shown promise copy (adapted).
-- [ ] While a card waits, the session's sidebar row shows the blocked marker with reason
+      (2026-09-19: landed — commits 9bcdd4d (chunk-B projections) + 1acb918
+      (rendering). `src/client/approval-pane.tsx`: the access-ask / secret-ask
+      cards mount above the conversation transcript as the Needs-you area
+      (heading reuses `roster.section.needs-you`); ticket 30's anatomy rides
+      the projections verbatim — option labels, clamped detail + omission
+      marker, wildcard-fenced option degradation, expired copy, secret-stored
+      promise; the location line resolves per card through the 71 AC-4
+      `locationFor` hook. Decision provenance renders the shipped
+      `AccessDecision.reason` labels verbatim — a posture deny reads
+      policy-denied with the self-naming auto-review detail. Resolve actions
+      go through the injected seat; without it (today) a fed pending card
+      shows the honest unavailable line — no dead buttons; submit failures
+      show one honest line, retry-less (U-A). Honest absence: the section
+      renders nothing while the store is unfed — the relay-truth feed +
+      resolve transport into `Multitask.resolveAccess` are ticket 69's L1
+      live lane. Worker-dispatch cards render presentation-time from the
+      conversation's spawn records (replay-safe; C15 holds). Gates:
+      typecheck clean; `npm test` 1056/0; build:client ok; tests in
+      `test/approval-cards.test.ts` + `test/client-approval-pane.test.ts`.)
+- [x] While a card waits, the session's sidebar row shows the blocked marker with reason
       (closes the approval→presence loop, area 6).
-- [ ] Capsule retirement: remove the `shell.overlay` chip/panel entry and its routes once the
+      (Shipped by ticket 79's session-granularity presence — the blocked chip
+      rides the roster mirror's structured ask (class+target) with the
+      design-17 §4.1 precedence; offline-pinned in the 79/77 tests. Live
+      confirmation with a real pending card belongs to 69's L2.)
+- [x] Capsule retirement: remove the `shell.overlay` chip/panel entry and its routes once the
       frame election has shipped; the stores/sections live on inside the wrapper (they are
-      re-host inventory, not deleted). Toolview slot entries retire with the host chat — their
-      content moved in ticket 80.
+      re-host inventory, not deleted). Toolview slot entries retire with the host chat —
+      their content moved in ticket 80.
+      (2026-09-19: MOOT-VERIFIED — this landed with ticket 78's cutover, not
+      here: a44084a retired the capsule and launcher overlay entries, 94e6127
+      registered the frame as the dynamic root entry, and the stores/copy/
+      components remain as re-host assets with dead-code disposition assigned
+      to the 65/66/73 lane. Post-cutover the toolview slot entries are
+      registered but unrendered (the frame replaces the host chat; the
+      conversation pane renders tool rows from the window, incl. the
+      worker-dispatch cards) — their retirement rides the same 65/66/73
+      disposition. Nothing left to do in this ticket's rendering scope.)
 - [ ] Settings card (ticket 47) re-homes into the wrapper's own settings surface or stays a
       shipped-settings entry — decide with evidence once the frame displaces the settings UI.
+      (2026-09-19: not this pass — the frame now displaces the settings UI at
+      cutover, so the decision is live: the shipped settings page is
+      displaced by our root frame, and ticket 47's card currently renders
+      only inside the displaced surface. Ready for a live-lane/human call;
+      note ticket 46's watch already feeds our own stores.)
 
 ## Constraints
 
@@ -37,3 +74,52 @@ label resolved from the ask's producer kind, so a remote-box line becomes honest
 if the host ever grows the seam (71 is blocked on that human decision: host-seam request vs
 descope-with-gaps). Unknown kinds fall back to the local line; no card may claim remote without
 a verified kind. U-D binding unchanged: session-scoped always-allow only.
+
+### 2026-09-19 — agent (implemented: approval cards landed; capsule-retirement AC reconciled as already-shipped by 78)
+
+Landed in **9bcdd4d** (chunk-B projections — the contract this ticket renders,
+frozen on 69) and **1acb918** (rendering + placement). The composition's
+approvals wiring (store creation + pane seat) rode the concurrent **a2c09ed**
+(ticket 85) that swept `index.ts` — attribution recorded on 69; no semantic
+overlap. Gates at 1acb918: typecheck clean, `npm test` 1056/0 (offline),
+`npm run build:client` ok.
+
+**Placement decision.** The cards live in the conversation pane (the ticket's
+"conversation surface"), as a pinned Needs-you strip ABOVE the transcript —
+not a re-host of the roster panel's Needs-you section, which stays the
+per-worker partition (worker rows). One copy vocabulary: the strip heading
+reuses `roster.section.needs-you`; card titles reuse the shared
+`roster.blocked.*` templates; decision reasons render as core vocabulary
+verbatim. The session-row blocked marker (checkbox 2) was already the 79
+mechanism, so no second marker was added.
+
+**Worker-dispatch cards** (69 §3.2): settled `spawn_worker` records carry the
+frozen card (conversation-store reduction; pure in the record → replay-safe)
+and render above their collapsible tool row: title, stream, outcome
+(worker id or `refused: <reason>` verbatim), gating
+(`ungated | approval-allowed | approval-refused`, derived from the record's
+`gated` marker / `auto-review-refused` reason). No relay, no wake kind (C15),
+no ledger entry.
+
+**Copy / CSS contracts.** Ticket 30's copy is re-keyed NOWHERE: option labels,
+clamped detail, location line, expired copy, secret-stored reassurance arrive
+as projected strings (en host-side constants — ticket 30's own precedent) and
+render verbatim; the card's own chrome (target label, secret promise,
+unavailable/no-channel/failed/submitted lines, gate label) is locale-keyed
+en+zh. CSS is namespaced, token-only (`--dsw-alias-*`), opacity hierarchy, no
+animation (pinned in tests).
+
+**Honest-state matrix.** Unfed store → the strip renders NOTHING (unknown is
+never "nothing needs you"); ready+empty → nothing (roster empty-section rule);
+no resolve seat → unavailable line instead of dead buttons; no-channel /
+failed submit → one honest line, the card stays, NO retry affordance (U-A);
+routed → muted submitted line, card settles when the feed confirms.
+
+**Remaining for this ticket:** the settings-card re-home decision (checkbox 4,
+live/human — the frame now displaces the shipped settings UI at cutover) and
+live verification of the cards through a real feed (69's L1; blocked-marker
+L2). Capsule retirement (checkbox 3) reconciled above: already shipped by 78's
+cutover — a44084a / 94e6127 / c437ee8; nothing capsule-era remains to render
+against, so this ticket's rendering scope is entirely post-cutover.
+
+Status stays **open** (checkbox 4 + live lane).

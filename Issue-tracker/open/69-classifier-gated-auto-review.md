@@ -74,13 +74,32 @@ classifier; ADR-0018 brings the area in scope.
 
 ### Chunk B — 81-contract (offline; rendering itself is 81)
 
-- [ ] B1. Projection module exported with the §3 shapes frozen as the 81 contract.
-      (2026-09-19: pending — chunk B / ticket 81.)
-- [ ] B2. `locationFor` hook documented as 71's re-base point. (2026-09-19: pending —
-      chunk B.)
-- [ ] B3. No `access-types.ts` / relay-semantics diff (grep-level review assertion).
-      (2026-09-19: pending — chunk B; chunk A already kept both untouched, so B3 starts
-      from a clean base.)
+- [x] B1. Projection module exported with the §3 shapes frozen as the 81 contract.
+      (2026-09-19: landed — `src/client/approval-cards.ts`:
+      `projectAccessAskCards` (access-ask / secret-ask cards from relay truth
+      only — `listPending` + `AccessNotice`; ticket 30's option set minus the
+      wildcard-fenced always, clamped detail + omission marker,
+      pending/resolved/expired), `projectDispatchCard` (worker-dispatch,
+      presentation-time only from the spawn tool-call record, replay-safe,
+      no relay/wake kind — C15 holds), `createApprovalCardsStore` (unfed =
+      unknown). Evidence: `test/approval-cards.test.ts` — 22 tests pinning
+      the exact shapes, secret-ask derivation, posture-denied-as-
+      policy-denied with the self-naming detail (no new reason kind), option
+      degradation, clamp math, notice joins, replay-safety. Commit 9bcdd4d.)
+- [x] B2. `locationFor` hook documented as 71's re-base point. (2026-09-19:
+      landed — the card carries `locationLine` resolved through the
+      injectable `locationFor(card)` hook; default =
+      `defaultLocationFor` → 71 AC-4's `approvalLocationLineFor` map
+      (local entry). 81 never hard-codes the constant; tests pin default,
+      injection, and hook-input identity. Commit 9bcdd4d.)
+- [x] B3. No `access-types.ts` / relay-semantics diff (grep-level review assertion).
+      (2026-09-19: verified — `git diff d0860a2..HEAD -- src/core/
+      access-types.ts src/core/access-relay.ts` is EMPTY across the chunk-B
+      + 81 + 71-AC-4 commits. The only core deltas are in 69's own chunk-A
+      files: `tools.ts` (spawn success carries `gated: true` when the
+      posture gate allowed via the seam — so the durable tool-call record
+      carries approval-allowed provenance for presentation-time replay) and
+      `tool-results.ts` (the optional marker's type).)
 
 ### Live-only ACs (45/33 lane)
 
@@ -373,3 +392,57 @@ None found. 76's keying landed as the triage brief describes (`PolicyEntry.sessi
 `clearSession(sessionId?)`, per-session `pumpFor` in `src/plugin.ts:302-376`); ticket 30's
 "classifier NOT adopted" binds ticket 30 only. This design extends exactly the shipped lookup
 composition and reuses the shipped auto-answer, timeout, notice, and clearance paths unchanged.
+
+### 2026-09-19 — agent (chunk B implemented: projections + 81's cards + the 71 AC-4 slice; only live ACs remain)
+
+Landed in three commits: **e9f18ab** (71 AC-4 location map via this ticket's card
+contract), **9bcdd4d** (chunk B projections), **1acb918** (81's card rendering).
+Gates at 1acb918: `npm run typecheck` clean (both configs); `npm test` **1056 pass /
+0 fail**, fully offline; `npm run build:client` ok. B3 verified at the git level
+(empty diff over `access-types.ts` / `access-relay.ts` for the whole range).
+
+**What landed**
+
+- `src/client/approval-cards.ts` (pure, no React): the §3 frozen shapes.
+  Access-ask cards project from `listPending` + `AccessNotice` only; status
+  `pending | resolved | expired` (a timeout deny = expired, ADR-0008; pending
+  truth outranks a skewed notice for the same worker — the relay parks at most
+  one ask per worker, so workerId joins; a notice with no remembered ticket
+  carries honest unknowns `""/0` and renders no actions). Worker-dispatch card:
+  `projectDispatchCard({callId, args, result})` → `null` for unsettled/malformed
+  records (never a fabricated spawn); `gating` derives from the record's own
+  `gated: true` marker (chunk A's spawn result) and `auto-review-refused`
+  reason — replay-safe by purity.
+- `src/adapter/access-prompt.ts`: 71 AC-4's per-producer-kind label map
+  (`approvalLocationLineFor`; worker + unknown → the local line, computer/browser
+  worker → the remote line, capability-independent) — the prompt pathway resolves
+  its detail line through the map now (shipped output byte-identical).
+- `src/client/approval-pane.tsx` + conversation/integration (1acb918): 81's cards
+  (see ticket 81's comment for the rendering reconciliation).
+
+**Interpretations vs the frozen §3 shapes (documented, none blocking)**
+
+1. `gating: "approval-allowed"` required the durable record to say so: the spawn
+   success result now carries `gated: true` (set only when the seam answered
+   allowed-once). `tool-results.ts`/`tools.ts` are this ticket's own chunk-A
+   files — B3's protected surfaces untouched.
+2. §3's outcome pair "spawned-worker-id | refused-reason" is preserved exactly:
+   an unsettled spawn projects NO card (the generic tool row remains the pending
+   presentation) rather than inventing a third outcome.
+3. Access-ask `workerTitle` comes from an injectable resolver, defaulting to the
+   workerId (the relay's tickets carry no title); notice cards use the notice's
+   title when no remembered ticket exists.
+
+**Reconciliation notes for the closeout**
+
+- The card rendering landed under 81 (placement, copy, honest states, U-A
+  retry-less failure lines). The relay-truth FEED and the resolve transport into
+  `Multitask.resolveAccess` are NOT wired client-side yet — the approvals store
+  ships `unfed` and renders nothing (honest unknown). That wiring is L1's, and
+  the approval-service inject note at `dsh-adapter-api-notes.md:390` applies to
+  the dispatch seam too.
+- The 85 agent's a2c09ed swept the index.ts approvals-wiring hunks (plus an
+  exactOptionalPropertyTypes call-site fix in `approval-cards.ts` that 9bcdd4d
+  shipped red) — attribution recorded there; no semantic overlap with 85.
+
+Ticket stays **open**: L1–L4 (live lane) pending; Q1 stays ready-for-human.

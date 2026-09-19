@@ -234,3 +234,18 @@ folded into 81).** Supersedes ticket 30's constant line:
 **Final state:** ACs 1 (verdict), 2, 3, 5 closed; AC 4 closed as design (implementation → 81);
 implementation ACs for the area gated out. Ticket blocked on the human decision (a) vs (b);
 labels → ready-for-human.
+
+### 2026-09-19 — agent (AC-4 implemented via 81: the location-label map is code)
+
+Landed as **e9f18ab** ("Ticket 71 AC-4 via 81"): `approvalLocationLineFor`
+in `src/adapter/access-prompt.ts` — dispatched worker + every unknown kind →
+the local line (`APPROVAL_LOCATION_LOCAL`, kept as the map's local entry),
+computer-worker / browser-worker → `APPROVAL_LOCATION_REMOTE`
+("Runs on the product's computer (remote box).", adapted copy). The shipped
+prompt pathway resolves its detail line through the map (byte-identical
+output today) and 81's card contract carries the resolved label per card
+through the `locationFor` hook (`src/client/approval-cards.ts`,
+`defaultLocationFor`). Tests pin per-kind lines, the unknown-kind fallback,
+and that no remote line renders while only local kinds exist. Capability
+truth unchanged: AC-1's gate verdict stands, the ticket stays blocked on the
+human (a)-vs-(b) decision — the map is naming, not a claim.
