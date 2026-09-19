@@ -37,6 +37,7 @@ import {
   SHELL_PAGE_KEY,
   SHELL_ROOT_DYNAMIC_PRIORITY,
   SHIPPED_MAIN_PAGE_KEY,
+  createShellLauncherLayout,
   openShellPage,
   shellCellWinner,
   shellLauncherRegistration,
@@ -365,6 +366,69 @@ describe("shell staging mount — openShellPage decision", () => {
       kind: "panel-not-registered",
     });
     assert.deepEqual(calls, []);
+  });
+});
+
+describe("shell staging mount — host inject guard semantics (ticket 84)", () => {
+  /** Guard proxy: undeclared service reads throw like the real host proxy. */
+  function guardCtx(ctx: ClientContext): ClientContext {
+    const declared = new Set([
+      "slots",
+      "locale",
+      "sessions",
+      "remote",
+      "conversation",
+    ]);
+    const faces = new Set([
+      "slots",
+      "locale",
+      "sessions",
+      "remote",
+      "conversation",
+      "layout",
+      "settingsScope",
+    ]);
+    return new Proxy(ctx as unknown as Record<string, unknown>, {
+      get(target, prop, receiver) {
+        if (
+          typeof prop === "string" &&
+          faces.has(prop) &&
+          !declared.has(prop)
+        ) {
+          throw new Error(`cannot get property "${prop}" without inject`);
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as unknown as ClientContext;
+  }
+
+  it("the layout cell feeds the click: absent → no-layout, delivered → opened", () => {
+    const launcherLayout = createShellLauncherLayout(SHELL_PAGE_KEY);
+    assert.deepEqual(launcherLayout.open(), { kind: "no-layout" });
+    const { layout, calls } = createLayoutFake();
+    launcherLayout.setFace(layout);
+    assert.deepEqual(launcherLayout.open(), { kind: "opened" });
+    assert.deepEqual(calls, [SHELL_PAGE_KEY]);
+    // Teardown drops the face; the click degrades again — never throws.
+    launcherLayout.setFace(undefined);
+    assert.deepEqual(launcherLayout.open(), { kind: "no-layout" });
+  });
+
+  it("apply() never bare-reads the optional layout face — even when a fake hands one", () => {
+    // The live-pass-2 kill: `ctx.layout` was read bare (at click time) and
+    // the host's context proxy threw. Over a guard that throws on exactly
+    // that read — with a layout fake SITTING on the context, so only a bare
+    // read can reach it — the composition must still apply cleanly: the
+    // face may only arrive through the runtime `ctx.inject` wrapper.
+    const { layout } = createLayoutFake();
+    const ctx = createMountCtx({ layout });
+    const guarded = guardCtx(ctx);
+    assert.throws(
+      () => (guarded as unknown as { layout: unknown }).layout,
+      { message: 'cannot get property "layout" without inject' },
+      "guard self-check: a bare layout read must throw",
+    );
+    assert.doesNotThrow(() => apply(guarded));
   });
 });
 

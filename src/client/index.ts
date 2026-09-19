@@ -10,10 +10,15 @@
  * Inside the browser the module is an ordinary Cordis plugin: `apply(ctx)`
  * registers only through `ctx` services, so unload/HMR reverses everything
  * (Findings 1/2/5 lifecycle). `inject` names the client services the module
- * binds — the shipped idiom (e.g. dsh-client-ui-agent-preset exports
- * `inject: ["slots", "locale", ...]`). The settings service is deliberately
- * NOT listed: it is optional, reached through the runtime `ctx.inject` idiom
- * under its real client name **`settingsScope`** (ticket 46).
+ * READS on `ctx` — the shipped idiom (dsh-client-ui-session exports
+ * `inject = ["sessions", "slots"]`): the context proxy THROWS on any service
+ * property the module's inject list does not declare, wherever the read
+ * happens (`cannot get property "X" without inject` — ticket 84). So the
+ * always-shipped faces we read (`sessions`, `remote`, `conversation`) are
+ * declared here; `layout` and `settingsScope` are genuinely OPTIONAL faces
+ * reached through the runtime `ctx.inject([...])` wrapper instead (tickets
+ * 46/84) — a hard declaration would hold the whole module PENDING when they
+ * are absent.
  *
  * What registers (design-16 §4.2/§5):
  * 1. the `multitask-dispatcher` locale namespace ({en, zh});
@@ -63,10 +68,11 @@
  * `/dispatcher-start` verbatim; stop = the scope-addressed plain-prompt
  * sink with the locale-keyed conversational phrasing) and the per-row steer
  * prefill seat (`input.for(actx).setDraft`) are built here over lazy
- * service sources and closed into the capsule factory. The services are
- * read at send/click time, never declared as boot-time binds (ADR-0014's
- * smallest-set rule — same runtime-dynamic idiom as the settings watch), so
- * a runtime without them degrades to honest `no-channel`/copy-fallback UX
+ * service sources and closed into the capsule factory. The faces are read
+ * lazily so their VALUES are fresh at send/click time; the services
+ * themselves are DECLARED in the module inject (ticket 84 — an undeclared
+ * property read throws on the real host wherever it happens), and a face
+ * that is absent still degrades to honest `no-channel`/copy-fallback UX
  * via `src/client/actions.ts`.
  */
 
@@ -117,6 +123,7 @@ import { createRosterPanel } from "./panel.js";
 import {
   MAIN_PAGE_SLOT,
   SHELL_PAGE_KEY,
+  createShellLauncherLayout,
   openShellPage,
   shellLauncherRegistration,
   shellPageRegistration,
@@ -152,8 +159,27 @@ import {
 } from "./onboarding.js";
 import { createOnboardingPane } from "./onboarding-pane.js";
 
-/** Client services this module binds (vendored Cordis inject list). */
-export const inject: readonly string[] = ["slots", "locale"];
+/**
+ * Client services this module READS on `ctx`, declared per the shipped
+ * Cordis idiom (ticket 84): the context proxy throws `cannot get property
+ * "X" without inject` on any undeclared service property — at read time,
+ * wherever it happens — so every service face the module touches must
+ * appear here unless it is reached through the runtime `ctx.inject([...])`
+ * wrapper instead. Declared: the always-shipped load-bearing faces
+ * (`slots` ← ui-renderer, `locale` ← client-locale, `sessions` ←
+ * ui-session, `remote` ← api-gateway, `conversation` ← ui-conversation).
+ * Wrapper-only, deliberately NOT declared because a hard requirement would
+ * hold the whole module PENDING when absent: `settingsScope` (ticket 46's
+ * settings watch) and `layout` (the launcher's optional page controller,
+ * watched in the staging-mount section below).
+ */
+export const inject: readonly string[] = [
+  "slots",
+  "locale",
+  "sessions",
+  "remote",
+  "conversation",
+];
 
 /**
  * Browser plugin entry. Every registration is an effect on this module's
@@ -385,16 +411,33 @@ export function applyClientModule(
 
   // The launcher affordance: a SECOND additive `shell.overlay` list entry
   // (own id — coexistence by unique id, never shadowing) whose click runs
-  // the page-open decision over the lazily-read layout service. The layout
-  // face is optional and read at click time (ADR-0014's smallest-set rule,
-  // same idiom as the capsule transports); every documented failure is
-  // contained inside `openShellPage` as an honest outcome. A staging vehicle
-  // only — retired at the cutover together with the capsule.
+  // the page-open decision. Ticket 84 corrected the access contract: a bare
+  // `ctx.layout` property read THROWS on the real host, and `layout` is
+  // genuinely optional — the chip must reach its honest `no-layout` outcome
+  // when absent, while a hard inject would keep the whole module PENDING.
+  // So the face is watched through the runtime `ctx.inject` wrapper (the
+  // settings-watch idiom, ticket 46) into a cell the click reads; absence
+  // leaves the cell undefined and `openShellPage` degrades. A staging
+  // vehicle only — retired at the cutover together with the capsule.
+  const launcherLayout = createShellLauncherLayout(SHELL_PAGE_KEY);
+  ctx.effect(() => {
+    launcherLayout.setFace(undefined);
+    if (typeof ctx.inject !== "function") return () => {};
+    ctx.inject(["layout"], (child) => {
+      launcherLayout.setFace(child.layout);
+      // The wrapper fiber's disposer: when the layout service unloads (or
+      // the child reloads around a replacement), the cell drops the stale
+      // face instead of feeding the click a dead controller.
+      return () => launcherLayout.setFace(undefined);
+    });
+    return () => launcherLayout.setFace(undefined);
+  }, "multitask-dispatcher: shell launcher layout watch");
+
   ctx.slots.inject(SHELL_OVERLAY_SLOT, () => {
     const t = ctx.locale.bind(LOCALE_NAMESPACE);
     return ctx.slots.register(
       shellLauncherRegistration(),
-      createShellLauncher(t, () => openShellPage(ctx.layout, SHELL_PAGE_KEY)),
+      createShellLauncher(t, () => launcherLayout.open()),
     );
   });
 
@@ -428,8 +471,9 @@ export function applyClientModule(
  * registration" constraint).
  *
  * - The sidebar rides `bindShellSessionsFeed` (ticket 79's projection) over
- *   `ctx.sessions`; without the sessions service the store stays empty and
- *   the shell renders its honest empty copy — the mount never blocks.
+ *   `ctx.sessions` — a DECLARED read (ticket 84), so it cannot throw; an
+ *   absent face (offline fakes) leaves the store empty and the shell renders
+ *   its honest empty copy — the mount never blocks.
  * - Row selection re-routes through the binding's guarded `open`, which
  *   rides the host's `sessions.open(id)` verb after the store accepted the
  *   row (unknown ids are refused on both sides).
@@ -469,9 +513,13 @@ export function mountShellPage(
   let binding: ShellFeedBinding | undefined;
 
   // Feed binding (ticket 79's projection, wired at THIS composition point —
-  // the ticket-79 comment's "ticket 78's registration"). The `onOpen` hook
-  // rides the host's selection verb; optional chaining keeps a runtime
-  // without `open` degrading to store-only selection.
+  // the ticket-79 comment's "ticket 78's registration"). `sessions` is
+  // DECLARED in the module inject (ticket 84 — an undeclared read throws on
+  // the real host), so this guard reads only the face's VALUE: `undefined`
+  // means the face is absent (offline fakes) and the mount degrades to an
+  // empty store. The `onOpen` hook rides the host's selection verb; optional
+  // chaining keeps a runtime without `open` degrading to store-only
+  // selection.
   ctx.effect(() => {
     if (ctx.sessions === undefined) return () => {};
     const bound = bindShellSessionsFeed(store, ctx.sessions, {
@@ -483,8 +531,9 @@ export function mountShellPage(
 
   // Conversation window binding (ticket 80, Finding 7): the SELECTED
   // session's event window feeds the conversation store; the window opens
-  // because the selection above stages the session via `open`. Without the
-  // binding face the pane degrades to honest unavailability — never a
+  // because the selection above stages the session via `open`. `sessions` is
+  // a declared read (ticket 84); `undefined` here is the offline absence of
+  // the face, and the pane degrades to honest unavailability — never a
   // fabricated transcript.
   ctx.effect(() => {
     if (ctx.sessions === undefined) return () => {};

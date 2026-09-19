@@ -26,6 +26,10 @@ import {
 } from "../src/client/overlay.js";
 import { CLIENT_MODULE_ID, wrapClientBundle } from "../src/client/wrapper.js";
 import { buildClient } from "../scripts/build-client.js";
+import {
+  createShellLauncherLayout,
+  SHELL_PAGE_KEY,
+} from "../src/client/shell-mount.js";
 
 /**
  * Fake the client face the way the shipped Cordis runtime behaves:
@@ -109,6 +113,85 @@ function createClientCtx() {
   return ctx as typeof ctx & ClientContext & { runFiberTeardown(): void };
 }
 
+/** The service faces the host guards with the inject requirement (ticket 84). */
+const CLIENT_SERVICE_FACES = new Set([
+  "slots",
+  "locale",
+  "sessions",
+  "remote",
+  "conversation",
+  "layout",
+  "settingsScope",
+]);
+
+/**
+ * The scaffold fake under the REAL host guard semantics (ticket 84): the
+ * module context is a proxy that throws `cannot get property "X" without
+ * inject` when a plugin reads a service property outside its declared
+ * inject list (cordis `src/reflect.ts:144`; declared reads resolve through
+ * the fiber's inject snapshot, `fiber.ts:647`), and `ctx.inject([...], cb)`
+ * runs the callback with a CHILD context whose listed services are declared
+ * (cordis `registry.ts:300-302` — a child plugin fiber; a disposer the
+ * callback returns is collected as that fiber's teardown). `providers`
+ * stands in for the shipped services; a declared face with no provider
+ * reads `undefined`, exactly like an optional structural face offline.
+ */
+function createStrictHostCtx(providers: Record<string, unknown> = {}) {
+  const base = createClientCtx();
+  const declared = new Set<string>([...clientInject]);
+  const injectRequests: Array<readonly string[]> = [];
+  const injectDisposers: Array<() => void> = [];
+  const guard = (
+    target: Record<string, unknown>,
+    allowed: Set<string>,
+  ): Record<string, unknown> =>
+    new Proxy(target, {
+      get(target, prop, receiver) {
+        if (
+          typeof prop === "string" &&
+          CLIENT_SERVICE_FACES.has(prop) &&
+          !allowed.has(prop)
+        ) {
+          throw new Error(`cannot get property "${prop}" without inject`);
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+  const moduleAllowed = new Set(declared);
+  for (const name of declared) {
+    // Overlay ONLY the faces a provider stands in for; the fake's own
+    // slots/locale machinery must survive.
+    if (providers[name] !== undefined) {
+      (base as Record<string, unknown>)[name] = providers[name];
+    }
+  }
+  (base as Record<string, unknown>).inject = (
+    services: readonly string[],
+    cb: (child: unknown) => unknown,
+  ) => {
+    injectRequests.push([...services]);
+    const returned = cb(
+      guard(
+        { ...providers },
+        new Set<string>([...declared, ...services]),
+      ),
+    );
+    if (typeof returned === "function") injectDisposers.push(returned);
+    return {};
+  };
+  const ctx = guard(
+    base as unknown as Record<string, unknown>,
+    moduleAllowed,
+  ) as unknown as typeof base & { injectRequests: Array<readonly string[]> };
+  const baseTeardown = base.runFiberTeardown.bind(base);
+  (ctx as { runFiberTeardown(): void }).runFiberTeardown = () => {
+    baseTeardown();
+    for (const dispose of injectDisposers.reverse()) dispose();
+  };
+  ctx.injectRequests = injectRequests;
+  return ctx;
+}
+
 describe("client face scaffold — package declaration (Finding 4)", () => {
   const pkg = JSON.parse(
     readFileSync(new URL("../package.json", import.meta.url), "utf8"),
@@ -137,11 +220,13 @@ describe("client face scaffold — package declaration (Finding 4)", () => {
   });
 
   it("declares dsh.client.inject after the shipped idiom; no immediately flag (ticket 34)", () => {
-    // Boot-graph edges to exactly the client packages whose services the
-    // module's Cordis-level inject (["slots", "locale"]) binds at boot:
-    // slots ← dsh-client-ui-renderer, locale ← dsh-client-locale. Without
-    // these edges nothing orders our row after its service providers and the
-    // factory stays registered-but-dormant (dsh-client-modules arriveGraphRow).
+    // Boot-graph edges ordering our bundle after its service providers'
+    // bundles (dsh-client-modules `arriveGraphRow`). NOTE (ticket 84): this
+    // manifest list orders BUNDLE ARRIVAL only — it does not authorize
+    // service reads. The service-level declaration is the module's exported
+    // Cordis `inject` array (asserted below); `slots` ← renderer and
+    // `locale` ← locale remain the only bundles our factory's require graph
+    // needs edges for.
     assert.deepEqual(pkg.dsh?.client?.inject, [
       "@deepseek-ai/dsh-client-ui-renderer",
       "@deepseek-ai/dsh-client-locale",
@@ -190,8 +275,25 @@ describe("client face scaffold — shell.overlay entry builder (Finding 5, desig
     }
   });
 
-  it("binds the client services via the Cordis-level inject list", () => {
-    assert.deepEqual([...clientInject], ["slots", "locale"]);
+  it("declares every service face the module reads (ticket 84)", () => {
+    // The context proxy throws `cannot get property "X" without inject` on
+    // any service property the module's inject list does not declare, at
+    // read time, wherever the read happens (live pass 2's launcher kill).
+    // Declared: slots ← ui-renderer, locale ← dsh-client-locale, sessions ←
+    // dsh-client-ui-session (the shipped provider itself exports
+    // `inject = ["sessions", "slots"]`), remote ← dsh-api-gateway,
+    // conversation ← dsh-client-ui-conversation. `layout` and
+    // `settingsScope` are deliberately NOT declared — genuinely optional
+    // faces reached through the runtime `ctx.inject([...])` wrapper instead
+    // (tickets 46/84); a hard declaration would hold the module PENDING
+    // when they are absent.
+    assert.deepEqual([...clientInject], [
+      "slots",
+      "locale",
+      "sessions",
+      "remote",
+      "conversation",
+    ]);
   });
 });
 
@@ -400,6 +502,48 @@ describe("client face scaffold — apply over fake client seams", () => {
     assert.equal(ctx.injects.length, 5);
     assert.equal(overlayInject(ctx).entries.length, 1);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
+  });
+});
+
+describe("client face scaffold — host inject guard semantics (ticket 84)", () => {
+  it("applies cleanly when undeclared service reads throw like the real host", () => {
+    // The exact live-pass-2 regression, modeled offline: the pre-84
+    // composition read `ctx.sessions`/`ctx.layout` bare, and the host's
+    // context proxy threw `cannot get property "…" without inject`. Over a
+    // context that throws the same way, the applied module must not touch
+    // any face outside its declared inject list.
+    const ctx = createStrictHostCtx();
+    assert.doesNotThrow(() => apply(ctx));
+    // The optional faces were requested through the runtime inject wrapper
+    // (settings watch first, launcher layout watch second) — never a bare
+    // read, which the proxy would have thrown.
+    assert.deepEqual(ctx.injectRequests, [["settingsScope"], ["layout"]]);
+  });
+
+  it("declared faces resolve and undeclared faces throw with the host's message", () => {
+    const sessions = { list: { getSnapshot: () => ({}) }, scope: () => undefined };
+    const ctx = createStrictHostCtx({ sessions });
+    // Declared face: the module-context read resolves to the provider.
+    assert.equal(ctx.sessions, sessions);
+    // Undeclared face: the host's exact guard message (cordis reflect.ts:144).
+    assert.throws(
+      () => (ctx as unknown as { layout: unknown }).layout,
+      { message: 'cannot get property "layout" without inject' },
+    );
+  });
+
+  it("the launcher click rides the layout cell to the honest outcomes", () => {
+    // Pure cell behind the click (shell-mount): absent face → `no-layout`;
+    // the wrapper-delivered face → `opened` with OUR page key; teardown
+    // (face dropped) → `no-layout` again. Never a throw.
+    const launcherLayout = createShellLauncherLayout(SHELL_PAGE_KEY);
+    assert.deepEqual(launcherLayout.open(), { kind: "no-layout" });
+    const calls: string[] = [];
+    launcherLayout.setFace({ selectPanel: (id) => void calls.push(id) });
+    assert.deepEqual(launcherLayout.open(), { kind: "opened" });
+    assert.deepEqual(calls, [SHELL_PAGE_KEY]);
+    launcherLayout.setFace(undefined);
+    assert.deepEqual(launcherLayout.open(), { kind: "no-layout" });
   });
 });
 

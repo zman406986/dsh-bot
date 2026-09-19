@@ -39,7 +39,10 @@ import {
   type CommandResultLike,
 } from "../src/adapter/index.js";
 import { ROSTER_SETTINGS_KEY } from "../src/core/roster-snapshot.js";
-import { apply as applyDispatcherClient } from "../src/client/index.js";
+import {
+  apply as applyDispatcherClient,
+  inject as clientInject,
+} from "../src/client/index.js";
 import type { ClientContext } from "../src/client/context.js";
 import {
   LOCALE_NAMESPACE,
@@ -473,7 +476,33 @@ function createClientCtx() {
       injectControllers.length = 0;
     },
   };
-  return ctx as typeof ctx & ClientContext & {
+  // Ticket 84: the fake models the host's inject guard — a plugin reading a
+  // service property outside its declared inject list throws the context
+  // proxy's `cannot get property "X" without inject`. Both client faces
+  // exercised here (the dispatcher's and the foreign helper's) must read
+  // only declared faces.
+  const declared = new Set<string>([...clientInject]);
+  const serviceFaces = new Set([
+    "slots",
+    "locale",
+    "sessions",
+    "remote",
+    "conversation",
+    "layout",
+    "settingsScope",
+  ]);
+  return new Proxy(ctx as unknown as Record<string, unknown>, {
+    get(target, prop, receiver) {
+      if (
+        typeof prop === "string" &&
+        serviceFaces.has(prop) &&
+        !declared.has(prop)
+      ) {
+        throw new Error(`cannot get property "${prop}" without inject`);
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as typeof ctx & ClientContext & {
     locales: Map<string, unknown>;
     injects: Array<{
       parent: string;

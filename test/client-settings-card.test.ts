@@ -291,8 +291,10 @@ describe("settings card — registration is the pairing contract (ticket 47)", (
     apply(ctx);
     // The roster watch and the card are two readers of one bound scope; a
     // second bind would be a second revision view of the same document.
+    // (Ticket 84 adds the launcher's layout watch as the other runtime
+    // request — `layout`, not a second settings channel.)
     assert.deepEqual(ctx.boundNamespaces, [LOCALE_NAMESPACE]);
-    assert.deepEqual(ctx.injectRequests, [["settingsScope"]]);
+    assert.deepEqual(ctx.injectRequests, [["settingsScope"], ["layout"]]);
   });
 
   it("every card copy key exists in both faces, and the dictionaries stay parallel", () => {

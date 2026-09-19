@@ -134,9 +134,17 @@ export interface ClientSettingsScopeBinderLike {
   bind(spec: { readonly namespace: string }): ClientSettingsScopeLike;
 }
 
-/** Services handed to an `inject` callback child context. */
+/**
+ * Services handed to an `inject` callback child context. Inside the callback
+ * the requested faces are DECLARED on the child, so property reads resolve
+ * instead of throwing the host's `cannot get property "X" without inject`
+ * (ticket 84). The callback may return a disposer — the host collects it as
+ * the wrapper fiber's teardown (run on service unload/replacement).
+ */
 export interface ClientInjectedServices {
   settingsScope?: ClientSettingsScopeBinderLike;
+  /** The ui-layout page controller, when the wrapper requested it (ticket 84). */
+  layout?: ClientLayoutLike;
 }
 
 /**
@@ -272,13 +280,17 @@ export interface ClientLayoutLike {
 }
 
 /**
- * The narrow client context this scaffold's `apply` needs. The three action
- * services are OPTIONAL structural faces: they are always present in the
- * shipped web composition (connection/composer core), are read lazily at
- * send/click time (never declared as boot-time binds — ADR-0014's smallest-
- * set rule; same runtime-dynamic idiom as the settings watch), and a
- * runtime without them degrades to honest `no-channel`/copy-fallback UX
- * instead of blocking module materialization.
+ * The narrow client context this scaffold's `apply` needs. Ticket 84
+ * corrected the access contract: the host's context proxy THROWS on any
+ * service property the module's Cordis inject list does not declare
+ * (`cannot get property "X" without inject`), wherever the read happens —
+ * eager or inside a lazy closure. `slots`, `locale`, `sessions`, `remote`,
+ * and `conversation` are therefore DECLARED in `src/client/index.ts`'s
+ * `inject` export; they stay optional in this STRUCTURAL type only, so
+ * offline fakes can omit them and the honest-degrade branches stay
+ * exercisable. `layout` is wrapper-only: a genuinely optional face reached
+ * through the runtime `ctx.inject([...])` idiom (ticket 84), never a bare
+ * read on this context.
  */
 export interface ClientContext extends ClientEffectContext {
   slots: SlotsServiceLike;
@@ -289,9 +301,10 @@ export interface ClientContext extends ClientEffectContext {
   conversation?: ClientConversationLike;
   /**
    * The ui-layout page controller (ticket 78). Optional structural face,
-   * read lazily at click time (never a boot-time bind — ADR-0014's
-   * smallest-set rule): a runtime without it leaves the launcher degrading
-   * to an honest no-open instead of blocking module materialization.
+   * delivered through the runtime `ctx.inject(["layout"], …)` wrapper into
+   * the launcher's cell (ticket 84 — a bare read throws on the real host,
+   * and a hard inject would block module materialization): a runtime
+   * without it leaves the launcher degrading to an honest no-open.
    */
   layout?: ClientLayoutLike;
 }

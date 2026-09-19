@@ -942,8 +942,12 @@ describe("roster panel — apply() wires the fallback data path and the overlay 
     // (vendor registry.ts:300-302), so a wrong name means the callback never
     // runs — exactly the live defect. The browser provides `settingsScope`
     // (dsh-client-ui-settings `lib/types/client/index.d.ts:2-3`); the client
-    // has no `settings` service at all.
-    assert.deepEqual(ctx.injectRequests, [["settingsScope"]]);
+    // has no `settings` service at all. Ticket 84 adds the launcher's layout
+    // watch as the second wrapper-only request.
+    assert.deepEqual(ctx.injectRequests, [
+      ["settingsScope"],
+      ["layout"],
+    ]);
     for (const requested of ctx.injectRequests) {
       assert.ok(!requested.includes("settings"));
     }
@@ -1024,7 +1028,18 @@ describe("roster panel — apply() wires the fallback data path and the overlay 
 });
 
 describe("roster panel — module-level Cordis inject list", () => {
-  it("binds slots and locale; the settings scope stays a runtime-optional inject", () => {
-    assert.deepEqual([...clientInject], ["slots", "locale"]);
+  it("declares every read face; the optional ones stay runtime injects (tickets 46 + 84)", () => {
+    // The context proxy throws on any undeclared service-property read
+    // (ticket 84): the always-shipped faces the module touches are all
+    // declared here. `settingsScope` and `layout` stay runtime-optional
+    // injects — a hard declaration would hold the module PENDING without
+    // them (ticket 46's lesson, applied to the launcher's layout face).
+    assert.deepEqual([...clientInject], [
+      "slots",
+      "locale",
+      "sessions",
+      "remote",
+      "conversation",
+    ]);
   });
 });

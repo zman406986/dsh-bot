@@ -571,7 +571,9 @@ describe("onboarding shell seat + composition wiring (ticket 68)", () => {
     });
     const ctx = createOnboardingCtx(fake.scope);
     const onboarding = applyWith(ctx);
-    assert.deepEqual(ctx.injectRequests, [["settingsScope"]]);
+    // Ticket 84 adds the launcher's layout watch beside the settings watch:
+    // two runtime-inject requests, both wrapper-only (never bare reads).
+    assert.deepEqual(ctx.injectRequests, [["settingsScope"], ["layout"]]);
     assert.deepEqual(onboarding.getBox().seenValue, seen);
 
     // A live replacement re-feeds the input; the suppression decision flips.

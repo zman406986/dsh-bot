@@ -147,6 +147,41 @@ export function openShellPage(
 }
 
 /**
+ * The launcher's click-time layout access (ticket 84). `layout` is a
+ * genuinely OPTIONAL face — the chip must reach its honest `no-layout`
+ * outcome when absent, and a hard entry in the module's Cordis inject list
+ * would keep the whole module PENDING instead — but a bare `ctx.layout`
+ * property read THROWS on the real host (`cannot get property "layout"
+ * without inject`; that bare read is what killed the launcher click in live
+ * pass 2). The composition therefore watches the service through the runtime
+ * `ctx.inject([...])` wrapper (the settings-watch idiom, ticket 46) and
+ * feeds the delivered face into this cell; the click runs
+ * {@link openShellPage} over the cell's current value. Pure state + the pure
+ * open decision — no Cordis — so the click path is pinned offline (S8).
+ */
+export interface ShellLauncherLayout {
+  /** Replace the held face (`undefined` = absent, unloaded, or teardown). */
+  setFace(face: ClientLayoutLike | undefined): void;
+  /** The click: the page-open decision over the currently held face. */
+  open(): ShellPageOpenOutcome;
+}
+
+/** Build the launcher's layout cell over {@link openShellPage}. */
+export function createShellLauncherLayout(
+  pageKey: string,
+): ShellLauncherLayout {
+  let face: ClientLayoutLike | undefined;
+  return {
+    setFace(next: ClientLayoutLike | undefined) {
+      face = next;
+    },
+    open() {
+      return openShellPage(face, pageKey);
+    },
+  };
+}
+
+/**
  * The `root` single slot (dsh-owned; occupied by the shipped AppFrame). Its
  * contract note says "DO NOT register here" — coexistence etiquette for
  * add-on plugins that ADR-0020 deliberately retires for the wrapper shell at
