@@ -39,6 +39,7 @@ export {
 export {
   createDispatchApprovalSeam,
   DISPATCH_APPROVAL_TOOL_NAME,
+  type DispatchApprovalFn,
   type DispatchApprovalSeamOptions,
   type HostApprovalServiceLike,
 } from "./dispatch-approval.js";

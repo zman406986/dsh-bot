@@ -25,6 +25,7 @@ import {
   registerDispatcherTools,
   resolveExecSessionId,
   RESTART_DEGRADED_NOTICE,
+  type DispatchApprovalFn,
   secretStoredAccessNotice,
   type AccessPromptPump,
   type AdapterContext,
@@ -108,6 +109,36 @@ type CordisContext = AdapterContext &
   SettingsInjectContext & {
     effect: (execute: () => unknown, label?: string) => unknown;
   };
+
+/**
+ * Ticket 69 (L3 offline half): the dispatch approval seam's live face as
+ * THIS plugin wires it — `ctx.approval.request` (`@deepseek-ai/dsh-user-approval`,
+ * adapter notes :220/:390) scoped to the activated dispatcher session's own
+ * Agent (`host.parentAgentOf(sessionId)`; a UI answerer only answers for
+ * agents it owns — the service's routing rule). Factored as an exported
+ * builder so OFFLINE tests can drive the plugin's OWN construction chained
+ * into the chunk-A spawn gate instead of a hand-built lookalike: the
+ * shipped posture is EMPTY, so the plugin-level gate never fires without a
+ * posture row, and no seeder ships (Q1 ruling / U-D) — this function is the
+ * regression-visible surface for the wiring. The seam degrades every
+ * failure (service absent, agent gone, throw, rogue outcome) to
+ * `unavailable`; the chunk-A spawn gate refuses on anything but
+ * `allowed-once`, so a gated dispatch with no live answerer refuses
+ * honestly and the dispatcher re-plans — it cannot wedge the turn (design
+ * §6 Q2's offline half). Whether the shipped client approval composer still
+ * answers under the wrapper's root frame stays the LIVE lane's verification
+ * (L3).
+ */
+export function dispatchApprovalSeamFor(
+  ctx: Pick<AdapterContext, "approval">,
+  host: Pick<CordisDshHost, "parentAgentOf">,
+  sessionId: string,
+): DispatchApprovalFn {
+  return createDispatchApprovalSeam({
+    getApproval: () => ctx.approval,
+    getAgent: () => host.parentAgentOf(sessionId),
+  });
+}
 
 /**
  * Compose the wake follow-up body: drain the ready wake (reconcile runs),
@@ -480,19 +511,10 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       // verdict — visibility only, no watchdog, no polling.
       lastActivityAtMs: (workerId: string) => host.lastActivityAtMs(workerId),
       // Ticket 69 (L3 offline half): the dispatch approval seam's live
-      // face — `ctx.approval.request` (`@deepseek-ai/dsh-user-approval`,
-      // adapter notes :220/:390) scoped to THIS session's activated Agent.
-      // The seam degrades every failure (service absent, agent gone,
-      // throw, rogue outcome) to `unavailable`; the chunk-A spawn gate
-      // refuses on anything but `allowed-once`, so a gated dispatch with
-      // no live answerer refuses honestly and the dispatcher re-plans —
-      // it cannot wedge the turn (design §6 Q2's offline half). Whether
-      // the shipped client approval composer still answers under the
-      // wrapper's root frame stays the LIVE lane's verification (L3).
-      requestDispatchApproval: createDispatchApprovalSeam({
-        getApproval: () => ctx.approval,
-        getAgent: () => host.parentAgentOf(sessionId),
-      }),
+      // face, built by `dispatchApprovalSeamFor` over the injected
+      // `ctx.approval` and THIS session's activated Agent (its doc comment
+      // carries the contract and the L3 remainder).
+      requestDispatchApproval: dispatchApprovalSeamFor(ctx, host, sessionId),
     };
     // ADR-0019: register through the activated agent's own scoped context
     // (`agent.ctx.tools` — the host's per-agent scope seam). Agents without
