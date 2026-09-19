@@ -158,6 +158,15 @@ a real browser — post-cutover (the flow renders on the staging `main` page tod
 `root` frame after; the seat itself is cutover-invariant). 2026-09-19: left open per the
 triage brief; not resolvable offline.
 
+### 2026-09-19 — live pass 3: AC 5 still open — the cutover aborts the client before any UI renders (ticket 85)
+
+The pass booted HEAD `c437ee8` (onboarding code included) against a real `multitask`
+profile, but the 78 cutover's no-priority `root` registration throws on the real host and
+the whole loader entry fails: the page shows the host's fail-loud screen — no shell, no
+no-selection seat, no onboarding pane, and no settings surface to walk
+(`C:\Users\TZhen\Desktop\dsh-live-pass3-2026-09-19\`, `shots/01-boot-blank-or-not.png`).
+Zero LLM traffic. AC 5 remains with the live lane once 85 lands.
+
 **Hazards for the live-pass / cutover agents:**
 - The `onboarding` seen key is an extra-schema field written CLIENT-side through
   `scope.set` (the roster mirror keys are written host-side). If the live Host rejects

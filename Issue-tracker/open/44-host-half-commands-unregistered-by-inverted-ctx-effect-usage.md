@@ -227,6 +227,17 @@ honesty; (3) NEW defect found on this boot, unrelated to this ticket's fix: the 
 launcher chip cannot open the `main` page (uninjected `ctx.layout`/`ctx.sessions` reads
 throw) — filed as ticket 84.
 
+### 2026-09-19 — live pass 3: AC 3 not attempted — the 78 cutover aborts the client boot (ticket 85); composer interception is untestable without a composer
+
+The pass booted HEAD `c437ee8` on a real `multitask` profile; the client fails loud at the
+no-priority `root` registration (fail-loud screen: no composer, no shell, no stock app —
+`C:\Users\TZhen\Desktop\dsh-live-pass3-2026-09-19\`, ticket 85). AC 3's first clause
+("/dispatcher-start intercepts composer input") cannot be observed, and per the
+no-invented-seam rule the flow was not driven through undocumented RPC paths. Zero LLM
+traffic (the one-flow budget is preserved for the next pass after 85 lands). Host-half
+health was not in question: the server booted clean with no plugin errors in
+`server.log`; nothing in this defect touches the 44 fix. ACs unchanged.
+
 ### 2026-09-19 — one-line note
 
 Mooted by 78 cutover (a44084a): capsule retired.

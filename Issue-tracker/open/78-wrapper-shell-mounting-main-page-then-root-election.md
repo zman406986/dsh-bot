@@ -186,3 +186,27 @@ conversation/roster seats work inside the elected frame).
 - **Gates:** `npm test` 1016 pass / 0 fail (250 suites, both commits); `npm run typecheck`
   clean (both configs); `npm run build:client` green (client\index.js, 158,103 → 138,259
   bytes across the two commits).
+
+### 2026-09-19 — live pass 3 (`C:\Users\TZhen\Desktop\dsh-live-pass3-2026-09-19\`, outside the repo): the cutover's live half FAILS — the `root` registration throws on the real host and the WHOLE loader entry aborts; NEW ticket 85; no live AC ticked
+
+Setup: HEAD `c437ee8` rebuilt in place (bundle 138,259 bytes — the post-cutover size, not
+the stale ~158 KB), throwaway `multitask` profile, insert row composed
+(`multitask-config-dump.yml:542`), host 0.1.5-rc.1, port 8876, WMI node-direct boot,
+timers armed at launch and verified in tasklist. Zero LLM traffic.
+
+- The page renders the host's FAIL-LOUD screen ("Failed to load plugins /
+  dsh-multitask-dispatcher / failed to apply loader entry …: single slot "root" already has
+  a registration at priority 0 (registered by Ba) — register at a different priority to
+  shadow it (lowest renders)") — `shots/01-boot-blank-or-not.png`, `driver-status-final.json`
+  (the session's ONLY page error; zero `without inject` errors — 84's inject declarations
+  worked; the throw happens LATER, at the slot registration).
+- Scope: no `[data-shell="dispatcher"]`, no shell faces, AND no stock app either (composer
+  count 0, nav count 0) — the entry throw kills the client boot before any election exists.
+  The boot graph row itself is correct (`served-html.html`).
+- Root cause + fix direction: **ticket 85** — `shellRootRegistration()` passes no priority;
+  the host single-slot register defaults to priority 0, colliding with the shipped
+  AppFrame's; the comment above's "the priority field is host-assigned" reading does not
+  hold live for the `root` single slot.
+- None of this ticket's live-lane clauses (frame swap visual, HMR reversal, fallback-on-
+  crash, onboarding/conversation/roster seats in the elected frame) could be observed —
+  the frame never mounts. ACs unchanged; the ticket stays `open/` on 85.

@@ -115,3 +115,12 @@ and `sessions` have no such wrapper.
     `[["settingsScope"], ["layout"]]` (roster-panel / settings-card / onboarding).
   - Gates: `npm test` 1014 pass / 0 fail (~122 s), `npm run typecheck` green,
     `npm run build:client` green (client/index.js 157,596 bytes).
+- **2026-09-19 (live pass 3, `C:\Users\TZhen\Desktop\dsh-live-pass3-2026-09-19\`)** — this
+  ticket's fix is CONFIRMED live in the narrow sense: the session's only page error is the
+  root-slot registration throw (ticket 85); **zero `cannot get property … without inject`
+  errors** — the declared `sessions`/`remote`/`conversation` reads and the wrapped
+  `layout` watch all passed the real host's context semantics, and the module factory ran
+  to the registration step. The live AC (launcher click opens the shell page, zero
+  pageerrors) still FAILS: the 78 cutover's no-priority `root` registration aborts the
+  whole loader entry before any chip or page exists (fail-loud screen, no composer, no
+  stock app). Stays `open/` on 85; this ticket's own mechanism needs no further work.

@@ -233,3 +233,12 @@ one flow (dispatcher spawn round 33.5K tok/29 s; worker 53.2K tok/3 s; wake-sett
 stop round 18.9K), 124K tok total, 86% cache hit, no retries. The ONLY unproven words in AC 3
 are "mid-run steer reaches a running worker" — a timing matter for the next token-budgeted
 pass, not a known defect.
+
+### 2026-09-19 — live pass 3: AC 3 not attempted — the 78 cutover aborts the client boot (ticket 85), so the flow's vehicle (the composer) does not exist
+
+The pass booted HEAD `c437ee8` on a real `multitask` profile, but the client fails loud at
+the root-slot registration (fail-loud screen, no composer, no stock app —
+`C:\Users\TZhen\Desktop\dsh-live-pass3-2026-09-19\`). Per the no-invented-seam rule the
+flow was NOT driven through undocumented RPC paths: AC 3 requires the ticket-44 flow
+recorded there, whose first clause is composer interception — untestable this pass. Zero
+LLM traffic used (budget preserved for the next pass after 85 lands). ACs unchanged.
