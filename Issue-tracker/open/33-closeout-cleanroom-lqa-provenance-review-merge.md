@@ -877,3 +877,76 @@ HEAD `3826525`:**
 
 Gate 2's checkbox above is deliberately left UNTICKED — box-ticking belongs to the closure sweep
 (W17); this comment is the evidence record it can tick from.
+
+### 2026-09-20 — live pass 5, Session B-4 (W21, two composer sends = the cap, one task): 81 dispatch card LIVE-VERIFIED (FINDING 2 fix confirmed); W19 FINDING 1 fix confirmed at the model level (first live worker to call request_access); NEW FINDING 4: the parked ask is lost to worker settlement (69 L1/L2 + 30 stay blocked, now at the core); NEW FINDING 5: B-3's wedged turn PERSISTS across restart and eats sends
+
+Evidence root: `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-20\session-B4\` (README maps every
+artifact to the claim; per-command `.json` → `.out.json` pairs in `session-B4/driver/`; offline
+host-state reads in `session-B4/probes/`; screenshots in `session-B4/shots/`). Boot per the W9
+recipe on the throwaway `multitask` profile, port 8877, WMI-detached, HEAD `3826525`; gates
+before anything: typecheck clean, **1118/271/0**; rebuild + profile remove→re-add, and the W19
+markers confirmed in the SERVED copy pre-boot ("Asking for access" ×2 + `request_access` ×2 in
+`lib/worker/prompt.js`, `structuredPresentationMeta` in `lib/adapter/dispatcher-tools.js`,
+`dispatchApprovalSeamFor` ×3 in `lib/plugin.js`; `LIB_DIFF_EMPTY`). Kill timers armed at launch
+(30-min internal + 45-min WMI backstop + 20-min driver wrapper + 18-min self-exit); after
+driver-1's window closed the backstop was killed and re-armed fresh (net never absent). All
+cleared at teardown: all five lane pids gone, port 8877 no LISTENING line, zero chrome, profile
+document left clean (all three roster keys nulled — TWO sessions were activated in-memory —
+revision 9), stock `web` profile byte-identical (md5 AND mtimes).
+
+**Task budget: 2 sends (the cap)** — both recorded BEFORE sending in
+`session-B4/task-budget-w21.txt` (1 authorized + 1 retry under the pre-recorded
+transport-failure rule; the retry went to a DIFFERENT clean session). Driver-1 artifacts were
+wiped by driver-2's boot (driver `rmSync` at start) — re-emitted as `*.reconstructed.json` with
+verbatim payloads and honesty notes; the load-bearing wedge evidence was never at risk (offline
+reads).
+
+- **81 → LIVE-VERIFIED (the worker-dispatch card; W19 FINDING 2 fix works live).** After the
+  spawn settled, the dispatcher conversation rendered `[data-card-kind="worker-dispatch"]` with
+  `data-gating="ungated"` and `data-tool-call-id`, text "Live-lane probe B4 / 流
+  live-lane-b4-probe / 结果 2dbc148e-… / 审批门 ungated" (`w21-42-pollA`, `w21-44-final`,
+  `shots/w21-shot-final-dispatch-card.png`). B-2 saw zero cards from two settled spawns; tonight
+  the FIRST settled spawn produced the frozen card. `gated: true`/`approval-allowed` remains
+  NOT observable (needs the L3 posture lane; posture EMPTY per Q1) — unchanged.
+- **W19 FINDING 1 fix → MODEL HALF LIVE-VERIFIED.** Worker `2dbc148e` ("Live-lane probe B4") is
+  the FIRST live worker ever to call `request_access` (4 predecessors skipped it): one turn,
+  response "Access request sent: class `credential`, target `dsh-live-b4-probe-cred` (name only,
+  no value). Tool returned confirmat…" — call made exactly once, credential NAME only per the
+  contract, then the worker ended its turn (stop-and-wait; `openTurnStartSeq: null`,
+  `pendingCalls: {}`). Evidence: offline read of the host session projcache
+  (`session-B4/probes/w21-worker-2dbc148e-turnoutline.json`; the live page never shows worker
+  internals).
+- **FINDING 4 (new; blocks 69 L1/L2 + 30 at the core): the parked ask does not survive worker
+  settlement.** The tool returned success in 46 ms (park ack), the worker ended its turn per the
+  W19 contract, host settlement fired, and the core marked the worker `completed`+`delivered:true`
+  6 s after spawn (`multitask_dispatcher.json` marker `updatedAtMs` 1789849870070);
+  `pendingAsks: []` at every observable moment (revision 8); no card; no blocked marker; and
+  `/dispatcher-resolve 2dbc148e allow` → honest error "No pending access ask for 2dbc148e in this
+  chat." (`w21-43`). The offline composition pin parks a real ask and it stays pending — the
+  harness never fires the settlement notice the real host fires when the child's turn ends. The
+  W19 stop-and-wait contract and dsh settlement semantics conflict: **the relay's park never gets
+  a window.** Also recorded: the dispatcher's delivered narration says "B4 remains parked pending
+  your grant/deny" while core truth has no ask (`w21-44-final` convTail) — the user channel was
+  told an ask is pending when none is. Sharpens FINDING 3/Q2.
+- **69 L1 → NOT-TRIGGERED (transport halves split):** the resolve COMMAND half is live
+  (registered pre-input per the token guard; routes and refuses honestly on a stale worker —
+  `w21-43`), but the pending-card half never had an ask to render. **69 L2 → NOT-TRIGGERED**
+  (nothing ever waited: `blocked: null`, straight to completed). **30 → NOT-OBSERVABLE** (no ask
+  card ever rendered; the 340-char clamp bait was consumed by the park but no card ever showed
+  it; nothing on 30 contradicted). Both need FINDING 4 fixed first.
+- **FINDING 5 (new; B-3 inheritance; for W13): the wedged dispatcher turn PERSISTS across host
+  restart and silently eats sends.** First send went to session-cf5249cf ("Diagnostic probe",
+  the B-2/B-3 session): transport green (draft 835 → 0, outcome "sent", session file written),
+  but no turn ever ran — revision frozen at 1, transcript never rendered the message (even after
+  a seat re-open), network verified alive. Offline host-state read
+  (`session-B4/probes/w21-wedge-cf5249cf-turnboundary.json`): the session carries a persisted
+  OPEN TURN (`openTurnStartSeq: 415`, `lastTurn: 18`, `lastStepBoundary {kind:start, seq:427}` —
+  B-3's wedged pwsh call) and the message sits in the session inbox `next-turn` behind it.
+  Tonight's boot REBUILT that state from disk — W12's "the wedge died with the teardown"
+  assumption is FALSE. cf5249cf is the only session with an open turn (projcache sweep). No
+  wrapper interrupt surface, no host command settles it. **Session C must NOT activate
+  session-cf5249cf**; B-4 completed the whole flow on "Dispatcher start command"
+  (session-cd03250b-…, `openTurn: None`) after a fresh `/dispatcher-start` there.
+
+No AC box on 33, 69, 81, or 30 is ticked by this session; no ticket file moves. Dispositions
+belong to the W14 sweep with the evidence review.
