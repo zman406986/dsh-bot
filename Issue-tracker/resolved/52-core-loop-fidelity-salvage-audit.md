@@ -1,6 +1,6 @@
 # 52 — Core-loop fidelity salvage audit: what survives, what is scrapped, and which branch actually holds the faithful imitation
 
-**Status:** open
+**Status:** resolved
 **Type:** research
 **Labels:** ready-for-agent
 **Blocked by:** none — start immediately. (ADR-0017 is a draft, but this ticket is the audit that *informs* the human's sign-off; it does not depend on the sign-off landing first.)

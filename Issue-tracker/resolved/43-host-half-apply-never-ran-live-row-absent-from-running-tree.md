@@ -1,6 +1,6 @@
 # 43 — Host-half apply never ran live: plugin row absent from the RUNNING boot tree on both routes (config dump misread as running state)
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Blocked by:** none
 **Related:** 09 (deferred smoke — this ticket unblocks it), 33 (live pass), 34 (client half — its remaining ACs share the same re-pass)

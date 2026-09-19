@@ -1,6 +1,6 @@
 # 54 — Salvage classification of the tree, and the list of tests that encode a deviation
 
-**Status:** open
+**Status:** resolved
 **Type:** research
 **Labels:** ready-for-agent
 **Blocked by:** none — but the API rate limit that killed the first attempt resets **18:59 on 2026-09-18**; do not launch before then, or you will die the same way.
