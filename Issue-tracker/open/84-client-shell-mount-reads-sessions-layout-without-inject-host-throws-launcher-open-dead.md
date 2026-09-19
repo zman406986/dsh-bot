@@ -63,7 +63,7 @@ and `sessions` have no such wrapper.
 
 ## Acceptance criteria
 
-- [ ] (offline, gate) fakes throw on uninjected service reads; the mount path passes with the
+- [x] (offline, gate) fakes throw on uninjected service reads; the mount path passes with the
       declared/wrapped injects; `npm test`, `npm run typecheck`, `npm run build:client` green.
 - [ ] (live, ZERO LLM calls) clicking the launcher chip opens the shell `main` page
       (`[data-shell="dispatcher"]` present, sidebar + seat render), zero pageerrors, on a
@@ -75,3 +75,43 @@ and `sessions` have no such wrapper.
   comment, 2026-09-19) — the registration contracts are fine; only the service access dies.
 - Filed by the live-pass agent per the no-hot-patch rule; no product files were changed
   during the pass.
+
+## Comments
+
+- **2026-09-19 (agent, fix landed `154e7c7`)** — offline AC ticked; the live AC stays open
+  for live pass 3 (zero LLM calls). Mechanism CORRECTION vs the ticket's root-cause text,
+  established by reading the installed 0.1.5-rc.1 tree read-only:
+  - The enforcement is pure vendored-cordis: the context proxy get trap builds
+    `cannot get property "${prop}" without inject` (`@deepseek-ai/cordis/src/reflect.ts:144`),
+    enforces it on every plugin-fiber read (`reflect.ts:152` — only non-runtime contexts read
+    leniently), and resolves DECLARED services through the fiber's inject snapshot
+    (`reflect.ts:159`; `fiber.ts:614/647` — `store = {...this._store}`, filled only for
+    `Object.keys(this.inject)`). The declaration is the module's EXPORTED `inject` array:
+    `registry.ts:330` builds the fiber with `Inject.resolve(plugin.inject)`. Shipped idiom:
+    `dsh-client-ui-session/lib/client.js:314` exports `inject = ["sessions", "slots"]` — the
+    provider itself declares the service it reads property-style.
+  - `dsh.client.inject` in package.json is a PACKAGE list used ONLY for bundle-arrival
+    graph ordering (`dsh-client-modules/lib/index.js:145-153`; `lib/client.js:265-268` —
+    `arriveGraphRow`); it does NOT authorize service reads, so it was left unchanged.
+  - `ctx.inject([...], cb)` works undeclared because it is a mixin accessor over the
+    context's OWN `registry` property (`reflect.ts:221`; own props at `context.ts:74-83`) —
+    the same reason ticket 46's settings watch works live.
+- **2026-09-19 (agent, fix landed `154e7c7`)** — What changed, per service:
+  - DECLARED in the exported inject (hard, always-shipped, load-bearing): `sessions`,
+    `remote`, `conversation` (providers: ui-session; api-gateway `lib/client.js:1420`
+    `super(ctx, "remote")`; ui-conversation `lib/client.js:2857`
+    `super(ctx, "conversation")`). The `ctx.sessions === undefined` guards in
+    `mountShellPage` remain as offline-fake tolerance; on the host the read cannot throw.
+  - WRAPPER (genuinely optional — a hard inject would hold the module PENDING and kill the
+    honest `no-layout` outcome): `layout` is now watched via `ctx.inject(["layout"], cb)`
+    (the settings-watch idiom) into a `createShellLauncherLayout` cell
+    (`src/client/shell-mount.ts`); the click reads the cell, absence degrades to
+    `no-layout`, the wrapper's disposer drops the face on unload. `settingsScope` stays
+    wrapper-only as before.
+  - Fakes: scaffold + coexistence client fakes now throw on undeclared service reads
+    (`cannot get property "X" without inject`), and new tests prove apply() over that guard
+    touches no undeclared face — including with a layout fake sitting on the context
+    (shell-mount guard test). Runtime-inject request pins updated to
+    `[["settingsScope"], ["layout"]]` (roster-panel / settings-card / onboarding).
+  - Gates: `npm test` 1014 pass / 0 fail (~122 s), `npm run typecheck` green,
+    `npm run build:client` green (client/index.js 157,596 bytes).

@@ -132,3 +132,4 @@ profile, host 0.1.5-rc.1, commit `c56e69d` tree, client bundle 157,823 bytes).
 - Consequences for this ticket's checklist: the staging-mount AC stays ticked (registration
   contract + chip are real); the live visual confirmation of the three-pane `main` page and
   the cutover ACs remain open and now additionally await 84. No cutover ACs were touched.
+- **2026-09-19**: 84 landed (`154e7c7`) — shell page open unblocked for live pass 3.
