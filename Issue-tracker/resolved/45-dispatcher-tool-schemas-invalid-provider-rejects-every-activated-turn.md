@@ -1,8 +1,8 @@
 # 45 — Dispatcher tool schemas are invalid JSON Schema: the provider rejects EVERY dispatcher turn (`false is not of type "array"`), so no worker can ever spawn live
 
-**Status:** open
+**Status:** resolved (2026-09-19, live pass 4 — all three ACs green)
 **Labels:** ready-for-agent
-**Blocked by:** none for AC 1 (offline, green); live ACs 2–3 blocked by 83 (worker spawn refused by the host's depth check — discovered 2026-09-19, see comment)
+**Blocked by:** none
 **Related:** 44 (live pass evidence), 11 (dispatcher tools), 09/10 (spawn path this blocks), 33 (live close-out), 83 (the spawn-depth defect this pass exposed)
 
 ## Symptom (live, cited)
@@ -61,8 +61,16 @@ failure to the next tool.
       `/dispatcher-start` via `commands/execute`, one trivial spawn ask, worker appears. —
       **2026-09-19 live pass 2: both clauses proven (activation via composer interception AND
       RPC re-confirmed; spawn ask completed; worker appeared in `subagents/list`); see comment.**
-- [ ] (live, BURNS tokens — same single trivial flow per AGENTS.md) the ticket-44 AC 3 flow
+- [x] (live, BURNS tokens — same single trivial flow per AGENTS.md) the ticket-44 AC 3 flow
       (start → one trivial worker → one mid-run steer → stop) executes and is recorded there.
+      — **2026-09-19 live pass 4: the full flow executed (start ✓ / worker spawned,
+      delivered, completed ✓ / mid-run steer reached the running worker — its steered word
+      appears in the delivered reply ✓ / stop ✓ honest no-op); recorded in 44 and in the
+      comment below. Nuances recorded honestly: the steer COMMAND card refused on a
+      completion race while the enqueued content still reached the worker; the flow ran in
+      the abdicated stock frame because the shell's conversation seat crashed on selection
+      (new ticket 88) — the provider/schema behavior this ticket owns is unaffected by the
+      vehicle.**
 
 ## Notes
 
@@ -242,3 +250,32 @@ the root-slot registration (fail-loud screen, no composer, no stock app —
 flow was NOT driven through undocumented RPC paths: AC 3 requires the ticket-44 flow
 recorded there, whose first clause is composer interception — untestable this pass. Zero
 LLM traffic used (budget preserved for the next pass after 85 lands). ACs unchanged.
+
+### 2026-09-19 — live pass 4 (`C:\Users\TZhen\Desktop\dsh-live-pass4-2026-09-19\`, outside the repo): AC 3 TICKED — the full start → worker → mid-run steer → stop flow executed against the real host; ticket RESOLVED
+
+Setup: HEAD `8d0d572` rebuilt (client bundle 159,060 bytes), throwaway `multitask` profile
+(object-shaped insert row — see the pass README's recipe note), host 0.1.5-rc.1, port 8877,
+WMI node-direct, timers armed and verified. The 85 fix held: the shell booted as the whole
+client with zero pageerrors; the crash that then abdicated the shell to the stock frame
+(new ticket 88) is a UI render defect orthogonal to this ticket's schema fix — every
+dispatcher tool the provider validated this pass carries the fixed schema shape.
+
+Flow (ONE trivial flow, no retries; recorded verbatim in the artifacts):
+- `/dispatcher-start` via composer → intercepted, activation card rendered
+  (`activation-card-text.json`).
+- Trivial spawn ask → dispatcher round completed (policy injection, `todo_write`,
+  `spawn_worker` ACCEPTED — zero INVALID_REQUEST, third boot running the fix), worker
+  `8cfc55d0-…` ("20-second timed reply") seen `activity:"running"` via `subagents/list`
+  (`rpc-subagents-worker-running.json`), later `inactive`
+  (`rpc-subagents-worker-inactive.json`).
+- `/dispatcher-steer <workerId> …say the word ack` submitted mid-run: the command card
+  returned the honest completion-race refusal, but the steered content DELIVERED — the
+  worker's reply reads "done ack", a token that exists nowhere except the steer instruction
+  (`flow-tail-steer-doneack.json`). Recorded with both facts stated plainly.
+- Conversational stop → honest no-op ("nothing left to stop", `stop-tail-honest-noop.json`).
+
+LLM traffic: ~4 dispatcher rounds + 1 worker round ≈ 378K tok session-delta, 87-89% cache
+hit; the elevated count vs pass 2 is typing-truncation rounds (driver artifact), each a
+distinct flow leg — no rejected turn was retried. All three ACs of this ticket are now
+green live across passes 2 and 4; the schema defect is fixed and regression-pinned offline.
+**Resolved.**

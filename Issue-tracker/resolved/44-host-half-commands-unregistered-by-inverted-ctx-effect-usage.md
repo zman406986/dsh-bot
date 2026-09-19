@@ -1,6 +1,6 @@
 # 44 — Host-half commands vanish live: plugin passed registration disposers to `ctx.effect` as if it took cleanup callbacks (cordis runs `execute` immediately; nothing is collected for unload)
 
-**Status:** open
+**Status:** resolved (2026-09-19, live pass 4 — AC 3 clauses all exercised; see comment)
 **Labels:** ready-for-agent
 **Blocked by:** none
 **Related:** 43 (host apply now runs live — this is the delta it exposed), 33 (live pass), 09 (adapter wiring)
@@ -101,11 +101,13 @@ UNDONE at apply time, because our `ctx.effect(...)` calls invert the cordis effe
       visible in the Settings UI (插件配置)， and the client footer flag mirror reads a real
       value (no `unknown`). — **2026-09-19 live pass 2: every clause green on one boot; see
       comment.**
-- [ ] (live, BURNS tokens — last, separate pass, single trivial task per AGENTS.md)
+- [x] (live, BURNS tokens — last, separate pass, single trivial task per AGENTS.md)
       `/dispatcher-start` intercepts composer input (no plain-text leak) → activation flips
       dormant→activated → one trivial worker spawns, delivers, completes →
       `/dispatcher-steer` reaches it → stop → dormant. Owner: the follow-up live pass, not
-      the offline fix.
+      the offline fix. — **2026-09-19 live pass 4: every clause exercised; see the comment
+      in 45 and the pass-4 comment below. "→ dormant" has no deactivate path by design
+      (ticket 31) — same recorded caveat as live pass 2.**
 
 ## Verification
 
@@ -241,3 +243,27 @@ health was not in question: the server booted clean with no plugin errors in
 ### 2026-09-19 — one-line note
 
 Mooted by 78 cutover (a44084a): capsule retired.
+
+### 2026-09-19 — live pass 4 (`C:\Users\TZhen\Desktop\dsh-live-pass4-2026-09-19\`, outside the repo): AC 3 TICKED — every clause exercised on one boot; ticket RESOLVED
+
+Evidence and flow narrative live in 45's pass-4 comment (same boot, same flow; artifacts in
+`C:\Users\TZhen\Desktop\dsh-live-pass4-2026-09-19\`). Clause map for THIS ticket's AC 3:
+
+- **Intercepts composer input (no plain-text leak): ✓** — typed `/dispatcher-start` +
+  Enter rendered the "Dispatcher active in this chat. …" command card
+  (`activation-card-text.json`).
+- **dormant→activated: ✓** — fresh activation this boot (the session's prior activation did
+  not survive the restart; the card was the fresh-activation text, not "already active").
+- **One trivial worker spawns, delivers, completes: ✓** — worker `8cfc55d0-…` running →
+  inactive (`rpc-subagents-worker-*.json`); delivered reply "done ack" into the chat.
+- **`/dispatcher-steer` reaches it: ✓ (nuance stated)** — the command card refused on a
+  completion race, but the steered word ("ack") appears in the worker's DELIVERED reply —
+  the queue path delivered mid-run content; both facts recorded.
+- **stop: ✓** — honest no-op ("nothing left to stop", `stop-tail-honest-noop.json`).
+- **dormant: N/A by design** — no deactivate path (ticket 31); same caveat pass 2 recorded.
+
+Honesty note required by the record: the flow ran in the ABDICATED stock frame (the shell's
+conversation seat crashed on selection — new ticket 88), because 88 crashed the shell the
+moment a session opened. The command/composer path this ticket owns is host-level and
+unaffected; nothing in 88 touches the effect-contract fix verified here. With ACs 1-3 green
+across passes (2, 3, 4), **resolved**.
