@@ -107,10 +107,24 @@ classifier; ADR-0018 brings the area in scope.
 
 ### Live-only ACs (45/33 lane)
 
-- [ ] L1. Pending card renders inline in the wrapper conversation and resolves through
-      `Multitask.resolveAccess`. (2026-09-19: pending — live lane.)
-- [ ] L2. Blocked-marker-with-reason appears on the session row while a card waits.
-      (2026-09-19: pending — live lane.)
+- [x] L1. Pending card renders inline in the wrapper conversation and resolves through
+      `Multitask.resolveAccess`. (2026-09-19: pending — live lane. **TICKED 2026-09-20 (W14):
+      LIVE-VERIFIED, live pass 5 Session B-5** — card half: a pending `secret-ask` card rendered
+      inline with `data-status="pending"` + `data-request-id` (`session-B5/driver/w23-15-deepcard`,
+      `session-B5/shots/w23-shot-parked-secretask.png`); resolve half: a prefix-id resolve was
+      honestly refused while the ask was live (`w23-17`), then `/dispatcher-resolve <full-id>
+      allow` → "Answer routed…" (`w23-19`) → within one revision the ask left the relay, the card
+      left the feed, the parked call resolved
+      (`session-B5/probes/w23-worker-7c5db9ce-postresolve.json`), and the worker's reply named the
+      decision (`session-B5/probes/w23-worker-7c5db9ce-turns.json`). Record: ticket 33's B-5
+      comment (commit `69a708c`).)
+- [x] L2. Blocked-marker-with-reason appears on the session row while a card waits.
+      (2026-09-19: pending — live lane. **TICKED 2026-09-20 (W14): LIVE-VERIFIED, Session B-5** —
+      while parked, the roster row read `data-presence="needs-you"` with the blocked-with-reason
+      marker 「等待你的批准：使用凭据"dsh-live-b5-probe-cred"」 (class + target phrase), distinct
+      from the stale-window `unavailable` chip and the landed chips
+      (`session-B5/driver/w23-09` rows + screenshot). Record: ticket 33's B-5 comment
+      (`69a708c`).)
 - [ ] L3. Dispatch approval pauses and surfaces through the real `ctx.approval` waterfall.
       (2026-09-19: pending — live lane. The seam is deliberately NOT wired in
       `src/plugin.ts` yet: `requestDispatchApproval` is an injected dep that is absent
@@ -791,3 +805,29 @@ relay delivers the decision, the card leaves, AND the worker's pending tool call
 the settled ack, after which the decision message starts the worker's continuation turn. If the
 worker still settles early, capture the host-side tool-execution trace — that would mean the
 host force-resolves tool calls we could not observe offline; record, do not guess.
+
+### 2026-09-20 — W14 post-live bookkeeping: L1 + L2 ticked from Session B-5 evidence; L3/L4 stay unticked (BLOCKED-no-seeder); A7 left as recorded; Q1 unchanged (human-gated)
+
+Box sweep over the recorded live evidence (evidence-gated, ticket-32 precedent: a box is ticked
+only where a recorded artifact meets the box's own wording; the close/disposition call is W17's):
+
+- **L1 → ticked** (both halves, Session B-5; artifact names in the box above). The card and
+  resolve halves had been NOT-TRIGGERED in B-2/B-4 (no ask ever parked — FINDING 1, then
+  FINDING 4); W22's park fix (merge `c8849a7`) gave the parked ask its window and B-5 proved the
+  full round-trip live, zero wedging of the dispatcher turn.
+- **L2 → ticked** (Session B-5; the blocked-with-reason marker rode the same parked ask).
+- **L3 → NOT ticked — BLOCKED-no-seeder** (Session B-3 record on ticket 33, commit `f8035b9`):
+  no live path can insert a review-posture row (`reviewPosture.set` has zero src callers; the 9
+  host commands, the settings document, and the adapter carry zero posture exposure); no seeder
+  shipped per Q1/U-D. L3's waterfall FACE answered NEGATIVE en route (the host approval composer
+  ships but does not answer under the wrapper root frame; FINDING 3). Stays pending on a
+  human-decided posture act (Q1's recorded reversal path).
+- **L4 → NOT ticked — BLOCKED-no-seeder** (same B-3 record; posture auto-answer needs a non-empty
+  posture, which no live path can create).
+- **A7 → left as recorded** (handed to chunk B; the projection tests landed with the module — B1's
+  evidence, `test/approval-cards.test.ts` — and rest on offline pins; not a live claim, not
+  re-ticked by this sweep).
+- **Q1 → unchanged** (ruled 2026-09-19, agent, subject to human reversal; the human signature
+  remains outstanding — untouched here).
+
+No file moved; per the PLAN's end-state this ticket stays open regardless of live outcomes.
