@@ -1,6 +1,6 @@
 # 86 — Fake-vs-host client contract gaps (the 44/45/84/85 class): a hygiene pass aligning offline fakes with VERIFIED host contracts
 
-**Status:** open
+**Status:** resolved (2026-09-19, independent verification — all three ACs hold)
 **Labels:** needs-triage
 **Blocked by:** none
 **Related:** 44, 45, 84, 85 (the four known instances), 33 (live close-out lane), 78 (the cutover that surfaced 85)
@@ -157,3 +157,69 @@ offline:
   `test/client-face-scaffold.test.ts` went 16 → 21 (both counts observed by running that
   file before and after the change).
 - `npm run build:client` → green, `client/index.js` **161,087 bytes**.
+
+- **2026-09-19 (independent verifier — separate agent, no part in writing the
+  pass above) — RESOLVED. All three ACs hold. Method: read the merged tree
+  (`main` @ `61ddf61`) and the installed host tree read-only; nothing below
+  is copied from the executor's comment.**
+  - **AC1 — holds.** Sampled 14 of the 24 rows and re-read every citation
+    from the installed tree (`C:\Users\TZhen\.dsh\profiles\node_modules\@deepseek-ai\`,
+    0.1.5-rc.1): rows 1-4 (slot-register fakes + minified `SlotCore.register`
+    in `dsh-web-frontend/dist/assets/index-BKQ_L1z6.js`, which really does
+    carry `a=t.priority??0`, the per-kind `entries.find(...)`+throw, and the
+    insert sort; winner rule at `dsh-client-ui-renderer/lib/types/client/registry.d.ts:156-164`),
+    8 (`dsh-client-ui-renderer/lib/client.js:991-1074` — the declaration wait,
+    `subscribeDeclaration` + `ctx.effect(callback, …)`), 9 (cordis
+    `src/reflect.ts:144` / `lib/index.js:675` "cannot get property … without
+    inject"; `src/registry.ts:300-302` inject-as-child-fiber), 11
+    (`dsh-client-locale/lib/client.js:1256-1282` duplicate-locale throw +
+    per-entry disposer), 12 (`dsh-api-session-controller/lib/client.js:3087`
+    provide / `:3093` open / `:3254` scope; `dsh-client-ui-session/lib/client.js:314`
+    inject list), 14 (`dsh-user-approval/lib/index.js:131-145`, throw at `:133`),
+    16 (`dsh-commands/lib/index.js:82`), 17 (`dsh-tools/lib/index.js:2538`),
+    19 (`dsh-settings/lib/index.js:283`), 21 (`src/core/fake-host.ts` real),
+    22 (`test/adapter-cordis-dsh-host.test.ts:42-140` real). Every cited fake
+    file exists and every cited host file:line resolved to the claimed
+    content. No row failed.
+  - **AC2 — holds.** Read the aligned fakes, not the claims: all five
+    previously-unguarded suites carry the rule in code —
+    `client-face-scaffold.test.ts:80-241` (`priority ?? 0`, per-kind collision
+    throw, ascending insert sort, per-entry disposer),
+    `client-toolviews.test.ts:136-222` + helper `:39-134`,
+    `client-settings-card.test.ts:155-257` + helper `:259-343`,
+    `client-roster-panel.test.ts:142-261` + helper `:262-346`,
+    `client-onboarding.test.ts:686-755` + helper `:52-137`. The assertions are
+    real, not weakened: `client-face-scaffold.test.ts:616-722` adds 5 pins with
+    three verbatim host-message `assert.throws` (no-priority `root` collision,
+    keyed same-key collision, additive different key) — that file now runs
+    **21 tests** (observed), the 16 → 21 claim holds. The other four suites'
+    re-apply assertions (`client-toolviews.test.ts:739`,
+    `client-settings-card.test.ts:756`, `client-roster-panel.test.ts:1112`,
+    `client-onboarding.test.ts:866`) sit over a collision-modeling fake, so a
+    broken teardown would throw — the comments state exactly that and no
+    assertion was downgraded. Message-text correction verified: no stale
+    `"already has a registration for key/with id"` string remains in `test/`;
+    `client-shell-mount.test.ts:189-195` and `coexistence.test.ts:503-509`
+    carry the corrected host wording. The spun-out ticket is real:
+    `Issue-tracker/open/91-host-registry-duplicate-throws-unmodeled-in-fakes.md`
+    exists, is `ready-for-agent`, and cites the same two host lines.
+  - **AC3 — holds, re-run by the verifier on the merged tree** (`main` @
+    `61ddf61`, `npm` on this checkout): `npm run typecheck` → clean, exit 0,
+    both configs; `npm test` → **1051 tests / 258 suites, 1051 pass, 0 fail**
+    (the +2 over the executor's 1049 is the wt/69l1 merge, not a regression);
+    `npm run build:client` → green, `client/index.js` **161,214 bytes**
+    (script-reported `bundle.length`; 162,494 on disk, the delta is
+    multi-byte UTF-8).
+  - **Non-blocking observation (does not affect any AC):** row 1 quotes the
+    host insert sort as `sort((m,g)=>(m.options.priority??0)-(g.options.priority??0))`;
+    the minified source uses exactly that for single/keyed but the `list`
+    branch adds a secondary `(m.options.order??0)-(g.options.order??0)`
+    tiebreak. The fakes model the priority term only; row 23 already records
+    that the kind/catalog half is not modeled. No list-kind slot survives the
+    ticket-78 cutover in our registration set, so no offline test is
+    misleading because of it.
+  - **Renumber sanity:** `Issue-tracker/open/91-…` exists; ticket numbers
+    across `open/` + `resolved/` have no duplicates; `grep -rn
+    "90-host-registry" --include=*.md .` returns nothing (0 hits).
+  - Closing comment appended by the verifier, then the file moved to
+    `Issue-tracker/resolved/` under the same filename.

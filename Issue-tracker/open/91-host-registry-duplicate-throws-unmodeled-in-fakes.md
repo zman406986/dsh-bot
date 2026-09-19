@@ -72,7 +72,7 @@ fake's header comment.
 ## Notes
 
 - Filed by the ticket-86 agent (2026-09-19) from the AC1 inventory; the
-  inventory rows are `Issue-tracker/open/86-fake-vs-host-client-contract-gaps-44-45-84-85-class.md`
+  inventory rows are `Issue-tracker/resolved/86-fake-vs-host-client-contract-gaps-44-45-84-85-class.md`
   ("Comments", rows 16/17/19).
 - Renumbered 90 → 91 at the merge train (2026-09-19): a parallel workstream
   filed `90-restart-honesty-carried-verifier-findings.md` in the same window;
