@@ -623,3 +623,29 @@ only adds the pass-5 trail the umbrella was owed.
 
 ### 2026-09-19 — evidence-folder cleanup (desktop)
 At the human's request the superseded live-pass artifact folders were deleted from the Desktop: `dsh-live-pass2-2026-09-19`, `dsh-live-pass3-2026-09-19`, `dsh-live-repass3-2026-09-18`, `dsh-live-ticket45-2026-09-19`, `dsh-live-fixes-2026-09-19` (~96 MB; the fixes folder held harness recon copies only, never evidence). Any ticket citation pointing into those five folders is now a dead path — the recorded results stand as written, but the raw artifacts are gone. Still on disk and current: `C:\Users\TZhen\Desktop\dsh-live-pass4-2026-09-19\` and `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-19\` (boot recipe + Session A evidence; see the pass-5 handover above).
+
+### 2026-09-20 — independent verification pass (read-only) clears the standing verification debt; recorded by overnight bookkeeping run (W0)
+
+The 2026-09-19 handover's "VERIFICATION DEBT" item (a) is discharged by an independent read-only
+verification pass (2026-09-20, separate agent from the original executors):
+
+- **Closure batch `9126909` (46/49/84/34/32) re-read:** all 35 cited commit hashes resolve, and the
+  in-tree artifacts confirm — `test/client-theme-tokens.test.ts`,
+  `docs/research/dsh-plugin-ui-patterns.md:95`, `docs/surfaces.md`, `dsh.client.inject` in
+  `package.json`, 8× `settingsScope` in `src/client/index.ts`.
+- **ADRs 0010–0012:** verified coherent with tickets 27/28/30/31 as described; status lines intact;
+  partial supersessions self-recorded.
+- **Frozen WIP `d25d6ef`** (69 L1 half + 89 deletion): confirmed an **ancestor of `main`** (not
+  stashed/dangling); its `src/client/approval-feed.ts` and `src/adapter/resolve-command.ts` are
+  byte-identical with `main` — the "apparently landed" list is landed.
+- **Gate 2 substance reproduced on `main`:** `npm run typecheck` clean on both tsconfigs;
+  `npm test` **1103 assertions passed / 0 fail / 269 suites** — the handover's 1098/267 baseline is
+  stale (the pass-5 Session-B record already carried 1103/269 at `55e6847`).
+
+**Residuals (unchanged, recorded):** (1) claims citing the five deleted Desktop evidence folders
+(`dsh-live-{repass2,repass3}-2026-09-18`, `dsh-live-pass2/pass3-2026-09-19`, `dsh-live-fixes`) rest
+on the recorded text only — raw artifacts are gone (see the 2026-09-19 cleanup note above);
+(2) the RED-verified pins (46's 7-fail revert, 49's 2-fail) were not re-run — accepted on the
+recorded evidence. Bookkeeping executor's own spot-checks this date corroborate the mechanical
+claims (ancestor check, byte-identity diff, file/line/count greps); the full re-read is the
+verification pass's. AC1 stays unticked (superseded); no box moved; ticket stays open.

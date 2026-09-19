@@ -1,7 +1,7 @@
 # 81 — Wrapper approval cards + capsule retirement (ADR-0020 slice 5)
 
 **Status:** open
-**Labels:** needs-triage
+**Labels:** ready-for-agent
 **Blocked by:** 80 (cards render in the conversation surface), 69 (classifier gating design — this ticket is the wrapper-side rendering, 69 owns the gating design)
 **Related:** ADR-0020 (inventory rows: approvals), 13/23/30 (relay + prompt UX re-host), 45/33 (live lane)
 
@@ -148,3 +148,9 @@ including this ticket's finding that the post-cutover toolview slot entries (tic
 are registered but unrendered and "ride the same 65/66/73 disposition" — is now tracked
 as **open ticket 89 ("Delete retired capsule source assets")**, which lists the toolview
 verify-item explicitly. Nothing left to do here; reference updated for the moved files.
+
+### 2026-09-20 — triage (overnight team-lead run, W0 bookkeeping)
+
+Triaged 2026-09-20 by the overnight team-lead run: `ready-for-agent`. Residual: (i) live card
+verification (rides 69's L1/L2 live round-trip — this ticket is sequenced behind it, no code work
+tonight before that) and (ii) the settings-card re-home decision (checkbox 4, live-lane/human call).

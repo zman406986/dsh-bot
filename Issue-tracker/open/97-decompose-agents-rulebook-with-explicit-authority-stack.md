@@ -1,7 +1,7 @@
 # 97 — Decompose the AGENTS.md rulebook + add an explicit authority stack
 
 **Status:** open
-**Labels:** needs-triage
+**Labels:** ready-for-agent
 **Blocked by:** none (logically pairs with ticket 96 — its doc lint then guards the new structure; neither blocks the other)
 **Related:** `docs/adr/README.md` (ADR-0016 retraction — the motivating case), ADR-0001, ADR-0018, ticket 64 (PRD amendments), ticket 69's Q1 ruling (an example of a recorded agent ruling), sibling-repo pattern cited below as device-specific evidence
 
@@ -61,3 +61,8 @@ Follow the sibling repo's pattern (device-specific absolute path, sibling repo "
 ### 2026-09-20 — scribe (filing pass; no implementation performed)
 
 Filed together with ticket 96 from an outside audit. Evidence gathered this pass: the three numbered conflicts above were each verified against the current files (`AGENTS.md` reference-policy section vs its "Definition of working"; `AGENTS.md` constraints table vs `docs/adr/0001-typescript-in-process-multitask-core.md` and the shipped TypeScript tree; ADR-0018's voiding of the PRD requirements recorded in `docs/adr/README.md`); the ADR-0016 retraction wording is quoted from `docs/adr/README.md`. The proposed stack order is a proposal for verification, not a ruling — this scribe has no authority to set precedence, only to show the conflicts that need one.
+
+### 2026-09-20 — triage (overnight team-lead run, W0 bookkeeping)
+
+Triaged 2026-09-20 by the overnight team-lead run: `ready-for-agent`. Next in the overnight work
+order (W4 implementation + W5 independent verification, after 96's tooling lands).

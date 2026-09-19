@@ -1,7 +1,7 @@
 # 96 — Doc lint + generated indexes: make the orientation docs provably honest
 
 **Status:** open
-**Labels:** needs-triage
+**Labels:** ready-for-agent
 **Blocked by:** none
 **Related:** ticket 97 (its `read-before-<activity>.md` guides add naming surface this lint can later check), sibling-repo tooling cited below as device-specific evidence
 
@@ -59,3 +59,8 @@ Checks to port:
 Filed together with ticket 97 from an outside audit of the orientation layer. Evidence gathered this pass: `docs/agents/` absent (`ls docs/agents` fails); `AGENTS.md` lines 3, 70, 76, 80, 84 carry the stale claims/citations; `README.md` Status section untouched since ticket 01; `package.json` `files` includes `README.md`; max existing ticket number 95 (`Issue-tracker/resolved/95-packaging-license-prepack-repo-metadata.md`), so this is 96. The sibling tool paths above are device-specific and cited read-only; nothing is copied verbatim — adapt to this repo's schema, per the standing adapted-copy policy (AGENTS.md 2026-09-18 ruling / ADR-0018 exception B9).
 
 Ticket 97 depends on nothing here being merged first, but its guides will add `read-before-*.md` files; if 97 lands first, extend the naming check rather than skipping it.
+
+### 2026-09-20 — triage (overnight team-lead run, W0 bookkeeping)
+
+Triaged 2026-09-20 by the overnight team-lead run: `ready-for-agent`. Next in the overnight work
+order (W1–W5: tooling, first catches + indexes, independent verification).
