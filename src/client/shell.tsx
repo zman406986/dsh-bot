@@ -32,6 +32,12 @@
  * deliberately RETRY-LESS — no retry control, no reconnect banner
  * (ADR-0018 U-A; see ticket 82 for the ADR-0020 row tension).
  *
+ * Ticket 70 (peer tier placement): each dispatcher row carries a
+ * copy-session-id affordance — the session id is what a peer addresses
+ * `send_peer` with, and the sidebar roster is its source (no directory;
+ * C13 holds). The affordance shows the id verbatim and copies it through
+ * the host clipboard seam; nothing else about peer traffic surfaces here.
+ *
  * Presentation only: the shell never spawns, steers, stops, or sends — every
  * intent stays with the later slices' verified transports. Pane decisions
  * come from the pure `describeShellPanes`; this component only maps them to
@@ -95,6 +101,9 @@ export const SHELL_CSS = `
 .multitask-dispatcher-shell__chip--waiting{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 6px;border-radius:8px;border:1px solid currentColor;color:var(--dsw-alias-state-warn-primary)}
 .multitask-dispatcher-shell__row-preview{display:none;opacity:.6;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .multitask-dispatcher-shell__row:hover .multitask-dispatcher-shell__row-preview,.multitask-dispatcher-shell__row:focus-visible .multitask-dispatcher-shell__row-preview{display:block}
+.multitask-dispatcher-shell__row-copy{display:none;align-self:flex-start;margin:2px 8px 0;padding:0;border:none;background:transparent;color:inherit;font:inherit;font-size:11px;opacity:.55;cursor:pointer;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.multitask-dispatcher-shell__row-copy:hover{opacity:.9;text-decoration:underline}
+.multitask-dispatcher-shell__list li:hover .multitask-dispatcher-shell__row-copy,.multitask-dispatcher-shell__row-copy:focus-visible{display:block}
 .multitask-dispatcher-shell__main{display:flex;flex-direction:column;min-width:0;min-height:0}
 .multitask-dispatcher-shell__main-header{padding:10px 14px;border-bottom:1px solid var(--dsw-alias-border-l3);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .multitask-dispatcher-shell__conversation-pending{padding:14px;opacity:.6}
@@ -186,15 +195,42 @@ export interface ShellHosts {
    * cutover.
    */
   readonly onboarding?: ComponentType | undefined;
+  /**
+   * Ticket 70 (peer tier placement): the clipboard writer behind the
+   * dispatcher rows' copy-session-id affordance — the session id is what a
+   * peer addresses `send_peer` with, and the sidebar roster row is its
+   * source. The composition wires the host clipboard; ABSENT, the shell
+   * falls back to a best-effort `navigator.clipboard` write whose failure is
+   * contained (the id stays readable on the button and its title either way
+   * — no fake success is ever shown).
+   */
+  readonly copyToClipboard?: (text: string) => void | Promise<void>;
 }
 
-/** Sidebar row as a button (selection is a plain click, no router yet). */
+/** Best-effort default clipboard writer (host browser provides the seam). */
+function defaultCopyToClipboard(text: string): void {
+  try {
+    void navigator.clipboard?.writeText(text);
+  } catch {
+    // Clipboard unavailable: contained. The affordance's title still shows
+    // the id verbatim — no fake success, no crash.
+  }
+}
+
+/**
+ * Sidebar row as a button (selection is a plain click, no router yet).
+ * Ticket 70: dispatcher rows additionally render the copy-session-id
+ * affordance OUTSIDE the row button (a button inside a button is invalid
+ * HTML) — hover/focus-revealed, showing the id verbatim; clicking copies
+ * it through the host seam.
+ */
 function ShellRow(props: {
   t: TranslateFn;
   row: ShellRowView;
   onSelect: (sessionId: string) => void;
+  onCopyId: (sessionId: string) => void;
 }): JSX.Element {
-  const { t, row, onSelect } = props;
+  const { t, row, onSelect, onCopyId } = props;
   const presence = row.presence;
   const presenceAvailable = row.presenceAvailable;
   const dot = describePresenceDot(row);
@@ -266,6 +302,18 @@ function ShellRow(props: {
           </span>
         ) : null}
       </button>
+      {row.dispatcher ? (
+        <button
+          type="button"
+          className={`${SHELL_CLASS}__row-copy`}
+          data-copy-id={row.sessionId}
+          aria-label={t("shell.row.copy-id")}
+          title={row.sessionId}
+          onClick={() => onCopyId(row.sessionId)}
+        >
+          {row.sessionId}
+        </button>
+      ) : null}
     </li>
   );
 }
@@ -364,6 +412,11 @@ export function createDispatcherShell(
                   onSelect={(sessionId) => {
                     store.select(sessionId);
                     hosts.onSelectSession?.(sessionId);
+                  }}
+                  onCopyId={(sessionId) => {
+                    void (hosts.copyToClipboard ?? defaultCopyToClipboard)(
+                      sessionId,
+                    );
                   }}
                 />
               ))}

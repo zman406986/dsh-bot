@@ -272,6 +272,9 @@ export const localeDictionary: LocaleDictionary = {
     "shell.row.needs-you": "{count} need you",
     "shell.row.finished": "{count} finished",
     "shell.row.presence-unavailable": "presence unavailable",
+    // Ticket 70: the copy-session-id affordance on dispatcher rows — the
+    // session id is what a peer addresses send_peer with (no directory; C13).
+    "shell.row.copy-id": "Copy session id",
     // Ticket 80 (ADR-0020 slice 4): the conversation pane's copy. Text-only
     // surface, honest states (waiting / unavailable / empty are different
     // facts), send-only composer (area 7: no stop affordance anywhere).
@@ -440,6 +443,9 @@ export const localeDictionary: LocaleDictionary = {
     "shell.row.needs-you": "{count} 个需要你",
     "shell.row.finished": "{count} 个已完成",
     "shell.row.presence-unavailable": "状态不可用",
+    // Ticket 70：调度会话行上的“复制会话 ID”入口——同伴互发消息以会话 ID 寻址
+    // （不设目录；C13 维持）。
+    "shell.row.copy-id": "复制会话 ID",
     // Ticket 80（ADR-0020 切片 4）：对话面板文案。纯文本表面，状态如实区分
     // （等待 / 不可用 / 空是三种不同的事实）；输入框只发不停（领域 7：任何
     // 位置都不设停止控件）。命名与措辞均为自创（例外 B9）。

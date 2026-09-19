@@ -415,6 +415,7 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
       "shell.onboard.step",
       "shell.onboard.tools.body",
       "shell.onboard.tools.title",
+      "shell.row.copy-id",
       "shell.row.finished",
       "shell.row.needs-you",
       "shell.row.presence-unavailable",

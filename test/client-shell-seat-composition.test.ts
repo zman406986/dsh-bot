@@ -500,3 +500,65 @@ describe("shell seat composition survives selection (ticket 88)", () => {
     });
   });
 });
+
+describe("copy-session-id affordance on dispatcher rows (ticket 70 chunk 3)", () => {
+  it("renders on dispatcher rows only, shows the id verbatim, and copies it through the host seam", async () => {
+    const fake = fakeSessions({
+      ids: [],
+      byId: {},
+    });
+    const onboarding = createOnboardingStore();
+    const { ctx } = createCompositionCtx(fake.sessions);
+    const mount = mountShellPage(ctx, {
+      store: onboarding,
+      onSeen: () => {},
+    });
+    // The clipboard seam the live composition would wire from the host;
+    // the recorder stands in for it (the affordance is our only new host
+    // touchpoint and must carry exactly the session id).
+    const copied: string[] = [];
+    const Shell = createDispatcherShell(
+      (key: string) => localeDictionary.en[key] ?? key,
+      mount.store,
+      { ...mount.hosts, copyToClipboard: (text: string) => void copied.push(text) },
+    );
+    const container = dom.window.document.createElement("div");
+    dom.window.document.body.replaceChildren(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(createElement(Shell));
+      mount.store.applySessionMirror("s-disp", dispatcherSnapshot("s-disp"));
+      fake.publishFeed({
+        ids: ["s-disp", "s-plain"],
+        byId: {
+          "s-disp": { id: "s-disp", displayTitle: "Dispatcher run" },
+          "s-plain": { id: "s-plain", displayTitle: "Plain chat" },
+        },
+      });
+    });
+
+    // Dispatcher row: affordance present, id verbatim as its text and title.
+    const copyButton = query('button[data-copy-id="s-disp"]');
+    assert.ok(copyButton, "dispatcher row carries the copy-id affordance");
+    assert.equal(copyButton.getAttribute("title"), "s-disp");
+    assert.equal(copyButton.textContent, "s-disp");
+    // Plain session: no affordance (it is not a peer address).
+    assert.equal(
+      query('button[data-copy-id="s-plain"]'),
+      null,
+      "non-dispatcher rows carry no id affordance",
+    );
+
+    await act(async () => {
+      copyButton.dispatchEvent(
+        new dom.window.MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+    });
+    assert.deepEqual(copied, ["s-disp"]);
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+});

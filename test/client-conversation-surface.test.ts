@@ -33,6 +33,7 @@ import {
   sendOutcomeCopyKey,
   type ConversationActions,
 } from "../src/client/conversation.js";
+import { PEER_WAKE_SECTION_HEADINGS } from "../src/core/policy/prompts.js";
 import { createDispatcherShellStore } from "../src/client/shell-store.js";
 import type { ClientSessionsLike } from "../src/client/context.js";
 import {
@@ -198,6 +199,43 @@ describe("conversation reduction — replay turns (ticket 80)", () => {
       transcript.items.map((item) => (item.kind === "user" ? item.text : "?")),
       ["the real prompt"],
     );
+  });
+
+  it("never presents an injected peer wake turn as the user's speech (ticket 70 chunk 3)", () => {
+    // The peer wake is a HIDDEN dispatcher turn: the host injects its
+    // other-assistant cue + body as model-facing context in a non-user
+    // user-role message. The reduction must skip it wholesale — the
+    // machinery copy never renders as chat, and it never reads as the
+    // user speaking (the tier's one presentation rule).
+    const peerCue = `${PEER_WAKE_SECTION_HEADINGS[0]}
+
+This turn was opened by the peer inbox.`;
+    const transcript = reduceConversationWindow({
+      entries: [
+        userMessage("what should I change?"),
+        userMessage(peerCue, "plugin"),
+        event("assistant/message", {
+          turn: 1,
+          step: 1,
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "I can look into it." }],
+            source: { kind: "model", provider: "p", model: "m" },
+          },
+        }),
+      ],
+    });
+    assert.ok(transcript);
+    const userTexts = transcript.items
+      .filter((item) => item.kind === "user")
+      .map((item) => (item.kind === "user" ? item.text : ""));
+    assert.deepEqual(userTexts, ["what should I change?"]);
+    // The cue text appears NOWHERE in the reduced transcript.
+    const rendered = JSON.stringify(transcript.items);
+    assert.equal(rendered.includes("Peer message"), false);
+    assert.equal(rendered.includes("peer inbox"), false);
+    // The peer traffic that IS visible rides the send_peer tool row,
+    // never a fabricated user/assistant bubble.
   });
 
   it("omits text-less assistant messages (tool-call-only steps) instead of empty bubbles", () => {
