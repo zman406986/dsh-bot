@@ -728,3 +728,66 @@ delta); no posture seed; Q1 untouched.
 `/dispatcher-resolve` round-trips, and the row's blocked marker shows while waiting. If a
 worker STILL skips the call with the documented contract, the remaining suspects are host-side
 visibility (needs a worker-toolset diagnostic surface) — record, do not guess.
+
+### 2026-09-20 — agent (W22, FINDING 4 fixed offline: the parked ask now holds the worker's TOOL CALL open; park-vs-settlement semantics RULED as an agent ruling, subject to human reversal)
+
+Issue reference: ticket 33's Session B-4 comment (commit `7ac8edc`), FINDING 4 — logged there per
+the tracker rule; no new ticket filed. Merge **`c8849a7`** (branch `wt/69-park-settlement`,
+commits `64fb1b4` fix + `72753e0` pins/ports).
+
+**SEMANTICS DECISION (agent ruling under the Q1 precedent — an overnight dispatched ruling by an
+autonomous agent, recorded so it can be reversed with a human signature rather than re-derived):**
+
+> On dsh, a worker's parked access ask MUST hold the worker's `request_access` TOOL CALL open
+> (parks the tool, never the turn-end). A worker turn that ends with an ask still pending is a
+> bug by construction: dsh settlement fires on turn end and the core's settle path drops the
+> pending ticket ("Settle wins over a pending access ask", `src/core/multitask.ts`) — that is
+> exactly how the live B-4 ask was destroyed (worker completed+delivered ~6 s after spawn while
+> the dispatcher narrated a parked worker). Equivalently: the relay's ADR-0008 timeout, an
+> explicit resolve, or a stop/settle clear are the ONLY things that may end an ask — never the
+> worker's own turn lifecycle. Reversal path (if a human ever wants turn-end-with-pending-ask
+> semantics instead): change the `awaitSettled` wiring in `acquireGlobalAccessTool`
+> (`src/plugin.ts`) back to the legacy park-ack — one wiring line, and this comment is the record
+> to amend. Reversal is cheap NOW; after L1/L2 go live, answers already delivered cannot be
+> un-delivered, the same asymmetry the Q1 ruling recorded.
+
+**Mechanism (validated against the host/tool contract before committing to it):** the tool model
+supports a long-pending execute — per-tool call limits are OPT-IN
+(`@deepseek-ai/dsh-tool-call-timeout-policy`: "tools that have a limit configured are protected
+automatically; every other tool is untouched"), so `request_access`, which configures no limit,
+is never cut off. The worker prompt (W19 contract) is UNCHANGED — denial still final, one call,
+then stop; only the tool's resolve timing moved. What landed:
+
+- `src/adapter/worker-access-tool.ts` — new optional `awaitSettled(workerId, requestId)` dep +
+  `createPendingAskSettleWaiter` (polls core truth `Multitask.listPendingAccess` at 100 ms —
+  deliberately polling, since resolve/timeout/stop/deactivation all flip the predicate with no
+  plugin-visible event; the wait ALWAYS terminates because the relay ends every ticket). With the
+  dep, execute returns `ASK_SETTLED_SUMMARY` (the decision itself still arrives as the worker's
+  next message via the unchanged relay deliver path; a CLEARED ask honestly says no message
+  comes). Without the dep, the legacy park-ack shape is kept (pure-handler callers).
+- `src/plugin.ts` — `acquireGlobalAccessTool` wires `awaitSettled:
+  createPendingAskSettleWaiter({ isPending: pendingAskOf })`, sharing ONE pending-set lambda with
+  the duplicate-ask refusal. `src/core/access-relay.ts` / `access-types.ts` untouched (B3).
+
+**RED-check (two honest breaks, each reverted after capture):** (1) dropping the apply() wiring
+line → the source-level wiring pin fails, 6/7; (2) no-op'ing the handler await (old park-ack
+behavior) → the 4 behavior pins fail, including the B-4 repro pin "execute stays pending while
+the ask is parked" over FakeDshHost + the REAL `subagent/end` → settle path. Re-applied → 7/7.
+FINDING 3 (B-3, the dispatch-approval seam wedging a dispatcher turn on an unanswered host ask)
+is the same FAMILY but a different seam (`ctx.approval` waterfall, not the access relay) — this
+mechanism does not cover it and it was NOT redesigned; the analog pin here is the ADR-0008
+bounded-block test (the tool settles on the armed timeout deny, never wedges).
+
+**Gates on merged main:** `npm run typecheck` clean (both configs); `npm test` **1125 pass /
+0 fail / 272 suites** (baseline 1118/271/0 — +7 tests, +1 suite). B3 holds (empty diff on
+`access-relay.ts`/`access-types.ts` vs `e069b8a`); no posture seed; Q1 untouched; no
+reference-tree touch; live lane untouched.
+
+**What a B-5 live session can now verify:** the worker calls `request_access` once → the tool
+call does NOT return while the ask is parked (worker turn stays open; no settle; `pendingAsks`
+non-empty at EVERY poll, not just pre-settlement) → the access-ask card renders inline (69 L1
+card half) → the row's blocked marker shows (69 L2) → `/dispatcher-resolve` round-trips: the
+relay delivers the decision, the card leaves, AND the worker's pending tool call resolves with
+the settled ack, after which the decision message starts the worker's continuation turn. If the
+worker still settles early, capture the host-side tool-execution trace — that would mean the
+host force-resolves tool calls we could not observe offline; record, do not guess.

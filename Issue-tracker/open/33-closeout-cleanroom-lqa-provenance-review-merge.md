@@ -1024,3 +1024,12 @@ The ADR-0010 text itself was NOT edited (per brief); its "re-opened, not
 re-decided" rationales are now decided at agent level pending human
 reversal/review. Task budget: 1/3 sends, recorded pre-send
 (`session-C/task-budget-w13.txt`).
+
+### 2026-09-20 — agent (W22: FINDING 4 FIXED offline — merge c8849a7; see ticket 69's W22 comment for the mechanism + the park-vs-settlement agent ruling)
+
+FINDING 4 (this file's Session B-4 record, `7ac8edc`) is fixed offline: `request_access`'s tool
+call now stays pending while the ask sits in the relay (park the TOOL, not the turn-end), so dsh
+settlement can no longer eat a parked ask or mark a worker completed+delivered while a decision
+is owed. Worker prompt unchanged (W19 contract intact; denial final). RED-checked, gates on
+merged main 1125/0/272, B3 holds. Full record + SEMANTICS DECISION ruling (subject to human
+reversal) + the B-5 live verification list: ticket 69's comment 2026-09-20 (W22).
