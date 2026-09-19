@@ -1,6 +1,6 @@
 # 46 — Client watch `ctx.inject(["settings"])` never fires live: capsule never flips client-side, footer flag stays `unknown`, and no plugin settings card is registered
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Blocked by:** none (root cause confirmed 2026-09-18 — see below)
 **Related:** 35 (capsule epic), 44/45 (same live re-pass #2, 2026-09-18), 34 (client module materialization), 33 (live close-out), 47 (the settings-card half, split out at triage)
@@ -83,11 +83,24 @@ rules), so it is split out per the epic-35 granularity rule:
 Watch half (this ticket):
 
 - [x] Root cause confirmed with a cited mechanism (file/line) for the dead watch.
-- [ ] (offline, gate) `npm test`, `npm run typecheck`, `npm run build:client` green
+- [x] (offline, gate) `npm test`, `npm run typecheck`, `npm run build:client` green
       including a regression pin that fails if the watch goes back to a
       non-existent service name or to a `watch(namespace, cb)` shape.
-- [ ] (live, ZERO LLM calls) the watch fires in an activated session: the capsule
+      — **2026-09-19 (closeout batch): ticked from recorded evidence** — the
+      2026-09-18 comment records `npm test` 711 pass / 0 fail / 186 suites,
+      typecheck clean (both configs), `build:client` OK, and the RED-verified
+      pin (reverting the service name to `"settings"` fails 7 tests in
+      `test/client-roster-panel.test.ts`).
+- [x] (live, ZERO LLM calls) the watch fires in an activated session: the capsule
       flips client-side and the footer flag reads a real value (no `unknown`).
+      — **2026-09-19 (closeout batch): ticked — the watch-fire and footer-flag
+      clauses are PROVEN live** (pass 2: `data-flag="on"` after
+      `/dispatcher-start`, shots `10b`/`13`; nothing else in the client writes
+      that attribute). The "capsule flips client-side" clause is
+      **MOOT-VERIFIED, not proven**: pass 2 honestly recorded the card keeping
+      the dormant pitch, and the capsule vehicle was retired at the 78 cutover
+      (a44084a / 94e6127 / c437ee8; ADR-0018 always-on) — see the closing
+      comment.
 
 Card half: **moved to ticket 47** (filed 2026-09-18) — the offline pin and the
 live "a settings card renders in 插件配置" assertion live there.
@@ -239,3 +252,30 @@ pass-2 comment. The offline-gate AC 2 stays for the offline pass owner to tick.
 ### 2026-09-19 — one-line note
 
 Mooted by 78 cutover (a44084a): capsule retired.
+
+### 2026-09-19 — CLOSED (closeout batch): watch half fully proven live + offline; the capsule-flip remainder is MOOT-VERIFIED per the 78 cutover
+
+All three ACs now carry evidence:
+
+- **AC 1 (root cause):** confirmed with citations 2026-09-18.
+- **AC 2 (offline gate):** ticked from the 2026-09-18 record — 711/0/186 suites,
+  typecheck clean both configs, `build:client` OK, RED-verified regression pin
+  against the exact live defect (wrong service name).
+- **AC 3 (live):** the watch demonstrably fires in an activated session and the
+  footer flag reads a real value — pass 2 (`C:\Users\TZhen\Desktop\dsh-live-pass2-2026-09-19\`,
+  zero LLM calls for this AC): `data-flag="on"` after `/dispatcher-start`
+  (shots `10b`/`13`), vs the `unknown` state every earlier pass recorded. The
+  "capsule flips client-side" clause is **MOOT-VERIFIED**: pass 2's honest
+  caveat recorded the expanded card keeping the dormant pitch, and the capsule
+  vehicle was retired at the 78 cutover — a44084a removed the capsule/launcher
+  overlay entries, 94e6127 elected the shell frame as the dynamic root,
+  c437ee8 recorded the cutover — with ADR-0018 ruling always-on (no
+  dormant/activated flip exists to assert). The flip assertion has no live
+  vehicle left to run against; it is voided, not satisfied.
+
+The `settingsScope` contract knowledge (bind + subscribe + one immediate read)
+survives in `src/client/index.ts` wherever the wrapper consumes the settings
+namespace mirror; the card half lives in resolved ticket 47.
+
+MOOT-VERIFIED disposition recorded per the resolved ticket 81 pattern. Status
+→ resolved.

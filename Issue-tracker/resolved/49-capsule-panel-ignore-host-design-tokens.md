@@ -1,6 +1,6 @@
 # 49 — The capsule/panel hardcode a dark palette instead of the host's shared `--dsw-*` design tokens, so the dispatcher UI cannot follow the light/dark theme
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Blocked by:** none
 **Related:** 35 (capsule epic — the surfaces this touches), 38 (`CAPSULE_CSS`), 42 (capsule close-out), 27/28 (`ROSTER_PANEL_CSS`), 17 (always-on epic), 33 (close-out), 36 (seam research note this corrects)
@@ -103,15 +103,27 @@ capsule stops being a foreign object.
 
 ## Acceptance criteria
 
-- [ ] (offline, gate) A pin fails if any raw colour literal reappears in either
+- [x] (offline, gate) A pin fails if any raw colour literal reappears in either
       CSS block, and asserts the role mapping above; RED-verified against the
       pre-change palette.
-- [ ] (offline, gate) `npm test` 0 fail, `npm run typecheck` clean (both
+      — **2026-09-19 (closeout batch): ticked from recorded evidence** — the
+      2026-09-18 comment records `test/client-theme-tokens.test.ts` (15 cases /
+      2 suites, in-tree, re-verified this batch) with the RED proof (reverting
+      the chip background to `#161b22` fails 2 cases, including the raw-literal
+      pin) and exact-set pins both directions.
+- [x] (offline, gate) `npm test` 0 fail, `npm run typecheck` clean (both
       configs), `npm run build:client` OK — the animation/reduced-motion and
       namespace pins that already guard these blocks stay green.
-- [ ] (offline) `docs/research/dsh-plugin-ui-patterns.md` Finding 6 carries the
+      — **2026-09-19 (closeout batch): ticked from recorded evidence** —
+      726 pass / 0 fail / 188 suites, typecheck clean on both configs,
+      `build:client` OK, and the built bundle inspected (zero retired literals,
+      `--dsw-alias-brand-primary` ×0).
+- [x] (offline) `docs/research/dsh-plugin-ui-patterns.md` Finding 6 carries the
       token-layer finding with citations, so the next implementer does not
       re-derive "no theme contract" from its silence.
+      — **2026-09-19 (closeout batch): ticked — verified present in-tree** at
+      `docs/research/dsh-plugin-ui-patterns.md:95` (the 2026-09-18
+      correction/addition: token layer, scale, the two traps, the pin pointer).
 - [x] (live, ZERO LLM calls — ticket 33's pass) the chip and card follow the host
       theme: legible light **and** dark, on a real launcher/profile boot. — **2026-09-19
       live pass 2: both schemes on one profile boot; resolved token values recorded; see
@@ -243,3 +255,21 @@ Note per the 2026-09-19 re-base: the shell sidebar surface could not be read —
 `main` page cannot open on this boot (ticket 84, uninjected service reads throw). The AC's
 own words ("the chip and card") are fully proven; the offline AC boxes 1–3 stay for the
 implementer to tick from the 2026-09-18 offline comment's evidence.
+
+### 2026-09-19 — CLOSED (closeout batch): all four ACs carry evidence
+
+Offline boxes 1–3 ticked from the 2026-09-18 offline record; this batch re-verified the
+underlying artifacts still in-tree (`test/client-theme-tokens.test.ts`; the research-note
+correction at `docs/research/dsh-plugin-ui-patterns.md:95`). Live box 4 was already ticked
+at pass 2: both schemes on one profile boot, resolved token values recorded
+(`theme-light-tokens.json` / `theme-dark-tokens.json`, re-verified against the artifacts
+this batch — the recorded values match byte-for-byte; ~17:1 light / ~13:1 dark pairs,
+shots 06–08), zero LLM calls.
+
+Vehicle note, recorded honestly: the capsule/panel blocks this ticket restyled were
+retired at the 78 cutover (a44084a / 94e6127 / c437ee8). The live AC was proven on the
+then-live surfaces before retirement, and the ticket's deliverable — no raw colour
+literals, semantic `--dsw-*` mapping, exact-set pins against regression — is
+vehicle-independent: the successor shell surfaces already follow it (ticket 81's approval
+cards CSS is token-only), and the two-scheme legibility check re-applies there if ever
+wanted. Status → resolved.

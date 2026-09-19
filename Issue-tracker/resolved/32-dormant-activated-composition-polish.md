@@ -1,7 +1,7 @@
 # 32 — Dormant/activated composition polish: copy, locale, surfaces README, prompt review
 
 **Blocked by:** 27, 28, 30, 31 (polish passes over their landed surfaces).
-**Status:** open
+**Status:** resolved
 
 ## Problem
 
@@ -17,7 +17,16 @@ Implementation lands in the worktree checkout `C:\Users\TZhen\Desktop\dsh-bot-al
 - [x] Surfaces README: a short doc (repo `docs/` or `CONTEXT.md` section, clean-room) recording the designed absences and their reasons: no push notifications (no seam — pull surfaces only), no todo board (private ledger, ADR-0007; `todoId` is linkage metadata), no milestones (no runtime entity), no stop control (conversational stops, PRD §15.3), no worker console, no timeline cards (closed node-type domain), send journal is host-owned.
 - [x] Prompt review (conflicts 2/3): grep the policy/prompt assets for any wording implying a task board, milestone view, or push notification; fix with new copy if found; record the pass in this ticket's comments.
 - [x] Locale validation: run `validateLocaleDictionary` over the final enlarged dictionary in tests (identical en/zh key sets, all strings); sweep for stray untranslated literals added by 27–31.
-- [ ] Optional (drop without ceremony if the seam does not verify at integration): a `settings.onboarding` list entry (seams Finding 5 catalog) describing the opt-in dispatcher in one screen — lightweight, no guided overlay, suppressed once seen is NOT attempted (no verified persistence for "seen" without inventing state; conflict with design-17 §3.1(c)).
+- [x] Optional (drop without ceremony if the seam does not verify at integration): a `settings.onboarding` list entry (seams Finding 5 catalog) describing the opt-in dispatcher in one screen — lightweight, no guided overlay, suppressed once seen is NOT attempted (no verified persistence for "seen" without inventing state; conflict with design-17 §3.1(c)).
+      — **2026-09-19 (closeout batch): ticked as DROPPED per this box's own
+      authorization** — the 2026-09-17 comment records the drop reasoning (the
+      seam catalog lists the slot name only; no verified registration shape;
+      shipping it would violate the no-new-seams constraint; its intent is
+      covered by the presence hint + `docs/surfaces.md`). Also moot in the
+      current vehicle: the opt-in/dormant framing it described was abolished by
+      ADR-0018 (always-on, no dormant state); the wrapper onboarding/first-run
+      surface is ticket 68's scope, and the "seen" persistence concern is
+      settled by resolved ticket 87 (settings document).
 - [x] Offline tests (S8): dormant-registration matrix, deactivation→unavailable→reactivate-rebuild flow, copy assertions, locale validator; full suite green, typecheck clean.
 
 ## Constraints
@@ -161,3 +170,26 @@ locale-validation tooling, the prompt-review method, and the no-board/no-milesto
 rules (aligned with exception C14 and the todos-private-ledger conformance). The
 composition-coherence goal re-bases onto the wrapper's onboarding/first-run surface (scope
 ticket seeded). Status stays open, re-scoped.
+
+### 2026-09-19 — CLOSED (closeout batch) as moot-closure: all work items done or dropped under their own terms; superseded halves already recorded; successor scope live elsewhere
+
+- **Blockers discharged in substance:** 27/28/30/31 (the polish passes this ticket
+  composed over) all landed and merged (`400450f`) before this ticket's closure; their own
+  ticket closures remain part-2 closeout work and are not assumed here.
+- **Work items:** the seven mandatory boxes + the offline-tests box landed at `77baef8`
+  and merged in `400450f`; the 2026-09-17 handover's "verification PENDING" concern was
+  discharged by ticket 33's merge record (post-merge gates 701 pass / 0 fail / 185 suites,
+  typecheck + builds green) plus the 2026-09-18 human deferral note ("considered passed").
+  The optional `settings.onboarding` box is ticked as DROPPED per its own authorization
+  (annotation on the box).
+- **Vehicle supersession, already recorded in the 2026-09-19 re-base note:** the
+  activation presence hint, dormant-registration matrix, and deactivation-honesty flow are
+  superseded by ADR-0018 (always-on, no dormant state; capsule retired at
+  a44084a/94e6127/c437ee8). What survives as method and record: the surfaces-README
+  discipline, locale validation, the prompt-review method, and the no-board/no-milestone
+  narration rules. Dormant-composition live presence was proven (re-pass #2) before
+  retirement.
+- **Successor scope:** the composition-coherence goal lives in ticket 68 (wrapper
+  onboarding/first-run) and resolved ticket 87 (seen suppression).
+
+Status → resolved.

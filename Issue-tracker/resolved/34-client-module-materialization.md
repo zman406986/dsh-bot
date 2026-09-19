@@ -1,6 +1,6 @@
 # 34 — Client module never materializes in the browser (dsh.client record needs inject/immediately)
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Blocking:** everything client-side (35 and its descendants). Fix this first.
 
@@ -26,15 +26,45 @@ Root cause, read from `@deepseek-ai/dsh-client-modules` (0.1.5-rc.1):
       (slots) and `@deepseek-ai/dsh-client-locale` (locale, itself `immediately: true`), plus
       `@deepseek-ai/dsh-client-ui-settings` if the roster settings watch needs it materialized.
       Prefer the smallest set that materializes; justify each entry in the ticket comment.
-- [ ] After a launcher boot (`dsh --profile web --patch <overlay>` from the desktop
+- [x] After a launcher boot (`dsh --profile web --patch <overlay>` from the desktop
       `dsh-bot.ps1`), the served page's outer HTML / boot graph contains the
       `dsh-multitask-dispatcher` row and the combo bundle route serves our `client/index.js`
       (the served-page check from `docs/research/dsh-plugin-ui-examples.md` Finding 3).
-- [ ] With the module materialized, the roster panel's **dormant composition** (ticket 32)
+      — **2026-09-19 (closeout batch): ticked on two recorded boots; the literal
+      `dsh-bot.ps1` executor invocation never ran.** The box's substance (the
+      Finding-3 served-page check) is proven (a) on the 2026-09-18
+      launcher-equivalent web-overlay boot — `dsh --profile web --patch` with an
+      overlay identical to `dsh-bot.ps1 -Checkout 1 -DryRun` output (recorded on
+      ticket 33: boot-graph row present, combo route served 64,914 bytes) and
+      (b) post-cutover on the persistent `multitask` profile (pass-4 README
+      §1/§5: row with renderer+locale injects and react externals, bundle
+      served, module materialized, root registration won — the README's cited
+      `boot-graph-row.json` is absent from that dir; the row content is recorded
+      inline in the README and in this ticket's pass-4 comment). Post-cutover
+      the overlay/launcher route is capsule-era; its drift is ticket 48's.
+- [x] With the module materialized, the roster panel's **dormant composition** (ticket 32)
       is visible in a fresh, non-activated chat — screenshot or Playwright assertion recorded
       in a comment.
-- [ ] `/dispatcher-start` activates a chat and the panel switches to the activated
+      — **2026-09-19 (closeout batch): ticked — proven live pre-cutover, then the
+      vehicle retired.** 2026-09-18 pass: dormant composition exactly as composed
+      (`shots/02-dormant-panel.png`); pass 2: dormant composition renders
+      (shots 01/04). The dormant capsule composition was retired at the cutover
+      (a44084a) and ADR-0018 abolished dormant/activated modes — the as-written
+      condition was met by recorded evidence before the vehicle vanished; MOOT
+      going forward.
+- [x] `/dispatcher-start` activates a chat and the panel switches to the activated
       composition; the five dispatcher tool views render when those tools are called.
+      — **2026-09-19 (closeout batch): MOOT-VERIFIED — never green as written.**
+      Pre-cutover the flip clause was blocked (ticket 44's pass-2 caveat: the
+      card kept the dormant pitch) and toolviews were only seen as collapsed
+      entries (pass 2, never expanded/verified). Post-cutover the
+      dormant/activated frame is void (ADR-0018 always-on; capsule retired at
+      a44084a/94e6127/c437ee8) and the toolview slot entries are
+      registered-but-unrendered, their content re-hosted in the conversation
+      (tickets 80/81; dead-code disposition rides ticket 89). Activation + a
+      live flow is proven on the successor surfaces (pass-4 README §4:
+      activation card, spawn, steer-delivered, honest stop no-op). See the
+      closing comment.
 - [x] No change to the host half's behavior; offline suite stays green (S8); no new deps.
 
 ## Notes
@@ -151,3 +181,28 @@ roster-keyed behavior flagged in ticket 44's pass-2 comment.
   toolview slot entries render inside the elected frame's conversation — which crashed on
   selection this pass (ticket 88). Left to this ticket's own reconciliation with the
   cutover; commented, not ticked, not resolved here.
+
+### 2026-09-19 — CLOSED (closeout batch): materialization AC proven live twice; capsule-era composition ACs reconciled against the cutover
+
+AC 1 (`dsh.client.inject` declared) and AC 5 (host half untouched, offline green) were
+ticked at the 2026-09-18 fix. This batch reconciled the remaining three (annotations on
+the boxes above):
+
+- **AC 2 (boot graph / bundle route):** substance proven on the 2026-09-18
+  launcher-equivalent overlay boot and re-proven post-cutover on the persistent profile
+  boot (pass 4). Recorded honestly: the AC names the desktop `dsh-bot.ps1` invocation and
+  that executor run never happened (agent-session reaping, ticket 48's caveat) — the
+  overlay and command were reproduced verbatim without the wrapper, which is the
+  equivalent evidence this closure rests on. The ticket's Notes clause never triggered:
+  materialization always worked via path-insert; the persistent profile route is the
+  cutover's vehicle choice, not a materialization workaround.
+- **AC 3 (dormant composition):** proven live pre-cutover with screenshots on two passes;
+  the vehicle was then retired (a44084a, ADR-0018). Met as written before it went moot.
+- **AC 4 (activation flip + five toolviews):** MOOT-VERIFIED — never green as written
+  (44's pass-2 caveat; collapsed-only toolview evidence), and the dormant/activated frame
+  plus the toolview slot vehicle are void post-cutover (ADR-0018; a44084a/94e6127/c437ee8;
+  re-host = tickets 80/81, disposition = 89).
+
+Surviving as host knowledge: `dsh.client.inject` is the consumer-driven arrival-graph
+contract (ADR-0014), and the module still materializes and wins the root cell post-cutover
+(pass 4). Status → resolved.

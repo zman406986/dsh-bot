@@ -1,6 +1,6 @@
 # 84 — Client shell mount reads `ctx.sessions`/`ctx.layout` without declaring the injects: the host throws `cannot get property … without inject`, so the launcher chip can never open the shell page live
 
-**Status:** open
+**Status:** resolved
 **Labels:** needs-triage
 **Blocked by:** none
 **Related:** 78 (the staging mount this breaks), 46 (the runtime-inject idiom that DOES work), 79/80 (the feed bindings that die with it)
@@ -65,9 +65,18 @@ and `sessions` have no such wrapper.
 
 - [x] (offline, gate) fakes throw on uninjected service reads; the mount path passes with the
       declared/wrapped injects; `npm test`, `npm run typecheck`, `npm run build:client` green.
-- [ ] (live, ZERO LLM calls) clicking the launcher chip opens the shell `main` page
+- [x] (live, ZERO LLM calls) clicking the launcher chip opens the shell `main` page
       (`[data-shell="dispatcher"]` present, sidebar + seat render), zero pageerrors, on a
       real profile boot.
+      — **2026-09-19 (closeout batch): MOOT-VERIFIED, never green as written.** The
+      vehicle is retired — a44084a removed the launcher chip, 94e6127 elects the shell
+      as the root frame with no open affordance, c437ee8 recorded the cutover — so the
+      literal click can never run. The AC's substance (the mount surviving the real
+      host's throw-on-uninjected context semantics) is proven twice: pass 3 zero
+      `without inject` errors, and pass 4 zero such errors across boot, the onboarding
+      walk, a session selection, a crash-abdication and a reload (pass 4's only errors
+      were ticket 88's conversation-seat crash, fixed at `d242d18`). See the closing
+      comment.
 
 ## Notes
 
@@ -137,3 +146,26 @@ now untestable BY DESIGN: a44084a retired the launcher chip and 94e6127's root e
 makes the shell the client without any open affordance. Recommendation: close as
 moot-verified (mechanism proven passes 3+4; vehicle retired) — left `open/` for the owner's
 call per the no-forced-resolutions rule.
+
+### 2026-09-19 — CLOSED (closeout batch) as moot-verified: mechanism proven on passes 3+4; the live AC's vehicle is retired by the 78 cutover
+
+The offline AC was ticked at `154e7c7`. The live AC as written is untestable by design
+after the cutover: a44084a retired the launcher chip, 94e6127 made the shell the root
+frame with no open affordance, c437ee8 recorded the cutover — the box above is ticked
+MOOT-VERIFIED, not as a satisfied assertion. What the AC was really about — the shell
+mount surviving the real host's throw-on-uninjected context semantics — is proven live
+twice:
+
+- **Pass 3** (`C:\Users\TZhen\Desktop\dsh-live-pass3-2026-09-19\`): zero
+  `cannot get property … without inject` errors; the declared
+  `sessions`/`remote`/`conversation` reads and the wrapped `layout`/`settingsScope`
+  watches all passed, and the module factory ran to registration.
+- **Pass 4** (`C:\Users\TZhen\Desktop\dsh-live-pass4-2026-09-19\`, README §1/§5):
+  zero such errors across boot, the onboarding walk, a session selection, a
+  crash-abdication and a reload — far more stress than the original single click —
+  with the shell booted as the whole client (ticket 85's root election). The pass-4
+  session's only errors were ticket 88's conversation-seat crash (fixed `d242d18`,
+  live re-confirm pending there) — outside this ticket's mechanism.
+
+Closed per the in-ticket pass-4 recommendation and the resolved ticket 81
+MOOT-VERIFIED pattern. Status → resolved.
