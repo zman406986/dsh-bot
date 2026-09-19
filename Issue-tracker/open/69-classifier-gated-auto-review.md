@@ -626,3 +626,58 @@ human-accepted deviation.
 empty default, the reason, and that any seeder is a U-D amendment; `test/review-posture.test.ts`
 — the A2 test pins the empty posture at composition level. No behavior change, no new field, no
 new ticket (nothing is implied that is not already covered by chunk A/L-lane ACs).
+
+### 2026-09-20 — agent (W7, L3 offline wiring pass: seam wiring verified landed; plugin-built seam pinned offline, RED-checked)
+
+**Finding first (corrects the plan's premise):** the L3 wiring this pass was scoped to do —
+`"approval"` in the plugin `inject`, and `createDispatchApprovalSeam` built from the real
+`ctx.approval` — **already landed on main in d25d6ef** (the cancelled L1 agent's WIP checkpoint,
+see the handover comment): `src/plugin.ts` inject line + `activateToolSurface` toolDeps. L3's
+"deliberately not wired" note above predates that checkpoint. What was actually missing offline:
+NO test could see that wiring (the shipped posture is EMPTY, so the plugin-level gate never
+fires, and no seeder ships — Q1/U-D), so a dropped or mis-scoped seam line was invisible to the
+whole suite. This pass pins it.
+
+**What landed (merge `14ee7a9`, branch commit `261fe34`, branch `wt/69-l3-wiring`):**
+
+- `src/plugin.ts` — the wiring line factored into an exported builder
+  `dispatchApprovalSeamFor(ctx, host, sessionId)` (behavior identical; call site
+  `activateToolSurface` unchanged in effect). The builder is the plugin's OWN construction:
+  `getApproval: () => ctx.approval`, `getAgent: () => host.parentAgentOf(sessionId)` — the ask
+  scoped to the activated dispatcher's Agent, fail-closed on every degradation.
+- `src/adapter/dispatch-approval.ts` + `src/adapter/index.ts` — `DispatchApprovalFn` re-exported
+  through the barrel (type-only, no behavior).
+- `test/dispatch-approval.test.ts` — new suite "plugin wiring: dispatchApprovalSeamFor":
+  (1) round-trip through the plugin builder over an INJECTED `ctx.approval` — allowed-once
+  proceeds with `gated: true`, exactly one ask reaches the service carrying the activated agent,
+  `spawn_worker` tool name, and the dispatch title/stream key; (2) `rejected` / `cancelled` /
+  `unavailable` from the real service each refuse honestly (`auto-review-refused`, outcome named,
+  no host spawn); (3) host WITHOUT the approval capability (absent `ctx.approval`) fails closed
+  and the turn settles — the Q2 no-wedge pin, now through the plugin's own builder; (4) posture
+  miss never reaches the injected service (A6 "miss → spawnWorker untouched" at wiring level);
+  (5) source-level wiring pin (composition-polish idiom: source read, comments stripped) asserting
+  the `requestDispatchApproval: dispatchApprovalSeamFor(ctx, host, sessionId)` line and the
+  `getApproval: () => ctx.approval` read. Pre-existing coverage NOT duplicated: seam unit
+  degradations, gate-level fake-seam matrix (`test/review-posture.test.ts` "worker-dispatch
+  gate"), and the Q2 no-wedge pin over a hand-built absent-approval seam (this pass rebuilt the
+  shared `setup`/`spawnTool` helpers at module scope — no test semantics changed).
+
+**RED-check (honest scope):** dropping the `requestDispatchApproval` wiring line from
+`plugin.ts` → the source-level pin FAILS ("activateToolSurface must wire the spawn gate to the
+plugin-built dispatch approval seam") while all behavior pins stay green; restored → 12/12 green
+in the file. The behavior pins RED on the builder's contract (mis-reading `ctx.approval`), not on
+the call site — stated plainly: an apply()-level gated round-trip remains impossible offline
+because no shipped path creates a posture row through the plugin (no seeder, per the Q1 ruling).
+That end-to-end gated proof is exactly W12's live lane (in-session Multitask API seeding in the
+test harness only).
+
+**Gates** (main at merge, offline, FakeDshHost — no network/LLM/browser): `npm run typecheck`
+clean (both configs); `npm test` **1108 pass / 0 fail over 270 suites** (baseline at this run's
+start: 1103/269 — +5 tests, +1 suite). **B3 holds:** `git diff` over `src/core/access-relay.ts` /
+`src/core/access-types.ts` vs e069b8a is EMPTY. No posture seed anywhere (`reviewPosture.set`
+appears in tests only); shipped posture stays EMPTY; Q1 not relitigated.
+
+**Still open on this ticket:** L1–L4 live halves (W9–W12: live-lane probe → L1/L2 + 81/30 →
+L3/L4 through the real `ctx.approval` waterfall and posture auto-answer) and Q1's human
+signature. The live-only question this pass could not answer: whether the shipped client approval
+composer still answers under the wrapper's root frame.
