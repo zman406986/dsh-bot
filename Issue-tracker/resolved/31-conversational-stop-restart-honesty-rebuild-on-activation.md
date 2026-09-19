@@ -1,7 +1,7 @@
 # 31 — Conversational stop semantics + restart honesty (rebuild-on-activation, unknown-state notice)
 
 **Blocked by:** None — core/adapter only; independent of the client-face tickets.
-**Status:** open
+**Status:** resolved
 
 ## Problem
 
@@ -136,3 +136,12 @@ the plugin's own shipped activation behavior, not a budgeted task.
 No AC box ticked (sweep's job). FINDING 5 cross-proof: the cf5249cf persisted
 open turn survived BOTH of tonight's boots read-only
 (`probes/w13-cf5249cf-turnboundary.json`).
+
+### 2026-09-20 — RESOLVED (W17 closure sweep): restart honesty LIVE-VERIFIED across a real host kill + reboot; moved open/ → resolved/
+
+**Verified.** All boxes ticked; implementation + offline tests (worktree commit `818d03c`, 582 pass / 0 fail; merged to main in `400450f`). Both deferred items discharged: (1) ADR-0012 ("Activation replays durability, never work") filed 2026-09-19 with ADR-0010/0011 in the part-1 batch (commit `439404b`; ticket 33's part-1 record) — the flag this ticket handed to 33 is closed; (2) the trigger re-base (activation → the per-session lifecycle bind under ADR-0018/0019) landed via resolved 57/58. The one remaining item — the live restart-honesty observation — is DONE: live pass 5 Session C (record `ae9cf4c` on ticket 33; evidence `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-20\session-C\`) observed a real SIGKILL mid-roster → reboot → re-activation: the stale mirror degrades honestly pre-activation (`状态不可用`, no invented rows, no fake heartbeat); the FIRST post-activation snapshot already carries all three restored terminal rows (rebuild-before-publish live); a single one-time wake narrates the restored state honestly ("all three are accounted for… nothing is running"), and the redrive turns say "(nothing new — all three already reported)". The unknown-state and degraded-store notices stay offline-pinned — correctly absent live, since nothing was unknown-state. Bonus cross-proof: ticket 58's `redriveAttempts: 2` persisted across boots. Offline gates at closure: `npm run typecheck` clean (both configs); `npm test` 1125 pass / 0 fail / 272 suites.
+
+**Remaining nuance (design-flagged, recorded; same finding as ticket 27's ruling 1):** durable markers carry no delivered bit (`session-C/probes/w13-markers-after-rebuild.json` — `delivered` absent on every rebuilt row), so the rebuilt panel says "not delivered yet" for a result delivered pre-restart until the wake reconciles conversationally. That is obligation-truth (coherent with ticket 58's model), accepted as honest; a marker-level delivered bit would be a durable-marker field addition via the design-17 conflict-8 stop-and-raise path — recorded for design, NOT fixed here. The verifier's non-blocking findings from 2026-09-17 (activation-guard false branch untested; session-id vs generation-counter guard; concurrent-event publish window) also stand as recorded, owned by no open ticket by explicit choice of this closure — they are quality notes, not AC gaps.
+
+Moved `Issue-tracker/open/31-conversational-stop-restart-honesty-rebuild-on-activation.md` →
+`Issue-tracker/resolved/`, `**Status:**` → resolved. No other file moved.
