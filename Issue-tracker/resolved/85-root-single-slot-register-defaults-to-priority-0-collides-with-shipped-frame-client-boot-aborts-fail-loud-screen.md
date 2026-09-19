@@ -1,6 +1,6 @@
 # 85 — Cutover's `root` registration passes no priority: the host single-slot register defaults to priority 0, collides with the shipped AppFrame, and the WHOLE loader entry aborts (fail-loud screen; no client at all)
 
-**Status:** open
+**Status:** resolved (2026-09-19, live pass 4 — both ACs green)
 **Labels:** ready-for-agent
 **Blocked by:** none
 **Related:** 78 (the cutover slice this breaks — its live ACs), 84 (the inject declarations — those part worked), 33 (live close-out), 34 (the fail-loud `assertEntriesActive` behavior)
@@ -79,9 +79,10 @@ wrong-contract class as tickets 44/45/84.
 - [x] (offline, gate) fakes throw on the colliding no-priority register; the
       registration carries the explicit shadowing priority; `npm test`,
       `npm run typecheck`, `npm run build:client` green.
-- [ ] (live, ZERO LLM calls) on a real profile boot the client loads past the
+- [x] (live, ZERO LLM calls) on a real profile boot the client loads past the
       plugin stage: `[data-shell="dispatcher"]` present, the shipped app is NOT
       rendered in its place (the election took the cell), zero pageerrors.
+      — **2026-09-19 live pass 4: green on every clause; see comment.**
 
 ## Notes
 
@@ -173,3 +174,28 @@ wrong-contract class as tickets 44/45/84.
   collision on the real fiber cascade, and that a render crash abdicates to
   the stock frame. Pass 4 should confirm the AC as written: dispatcher shell
   present, stock app NOT rendered, zero pageerrors.
+- **2026-09-19 (live pass 4, `C:\Users\TZhen\Desktop\dsh-live-pass4-2026-09-19\`,
+  outside the repo): LIVE AC TICKED — every clause green; both residual-
+  uncertainty clauses confirmed; ticket RESOLVED.** HEAD `8d0d572` rebuilt in
+  place (client bundle 159,060 bytes), throwaway `multitask` profile, host
+  0.1.5-rc.1, port 8877, WMI node-direct, timers armed at launch and verified.
+  - Boot: `[data-slot="root"]` renders
+    `<div class="multitask-dispatcher-shell" data-shell="dispatcher">` — the
+    election took the cell; shipped AppFrame NOT rendered; capsule chip 0,
+    launcher chip 0, stock nav 0; no fail-loud screen; the pageerror/console
+    log is EMPTY for the whole boot phase (`shots/01-boot.png`,
+    `boot-graph-row.json`).
+  - Re-apply: a full reload re-registered -1 cleanly (`shell:1` again, no
+    stale collision) — the HMR-remainder clause is confirmed.
+  - The third remainder (crash abdicates to the stock frame) was confirmed
+    the same boot, though by a REAL crash of our own conversation seat rather
+    than a synthetic one: `slot entry crashed in 'root': Minified React error
+    #300` → the host's per-entry boundary abdicated our entry and the stock
+    `pI_x6G_frame` retook the cell (`shots/02-abdicated-stock-frame.png`).
+    The crash is NOT this ticket's scope — filed as **88**.
+  - Recipe correction recorded in the pass README: the profile insert row
+    must be `- insert: [{name: ./node_modules/...}]` (object list); a bare
+    string entry dies at boot in `Include.ensureId` — unrelated to this
+    ticket, but it masquerades as a boot failure.
+  - Zero LLM traffic was used for this AC (the one-flow budget was spent
+    separately on the 45/44 AC3 legs, recorded there).
