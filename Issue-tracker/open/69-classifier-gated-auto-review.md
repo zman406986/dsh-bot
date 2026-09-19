@@ -856,3 +856,23 @@ No file moved; per the PLAN's end-state this ticket stays open regardless of liv
 Full records live on ticket 33 (the closeout ticket); this pointer makes the wedge family visible
 on the ticket that owns the seams. No fix is claimed for either mechanism and no scope decision is
 made here (W17/human).
+
+### 2026-09-20 — W17 disposition (stays OPEN; no file move): mechanism complete, L1/L2 live-verified; the open items are human-gated by design
+
+Disposition recorded per the overnight PLAN (69/81 are deliberately NOT closed by the sweep).
+
+**What IS verified:**
+- Chunk A offline (A1–A6 ticked with evidence; commits `61dd7bf`/`1a337fa`), chunk B offline (B1–B3 ticked; `9bcdd4d`/`e9f18ab`/`1acb918`; B3's empty-diff on `access-relay.ts`/`access-types.ts` holds through every later merge, most recently W22's `c8849a7`).
+- L3 offline wiring pinned RED-checked (W7, merge `14ee7a9`).
+- FINDING 1 fixed at the model level (W19, merge `f8067c3`) and its model half live-confirmed (Session B-4: the first live worker ever called `request_access`, name-only, stop-and-wait).
+- FINDING 4 fixed offline (W22 park-vs-settlement, merge `c8849a7`, semantics ruling recorded subject to human reversal) and LIVE-VERIFIED end to end (Session B-5: the parked ask survives settlement, `pendingAsks` non-empty at every poll, worker settles only after resolve).
+- **L1 + L2 LIVE-VERIFIED** (Session B-5; ticked by W14): secret-ask card inline with request-id → honest prefix-id refusal → full-id `/dispatcher-resolve allow` → "Answer routed" → ask + card leave, parked call resolves, worker names the decision; blocked-with-reason marker on the row throughout, distinct from landed/unavailable chips; the dispatcher turn never wedged.
+
+Gates at disposition: `npm run typecheck` clean (both configs); `npm test` 1125 pass / 0 fail / 272 suites.
+
+**Why it stays open — per this ticket's recorded end-state, regardless of live outcomes:**
+1. **Q1 awaits a human reversal window.** The posture default (EMPTY, no Config seed) is an agent ruling (2026-09-19, subject to human reversal); only a human signature settles it. U-D forbids shipping any seeder that would let the posture lane pass without that ruling.
+2. **L3/L4 stay unticked — BLOCKED-no-seeder** (Session B-3, record `f8035b9` on ticket 33): no live path can insert a review-posture row; L3's waterfall face answered NEGATIVE en route (the host approval composer ships but does not answer under the wrapper root frame).
+3. **FINDING 3/5 wedge family** — pointers recorded 2026-09-20 (W14): an unanswered host approval ask wedges the dispatcher turn (sharpens Q2); session cf5249cf's persisted open turn survives restart and eats sends. No fix claimed, no scope decided — W17/human.
+
+A future session may close this ticket when the human rules Q1 (after which L3/L4 either run live or are explicitly descoped) and the wedge family has an owner; everything else is recorded above with artifacts.

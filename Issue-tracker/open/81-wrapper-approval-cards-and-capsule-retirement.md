@@ -278,3 +278,23 @@ the one trivial spawn.
   retirement (checkbox 3) stands MOOT-VERIFIED as recorded.
 
 No file moved; the close/disposition call is W17's.
+
+### 2026-09-20 — W17 disposition (stays OPEN; no file move): substance verified; the residual is the human-gated posture lane plus the reversible settings ruling
+
+Disposition recorded per the overnight PLAN (69/81 are deliberately NOT closed by the sweep).
+
+**What IS verified** (all four checkboxes ticked, live annotations in place):
+- Rendering shipped + offline-tested (`9bcdd4d` projections + `1acb918` rendering; gates 1056/0 at the time; typecheck clean; build:client ok).
+- Worker-dispatch card LIVE-VERIFIED from a settled spawn — `[data-card-kind="worker-dispatch"]`, `gating="ungated"` (Session B-4 `w21-42-pollA`/`w21-44-final`, `shots/w21-shot-final-dispatch-card.png`; the W19 FINDING-2 fix `f8067c3` confirmed live; re-rendered again in Session C).
+- Access/secret-ask card anatomy + the resolve round-trip LIVE-VERIFIED via 69's L1 (Session B-5 — ticked on 69 by W14).
+- Blocked-marker loop LIVE via 69's L2 (Session B-5 `w23-09` — the blocked-with-reason marker rendered on the row while the secret-ask card waited).
+- Capsule retirement MOOT-VERIFIED (landed with 78's cutover: `a44084a`/`94e6127`; dead-code disposition rides resolved-ticket-89's completed pass).
+- Settings-card re-home DECIDED: stays a shipped-settings entry (2026-09-20 agent ruling above, subject to human reversal; checkbox 4 ticked by W14).
+
+Gates at disposition: `npm run typecheck` clean (both configs); `npm test` 1125 pass / 0 fail / 272 suites.
+
+**Why it stays open — the cheap close path for a future session:**
+1. `gating="approval-allowed"` / `gated: true` card anatomy remains live-unobserved — it needs the L3 posture lane; 69's L3/L4 are BLOCKED-no-seeder (no live posture-insert path exists and no seeder may ship per Q1/U-D). This resolves when the human rules on Q1 (ticket 69) or explicitly accepts ungated-only evidence as sufficient.
+2. The settings ruling is human-reversible; a reversal reopens checkbox 4 cheaply (the store is already wrapper-side).
+
+A future session may close this ticket once item 1 is human-dispositioned; everything else is recorded above with artifacts.
