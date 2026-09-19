@@ -466,3 +466,50 @@ The L1 wiring agent was cancelled mid-flight. Its uncommitted work was **kept, n
 4. **Q1 stays ready-for-human** (§6): whether any non-empty default/Config-seeded posture should ship is undecided; `d25d6ef` does not touch it.
 
 **Successor opens first:** `src/client/index.ts` (`mountShellPage` + `ShellApprovalFeedWiring` seam), `src/client/approval-feed.ts`, `src/client/approval-cards.ts`, `src/client/approval-pane.tsx`, `src/adapter/resolve-command.ts`, `src/adapter/dispatch-approval.ts`, `src/plugin.ts:460-480` and `:610-630`, then this ticket's Design 2026-09-19 comment (§2 classifier, §3 contract, §5 chunking) as the frozen contract.
+
+### 2026-09-19 — agent (L1 OFFLINE composition pin landed: real watch → hub → mounted store → real resolve; RED-verified)
+
+Closes the L1 gap the handover named — **"the offline tests pin units, not the composition."** One
+new test file drives the REAL composition end to end; no link is hand-rebuilt.
+
+**The chain the test drives** (`test/approval-feed-composition.test.ts`): real
+`apply({enabled:true})` → real `/dispatcher-start` activation → real `spawn_worker` tool → real
+`request_access` tool (park) → core `onRosterChanged` → real `rosterChannel.publish` → the owner
+scope's `update` into the ONE shared settings document → the real `applyClientModule` settings
+watch (`approvalFeed.applyChannelValue`) → the shared hub → **the composition's OWN
+`mount.approvals` store from the returned `mounts`** → real `/dispatcher-resolve` command → core
+`Multitask.resolveAccess` → re-publish → card leaves. A second test pins the fiber discipline:
+one client-fiber teardown releases the watch, the settings card's own bind, and every mount's feed
+attach (`bridge.subscribers.size === 0`), and a later host publish reaches nothing.
+
+**Source seam added (smallest additive change):** `applyClientModule` now returns a
+`ClientModuleComposition { approvalsFeed, mounts }` — `src/client/index.ts:235` (interface),
+`:302` (the `mounts` array), `:445`/`:492` (each `slots.inject` pushes its `mountShellPage`
+result), `:499` (return). `apply` ignores the return; the array is the same live array the injects
+push into, so a late slot declaration still lands in it (offline fakes run the inject callback
+synchronously, so the list is complete at return there). The mounted stores were previously
+reachable only inside the React component closure — this is the observability seam, nothing else
+moved.
+
+**RED evidence (three breaks, each reverted after capture):**
+1. Drop `approvalFeed.applyChannelValue(snapshot.value)` in the watch → both tests fail
+   `'unfed' !== 'ready'` at the mount-store assertion.
+2. Drop `feed.attach(approvalsStore)` in `mountShellPage` → same failure (`'unfed' !== 'ready'`).
+3. Break the resolve route in `plugin.ts` (`resolve: () => false`) → the resolve assertion fails
+   with the honest refusal (`kind:'error'`, `"…ask is no longer waiting…"`) instead of
+   `{kind:"success", text:"Answer routed for child-1."}`.
+
+**Gates** (worktree `wt/69l1`, offline, no browser/LLM): `npm run typecheck` clean (both configs);
+`npm test` **1046 pass / 0 fail** (257 suites; baseline 1044/256 — +2 tests, +1 suite);
+`npm run build:client` ok, **161,214 B** (was 161,087 B — +127 B for the seam).
+
+**Also fixed in this pass:** `test/resolve-command.test.ts`'s integration test claimed
+"Answering again after settle is honestly refused (ticket gone)" while asserting nothing about it.
+The assertion it describes was added (a second command invocation after the settle returns
+`dispatcherResolveNoPendingAsk`) rather than weakening the comment.
+
+**Still not claimed:** L1's LIVE half (inline render in the wrapper conversation, live resolve
+round-trip), L2, L3, L4 — untouched, still the 45/33 lane's. The offline pin proves the
+composition's data path, not that the live slot declaration / React mount behaves; the React
+render path with a fed store is still unpinned (`test/client-approval-pane.test.ts:262-274`'s
+hooks-need-React note stands).
