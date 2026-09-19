@@ -1,7 +1,7 @@
 ﻿# 17 — Behavior-clone the reference product's always-on dispatcher experience (separate worktree), UI as toggle
 
 **Blocked by:** None — can start immediately. Coordinates with #16 (UI toggle) rather than duplicating it.
-**Status:** open
+**Status:** resolved
 
 ## Problem / goal
 
@@ -116,3 +116,17 @@ Phase 3 (implementation) proceeds via those tickets, one-at-a-time in the worktr
 ### 2026-09-19 — Gate 3 pointer (ticket 33 part 1): provenance review re-scoped and done as the no-verbatim-copy review — PASS, zero hits
 
 Per ADR-0018's re-scope (recorded on ticket 33, 2026-09-19), the full-diff provenance review this ticket's Phase 3 owed was executed as the **no-verbatim-copy review**: method, grep evidence, naming-provenance traces, and verdict (`PASS — no verbatim reproduction found`) are in `docs/research/no-verbatim-copy-review-2026-09-19.md`. Scope: our shipped tree only (`src/ test/ client/ lib/ scripts/`); the reference tree was not opened; the comparison basis is the recorded reference set in `docs/research/`. Findings summary: 0 codename/basename/protocol-token/prompt-phrase hits outside the sanctioned `FORBIDDEN_VOCAB` negative-test fixtures; tool/locale/module names trace to PRD §16/CONTEXT glossaries and in-repo authored copy. Residual risk is the AGENTS.md 2026-09-18 human-accepted-risk line. Ticket 33's Gate 3 checkbox is ticked with this pointer; ticket 33's own dated comment carries the full part-1 record.
+
+### 2026-09-20 — RESOLVED (W17 closure sweep, LAST): Phase 3 complete by the totality — the whole split closed, merge + re-scoped QA + live pass recorded; moved open/ → resolved/
+
+**Closure decision.** This ticket's Phase 3 ("implementation via the split tickets, merge-gated") is met by the totality now recorded:
+
+- **The split is fully closed.** 27/28/29/31/30 closed in this sweep (`48937b9`/`a03615b`/`83e0b85`/`eb05ac5`/`d450cdd`); 32 closed 2026-09-19 (`9126909`); 33 (the close-out epic) closed `933b287` with AC3/AC7 ticked and AC1 recorded as deliberately voided (ADR-0018). Later scope the epic's surfaces grew into (67/77–81/85–94 shell era, 96/97 docs) resolved in their own right.
+- **Merge gates, as re-scoped by ADR-0018:** the clean-room identifier grep was voided as a ship gate (human accepted-risk, 2026-09-18) and replaced by the no-verbatim-copy review — PASS, zero hits (`docs/research/no-verbatim-copy-review-2026-09-19.md`, `439404b`); offline tests green throughout, final counts on main this date **1125 pass / 0 fail / 272 suites**, typecheck clean both configs, `npm run lint:docs` green.
+- **The merge record:** `400450f` (the 17.27–17.33 batch, --no-ff, post-merge gates green) + the part-2 merge train (`7ec5c1f`/`2cad4ce`/`4add534`/`d0bd81f`), §5 revisit-before-merge rows 1–8 recorded PASS with row 4's required by-choice note.
+- **The live pass record:** pass-5 (2026-09-19 Sessions A/B + 2026-09-20 Sessions B-1…B-5 and C, evidence `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-19\` and `...\dsh-live-pass5-2026-09-20\`) — presence/sections/firehose/restart honesty/approval cards + resolve round-trip/composer delivery all live-verified on the real host; findings 1–5 fixed or dispositioned (W19/W22 merges `f8067c3`/`c8849a7`).
+- **Deliberately-open residue (human-gated, NOT this epic's ACs):** tickets 69 (Q1 posture ruling awaits a human signature; L3/L4 no-seeder; wedge family FINDING 3/5) and 81 (gated-card anatomy; reversible settings ruling) stay open with dated W17 disposition comments (`2f80961`). The agent rulings the closures rest on (27 ×2, 28 stand-in, W22 park-vs-settlement, 81 settings re-home) are explicitly SUBJECT TO HUMAN REVERSAL per the Q1 pattern — a human reversal reopens the named scope cheaply; none of them re-opens this epic's Phase 3, whose bars (split closed, merge gated, tests green, provenance re-scoped and executed) are all met.
+
+Moved `Issue-tracker/open/17-behavior-clone-reference-always-on-dispatcher.md` →
+`Issue-tracker/resolved/`, `**Status:**` → resolved. This was the last file of the W17 sweep
+(order 27→28→29→31→30→33→17); the tracker's open set is now exactly {69, 81}.
