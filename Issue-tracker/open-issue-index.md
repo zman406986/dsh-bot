@@ -2,9 +2,8 @@
 
 # Open ticket index
 
-Generated from `Issue-tracker/open/*.md` — 2 open tickets. The row set is owned by the folder, so a ticket that moves cannot leave a stale row behind (ticket 96). Titles and labels mirror each ticket's own lines.
+Generated from `Issue-tracker/open/*.md` — 1 open ticket. The row set is owned by the folder, so a ticket that moves cannot leave a stale row behind (ticket 96). Titles and labels mirror each ticket's own lines.
 
 | # | Ticket | Title | Status | Labels |
 |---|---|---|---|---|
 | 102 | [102-summon-and-kill-dispatchers-from-the-floating-window](open/102-summon-and-kill-dispatchers-from-the-floating-window.md) | Summon/kill dispatcher affordances reported unusable in the floating window (live) + reference research | open | ready-for-agent |
-| 103 | [103-floating-window-drag-flies-across-the-screen](open/103-floating-window-drag-flies-across-the-screen.md) | Floating-window drag flies across the screen (compounding start-relative delta) | open | ready-for-agent |
