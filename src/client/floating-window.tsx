@@ -248,21 +248,26 @@ function liveViewport(): { width: number; height: number } {
 }
 
 /**
- * Drag: titlebar pointerdown captures the start point and rides window
+ * Drag: titlebar pointerdown seeds the last-seen point and rides window
  * pointermove deltas into `store.moveBy` (clamped there) until pointerup
  * or pointercancel. Listeners live on `window` so a fast drag that leaves
- * the titlebar never strands; deltas stay relative to the START point, so
- * no drift accumulates.
+ * the titlebar never strands. Each move contributes only its OWN delta
+ * (measured against the previous move, not the start), so the pointer and
+ * the window advance 1:1 and no start-relative offset accumulates.
  */
 function beginDrag(
   event: ReactPointerEvent<HTMLDivElement>,
   store: FloatingWindowStore,
 ): void {
   if (event.button !== 0) return;
-  const startX = event.clientX;
-  const startY = event.clientY;
+  let lastX = event.clientX;
+  let lastY = event.clientY;
   const onMove = (move: PointerEvent) => {
-    store.moveBy(move.clientX - startX, move.clientY - startY, liveViewport());
+    const dx = move.clientX - lastX;
+    const dy = move.clientY - lastY;
+    lastX = move.clientX;
+    lastY = move.clientY;
+    store.moveBy(dx, dy, liveViewport());
   };
   const onUp = () => {
     window.removeEventListener("pointermove", onMove);

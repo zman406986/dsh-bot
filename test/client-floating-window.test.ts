@@ -669,6 +669,81 @@ describe("floating window — rendered: chip toggles, window portals to body, cl
     });
     disposeWindowLayer();
   });
+
+  it("three monotonic pointermoves advance the window by the SUM of per-event deltas (no start-relative compounding)", async () => {
+    const store = createFloatingWindowStore();
+    const Chip = createLauncherChip(t, store, shellStub());
+    const { root } = renderTree();
+    await act(async () => {
+      root.render(createElement(Chip));
+    });
+    await act(async () => {
+      click(query(CHIP)!);
+    });
+    const before = store.getBox().state;
+
+    // Down on the titlebar, then three small monotonic moves on window,
+    // then up (the up is MANDATORY: it is what removes the window-level
+    // listeners and keeps them from leaking into later tests).
+    await act(async () => {
+      query(DRAG)!.dispatchEvent(
+        new dom.window.MouseEvent("pointerdown", {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          clientX: 400,
+          clientY: 40,
+        }),
+      );
+    });
+    for (const [clientX, clientY] of [
+      [410, 50],
+      [420, 60],
+      [430, 70],
+    ]) {
+      await act(async () => {
+        dom.window.dispatchEvent(
+          new dom.window.MouseEvent("pointermove", {
+            bubbles: true,
+            cancelable: true,
+            clientX,
+            clientY,
+          }),
+        );
+      });
+    }
+    await act(async () => {
+      dom.window.dispatchEvent(
+        new dom.window.MouseEvent("pointerup", {
+          bubbles: true,
+          cancelable: true,
+          clientX: 430,
+          clientY: 70,
+        }),
+      );
+    });
+
+    const after = store.getBox().state;
+    assert.equal(
+      after.x,
+      before.x + 30,
+      "three 10px moves land 30px right: each pointermove must contribute " +
+        "its OWN delta (relative to the previous move). On the compounding " +
+        "bug the start-relative deltas 10+20+30 re-apply on top of the live " +
+        "position and the window runs to before+60. Guard: monotonic in the " +
+        "pointer, no clamp hit at this magnitude.",
+    );
+    assert.equal(
+      after.y,
+      before.y + 30,
+      "same on the y axis: 30px down, not the compounding 60",
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    disposeWindowLayer();
+  });
 });
 
 describe("floating window — crash isolation (the ticket's guarantee, rendered)", () => {
