@@ -11,6 +11,12 @@ opencode.json
 .scratch/*.log
 .scratch/matt-skills-seed/
 
+# Testing/process artifacts — live-test evidence, boot/teardown logs, probes,
+# kill-timer records, driver scripts and their outputs. May contain private dsh
+# session content; NEVER commit (operator rule 2026-09-20). Evidence lives in the
+# repo from now on, never in new Desktop folders.
+.scratch/testing/
+
 # Build and dependencies
 node_modules/
 lib/

@@ -60,6 +60,17 @@ Moved from `AGENTS.md` §Network, 2026-09-20, unmodified:
 
 npm (not pnpm) drives typecheck, offline tests, and the build (`package.json`).
 
+## Testing artifacts & evidence layout (operator rule, 2026-09-20)
+
+**Human explicit override (authority-stack level 1), operator instruction recorded 2026-09-20.** This is a **new** rule from the operator, not a move: it does not appear in the pre-decomposition `AGENTS.md`, adds no row to the moved-rule register below, and leaves the register's no-rule-lost inventory untouched.
+
+- **All** future live-test/process artifacts — evidence subfolders, boot/teardown logs, probes, kill-timer records, driver scripts and their outputs, any process artifacts — go under `.scratch/testing/<yyyy-mm-dd>-<slug>/` in the repo, created **before** the session starts.
+- **No new evidence/process folders on the Desktop, ever.** Existing Desktop folders stay put; closed tickets citing them stand as written.
+- The layout is git-ignored (`.gitignore`) — artifacts may contain private dsh session content; **never commit them**.
+- From now on, ticket comments cite the in-repo path, not a Desktop path.
+
+The full rule's level-6 home is `read-before-running-live-and-browser-tests.md` §Evidence and process artifacts; the folder carries a short local README describing what belongs there.
+
 ## Moved-rule register (the no-rule-lost inventory)
 
 Line-by-line disposition of every rule in the pre-decomposition `AGENTS.md` (2026-09-20 tree, tickets 96/97 open). **None deleted.** Grouped by the authority level of the destination home; within groups, old-file order. "Moved, unmodified" = the text now lives verbatim at the destination; "Point(er)" = the rule's authoritative text already lives at the destination and the old wording was a restatement.
