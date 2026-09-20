@@ -309,8 +309,9 @@ function clickRow(sessionId: string): void {
 function mountComposition(sessions: ClientSessionsLike, onboarding: OnboardingStore) {
   const { ctx } = createCompositionCtx(sessions);
   // The REAL shell-page composition: feed bindings, conversation pane
-  // factory, hosted roster panel seat, onboarding seat — the same
-  // `mountShellPage` body the `main` page and the `root` frame register.
+  // factory, hosted roster panel seat, onboarding seat — the `mountShellPage`
+  // machinery (retained per ADR-0021; since ticket 99 driven directly by
+  // tests and, in production, by ticket 100's floating-window registration).
   const mount = mountShellPage(ctx, {
     store: onboarding,
     onSeen: () => {},

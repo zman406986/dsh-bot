@@ -2,14 +2,23 @@
  * Ticket 78 — wrapper shell mount (ADR-0020 slice 2: staging contracts +
  * the CUTOVER's root-frame election).
  *
+ * Ticket 99 (2026-09-20, ADR-0021): the root election and the keyed
+ * `main`-page registration LEFT the default composition — stock dsh is the
+ * primary UI and is never displaced. The machinery stays (reversible at one
+ * registration site — ticket 100's floating window), so this suite keeps
+ * two kinds of pins: MACHINERY-ISOLATION pins (the pure contracts, the
+ * election model, the collision rule — records of the retained, retired
+ * path) and DEFAULT-POSTURE pins (what `apply` registers today: NO `root`
+ * entry, NO `main` entry — the module renders nothing into dsh's layout).
+ *
  * Offline only (S8): the registration contracts pinned over fakes in
  * the established overlay/toolview style — inject → register, one entry, id
- * stability — plus the pure root fail-safe model. The `root` election's
- * REGISTRATION is pinned here (one dynamic entry, contract options incl. the
- * explicit shadowing priority — ticket 85, collision-throwing fakes, unload
- * abdication over fakes); the election's LIVE half (frame swap, HMR fiber
- * behavior, fallback-on-crash in a real browser) is live-only (tickets
- * 45/33) and is deliberately NOT claimed here.
+ * stability — plus the pure root fail-safe model. The retired `root`
+ * election's REGISTRATION shape is pinned over the fake (contract options
+ * incl. the explicit shadowing priority — ticket 85, collision-throwing
+ * fakes, unload abdication over fakes); the election's LIVE half (frame
+ * swap, HMR fiber behavior, fallback-on-crash in a real browser) was
+ * live-only (tickets 45/33) and was never claimed here.
  *
  * Ticket 89 (2026-09-19): the retired staging launcher's contracts and the
  * page-open decision tests left this suite with their deletion.
@@ -32,6 +41,8 @@ import {
   SHELL_OVERLAY_SLOT,
   rosterOverlayRegistration,
 } from "../src/client/overlay.js";
+import { SETTINGS_PLUGIN_ITEM_SLOT } from "../src/client/settings-card-store.js";
+import { TOOL_CALL_TOOLVIEW_SLOT } from "../src/client/toolviews.js";
 import {
   MAIN_PAGE_SLOT,
   ROOT_FRAME_SLOT,
@@ -318,15 +329,18 @@ function createLayoutFake(mode: "ok" | "throws" = "ok") {
   return { layout, calls };
 }
 
-describe("shell staging mount — registration contracts (ticket 78)", () => {
+describe("shell staging mount — registration contracts (ticket 78; retained machinery per ADR-0021)", () => {
   it("pins the keyed `main` page registration: dsh-owned slot, our key, stable", () => {
+    // Ticket 99 (ADR-0021): the registration itself left the default
+    // composition — this pins the RETAINED contract, ticket 100's re-host
+    // site reuses it verbatim.
     assert.equal(MAIN_PAGE_SLOT, "main");
     assert.deepEqual(shellPageRegistration(), {
       name: "main",
       key: "multitask-dispatcher-shell",
       locale: "multitask-dispatcher",
     });
-    // Id stability: the same contract on every call — the launcher opens
+    // Id stability: the same contract on every call — a launcher opens
     // exactly the key this registration claims.
     assert.deepEqual(shellPageRegistration(), shellPageRegistration());
   });
@@ -352,23 +366,17 @@ describe("shell staging mount — registration contracts (ticket 78)", () => {
 });
 
 describe("shell staging mount — apply() over the fake seams", () => {
-  function findInject(
-    ctx: ReturnType<typeof createMountCtx>,
-    parent: string,
-  ) {
-    const record = ctx.injects.find((candidate) => candidate.parent === parent);
-    assert.ok(record, `${parent} inject missing`);
-    return record;
-  }
-
-  it("registers exactly one `main` entry with the pinned options and a component", () => {
+  it("registers NO `main` entry — the keyed page left the default posture (ticket 99, ADR-0021)", () => {
     const ctx = createMountCtx();
     apply(ctx);
-    const main = findInject(ctx, MAIN_PAGE_SLOT);
-    assert.equal(main.entries.length, 1, "one `main` page entry");
-    const entry = main.entries[0]!;
-    assert.deepEqual(entry.options, shellPageRegistration());
-    assert.equal(typeof entry.component, "function");
+    // ADR-0021: stock dsh is the primary UI; the full-cell keyed `main`
+    // page registration retired with the root election. Nothing of ours
+    // claims a page in the shipped layout.
+    const mains = ctx.injects.filter(
+      (record) => record.parent === MAIN_PAGE_SLOT,
+    );
+    assert.equal(mains.length, 0, "no `main` inject controller");
+    assert.equal(ctx.slotCell(MAIN_PAGE_SLOT).length, 0, "empty `main` cell");
   });
 
   it("registers NO shell.overlay entries — the additive entries retired at the cutover", () => {
@@ -393,34 +401,47 @@ describe("shell staging mount — apply() over the fake seams", () => {
     }
   });
 
-  it("registers exactly one `root` entry — the cutover's dynamic election", () => {
+  it("registers NO `root` entry — the frame election left the default posture (ticket 99, ADR-0021)", () => {
     const ctx = createMountCtx();
     apply(ctx);
+    // ADR-0021 decision 1: our client module must not register over the
+    // `root` slot — the shipped AppFrame is never displaced. The election
+    // contract stays exported (the retained-machinery pin below), but the
+    // DEFAULT COMPOSITION must not elect it.
     const roots = ctx.injects.filter(
       (record) => record.parent === ROOT_FRAME_SLOT,
     );
-    assert.equal(roots.length, 1, "one `root` inject controller");
-    assert.equal(roots[0]!.entries.length, 1, "one dynamic root entry");
-    const entry = roots[0]!.entries[0]!;
-    assert.deepEqual(entry.options, shellRootRegistration());
-    assert.equal(typeof entry.component, "function");
-    // The single-slot shape: no `id`, no `key`, and — since ticket 85
-    // (2026-09-19) — the EXPLICIT shadowing priority. The cutover's original
-    // no-priority options defaulted to 0, collided with the shipped frame's
-    // own effective 0 (dsh-client-ui-layout lib/client.js:524-531 registers
-    // `{name: "root", …}` with no priority), and the shipped register THREW,
-    // killing the whole loader entry (live pass 3).
-    assert.deepEqual(entry.options, {
-      name: "root",
-      locale: "multitask-dispatcher",
-      priority: -1,
-    });
-    assert.deepEqual(shellRootRegistration(), shellRootRegistration());
-    // The shipped `conversation` main key is still never claimed — the
-    // election shadows the FRAME, never a keyed page.
+    assert.equal(roots.length, 0, "no `root` inject controller");
+    assert.equal(ctx.slotCell(ROOT_FRAME_SLOT).length, 0, "empty `root` cell");
+  });
+
+  it("the default posture renders NOTHING into dsh's layout: only additive slots register (ticket 99)", () => {
+    const ctx = createMountCtx();
+    apply(ctx);
+    // Exactly two declaration waits remain: the keyed toolview entries
+    // (serving the stock chat — ticket 89's AC 3, additive) and the keyed
+    // settings card (ticket 47, additive in the shipped settings tab). No
+    // layout surface of ours: no `root` entry, no `main` entry, and nothing
+    // claims the shipped `conversation` page key.
+    assert.equal(ctx.injects.length, 2);
+    assert.deepEqual(
+      ctx.injects.map((record) => record.parent).sort(),
+      [SETTINGS_PLUGIN_ITEM_SLOT, TOOL_CALL_TOOLVIEW_SLOT].sort(),
+    );
+    assert.equal(ctx.slotCell(ROOT_FRAME_SLOT).length, 0);
+    assert.equal(ctx.slotCell(MAIN_PAGE_SLOT).length, 0);
     for (const record of ctx.injects) {
-      for (const other of record.entries) {
-        const options = other.options as { name: string; key?: string };
+      for (const entry of record.entries) {
+        const options = entry.options as {
+          name: string;
+          key?: string;
+          priority?: number;
+        };
+        assert.notEqual(
+          options.name,
+          ROOT_FRAME_SLOT,
+          "nothing of ours in the single `root` cell",
+        );
         if (options.name === MAIN_PAGE_SLOT) {
           assert.notEqual(options.key, SHIPPED_MAIN_PAGE_KEY);
         }
@@ -428,18 +449,20 @@ describe("shell staging mount — apply() over the fake seams", () => {
     }
   });
 
-  it("the constant IS the registration's priority and is below the shipped frame's 0 (ticket 85)", () => {
+  it("the constant IS the registration's priority and is below the shipped frame's 0 (ticket 85; retained-contract record)", () => {
     // The ticket-78 cutover shipped SHELL_ROOT_DYNAMIC_PRIORITY as a model
     // constant only; ticket 85 threads it onto the options AND flips it to
     // the verified direction: the shipped SlotCore keeps entries sorted
     // ascending by `(priority ?? 0)` and renders the first live entry
     // ("lowest renders"), so shadowing the frame requires a value BELOW its
-    // effective 0 — and equal to it THROWS.
+    // effective 0 — and equal to it THROWS. Ticket 99 (ADR-0021): the
+    // registration left the default composition; this pins the RETAINED
+    // contract only.
     assert.equal(SHELL_ROOT_DYNAMIC_PRIORITY, -1);
     assert.equal(
       shellRootRegistration().priority,
       SHELL_ROOT_DYNAMIC_PRIORITY,
-      "the live registration carries the constant",
+      "the registration carries the constant",
     );
     assert.ok(
       shellRootRegistration().priority < 0,
@@ -490,14 +513,19 @@ describe("shell staging mount — apply() over the fake seams", () => {
     );
   });
 
-  it("the explicit priority shadows the seeded frame; the cell order and shellCellWinner agree with the host rule", () => {
+  it("the explicit priority shadows a seeded frame and shellCellWinner agrees with the host rule (retired-path record over the fake)", () => {
+    // Ticket 99 (ADR-0021): `apply` no longer registers the election — this
+    // pins the RETAINED machinery by registering it MANUALLY, the way
+    // ticket 100's re-host site would, over the same host-shaped fake.
     const ctx = createMountCtx();
     ctx.slots.inject(ROOT_FRAME_SLOT, () => {
       ctx.slots.register({ name: ROOT_FRAME_SLOT }, function ShippedAppFrame() {});
     });
     // With the explicit -1 there is no collision: the register succeeds and
     // shadows the frame.
-    apply(ctx);
+    ctx.slots.inject(ROOT_FRAME_SLOT, () => {
+      ctx.slots.register(shellRootRegistration(), function ShellFrame() {});
+    });
     assert.deepEqual(ctx.slotCell(ROOT_FRAME_SLOT), [
       // Ascending (priority ?? 0) — ours first, the shipped frame second:
       // the host's insert-time stable sort (SlotCore.register).
@@ -516,11 +544,15 @@ describe("shell staging mount — apply() over the fake seams", () => {
     assert.equal(shellCellWinner(cellEntries)?.priority, -1);
 
     // Teardown (unload/HMR) frees the cell — both fibers' controllers sweep
-    // their entries — and a fresh apply registers -1 again with no stale
-    // collision (the freed cell cannot throw).
+    // their entries — and a fresh registration of the same contract lands
+    // with no stale collision (the freed cell cannot throw).
     ctx.runFiberTeardown();
     assert.deepEqual(ctx.slotCell(ROOT_FRAME_SLOT), []);
-    assert.doesNotThrow(() => apply(ctx));
+    assert.doesNotThrow(() =>
+      ctx.slots.inject(ROOT_FRAME_SLOT, () => {
+        ctx.slots.register(shellRootRegistration(), function ShellFrame2() {});
+      }),
+    );
     assert.equal(ctx.slotCell(ROOT_FRAME_SLOT).length, 1);
     assert.equal(
       (
@@ -530,25 +562,15 @@ describe("shell staging mount — apply() over the fake seams", () => {
     );
   });
 
-  it("unload abdicates the cell: teardown empties `root`; the shipped frame is the surviving winner", () => {
-    const ctx = createMountCtx();
-    apply(ctx);
-    assert.equal(
-      ctx.injects.filter((record) => record.parent === ROOT_FRAME_SLOT)
-        .length,
-      1,
-    );
-
-    // The caller's-fiber cascade (registry.d.ts:77-83) sweeps the entry with
-    // the fiber: nothing of ours stays live in the single cell.
-    ctx.runFiberTeardown();
-    assert.equal(ctx.injects.length, 0);
-
-    // The documented election over the surviving cell hands it back to the
-    // shipped app frame (the pure model of the abdicated dynamic entry).
-    // Ticket 85 (2026-09-19): the shipped frame's effective priority is 0 —
-    // verified (its registration carries none; `?? 0`), not just "ours to
-    // guess" — and ours is the explicit -1.
+  it("abdication hands the cell back to the shipped frame (retired-path record; pure model)", () => {
+    // Ticket 99 (ADR-0021): `apply` no longer registers into `root`, so
+    // there is no live cell of ours to abdicate — this pins the pure model
+    // of the RETAINED machinery: the caller's-fiber cascade (registry.d.ts
+    // :77-83) sweeps a dynamic entry with its fiber, and the documented
+    // election over the surviving cell hands the cell back to the shipped
+    // app frame. Ticket 85 (2026-09-19): the shipped frame's effective
+    // priority is 0 — verified (its registration carries none; `?? 0`), not
+    // just "ours to guess" — and ours was the explicit -1.
     const ours: ShellCellEntry = {
       entryId: "multitask-dispatcher-shell-frame",
       priority: SHELL_ROOT_DYNAMIC_PRIORITY,
@@ -558,32 +580,26 @@ describe("shell staging mount — apply() over the fake seams", () => {
     assert.equal(shellCellWinner([ours, shipped]), shipped);
   });
 
-  it("fiber teardown (HMR) reverses every registration incl. the dynamic root entry; re-apply restores the identity", () => {
+  it("fiber teardown (HMR) reverses every registration; re-apply restores the additive posture", () => {
     const ctx = createMountCtx();
     apply(ctx);
-    // Four declaration waits: tool.call.toolview, settings.plugin.item,
-    // `main` (the staging page registration, retained), and `root` (the
-    // cutover's frame election). The capsule + launcher shell.overlay
-    // injects retired at the cutover.
-    assert.equal(ctx.injects.length, 4);
-    assert.equal(findInject(ctx, MAIN_PAGE_SLOT).entries.length, 1);
-    assert.equal(findInject(ctx, ROOT_FRAME_SLOT).entries.length, 1);
+    // Two declaration waits since ticket 99 (ADR-0021):
+    // tool.call.toolview and settings.plugin.item. The `main` page and the
+    // `root` election retired from the composition; the capsule + launcher
+    // shell.overlay injects retired at the ticket-78 cutover.
+    assert.equal(ctx.injects.length, 2);
+    assert.equal(ctx.slotCell(MAIN_PAGE_SLOT).length, 0);
+    assert.equal(ctx.slotCell(ROOT_FRAME_SLOT).length, 0);
 
     ctx.runFiberTeardown();
     assert.equal(ctx.injects.length, 0);
 
-    // A fresh fiber (post-HMR apply) registers the same contract again —
-    // same slot, same key, no accumulation.
+    // A fresh fiber (post-HMR apply) registers the same additive posture
+    // again — same slots, no accumulation, still nothing in dsh's layout.
     apply(ctx);
-    assert.equal(ctx.injects.length, 4);
-    const main = ctx.injects.find(
-      (record) => record.parent === MAIN_PAGE_SLOT,
-    );
-    assert.deepEqual(main?.entries[0]?.options, shellPageRegistration());
-    const root = ctx.injects.find(
-      (record) => record.parent === ROOT_FRAME_SLOT,
-    );
-    assert.deepEqual(root?.entries[0]?.options, shellRootRegistration());
+    assert.equal(ctx.injects.length, 2);
+    assert.equal(ctx.slotCell(MAIN_PAGE_SLOT).length, 0);
+    assert.equal(ctx.slotCell(ROOT_FRAME_SLOT).length, 0);
   });
 });
 
@@ -859,7 +875,7 @@ describe("shell staging mount — seat projection primitives", () => {
   });
 });
 
-describe("root fail-safe — the cutover's election contract (pure model + unload path)", () => {
+describe("root fail-safe — the retired election's contract, retained as a record (ticket 99, ADR-0021)", () => {
   const shipped: ShellCellEntry = {
     entryId: "dsh-app-frame",
     // Ticket 85 (2026-09-19): the shipped frame's effective priority is 0 —

@@ -2,7 +2,21 @@
  * Wrapper shell mount (ticket 78, ADR-0020 slice 2 — staging AND cutover
  * contracts; `docs/adr/0020` "Staging" paragraph).
  *
- * ADR-0020's vehicle is our own client module registering our own
+ * RETIRED FROM THE DEFAULT POSTURE (2026-09-20, ticket 99, ADR-0021 — the
+ * human-ruled coexistence vehicle that supersedes ADR-0020 as vehicle):
+ * stock dsh is the user's primary UI and is never displaced, so nothing
+ * registers these contracts today — `src/client/index.ts` no longer injects
+ * the keyed `main` page or the `root` frame election. The machinery is
+ * retained, NOT deleted (ADR-0021 decision 1: "the registration machinery
+ * stays in the tree and reversible at one registration site"): every export
+ * below stays live, and ticket 100's floating-window registration is the
+ * one site that re-hosts them (additively, never over `root`). The root
+ * election's own fail-safe (below) is a record of the retired path — under
+ * the additive posture there is no shadowed cell to abdicate; our
+ * registrations fail within our own module and the stock app is never
+ * shadowed.
+ *
+ * ADR-0020's vehicle was our own client module registering our own
  * application frame over the shipped dsh client runtime. The election was
  * staged: the shell first surfaced as a keyed `main` page (the layout's page
  * surface — key ours by default, the only shipped key being
@@ -10,12 +24,13 @@
  * `ctx.layout.selectPanel(panelId)` verb (ui-layout `lib/client.js:399-412`;
  * `wrapper-vehicle-seams.md` Finding 5, `dsh-capsule-seams.md` Seam 4's
  * status correction). With the surfaces real (ticket 80's conversation
- * surface landed), the CUTOVER slice registers the frame into the `root`
- * single slot: {@link shellRootRegistration} is that contract and the live
- * composition registers it in `index.ts` (the capsule/launcher overlay
- * retirement rides the same slice).
+ * surface landed), the CUTOVER slice registered the frame into the `root`
+ * single slot: {@link shellRootRegistration} is that contract and the
+ * composition registered it in `index.ts` until ticket 99 (the
+ * capsule/launcher overlay retirement rode the same slice).
  *
- * Fail-safe posture (ADR-0020 property 2, pinned offline where possible):
+ * Fail-safe posture of the RETIRED path (ADR-0020 property 2, pinned
+ * offline where possible):
  * the `root` registration carries an EXPLICIT shadowing priority
  * ({@link SHELL_ROOT_DYNAMIC_PRIORITY}; ticket 85, 2026-09-19 — the shipped
  * single-slot register defaults an absent priority to 0, the shipped frame's
@@ -23,14 +38,14 @@
  * cell election takes "the first live (non-abdicated) entry … in priority
  * order" over entries kept sorted ASCENDING by priority (`registry.d.ts:156-164`;
  * the shipped SlotCore sorts `(priority ?? 0)` ascending at insert and its
- * error text pins the direction: "lowest renders"). Our frame therefore wins
- * the cell exactly while it stays live; a crash
- * abdicates and the stock dsh app takes the cell back — the degradation mode
- * of "the whole UI is ours" is the ordinary product, never a blank window.
+ * error text pins the direction: "lowest renders"). Our frame therefore won
+ * the cell exactly while it stayed live; a crash
+ * abdicated and the stock dsh app took the cell back — the degradation mode
+ * of "the whole UI is ours" was the ordinary product, never a blank window.
  * {@link shellCellWinner} pins that election rule as a pure decision, and
  * the fake-fiber tests pin the unload abdication path (teardown empties the
  * cell; the shipped frame is the surviving winner); the live frame swap /
- * HMR / fallback behavior itself stays live-only (tickets 45/33) and is NOT
+ * HMR / fallback behavior itself stayed live-only (tickets 45/33) and is NOT
  * claimed here.
  *
  * This module is pure registration data + pure decisions: no React, no DOM,
@@ -43,9 +58,11 @@
  * `shellLauncherRegistration`, `SHELL_LAUNCHER_LABEL_KEY`,
  * `ShellPageOpenOutcome`, `openShellPage`, `ShellLauncherLayout`,
  * `createShellLauncherLayout` — were DELETED with the retired vehicle
- * (nothing consumed them post-cutover). The LIVE main-page contracts
+ * (nothing consumed them post-cutover). The main-page contracts
  * (`MAIN_PAGE_SLOT`, `SHIPPED_MAIN_PAGE_KEY`, `SHELL_PAGE_KEY`,
- * `shellPageRegistration`) and every `root`-election contract stay.
+ * `shellPageRegistration`) and every `root`-election contract stay —
+ * retained machinery since ticket 99 (ADR-0021), ticket 100's re-host site
+ * being their consumer.
  */
 
 import { LOCALE_NAMESPACE } from "./overlay.js";

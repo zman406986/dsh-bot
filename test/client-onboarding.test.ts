@@ -861,11 +861,14 @@ describe("onboarding shell seat + composition wiring (ticket 68)", () => {
     assert.equal(typeof component, "function");
   });
 
-  it("a full apply() over a scope-less runtime still registers the page (degrade, no crash)", () => {
+  it("a full apply() over a scope-less runtime degrades without crashing (and registers no layout page)", () => {
     const ctx = createOnboardingCtx(undefined);
     assert.doesNotThrow(() => apply(ctx));
+    // Ticket 99 (ADR-0021): no `main` page is registered at all — the
+    // default posture's only injects are the additive toolview and
+    // settings-card waits, and over a scope-less runtime the watch degrades
+    // honestly (pinned above). Nothing of ours lands in dsh's layout.
     const main = ctx.injects.find((record) => record.parent === "main");
-    assert.ok(main, "main page registration missing");
-    assert.equal(main.entries.length, 1);
+    assert.equal(main, undefined, "no `main` page in the default posture");
   });
 });

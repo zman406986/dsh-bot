@@ -51,8 +51,8 @@ import {
   type SlotRegistrationOptions,
 } from "../src/client/overlay.js";
 import {
+  MAIN_PAGE_SLOT,
   ROOT_FRAME_SLOT,
-  shellRootRegistration,
 } from "../src/client/shell-mount.js";
 import {
   TOOLVIEW_TOOL_NAMES,
@@ -1057,7 +1057,7 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
 });
 
 describe("coexistence — client face: additive lists and keyed cells (Finding 5)", () => {
-  it("the cutover's root election: one dynamic entry from the dispatcher, foreign modules untouched", () => {
+  it("the dispatcher registers NOTHING into dsh's layout cells (`root`/`main`); foreign modules untouched", () => {
     const ctx = createClientCtx();
     applyForeignClientPlugin(ctx);
     const dispatcherFiber = applyClientPluginInFiber(
@@ -1065,30 +1065,26 @@ describe("coexistence — client face: additive lists and keyed cells (Finding 5
       applyDispatcherClient,
     );
 
-    // The `root` SINGLE slot is the ticket-78 cutover's target: exactly one
-    // inject from the dispatcher, one dynamic entry with the pinned
-    // single-slot contract (no id/key — the catalog's documented shape) and
-    // the explicit shadowing priority (ticket 85 — pinned via the
-    // shellRootRegistration deepEqual below; the collision itself is pinned
-    // in client-shell-mount.test.ts over the throwing cell model).
-    const roots = ctx.injects.filter(
-      (record) => record.parent === ROOT_FRAME_SLOT,
+    // Ticket 99 (2026-09-20, ADR-0021): the displacement registrations left
+    // the default posture — no `root` election (the ticket-78 cutover's
+    // dynamic entry, retired) and no keyed full-cell `main` page (the
+    // ticket-78 staging registration, retired). Stock dsh is the primary UI
+    // and is never displaced; the foreign module must not sneak in either.
+    const layoutInjects = ctx.injects.filter(
+      (record) =>
+        record.parent === ROOT_FRAME_SLOT || record.parent === MAIN_PAGE_SLOT,
     );
-    assert.equal(roots.length, 1, "one `root` inject");
-    assert.equal(roots[0]!.entries.length, 1, "one dynamic root entry");
-    assert.deepEqual(roots[0]!.entries[0]!.options, shellRootRegistration());
-    // The foreign plugin registers nothing into the single slot — its
-    // surfaces stay additive (list) or keyed.
+    assert.equal(layoutInjects.length, 0, "no layout injects from anyone");
     for (const record of ctx.injects) {
-      if (record.parent === ROOT_FRAME_SLOT) continue;
       for (const entry of record.entries) {
-        assert.notEqual(
-          (entry.options as { name: string }).name,
-          ROOT_FRAME_SLOT,
-        );
+        const name = (entry.options as { name: string }).name;
+        assert.notEqual(name, ROOT_FRAME_SLOT, "no `root` entry");
+        assert.notEqual(name, MAIN_PAGE_SLOT, "no `main` entry");
       }
     }
-    // Foreign cells unmolested by the election.
+    // Additive/keyed coexistence still holds: the dispatcher's toolviews
+    // (serving the stock chat) plus the foreign toolview, and the two
+    // locale namespaces.
     assert.equal(
       ctx.entriesAt(TOOL_CALL_TOOLVIEW_SLOT).length,
       TOOLVIEW_TOOL_NAMES.length + 1,
@@ -1098,12 +1094,15 @@ describe("coexistence — client face: additive lists and keyed cells (Finding 5
       LOCALE_NAMESPACE,
     ]);
 
-    // Unload (HMR) of ONLY the dispatcher fiber empties the single cell —
-    // the shipped app frame is the surviving occupant again — while every
-    // foreign registration stays exactly as it was.
+    // Unload (HMR) of ONLY the dispatcher fiber removes exactly its own
+    // registrations while every foreign registration stays as it was.
     dispatcherFiber.dispose();
     assert.deepEqual(
-      ctx.injects.filter((record) => record.parent === ROOT_FRAME_SLOT),
+      ctx.injects.filter(
+        (record) =>
+          record.parent === ROOT_FRAME_SLOT ||
+          record.parent === MAIN_PAGE_SLOT,
+      ),
       [],
     );
     assert.deepEqual(ctx.entriesAt(TOOL_CALL_TOOLVIEW_SLOT).map((e) => (e.options as { key?: string }).key), [
@@ -1123,8 +1122,9 @@ describe("coexistence — client face: additive lists and keyed cells (Finding 5
     const entries = ctx.entriesAt(SHELL_OVERLAY_SLOT);
     // The ticket-78 CUTOVER (2026-09-19) ends the capsule era: both of our
     // additive entries (the roster capsule, the staging launcher chip)
-    // stopped registering — the wrapper shell frame's `root` election is
-    // the product surface. The foreign plugin's entry is unmolested.
+    // stopped registering. Ticket 99 (ADR-0021) then retired the
+    // displacement registrations too — nothing of ours registers anywhere
+    // in the shipped layout. The foreign plugin's entry is unmolested.
     assert.equal(entries.length, 1);
     const options = entries[0]!.options as SlotRegistrationOptions;
     assert.equal(options.id, FOREIGN.overlayEntryId);
@@ -1188,9 +1188,10 @@ describe("coexistence — client face: additive lists and keyed cells (Finding 5
     const dispatcherFiber = applyClientPluginInFiber(ctx, applyDispatcherClient);
     const foreignFiber = applyClientPluginInFiber(ctx, applyForeignClientPlugin);
 
-    // Unload ONLY the dispatcher's client fiber (HMR swap): its `root`
-    // frame election, keyed page, toolviews, and card all leave; the
-    // foreign plugin's entries stay.
+    // Unload ONLY the dispatcher's client fiber (HMR swap): its toolviews
+    // and settings card leave (the `root` election and keyed `main` page
+    // retired from the composition at ticket 99 — ADR-0021); the foreign
+    // plugin's entries stay.
     dispatcherFiber.dispose();
     assert.deepEqual(ctx.injects.filter((record) => record.parent === ROOT_FRAME_SLOT), []);
     assert.deepEqual(ctx.entriesAt(SHELL_OVERLAY_SLOT).map((e) => (e.options as SlotRegistrationOptions).id), [

@@ -44,46 +44,33 @@
  *    `layout` watch stopped with the frame election (item 10). Its contracts
  *    and component were retained briefly as re-host assets and are now
  *    DELETED outright (ticket 89, 2026-09-19) — nothing consumed them; the
- *    LIVE main-page contracts (item 7) stay.
- * 7. the wrapper shell page itself (ticket 78, ADR-0020 staging): one keyed
- *    `main` entry under OUR key (the only shipped key is `conversation`),
- *    binding the shell store to the sessions feed and hosting the existing
- *    roster panel in the right seat. The `root` frame election (item 10) is
- *    the CUTOVER slice — it executes only after ticket 80's conversation
- *    surface has landed; at the cutover the page registration STAYS (the
- *    pinned staging contract), dormant behind the frame election and
- *    self-restoring on abdication.
- * 8. the wrapper conversation pane (ticket 80, ADR-0020 slice 4): the main
- *    seat renders the selected session's text-only conversation — replay +
- *    live turns from the session's verified event window
- *    (`sessions.binding(id).eventSource`, `wrapper-vehicle-seams.md`
- *    Finding 7) reduced by `conversation-store.ts`, older pages through the
- *    scoped `loadOlder()`, sends through ticket 40's plain-prompt sink. No
- *    cancel affordance exists (area 7 conformity).
- * 9. the onboarding first-run seat (ticket 68, ADR-0018 in-scope area): the
- *    shell's no-selection main state hosts the beat walk when the flow is
- *    unsuppressed — IN-SHELL, so it survives the ticket-78 cutover (never
- *    the staging-only shipped `settings.onboarding` slot). Suppression rides
- *    the SAME settings-namespace bind as the roster/card (A5): a well-formed
- *    `onboarding` seen record OR ≥1 dispatcher mirror key (`roster.<id>`,
- *    tickets 76/79) suppresses; a corrupt/unreadable record FAILS OPEN — the
- *    flow shows, it is never silently hidden.
- * 10. the wrapper shell frame's ROOT election (ticket 78 CUTOVER,
- *    ADR-0020 property 2): one DYNAMIC `root` entry that displaces the
- *    shipped AppFrame exactly while it stays live and abdicates back to it
- *    on crash (per-entry boundary) or unload (fiber cascade). The
- *    capsule/launcher overlay entries retire at this same cutover.
+ *    main-page contracts (item 7) stay as retained machinery.
+ * 7. ~~the wrapper shell page~~ + ~~the `root` frame election~~ RETIRED from
+ *    the DEFAULT POSTURE (2026-09-20, ticket 99, ADR-0021 — the human-ruled
+ *    coexistence vehicle): stock dsh is the user's primary UI and is never
+ *    displaced, so this composition no longer registers the keyed `main`
+ *    page (ticket 78 staging), the conversation pane / onboarding seats that
+ *    hosted inside it (tickets 80/68), or the DYNAMIC `root` entry that
+ *    displaced the shipped AppFrame (ticket 78 CUTOVER). The module renders
+ *    NOTHING into dsh's layout; the registration machinery — `mountShellPage`
+ *    (store + feeds + pane/seat wiring) and the `shell-mount.ts` contracts
+ *    (`MAIN_PAGE_SLOT`/`shellPageRegistration`, `ROOT_FRAME_SLOT`/
+ *    `shellRootRegistration`) — stays in the tree, reversible at ONE
+ *    registration site: ticket 100's floating-window registration re-hosts
+ *    the same surfaces additively (ADR-0021 decisions 1–2, 4). Fail
+ *    isolation is re-based onto the additive posture: our registrations fail
+ *    within our own module and the stock app is never shadowed.
  *
  * Ticket 40 binds the capsule/panel intents to ticket 36's verified seams
  * at THIS composition point and nowhere else: the narrow CommandTransport
  * (start = the composer's exact `commands.execute` transaction with
  * `/dispatcher-start` verbatim; stop = the scope-addressed plain-prompt
  * sink with the locale-keyed conversational phrasing) and the per-row steer
- * prefill seat (`input.for(actx).setDraft`) are built here over lazy
- * service sources. Since the ticket-78 cutover the composition's ONE
- * transport + steer seat live in `mountShellPage` (the wrapper shell's
- * conversation pane and hosted roster panel are their only consumers; the
- * capsule factory no longer receives them — its registration is retired).
+ * prefill seat (`input.for(actx).setDraft`) are built in `mountShellPage`
+ * over lazy service sources — the conversation pane and hosted roster panel
+ * are their only consumers. Since ticket 99 (ADR-0021) `mountShellPage` is
+ * NOT composed by default (no inject calls it); the wiring runs when ticket
+ * 100's floating-window registration re-hosts it.
  * The faces are read lazily so their VALUES are fresh at send/click time;
  * the services themselves are DECLARED in the module inject (ticket 84 — an
  * undeclared property read throws on the real host wherever it happens),
@@ -93,10 +80,7 @@
 
 import { createElement } from "react";
 import type { JSX } from "react";
-import type {
-  ClientContext,
-  ClientSettingsScopeLike,
-} from "./context.js";
+import type { ClientContext } from "./context.js";
 import {
   LOCALE_NAMESPACE,
   localeDictionary,
@@ -123,17 +107,10 @@ import {
 import { createPluginSettingsCard } from "./settings-card.js";
 import { createRosterPanel } from "./panel.js";
 import {
-  MAIN_PAGE_SLOT,
-  ROOT_FRAME_SLOT,
-  shellPageRegistration,
-  shellRootRegistration,
   shellSeatHostsPanel,
   shellSeatPanelState,
 } from "./shell-mount.js";
-import {
-  createDispatcherShell,
-  type ShellHosts,
-} from "./shell.js";
+import type { ShellHosts } from "./shell.js";
 import {
   createDispatcherShellStore,
   type DispatcherShellStore,
@@ -166,7 +143,6 @@ import {
 } from "./conversation.js";
 import {
   createOnboardingStore,
-  writeOnboardingSeenRecord,
   type OnboardingStore,
 } from "./onboarding.js";
 import { createOnboardingPane } from "./onboarding-pane.js";
@@ -196,8 +172,9 @@ import { createOnboardingPane } from "./onboarding-pane.js";
  * inject, never read client-side: the client half of that waterfall is the
  * shipped `dsh-client-ui-approval` composer over the forwarded
  * `approval/request` Remote event, which composes independently of this
- * module (whether it still answers under the wrapper root frame is the
- * live lane's L3 verification).
+ * module (with the ADR-0021 coexistence posture the shipped frame is never
+ * displaced, so the composer should answer natively — deferred ticket 98's
+ * gap 1 is expected-moot, pending the live lane's confirmation).
  */
 export const inject: readonly string[] = [
   "slots",
@@ -231,12 +208,14 @@ export function apply(ctx: ClientContext): void {
  *   feeds and every mount attaches its shell store to (ticket 94; the
  *   read side the live surface was missing).
  * - `mounts` — every `mountShellPage` result the slot injects created, in
- *   registration order (`main` page first, then the `root` frame). The
- *   array is the SAME array the injects push into, so it also collects
- *   mounts that arrive AFTER this call returns: on the real host the slot
- *   declaration may appear later than the inject, and the callback form's
- *   controller then runs whenever the declaration lands. Offline fakes run
- *   the callback synchronously, so the list is complete at return there.
+ *   registration order. Since ticket 99 (ADR-0021) the default composition
+ *   creates NO mounts (the `main`/`root` injects retired), so this is empty
+ *   after `apply`; it stays the push-site for a registration that re-hosts
+ *   the shell (ticket 100's floating window), and offline tests attach the
+ *   real `mountShellPage` to the returned feeds to drive the mount data
+ *   path. The array is the SAME array such an inject pushes into, so it
+ *   also collects mounts that arrive AFTER the call returns. Offline fakes
+ *   run the callback synchronously, so the list is complete at return there.
  *
  * Additive only: `apply` ignores the return, and the mounted stores were
  * previously reachable only through the React component closure.
@@ -295,8 +274,7 @@ export function applyClientModule(
   // Ticket 68 rides this SAME bind for the onboarding suppression input: each
   // accepted document feeds the store's seen extraction, and an unavailable
   // namespace feeds an explicit `undefined` — fail-open (the flow shows when
-  // the record cannot be read; it is never silently hidden). The bound scope
-  // is also kept for the seen WRITE hand-off below.
+  // the record cannot be read; it is never silently hidden).
   //
   // Ticket 69 (L1 offline half): the SAME document also feeds the
   // approval-cards relay feed — the roster snapshot's v4 `pendingAsks`
@@ -315,12 +293,19 @@ export function applyClientModule(
    * pinned but never called, so `state.mirrors` stayed empty forever
    * (`data-dispatcher="false"`, the `状态不可用` chip, no hosted panel). Fed
    * from the SAME single settings read as the two readers above, fanned out
-   * to every mount's shell store with a last-truth replay.
+   * to every mount's shell store with a last-truth replay. (Since ticket 99
+   * the default composition creates no mounts; the hub stays live for
+   * ticket 100's floating-window mount and for offline tests that attach
+   * the real `mountShellPage` to it.)
    */
   const mirrorsFeed = createShellMirrorFeed();
-  /** Ticket 69 (L1): every mount this composition creates, in order. */
+  /**
+   * Ticket 69 (L1): every mount this composition creates, in order. Since
+   * ticket 99 (ADR-0021) the default composition creates NO mounts — the
+   * array stays as the one place a registration site (ticket 100's floating
+   * window) pushes into again.
+   */
   const mounts: ShellPageMount[] = [];
-  let seenScope: ClientSettingsScopeLike | null = null;
   ctx.effect(() => {
     let disposeWatch: (() => void) | undefined;
     if (typeof ctx.inject !== "function") {
@@ -336,7 +321,6 @@ export function applyClientModule(
         return;
       }
       const scope = binder.bind({ namespace: LOCALE_NAMESPACE });
-      seenScope = scope;
       card.attach(scope);
       const readSnapshot = () => {
         const snapshot = scope.getSnapshot();
@@ -376,23 +360,16 @@ export function applyClientModule(
     });
     return () => {
       if (disposeWatch !== undefined) disposeWatch();
-      seenScope = null;
       card.detach();
     };
   }, "multitask-dispatcher: roster settings watch");
 
-  // The onboarding seen-write hand-off (ticket 68): a best-effort write of
-  // the seen record through the ONE bound scope (A5 — never a second
-  // channel), factored as the pure `writeOnboardingSeenRecord` (offline
-  // pinned). A resolved write stays silent — the watch re-delivers the
-  // document and the suppression decision closes the flow (no fake success
-  // surface; the capsule's discipline). A missing write path or a rejected
-  // write sets the honest save-failed notice instead: the flow closes for
-  // this visit and simply shows again next launch — fail-open, so nothing
-  // strands either way.
-  const writeOnboardingSeen = (): void => {
-    writeOnboardingSeenRecord(seenScope, () => onboarding.markSaveFailed());
-  };
+  // The onboarding seen-write hand-off (ticket 68) moved with the mount
+  // machinery (ticket 99): the write rode the ONE bound scope into the
+  // shell's onboarding pane, and with no mount composed by default there is
+  // no pane to write from. The pure `writeOnboardingSeenRecord` (onboarding.ts,
+  // offline-pinned) re-wires at ticket 100's floating-window registration
+  // site, over the same single scope — never a second channel (A5).
 
   // Per-tool call views (ticket 24): one inject at the shipped keyed slot,
   // one entry per dispatcher wire tool name. Keys are the plugin-owned core
@@ -401,14 +378,14 @@ export function applyClientModule(
   // All six registrations ride the same inject controller: fiber unload
   // disposes the controller and every entry with it (HMR-safe).
   //
-  // Ticket 89 (2026-09-19) — these STAY: while the `root` frame is elected
-  // they are registered but unrendered (the frame displaces the shipped chat;
-  // the ticket-80 pane renders its tool rows from the event window instead).
-  // The live consumer is the OTHER state: on abdication the shipped frame
-  // retakes the `root` cell and its chat renders `tool.call.toolview` keyed
-  // by wire tool name — these entries are what keeps OUR rows there instead
-  // of the generic fallback. Deleting them would change a reachable (live-
-  // pass-4-proven) fallback surface. Justification on ticket 89, AC 3.
+  // Ticket 89 (2026-09-19), rationale re-based by ticket 99 (ADR-0021) —
+  // these STAY: the keyed cells are ours by default and the shipped chat's
+  // tool rows render them. Under the ADR-0021 coexistence posture stock dsh
+  // is ALWAYS the primary UI, so these entries are the live surface (not an
+  // abdication-only fallback): our dispatcher tool rows render in the
+  // shipped chat instead of the generic fallback. Deleting them would
+  // regress a reachable (live-pass-4-proven) surface. Justification on
+  // ticket 89, AC 3; coexistence posture on ADR-0021.
   ctx.slots.inject(TOOL_CALL_TOOLVIEW_SLOT, () => {
     const t = ctx.locale.bind(LOCALE_NAMESPACE);
     for (const toolName of TOOLVIEW_TOOL_NAMES) {
@@ -448,88 +425,33 @@ export function applyClientModule(
     );
   });
 
-  // ── Wrapper shell STAGING mount (ticket 78, ADR-0020 slice 2) ──
+  // ── The displacement registrations RETIRED from the default posture
+  // (2026-09-20, ticket 99, ADR-0021) ──
   //
-  // Cutover note (ticket 78, 2026-09-19): the staging LAUNCHER — the second
-  // additive `shell.overlay` chip plus its `ctx.inject(["layout"])` watch —
-  // RETIRED with the frame election below (the vehicle that opened the page
-  // from the shipped app's floating layer; the page itself stays registered,
-  // dormant behind the frame election and self-restoring on abdication).
-  // Its pure contracts and component were retained briefly as retired-vehicle
-  // assets and are now DELETED (ticket 89, 2026-09-19): `openShellPage`,
-  // `createShellLauncherLayout`, `shellLauncherRegistration`, and
-  // `shell.tsx`'s `createShellLauncher` are gone. The LIVE main-page
-  // contracts (`SHELL_PAGE_KEY`, `shellPageRegistration`) stay — the `main`
-  // registration below is the pinned staging contract.
-
-  // The shell page: one keyed `main` entry under OUR key (the only shipped
-  // key is `conversation` — unclaimed cells are ours by default; claiming a
-  // covered key would be a shadowing election, which staging never makes).
-  // The entry mounts the live shell: store + sessions-feed binding + the
-  // hosted roster panel seat, all fiber-scoped so unload/HMR reverses the
-  // registration, the feed subscription, and the seat projection together.
-  ctx.slots.inject(MAIN_PAGE_SLOT, () => {
-    const t = ctx.locale.bind(LOCALE_NAMESPACE);
-    const mount = mountShellPage(ctx, {
-      store: onboarding,
-      onSeen: writeOnboardingSeen,
-      approvalsFeed: approvalFeed,
-      mirrorsFeed: mirrorsFeed,
-    });
-    mounts.push(mount);
-    return ctx.slots.register(
-      shellPageRegistration(),
-      createDispatcherShell(t, mount.store, mount.hosts),
-    );
-  });
-
-  // ── Cutover: the frame election (ticket 78, ADR-0020 property 2) ──
-
-  // The wrapper shell frame registers into the `root` single slot carrying an
-  // EXPLICIT shadowing priority (ticket 85, 2026-09-19 — the cutover first
-  // shipped no priority and the loader entry died: the shipped register
-  // defaults an absent priority to 0, the shipped AppFrame's own effective
-  // value (it registers `{name: "root", locale: "common", …}` with no
-  // priority — dsh-client-ui-layout lib/client.js:524-531), and THROWS on
-  // that collision: "single slot \"root\" already has a registration at
-  // priority 0 … — register at a different priority to shadow it (lowest
-  // renders)", the live pass-3 error). The caller's options reach that
-  // registry unchanged (the browser bundle has no priority allocator — the
-  // runner-side `allocatePriority` auto-assignment does not apply here), so
-  // `SHELL_ROOT_DYNAMIC_PRIORITY` (-1) is sent on the registration.
-  // Direction verified from the shipped SlotCore: entries sort ASCENDING by
-  // `(priority ?? 0)` at insert and the outlet renders the first live
-  // (non-abdicated) entry ("lowest renders";
-  // `registry.d.ts:156-164`) — so -1 shadows the frame exactly while our
-  // entry stays live. Fail-safe: a render crash abdicates the entry through
-  // the per-entry boundary and "the outlet re-renders onto the cell's next
-  // survivor" (dsh-client-ui-renderer lib/client.js:507-514) — the shipped
-  // app frame takes the cell back; module unload/HMR sweeps the entry with
-  // the caller's-fiber cascade (`registry.d.ts:77-83`). The registration
-  // shape is otherwise the runtime catalog's own documented example
-  // (`{name: "root"}`, `registerOptions: []`, runner lib/client.js:3514-3520;
-  // the shipped AppFrame adds `locale` and its child-seat declarations) —
-  // no id, no key, and NO `children`: the frame is self-contained (its
-  // sidebar/main/right seats are our own React seats, never host slot
-  // outlets). The same `mountShellPage` composition powers this frame and
-  // the `main` page above (one onboarding store shared — the suppression
-  // input is one fact, never two); the shipped `conversation` main key is
-  // still never claimed, and the frame swap / HMR fiber behavior /
-  // fallback-on-crash confirmation stays with the live lane (tickets 45/33).
-  ctx.slots.inject(ROOT_FRAME_SLOT, () => {
-    const t = ctx.locale.bind(LOCALE_NAMESPACE);
-    const mount = mountShellPage(ctx, {
-      store: onboarding,
-      onSeen: writeOnboardingSeen,
-      approvalsFeed: approvalFeed,
-      mirrorsFeed: mirrorsFeed,
-    });
-    mounts.push(mount);
-    return ctx.slots.register(
-      shellRootRegistration(),
-      createDispatcherShell(t, mount.store, mount.hosts),
-    );
-  });
+  // Until ticket 99 this composition made TWO more injects:
+  //
+  // 1. the keyed `main` page (ticket 78 staging; `MAIN_PAGE_SLOT` +
+  //    `shellPageRegistration()`, key `SHELL_PAGE_KEY`
+  //    "multitask-dispatcher-shell"), and
+  // 2. the `root` frame election (ticket 78 CUTOVER; `ROOT_FRAME_SLOT` +
+  //    `shellRootRegistration()` at the explicit shadowing priority
+  //    `SHELL_ROOT_DYNAMIC_PRIORITY` -1, ticket 85) that displaced the
+  //    shipped AppFrame with an abdication failsafe.
+  //
+  // ADR-0021 (the human-ruled coexistence vehicle) retires both: stock dsh
+  // is the user's primary UI and is never displaced. This module now renders
+  // NOTHING into dsh's layout — the intermediate state before ticket 100
+  // re-hosts the shell surfaces into a separate floating window behind an
+  // additive launcher. The machinery is retained, NOT deleted: the
+  // registration contracts stay exported from `shell-mount.ts`
+  // (`shellPageRegistration`, `shellRootRegistration`, the priority
+  // constant) and the mounting path stays exported below
+  // (`mountShellPage`), so the vehicle is reversible at ONE registration
+  // site — exactly the site ticket 100 adds. Fail isolation is re-based
+  // onto the additive posture: with no shadowing entry there is no cell to
+  // abdicate; our registrations fail within our own module and the stock
+  // app is never shadowed. The retired-path tests remain records of that
+  // machinery in `test/client-shell-mount.test.ts`.
 
   return { approvalsFeed: approvalFeed, mirrorsFeed, mounts };
 }
@@ -538,11 +460,14 @@ export function applyClientModule(
  * The shell page's live mounting path (ticket 78 staging), factored over
  * explicit stores so offline tests can drive the data path end to end —
  * feed snapshot → shell store → hosted-panel seat — without a DOM harness
- * (same discipline as `applyClientModule`). Called ONLY from the `main`
- * inject above: the effects land on the caller's fiber inside the inject
- * controller, so unloading the page registration reverses the feed binding
- * and the seat projection with it (HMR-safe; the ticket's "reverse every
- * registration" constraint).
+ * (same discipline as `applyClientModule`). RETAINED MACHINERY (ticket 99,
+ * ADR-0021): the `main`/`root` injects that used to call it left the
+ * default composition, so nothing in production calls it today — ticket
+ * 100's floating-window registration is its next caller, and offline tests
+ * drive it directly (also against the real composition's feeds). Its
+ * effects still land on the caller's fiber, so unloading the caller's
+ * registration reverses the feed bindings and the seat projection with it
+ * (HMR-safe; the ticket's "reverse every registration" constraint).
  *
  * - The sidebar rides `bindShellSessionsFeed` (ticket 79's projection) over
  *   `ctx.sessions` — a DECLARED read (ticket 84), so it cannot throw; an

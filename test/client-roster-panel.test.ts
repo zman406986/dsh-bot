@@ -1090,14 +1090,14 @@ describe("roster panel — apply() wires the fallback data path; the overlay ent
   it("fiber teardown (HMR) unsubscribes the scope; re-apply binds one fresh", () => {
     const ctx = createClientCtx();
     apply(ctx);
-    // Four declaration waits: tool.call.toolview, (ticket 47)
-    // settings.plugin.item, ticket 78's `main` page (kept), and the
-    // cutover's `root` frame election. The capsule + launcher shell.overlay
-    // injects retired at the cutover. The settings scope stays ONE bind —
-    // the card attaches to the same scope the roster watch holds, so there
-    // are exactly TWO subscriptions on that one scope (roster watch +
-    // settings card).
-    assert.equal(ctx.injects.length, 4);
+    // Two declaration waits since ticket 99 (ADR-0021): tool.call.toolview
+    // (ticket 24) and settings.plugin.item (ticket 47). The `main` page and
+    // the cutover's `root` frame election retired from the composition
+    // (ADR-0021); the capsule + launcher shell.overlay injects retired at
+    // the cutover. The settings scope stays ONE bind — the card attaches to
+    // the same scope the roster watch holds, so there are exactly TWO
+    // subscriptions on that one scope (roster watch + settings card).
+    assert.equal(ctx.injects.length, 2);
     assert.equal(ctx.boundNamespaces.length, 1);
     assert.equal(ctx.watchDisposedCount(), 0);
 
@@ -1110,7 +1110,7 @@ describe("roster panel — apply() wires the fallback data path; the overlay ent
     // live cell would throw the shipped slot collision (the fake now models
     // that rule), so teardown really must free every cell — assert it.
     assert.doesNotThrow(() => apply(ctx));
-    assert.equal(ctx.injects.length, 4);
+    assert.equal(ctx.injects.length, 2);
     assert.equal(ctx.boundNamespaces.length, 2);
     assert.equal(ctx.watchDisposedCount(), 2);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));

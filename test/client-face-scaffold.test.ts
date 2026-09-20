@@ -29,7 +29,6 @@ import { buildClient } from "../scripts/build-client.js";
 import {
   MAIN_PAGE_SLOT,
   ROOT_FRAME_SLOT,
-  SHELL_ROOT_DYNAMIC_PRIORITY,
 } from "../src/client/shell-mount.js";
 import { TOOL_CALL_TOOLVIEW_SLOT, TOOLVIEW_TOOL_NAMES } from "../src/client/toolviews.js";
 import { SETTINGS_PLUGIN_ITEM_SLOT } from "../src/client/settings-card-store.js";
@@ -572,8 +571,10 @@ describe("client face scaffold — apply over fake client seams", () => {
     // Ticket 24 adds a second inject (tool.call.toolview) and ticket 47 a
     // third (settings.plugin.item); the ticket-78 CUTOVER (2026-09-19)
     // retires the additive overlay entries — the capsule (ticket 38) and
-    // the staging launcher chip — so NO `shell.overlay` inject remains:
-    // the wrapper shell frame (the `root` election) is the product surface.
+    // the staging launcher chip — so NO `shell.overlay` inject remains.
+    // Ticket 99 (2026-09-20, ADR-0021) then retires the displacement
+    // registrations themselves (`main` page, `root` election): stock dsh is
+    // the primary UI and is never displaced — only additive slots register.
     const overlay = ctx.injects.find(
       (candidate) => candidate.parent === SHELL_OVERLAY_SLOT,
     );
@@ -594,11 +595,11 @@ describe("client face scaffold — apply over fake client seams", () => {
   it("fiber teardown (HMR/unload) reverses the namespace and the entry; re-apply restores", () => {
     const ctx = createClientCtx();
     apply(ctx);
-    // Four declaration waits: tool.call.toolview (ticket 24),
-    // settings.plugin.item (ticket 47), `main` (ticket 78 staging, kept),
-    // and `root` (the ticket-78 cutover's frame election). The capsule +
-    // launcher shell.overlay injects retired at the cutover.
-    assert.equal(ctx.injects.length, 4);
+    // Two declaration waits since ticket 99 (ADR-0021): tool.call.toolview
+    // (ticket 24) and settings.plugin.item (ticket 47). The `main` page and
+    // the `root` election retired from the composition (ADR-0021); the
+    // capsule + launcher shell.overlay injects retired at the cutover.
+    assert.equal(ctx.injects.length, 2);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
 
     ctx.runFiberTeardown();
@@ -608,19 +609,20 @@ describe("client face scaffold — apply over fake client seams", () => {
 
     // A fresh fiber (post-HMR apply) registers everything again.
     apply(ctx);
-    assert.equal(ctx.injects.length, 4);
+    assert.equal(ctx.injects.length, 2);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
   });
 });
 
 describe("client face scaffold — shipped slot register semantics (ticket 86)", () => {
-  it("the root frame registers at the explicit shadowing priority, over the shipped frame's 0", () => {
+  it("apply leaves a seeded `root` cell untouched — stock dsh keeps its frame (ticket 99, ADR-0021)", () => {
     // The shipped AppFrame holds the `root` cell at ITS effective
     // `priority ?? 0` (no priority declared — dsh-client-ui-layout
-    // lib/client.js:524-531). The cutover's frame must therefore register
-    // BELOW it: the fake throws on a same-priority single-slot collision, so
-    // this test is the offline detector for the ticket-85 live crash (the
-    // pre-85 registration carried no priority and the loader entry died).
+    // lib/client.js:524-531). Until ticket 99 the composition registered a
+    // shadowing frame at priority -1 (ticket 85) over exactly this seed;
+    // ADR-0021 retires the election: stock dsh is the primary UI and is
+    // NEVER displaced, so after `apply` the cell must hold ONLY the shipped
+    // frame, in its original shape.
     const ctx = createClientCtx();
     ctx.slots.inject(ROOT_FRAME_SLOT, () =>
       ctx.slots.register({ name: ROOT_FRAME_SLOT }, "shipped-app-frame"),
@@ -629,14 +631,10 @@ describe("client face scaffold — shipped slot register semantics (ticket 86)",
     assert.doesNotThrow(() => apply(ctx));
 
     const cell = ctx.cells.get(ROOT_FRAME_SLOT) ?? [];
-    assert.equal(cell.length, 2, "our frame and the shipped frame share the cell");
-    // Ascending `(priority ?? 0)`: ours is first — "lowest renders".
+    assert.equal(cell.length, 1, "the shipped frame stands alone in the cell");
     assert.equal(cell[0]?.options.name, ROOT_FRAME_SLOT);
-    assert.equal(cell[0]?.options.locale, LOCALE_NAMESPACE, "our frame declares our locale");
-    assert.equal(cell[0]?.options.priority, SHELL_ROOT_DYNAMIC_PRIORITY);
-    assert.equal(cell[0]?.options.priority, -1);
-    assert.equal(cell[1]?.component, "shipped-app-frame");
-    assert.equal(cell[1]?.options.priority, undefined, "shipped frame declares no priority");
+    assert.equal(cell[0]?.options.priority, undefined, "the shipped frame declares no priority");
+    assert.equal(cell[0]?.component, "shipped-app-frame");
   });
 
   it("a no-priority root registration collides with the shipped frame and throws", () => {
@@ -701,8 +699,10 @@ describe("client face scaffold — shipped slot register semantics (ticket 86)",
     apply(ctx);
     assert.equal(ctx.cells.get(TOOL_CALL_TOOLVIEW_SLOT)?.length, TOOLVIEW_TOOL_NAMES.length);
     assert.equal(ctx.cells.get(SETTINGS_PLUGIN_ITEM_SLOT)?.length, 1);
-    assert.equal(ctx.cells.get(MAIN_PAGE_SLOT)?.length, 1);
-    assert.equal(ctx.cells.get(ROOT_FRAME_SLOT)?.length, 1);
+    // Ticket 99 (ADR-0021): nothing of ours lands in dsh's layout — the
+    // `main` page cell and the `root` frame cell stay unclaimed by us.
+    assert.equal(ctx.cells.get(MAIN_PAGE_SLOT), undefined);
+    assert.equal(ctx.cells.get(ROOT_FRAME_SLOT), undefined);
     // No shell.overlay entry survives the ticket-78 cutover.
     assert.equal(ctx.cells.get(SHELL_OVERLAY_SLOT), undefined);
   });

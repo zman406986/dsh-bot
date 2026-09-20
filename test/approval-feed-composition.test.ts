@@ -18,10 +18,17 @@
  *   → core parks the ask → `onRosterChanged` → real `rosterChannel.publish`
  *   → owner-scope `update` (the settings document)
  *   → the real `applyClientModule` settings watch (`approvalFeed.applyChannelValue`)
- *   → the shared hub → the mount's OWN `ApprovalCardsStore` (from the
- *     composition's returned `mounts`, not a test-built one)
+ *   → the shared hub → the mount's OWN `ApprovalCardsStore`
  *   → real `/dispatcher-resolve` command → core relay → re-publish
  *   → the card leaves; answering again is honestly refused.
+ *
+ * Ticket 99 (2026-09-20, ADR-0021): the default composition registers NO
+ * mounts any more (the `main` page + `root` election left the posture —
+ * stock dsh is primary and never displaced), so the mount leg of the chain
+ * is driven by attaching the REAL `mountShellPage` to the composition's
+ * OWN returned feeds — exactly the attach a re-host registration makes
+ * (ticket 100's floating window). The feed/watch/hub half stays the real
+ * composition, unmodified.
  *
  * Offline only (S8): no Cordis, no browser, no DOM, no network, no LLM.
  *
@@ -39,6 +46,7 @@ import { describe, it } from "node:test";
 import { apply as pluginApply } from "../src/plugin.js";
 import {
   applyClientModule,
+  mountShellPage,
   type ClientModuleComposition,
   type ShellPageMount,
 } from "../src/client/index.js";
@@ -400,6 +408,22 @@ function createClientCtx(bridge: SettingsBridge) {
 
 // ── Assertion helpers ─────────────────────────────────────────────────────
 
+/**
+ * Ticket 99 (ADR-0021): the default composition creates NO mounts, so the
+ * mount data path is driven by attaching the REAL `mountShellPage` to the
+ * composition's returned feeds — the same attach a re-host registration
+ * (ticket 100's floating window) performs at its own site.
+ */
+function attachMount(
+  client: ReturnType<typeof createClientCtx>,
+  composition: ClientModuleComposition,
+): ShellPageMount {
+  return mountShellPage(client, {
+    approvalsFeed: composition.approvalsFeed,
+    mirrorsFeed: composition.mirrorsFeed,
+  });
+}
+
 /** The mount's OWN approvals store, projected cards only. */
 function cardsOf(mount: ShellPageMount): readonly AccessAskCard[] {
   const state = mount.approvals.getBox().state;
@@ -449,18 +473,25 @@ describe("ticket 69 L1 — the offline composition pin (real apply → real watc
     await flush();
     assert.equal(publishedRoster(bridge)?.dispatcherSessionId, "s-1");
 
-    // ── Client half: the REAL module body. The composition hands back the
-    // feed it created and every mount it registered.
+    // ── Client half: the REAL module body. Since ticket 99 (ADR-0021) the
+    // composition creates NO mounts — its live data path is the feed pair,
+    // and the REAL mount machinery attaches to those feeds at a re-host
+    // registration site (here: the test; in production: ticket 100).
     const composition: ClientModuleComposition = applyClientModule(
       client,
       createRosterStore(),
     );
-    assert.equal(composition.mounts.length, 2, "main page + root frame");
+    assert.equal(
+      composition.mounts.length,
+      0,
+      "the default posture registers no mounts",
+    );
     assert.deepEqual(client.boundNamespaces, [SETTINGS_NAMESPACE]);
-    // Both mounts ride the SAME feed the settings watch feeds (one channel).
-    assert.equal(composition.mounts[0]?.approvals.getBox().state.kind, "ready");
-    assert.equal(composition.mounts[1]?.approvals.getBox().state.kind, "ready");
-    assert.deepEqual(cardsOf(composition.mounts[0]), []);
+    const mount = attachMount(client, composition);
+    // The attached mount rides the SAME feed the settings watch feeds (one
+    // channel) — replayed at attach, live from then on.
+    assert.equal(mount.approvals.getBox().state.kind, "ready");
+    assert.deepEqual(cardsOf(mount), []);
 
     // ── A real worker spawns through the real tool.
     const spawn = host.tool("spawn_worker");
@@ -470,7 +501,7 @@ describe("ticket 69 L1 — the offline composition pin (real apply → real watc
       { agent: { session: { id: "s-1" } } },
     )) as SpawnedWorker;
     assert.equal(spawned.ok, true);
-    assert.deepEqual(cardsOf(composition.mounts[0]), []);
+    assert.deepEqual(cardsOf(mount), []);
 
     // ── The worker parks a real access ask through the real tool.
     // FINDING 4 contract (ticket 69): the tool call PARKS until the ask
@@ -506,28 +537,27 @@ describe("ticket 69 L1 — the offline composition pin (real apply → real watc
       spawned.worker_id,
     );
 
-    // The card is on BOTH mounts' own stores — the hub fanned the one read out.
-    for (const mount of composition.mounts) {
-      const cards = cardsOf(mount);
-      assert.equal(cards.length, 1, "one pending card per mount");
-      const card = cards[0];
-      assert.ok(card);
-      assert.equal(card.cardKind, "access-ask");
-      assert.equal(card.status, "pending");
-      assert.equal(card.requestId, askedRequestId);
-      assert.equal(card.workerId, spawned.worker_id);
-      assert.equal(card.parentSessionId, "s-1");
-      assert.equal(card.body.class, "tool");
-      assert.equal(card.body.target, "edit_file");
-      assert.ok(card.detail.includes("need to edit files"));
-      // Ticket 30's full option set for an exact target; the 71 AC-4 location
-      // line resolved through the card's own hook (never hard-coded here).
-      assert.deepEqual(
-        card.optionSet.map((option) => option.kind),
-        ["allow", "always-allow", "deny"],
-      );
-      assert.equal(card.locationLine, APPROVAL_LOCATION_LOCAL);
-    }
+    // The card is on the attached mount's own store — the hub fanned the
+    // one read out through it.
+    const cards = cardsOf(mount);
+    assert.equal(cards.length, 1, "one pending card on the mount");
+    const card = cards[0];
+    assert.ok(card);
+    assert.equal(card.cardKind, "access-ask");
+    assert.equal(card.status, "pending");
+    assert.equal(card.requestId, askedRequestId);
+    assert.equal(card.workerId, spawned.worker_id);
+    assert.equal(card.parentSessionId, "s-1");
+    assert.equal(card.body.class, "tool");
+    assert.equal(card.body.target, "edit_file");
+    assert.ok(card.detail.includes("need to edit files"));
+    // Ticket 30's full option set for an exact target; the 71 AC-4 location
+    // line resolved through the card's own hook (never hard-coded here).
+    assert.deepEqual(
+      card.optionSet.map((option) => option.kind),
+      ["allow", "always-allow", "deny"],
+    );
+    assert.equal(card.locationLine, APPROVAL_LOCATION_LOCAL);
 
     // ── The real command resolves it into the unchanged core relay.
     const resolved = host.runCommand({
@@ -560,9 +590,8 @@ describe("ticket 69 L1 — the offline composition pin (real apply → real watc
     const asked = await askedPromise;
     assert.equal(asked.ok, true);
     assert.equal(askState.settled, true);
-    // ... and the card LEFT the composition's own mounted store.
-    assert.deepEqual(cardsOf(composition.mounts[0]), []);
-    assert.deepEqual(cardsOf(composition.mounts[1]), []);
+    // ... and the card LEFT the composition-fed mount's own store.
+    assert.deepEqual(cardsOf(mount), []);
 
     // Answering again after settle is honestly refused through the SAME real
     // command (the ticket is gone, not silently re-resolved).
@@ -648,12 +677,15 @@ describe("ticket 69 L1 — the offline composition pin (real apply → real watc
     await flush();
 
     const composition = applyClientModule(client, createRosterStore());
-    const mount = composition.mounts[0];
-    assert.ok(mount, "the main page mount");
-    assert.equal(composition.mounts.length, 2, "main page + root frame");
+    assert.equal(
+      composition.mounts.length,
+      0,
+      "the default posture registers no mounts",
+    );
+    const mount = attachMount(client, composition);
 
-    for (const candidate of composition.mounts) {
-      const state = candidate.store.getBox().state;
+    {
+      const state = mount.store.getBox().state;
       // The mirror landed: the row is OURS (flag true) with live presence.
       const row = state.rows.get("s-1");
       assert.equal(row?.dispatcher, true, "the dispatcher flag is live");
@@ -676,9 +708,9 @@ describe("ticket 69 L1 — the offline composition pin (real apply → real watc
         true,
         "the panel is hosted",
       );
-      assert.notEqual(candidate.hosts.rosterPanel({ sessionId: "s-1" }), null);
+      assert.notEqual(mount.hosts.rosterPanel({ sessionId: "s-1" }), null);
       // …and NOT for a session the mirrors do not vouch for.
-      assert.equal(candidate.hosts.rosterPanel({ sessionId: "s-other" }), null);
+      assert.equal(mount.hosts.rosterPanel({ sessionId: "s-other" }), null);
     }
 
     // A real spawn republishes through the same channel: the presence counts
@@ -689,8 +721,8 @@ describe("ticket 69 L1 — the offline composition pin (real apply → real watc
       { stream_key: "k-94", title: "Mirror worker", prompt: "P." },
       { agent: { session: { id: "s-1" } } },
     );
-    for (const candidate of composition.mounts) {
-      const row = candidate.store.getBox().state.rows.get("s-1");
+    {
+      const row = mount.store.getBox().state.rows.get("s-1");
       assert.deepEqual(row?.presence, { working: 1, needsYou: 0, finished: 0 });
     }
 
@@ -723,8 +755,7 @@ describe("ticket 69 L1 — the offline composition pin (real apply → real watc
     await flush();
 
     const composition = applyClientModule(client, createRosterStore());
-    const mount = composition.mounts[0];
-    assert.ok(mount);
+    const mount = attachMount(client, composition);
     assert.equal(mount.store.getBox().state.rows.get("s-1")?.dispatcher, true);
 
     // Unload the client fiber: every effect (the watch and each mount's feed
@@ -759,6 +790,9 @@ describe("ticket 69 L1 — the offline composition pin (real apply → real watc
     await flush();
 
     const composition = applyClientModule(client, createRosterStore());
+    // The mount machinery attaches to the composition's own feeds (ticket
+    // 99's posture); its feed attach is an effect on the same client fiber.
+    const mount = attachMount(client, composition);
     const spawn = host.tool("spawn_worker");
     assert.ok(spawn);
     const spawned = (await spawn.execute(
@@ -779,10 +813,10 @@ describe("ticket 69 L1 — the offline composition pin (real apply → real watc
         assert.equal((value as { ok: boolean }).ok, true);
       }) as Promise<void>;
     await flush();
-    assert.equal(cardsOf(composition.mounts[0]).length, 1);
+    assert.equal(cardsOf(mount).length, 1);
 
     // Unload the client fiber: the settings watch, the settings card's own
-    // bind (ticket 47 rides the SAME scope), and every mount's feed attach
+    // bind (ticket 47 rides the SAME scope), and the mount's feed attach
     // are effects on it — one teardown releases all of them.
     client.runFiberTeardown();
     assert.equal(client.watchDisposedCount(), 2, "settings watch + settings card");
@@ -790,14 +824,14 @@ describe("ticket 69 L1 — the offline composition pin (real apply → real watc
 
   // A later host publish reaches nothing: the detached store keeps its last
   // truth instead of being fed by a dead fiber.
-  const before = cardsOf(composition.mounts[0]);
+  const before = cardsOf(mount);
   host.runCommand({
     commandId: DISPATCHER_RESOLVE_COMMAND,
     agent: topLevelAgent("s-1"),
     rawInput: `${spawned.worker_id} deny`,
   });
   await flush();
-  assert.deepEqual(cardsOf(composition.mounts[0]), before);
+  assert.deepEqual(cardsOf(mount), before);
   // The parked tool call settled on the deny (FINDING 4) — no stray park.
   await settled;
 });

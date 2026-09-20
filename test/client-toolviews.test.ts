@@ -684,11 +684,12 @@ describe("toolview — apply() registers one keyed entry per tool via the fake s
     const ctx = createClientCtx();
     apply(ctx);
 
-    // Four injects: tool.call.toolview (toolviews) + settings.plugin.item
-    // (ticket 47's settings card) + ticket 78's `main` page inject and the
-    // cutover's `root` frame election. The shell.overlay injects (capsule,
-    // launcher) retired at the ticket-78 cutover.
-    assert.equal(ctx.injects.length, 4);
+    // Two injects since ticket 99 (ADR-0021): tool.call.toolview (toolviews)
+    // + settings.plugin.item (ticket 47's settings card) — the `main` page
+    // and `root` election injects retired from the composition (stock dsh
+    // stays primary). The shell.overlay injects (capsule, launcher) retired
+    // at the ticket-78 cutover.
+    assert.equal(ctx.injects.length, 2);
     const overlay = ctx.findInject(SHELL_OVERLAY_SLOT);
     const toolviews = ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT);
     assert.equal(overlay, undefined, "no overlay inject post-cutover");
@@ -737,7 +738,7 @@ describe("toolview — HMR reversal over the fake seam", () => {
     // left any entry in its cell (the fake now models that rule), so the
     // HMR-reversal assertion is a real contract check, not just a count.
     assert.doesNotThrow(() => apply(ctx));
-    assert.equal(ctx.injects.length, 4);
+    assert.equal(ctx.injects.length, 2);
     assert.equal(ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT)?.entries.length, 6);
     assert.equal(ctx.findInject(SHELL_OVERLAY_SLOT), undefined);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
