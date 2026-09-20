@@ -40,6 +40,12 @@ export interface DshHost {
   /**
    * Optional: resolve a credential *name* to a value for scoped injection.
    * Adapter-only; core never sees the string. Tests never call this.
+   *
+   * Ticket 102b: the member stays for contract compatibility, but the live
+   * Cordis adapter does NOT implement it — its old `(ctx as {credentials?})`
+   * read was an undeclared-service read (a latent inject-by-exact-string
+   * throw) and was removed; see `cordis-dsh-host.ts`. Credentials reach
+   * workers via `SpawnOptions.credentialNames` (ADR-0008), not this seam.
    */
   resolveCredential?(
     credentialName: string,

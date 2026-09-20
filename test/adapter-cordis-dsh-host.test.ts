@@ -642,6 +642,19 @@ describe("listLiveJobs", () => {
   });
 });
 
+describe("resolveCredential is not implemented by the live adapter (ticket 102b hardening)", () => {
+  it("the adapter does not expose the optional seam", () => {
+    // The old implementation read `(ctx as {credentials?}).credentials`, an
+    // undeclared Cordis service: the resolver matches inject by EXACT STRING
+    // and throws at property ACCESS, so the fuse would fire the moment a
+    // caller was wired — silently green offline. The stub ctx here has no
+    // `credentials` face at all, so an absent/throwing read is the live shape.
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    assert.equal(host.resolveCredential, undefined);
+  });
+});
+
 describe("bindDispatcherLifecycle", () => {
   it("activation binds the parent and wires wakeBus turn bounds by session id", async () => {
     const ctx = createStubCtx();

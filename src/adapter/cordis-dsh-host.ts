@@ -599,28 +599,20 @@ export function createCordisDshHost(
       accessRequestCallbacks.push(cb);
     },
 
-    async resolveCredential(
-      credentialName: string,
-    ): Promise<{ value: string; source: string } | undefined> {
-      // Adapter-only: resolve a credential *name* for scoped injection.
-      // Core never sees the string. Missing credentials service → undefined.
-      const credentials = (ctx as { credentials?: {
-        resolve?: (ref: unknown) => Promise<{ value: string; source: string } | undefined>;
-        credentialRef?: (name: string) => unknown;
-      } }).credentials;
-      if (credentials === undefined || typeof credentials.resolve !== "function") {
-        return undefined;
-      }
-      try {
-        const ref =
-          typeof credentials.credentialRef === "function"
-            ? credentials.credentialRef(credentialName)
-            : credentialName;
-        return await credentials.resolve(ref);
-      } catch {
-        return undefined;
-      }
-    },
+    // Ticket 102b hardening: the adapter no longer implements the optional
+    // `resolveCredential` seam. Its read was `(ctx as { credentials? }).credentials`
+    // — a Cordis service declared in NEITHER `plugin.ts`'s `inject` nor
+    // `AdapterContext`, behind a cast that hid it from the type system. The
+    // resolver matches inject entries by EXACT STRING and throws at property
+    // ACCESS, so this was a latent fuse: no caller existed, but the first
+    // ticket to wire one would throw on an undeclared service while every
+    // offline test stayed green. Deleted rather than declared, because
+    // declaring `credentials` in `inject` would gate the whole plugin's apply
+    // on a service it never uses, and ADR-0008 routes credentials through
+    // `SpawnOptions.credentialNames` (resolved inside adapter/tools), not this
+    // seam. The optional `DshHost` member stays for contract compatibility
+    // (see `src/core/dsh-host.ts`); like `FakeDshHost`, the live adapter simply
+    // does not provide it.
 
     async spawnWorker(prompt: string, opts: SpawnOptions): Promise<string> {
       // ADR-0019: the authority agent is the worker's OWN dispatcher session.
