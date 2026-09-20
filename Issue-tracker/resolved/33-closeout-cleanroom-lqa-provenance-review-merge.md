@@ -1257,3 +1257,20 @@ merged park-vs-settlement fix `c8849a7`, B-5-verified), (2) this W27 data repair
 wedge instance, (3) deferred ticket 98 for the systemic halves. No AC box
 on any ticket is ticked by this cleanup; ticket 69's AC boxes untouched. Tracker-only commit,
 direct to main, explicit paths per tonight's practice.
+
+### 2026-09-20 — operator-directed purge of `dsh-live-pass5-2026-09-19` (and `dsh-bot.ps1.bak-2026-09-18`)
+
+At the operator's request the Desktop folder `C:\Users\TZhen\Desktop\dsh-live-pass5-2026-09-19\`
+and the file `C:\Users\TZhen\Desktop\dsh-bot.ps1.bak-2026-09-18` were deleted. The folder held the
+raw artifacts of pass-5 Session A (evidence/shots). Safety sweep before deletion found live citations
+of the folder path in tickets **17** (pass-5 live-pass record line), **33** (this ticket's Session A
+evidence roots, lines ~531–601), **68**, **78**, **87**, and **92** (92 cites `evidence\B\` under it);
+ticket **88** cites only the 2026-09-20 folder and is unaffected. Those citations are now dead paths —
+the results stand as recorded in the ticket comments, but the raw artifacts are gone, per the repo's
+evidence-folder precedent (cf. the five folders deleted 2026-09-19, above). The `.bak-2026-09-18`
+launcher backup is cited historically by ticket **48** ("the launcher has a backup at
+`dsh-bot.ps1.bak-2026-09-18`"); that mention now records a deleted file. The live launcher
+`dsh-bot.ps1` was read in full before deletion: it references neither purge target and boots only the
+`dsh-bot` main checkout, so it is unaffected. Kept on disk: `dsh-live-pass4-2026-09-19\`,
+`dsh-live-pass5-2026-09-20\`, `dsh-bot.bat`, `dsh-bot.ps1`, `dsh-bot.ps1.bak-2026-09-19-wt48`,
+`dsh-bot\`. Tracker-only commit, direct to main, explicit path.
