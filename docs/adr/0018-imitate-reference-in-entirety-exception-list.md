@@ -1,6 +1,6 @@
 # Imitate the reference in its entirety, except an enumerated exception list
 
-**Status:** accepted (human-ruled, 2026-09-18 trim session)
+**Status:** accepted (human-ruled, 2026-09-18 trim session); vehicle clause amended 2026-09-20 by ADR-0021 — stock dsh stays primary (addon coexistence), U-G amended for dispatcher sessions only
 
 **Supersedes wherever conflicting:** ADR-0005 (flag/toggle semantics), ADR-0009 (activation matrix; its deferred-binding *mechanics* may survive), ADR-0013 (capsule-as-one-overlay-slot; its seam research remains valid), ADR-0016 (already retracted), and the deviation register's U-1 row. **Amends the PRD** in the places listed under Consequences.
 

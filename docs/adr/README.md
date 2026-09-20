@@ -19,9 +19,10 @@
 | [0015](0015-browser-test-infrastructure-playwright-draft-nonhuman-approved.md) | Real-browser verification is Playwright against a dsh --profile web --patch launcher boot; execution consolidates in ticket 33's browser pass | draft (non-human-approved) |
 | [0016](0016-dispatcher-front-desk-mode-gated-activation-dedicated-surface.md) | The dispatcher is the front desk: activation moves to the mode boundary, and the dispatcher gets a dedicated surface | **RETRACTED 2026-09-18** — signed under a fabricated premise; superseded by 0018 |
 | [0017](0017-core-loop-follows-reference-deviations-need-human-approval-draft-nonhuman-approved.md) | The core loop follows the reference; every deviation needs written human approval | draft (non-human-approved) |
-| [0018](0018-imitate-reference-in-entirety-exception-list.md) | Imitate the reference in its entirety, except an enumerated exception list | **accepted (human-ruled, 2026-09-18) — the master rule** |
+| [0018](0018-imitate-reference-in-entirety-exception-list.md) | Imitate the reference in its entirety, except an enumerated exception list | **accepted (human-ruled, 2026-09-18) — the master rule**; vehicle clause amended 2026-09-20 by 0021 — addon coexistence, U-G amended for dispatcher sessions only |
 | [0019](0019-per-dispatcher-scoped-tools-draft-nonhuman-approved.md) | Per-dispatcher tool scoping: each dispatcher's tools register in its own agent scope; the process-global singleton retires | draft (non-human-approved) |
-| [0020](0020-wrapper-shell-vehicle-own-frame-over-shipped-runtime-draft-nonhuman-approved.md) | The wrapper vehicle: our own application frame over the shipped dsh client runtime (ADR-0018's "we build the whole UI") | draft (non-human-approved) |
+| [0020](0020-wrapper-shell-vehicle-own-frame-over-shipped-runtime-draft-nonhuman-approved.md) | The wrapper vehicle: our own application frame over the shipped dsh client runtime (ADR-0018's "we build the whole UI") | draft (non-human-approved); **vehicle superseded 2026-09-20 by 0021** — addon coexistence, floating dispatcher window; the root-frame election leaves the default posture |
+| [0021](0021-addon-coexistence-floating-dispatcher-window.md) | Addon coexistence: stock dsh stays the primary UI; dispatcher functions live in a separate floating window | accepted (human-ruled, 2026-09-20 in-session directive) — amends ADR-0018's vehicle clause; supersedes ADR-0020 as vehicle |
 
 Draft ADRs 0013–0015 (capsule epic 35, ticket 37) are agent-drafted and **pending human
 sign-off** (ticket 33's close-out pass). Numbers 0010–0012 were reserved to design-17 §9's
@@ -82,3 +83,10 @@ stack + moved-rule register), `read-before-running-live-and-browser-tests.md`, a
 stub (it is git-ignored). Older ADR text above that says "see AGENTS.md" (e.g. 0001's
 "Reference folder policy", 0018's B9) now resolves through that stub to these homes; the
 accepted ADR texts are left untouched, same as the 2026-09-19 identifier note.
+
+**2026-09-20 — addon-coexistence note (ADR-0021):** the human ruled the dispatcher UI is an
+addon co-existing with dsh — stock dsh stays the primary UI, dispatcher functions live in a
+separate floating window, and dispatcher sessions can be added/deleted from the UI (U-G
+amended for dispatcher sessions only). ADR-0020's root-frame vehicle is superseded;
+ADR-0018's whole-UI vehicle clause is amended. Implementation tickets 99–101; accepted-ADR
+bodies untouched (dated notes on the 0018/0020 Status lines, same convention as above).

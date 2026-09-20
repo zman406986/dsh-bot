@@ -109,7 +109,7 @@ This is **not** “more subagents.” It is a **policy + wake/steer contract** o
 
 ### 6.1 Dispatcher policy (behavioral, not verbatim prompt)
 
-Injected as system / always-on skill. **Amended 2026-09-18 (ADR-0018, supersedes ADR-0005's session-scoped flag):** there is no dispatcher mode, feature flag, or kill switch — the dispatcher is **always-on**, like the reference; the wrapper window / expanded surface *is* the dispatcher, and everything typed there goes to the dispatcher(s) living there:
+Injected as system / always-on skill. **Amended 2026-09-18 (ADR-0018, supersedes ADR-0005's session-scoped flag):** there is no dispatcher mode, feature flag, or kill switch — the dispatcher is **always-on**, like the reference; ~~the wrapper window / expanded surface *is* the dispatcher~~ **vehicle amended 2026-09-20 (ADR-0021):** stock dsh stays the primary UI (addon coexistence) and the dispatcher's surface is a separate floating window called out from the stock UI — everything typed there goes to the dispatcher(s) living there:
 
 - You are a **dispatcher**, not the workhorse.
 - Any non-trivial multi-step work → **spawn a worker**; conversational replies and one-step lookups stay inline.
@@ -354,7 +354,7 @@ Deliver as separate files in the product repo (e.g. `prompts/dispatcher.md`). Re
 2. Map Multitask wake bus → dsh job `completionDelivery=wakeup` (or equivalent).
 3. Confirm todo allows multiple `in_progress` (if not, extend or bypass with core-local queue + display).
 4. Confirm worker agent type can run **without** user-facing send tools.
-5. ~~Feature flag: `multitask_dispatcher` ON in the dedicated multitask profile, OFF in stock/default profiles; kill switch not live-applied (ADR-0005).~~ **Voided 2026-09-18 (ADR-0018):** no dispatcher mode, flag, or kill switch — the dispatcher is **always-on**; the wrapper window / expanded surface *is* the dispatcher. No on/off-while-running state exists to define.
+5. ~~Feature flag: `multitask_dispatcher` ON in the dedicated multitask profile, OFF in stock/default profiles; kill switch not live-applied (ADR-0005).~~ **Voided 2026-09-18 (ADR-0018):** no dispatcher mode, flag, or kill switch — the dispatcher is **always-on**; ~~the wrapper window / expanded surface *is* the dispatcher~~ **vehicle amended 2026-09-20 (ADR-0021):** the dispatcher's surface is a separate floating window over stock dsh, which stays primary (addon coexistence). No on/off-while-running state exists to define.
 6. Telemetry (optional): dispatch count, steer count, time-to-first-reply while busy — no prompt text in telemetry.
 
 ---
@@ -406,7 +406,7 @@ Deliver as separate files in the product repo (e.g. `prompts/dispatcher.md`). Re
 3. ~~Worker `Stop` visibility: silent vs user-visible cancel.~~ **Resolved: imitate reference behavior** (docs/research/reference-behavior-notes.md).
 4. ~~Steer conflict policy: confirm **last-wins**.~~ **Resolved: imitate reference behavior — last-wins confirmed** (docs/research/reference-behavior-notes.md).
 5. ~~Phase 2 peer agents: in scope for this project or separate PRD?~~ **Resolved: in scope for this project** (ADR-0002).
-6. ~~Default feature flag ON/OFF for first release.~~ **Voided 2026-09-18 (ADR-0018; supersedes ADR-0005):** there is no flag and no kill switch — the dispatcher is **always-on**; the wrapper window / expanded surface *is* the dispatcher. Q6 and the held-results half of Q8 are moot a fortiori.
+6. ~~Default feature flag ON/OFF for first release.~~ **Voided 2026-09-18 (ADR-0018; supersedes ADR-0005):** there is no flag and no kill switch — the dispatcher is **always-on**; ~~the wrapper window / expanded surface *is* the dispatcher~~ **vehicle amended 2026-09-20 (ADR-0021):** the dispatcher's surface is a separate floating window over stock dsh, which stays primary (addon coexistence). Q6 and the held-results half of Q8 are moot a fortiori.
 7. ~~Durable `WorkerRecord`/`SteerTicket`.~~ **Resolved: hybrid split.** A **minimum-to-reconstruct `WorkerRecord`** is durable — enough to rebuild the live roster across a restart (worker id, transcript pointer, todo link, status), written through the reference's control-plane obligation-marker idiom, so the dispatcher can notice an undelivered result after a restart and finish delivery (S4). **`SteerTicket` stays in-memory** — a steer is transient by definition (single-slot, last-wins), so persisting it means persisting a value expected to be overwritten. Still no second transcript DB. The in-memory half imitates the reference's honest-amnesia restart behavior; the durable half is **our deliberate divergence** from it (ADR-0006).
 
 ---

@@ -1,6 +1,6 @@
 # The wrapper vehicle: our own frame over the shipped dsh client runtime
 
-**Status:** draft (non-human-approved) — agent-drafted for ticket 67, pending human sign-off, per the ADR-0013–0016 filing convention.
+**Status:** draft (non-human-approved) — agent-drafted for ticket 67, pending human sign-off, per the ADR-0013–0016 filing convention; vehicle superseded 2026-09-20 by ADR-0021 — addon coexistence, floating dispatcher window; root-frame election leaves the default posture
 
 **Supersedes wherever conflicting:** ADR-0013's remaining UI-vehicle content (capsule as *the* plugin surface — already superseded by ADR-0018; this ADR records what replaces it). **Amends nothing else.** Operates under ADR-0018's master rule ("we build the whole UI") and its exhaustive exception list.
 

@@ -56,3 +56,14 @@ hashes, minimal-diff table, residual risk). Labels line set to `needs-info` per 
 vocabulary's five-role rule: the ticket cannot be shaped until design input lands on
 wrapper-frame approval rendering (the Deferred line above names the revisit trigger; flip to
 `ready-for-agent` when that input exists).
+
+### 2026-09-20 — team-leader session
+
+Vehicle changed by ADR-0021 (human-ruled): addon coexistence — stock dsh stays the primary UI
+and the ADR-0020 root-frame election leaves the default posture (open ticket 99). Gap (1) (the
+host approval composer ships but does not answer under the root frame) is expected-moot under
+the new vehicle: the stock frame is no longer displaced, so the shipped composer should render
+and answer natively — this stays deferred pending live confirmation under the new vehicle; the
+revisit trigger above now routes through ADR-0021/ticket 99 instead of ADR-0020 staging. Gap
+(2) (persisted open-turn reconcile on activation) is unaffected by the vehicle change. Status
+and Labels untouched by this comment.
