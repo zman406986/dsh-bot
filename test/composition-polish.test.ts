@@ -42,6 +42,7 @@ import {
   DISPATCHER_RESOLVE_COMMAND,
   DISPATCHER_START_COMMAND,
   DISPATCHER_START_SUCCESS,
+  DISPATCHER_STOP_COMMAND,
   DISPATCHER_STEER_COMMAND,
   MARKER_TABLE_NAME,
   type AdapterContext,
@@ -459,6 +460,7 @@ describe("composition polish — dormant registration matrix (design-17 §3.2/§
       DISPATCHER_RESOLVE_COMMAND,
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
+      DISPATCHER_STOP_COMMAND,
     ]);
     assert.deepEqual(ctx.toolNames(), []);
 

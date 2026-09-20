@@ -43,8 +43,14 @@
  * C13 holds). The affordance shows the id verbatim and copies it through
  * the host clipboard seam; nothing else about peer traffic surfaces here.
  *
- * Presentation only: the shell never spawns, steers, stops, or sends — every
- * intent stays with the later slices' verified transports. Pane decisions
+ * Presentation only: the shell never spawns, steers, stops a worker, or
+ * sends — every intent stays with the host seats / verified transports.
+ * Since ticket 101 (ADR-0021 decision 3) the sidebar additionally carries
+ * the session-lifecycle seats (add = `/dispatcher-start` in a chosen
+ * session, delete after confirmation = `/dispatcher-stop`): the shell only
+ * gates and routes the click; the composition owns the transports, and the
+ * worker/turn no-stop posture is untouched (the U-G amendment is for
+ * dispatcher sessions ONLY). Pane decisions
  * come from the pure `describeShellPanes`; this component only maps them to
  * seats. Rendering is covered by build + typecheck (S8: no DOM harness); the
  * store and pane logic are asserted purely in tests.
@@ -56,16 +62,22 @@
  * hierarchy is opacity-based, there is no animation at all, and no text
  * colour is set (the shell inherits the host's theme colour).
  */
-import { useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import type { ComponentType, JSX } from "react";
 import type { TranslateFn } from "./overlay.js";
 import { formatTemplate, rosterBlockedKey } from "./roster-store.js";
 import {
+  describeAddPicker,
   describeRowPreview,
   describeShellPanes,
   describeShellSidebar,
+  SHELL_DELETE_CONFIRM_MS,
+  SHELL_DELETE_IDLE,
+  shellDeletePress,
   type DispatcherShellStore,
+  type ShellDeleteArmState,
   type ShellRowView,
+  type ShellState,
   type ShellWaitingMarker,
 } from "./shell-store.js";
 
@@ -102,9 +114,18 @@ export const SHELL_CSS = `
 .multitask-dispatcher-shell__chip--waiting{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 6px;border-radius:8px;border:1px solid currentColor;color:var(--dsw-alias-state-warn-primary)}
 .multitask-dispatcher-shell__row-preview{display:none;opacity:.6;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .multitask-dispatcher-shell__row:hover .multitask-dispatcher-shell__row-preview,.multitask-dispatcher-shell__row:focus-visible .multitask-dispatcher-shell__row-preview{display:block}
-.multitask-dispatcher-shell__row-copy{display:none;align-self:flex-start;margin:2px 8px 0;padding:0;border:none;background:transparent;color:inherit;font:inherit;font-size:11px;opacity:.55;cursor:pointer;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.multitask-dispatcher-shell__row-copy:hover{opacity:.9;text-decoration:underline}
-.multitask-dispatcher-shell__list li:hover .multitask-dispatcher-shell__row-copy,.multitask-dispatcher-shell__row-copy:focus-visible{display:block}
+.multitask-dispatcher-shell__row-actions{display:none;align-self:flex-start;gap:10px}
+.multitask-dispatcher-shell__list li:hover .multitask-dispatcher-shell__row-actions,.multitask-dispatcher-shell__row-actions:focus-within{display:flex}
+.multitask-dispatcher-shell__row-actions button{border:none;padding:0;background:transparent;color:inherit;font:inherit;font-size:11px;opacity:.55;cursor:pointer;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.multitask-dispatcher-shell__row-actions button:hover{opacity:.9;text-decoration:underline}
+.multitask-dispatcher-shell__row-actions button[data-armed="true"]{opacity:1;color:var(--dsw-alias-state-warn-primary)}
+.multitask-dispatcher-shell__add{margin-top:auto;padding:6px 6px 2px;border-top:1px solid var(--dsw-alias-border-l3)}
+.multitask-dispatcher-shell__add-toggle{width:100%;border:none;padding:4px 2px;background:transparent;color:inherit;font:inherit;font-size:12px;opacity:.7;cursor:pointer;text-align:left}
+.multitask-dispatcher-shell__add-toggle:hover{opacity:1;text-decoration:underline}
+.multitask-dispatcher-shell__add-list{list-style:none;margin:4px 0 0;padding:0;display:flex;flex-direction:column;gap:2px}
+.multitask-dispatcher-shell__add-option{width:100%;border:1px solid transparent;border-radius:8px;padding:5px 8px;background:transparent;color:inherit;font:inherit;font-size:12px;opacity:.85;cursor:pointer;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.multitask-dispatcher-shell__add-option:hover{background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 75%,transparent);border-color:var(--dsw-alias-border-l3);opacity:1}
+.multitask-dispatcher-shell__add-empty{font-size:11px;opacity:.6;padding:4px 2px}
 .multitask-dispatcher-shell__main{display:flex;flex-direction:column;min-width:0;min-height:0}
 .multitask-dispatcher-shell__main-header{padding:10px 14px;border-bottom:1px solid var(--dsw-alias-border-l3);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .multitask-dispatcher-shell__conversation-pending{padding:14px;opacity:.6}
@@ -206,6 +227,23 @@ export interface ShellHosts {
    * — no fake success is ever shown).
    */
   readonly copyToClipboard?: (text: string) => void | Promise<void>;
+  /**
+   * Ticket 101 (ADR-0021 decision 3): the ADD seat — called with a session
+   * id chosen from the add picker (a feed-delivered session the mirrors do
+   * not flag as a dispatcher). The composition executes `/dispatcher-start`
+   * in that session through the composer's own command transaction. ABSENT,
+   * the picker is not rendered (an offline/stub shell shows no dead control).
+   */
+  readonly onAddDispatcherSession?: (sessionId: string) => void;
+  /**
+   * Ticket 101 (ADR-0021 decision 3): the DELETE seat — called with a
+   * dispatcher session id ONLY after the row's two-step confirmation
+   * (armed-window) completed. The composition executes `/dispatcher-stop` in
+   * that session: the binding deactivates through the host dispose path
+   * (tools unbound, mirror cleared); the dsh chat itself is NEVER disposed.
+   * ABSENT, no delete affordance renders.
+   */
+  readonly onDeleteDispatcherSession?: (sessionId: string) => void;
 }
 
 /** Best-effort default clipboard writer (host browser provides the seam). */
@@ -224,18 +262,46 @@ function defaultCopyToClipboard(text: string): void {
  * affordance OUTSIDE the row button (a button inside a button is invalid
  * HTML) — hover/focus-revealed, showing the id verbatim; clicking copies
  * it through the host seam.
+ * Ticket 101 (ADR-0021 decision 3): dispatcher rows with a delete seat also
+ * render the DELETE affordance in the same hover-revealed actions row —
+ * two-step confirmation (armed window, `shellDeletePress`), never a
+ * single-click fire; the armed label reverts when the window expires. The
+ * seat itself is the composition's command transaction; the row only gates.
  */
 function ShellRow(props: {
   t: TranslateFn;
   row: ShellRowView;
   onSelect: (sessionId: string) => void;
   onCopyId: (sessionId: string) => void;
+  onDelete?: ((sessionId: string) => void) | undefined;
 }): JSX.Element {
-  const { t, row, onSelect, onCopyId } = props;
+  const { t, row, onSelect, onCopyId, onDelete } = props;
+  const [arm, setArm] = useState<ShellDeleteArmState>(SHELL_DELETE_IDLE);
+  const armedHere = arm.armedSessionId === row.sessionId;
+  // Visual honesty: the armed ("confirm") label never outlives the window
+  // that would confirm it — a timer reverts the row to its idle label. (The
+  // press decision itself re-checks the window against the clock, so a
+  // lapsed timer can never confirm.)
+  useEffect(() => {
+    if (!armedHere) return;
+    const remaining = arm.armedAtMs + SHELL_DELETE_CONFIRM_MS - Date.now();
+    if (remaining <= 0) {
+      setArm(SHELL_DELETE_IDLE);
+      return;
+    }
+    const timer = setTimeout(() => setArm(SHELL_DELETE_IDLE), remaining);
+    return () => clearTimeout(timer);
+  }, [armedHere, arm.armedAtMs]);
   const presence = row.presence;
   const presenceAvailable = row.presenceAvailable;
   const dot = describePresenceDot(row);
   const preview = describeRowPreview(row, presenceAvailable);
+  const onDeleteClick = () => {
+    const sessionId = row.sessionId;
+    const press = shellDeletePress(arm, sessionId, Date.now());
+    setArm(press.state);
+    if (press.action === "confirm") onDelete?.(sessionId);
+  };
   return (
     <li>
       <button
@@ -304,18 +370,93 @@ function ShellRow(props: {
         ) : null}
       </button>
       {row.dispatcher ? (
-        <button
-          type="button"
-          className={`${SHELL_CLASS}__row-copy`}
-          data-copy-id={row.sessionId}
-          aria-label={t("shell.row.copy-id")}
-          title={row.sessionId}
-          onClick={() => onCopyId(row.sessionId)}
-        >
-          {row.sessionId}
-        </button>
+        <span className={`${SHELL_CLASS}__row-actions`}>
+          <button
+            type="button"
+            className={`${SHELL_CLASS}__row-copy`}
+            data-copy-id={row.sessionId}
+            aria-label={t("shell.row.copy-id")}
+            title={row.sessionId}
+            onClick={() => onCopyId(row.sessionId)}
+          >
+            {row.sessionId}
+          </button>
+          {onDelete !== undefined ? (
+            <button
+              type="button"
+              className={`${SHELL_CLASS}__row-delete`}
+              data-delete-id={row.sessionId}
+              data-armed={armedHere ? "true" : "false"}
+              aria-label={
+                armedHere ? t("shell.row.delete-confirm") : t("shell.row.delete")
+              }
+              title={t("shell.row.delete-title")}
+              onClick={onDeleteClick}
+            >
+              {armedHere ? t("shell.row.delete-confirm") : t("shell.row.delete")}
+            </button>
+          ) : null}
+        </span>
       ) : null}
     </li>
+  );
+}
+
+/**
+ * The sidebar's ADD section (ticket 101, ADR-0021 decision 3): a toggle
+ * revealing the picker of activatable sessions — feed-delivered rows the
+ * mirrors do not flag as dispatchers ({@link describeAddPicker}). Empty
+ * picker = the honest guidance (create the chat in dsh first); there is no
+ * client-side "create chat" seam and none is simulated. Its own component
+ * (own hook fiber, the ticket-88 discipline) because it holds the open/closed
+ * state.
+ */
+function AddDispatcherSection(props: {
+  t: TranslateFn;
+  state: ShellState;
+  onAdd: (sessionId: string) => void;
+}): JSX.Element {
+  const { t, state, onAdd } = props;
+  const [open, setOpen] = useState(false);
+  const picker = describeAddPicker(state);
+  return (
+    <div className={`${SHELL_CLASS}__add`}>
+      <button
+        type="button"
+        className={`${SHELL_CLASS}__add-toggle`}
+        data-add-toggle={open ? "open" : "closed"}
+        aria-expanded={open ? "true" : "false"}
+        onClick={() => setOpen(!open)}
+      >
+        {t("shell.add.label")}
+      </button>
+      {open ? (
+        picker.kind === "ready" ? (
+          <ul className={`${SHELL_CLASS}__add-list`}>
+            {picker.candidates.map((row) => (
+              <li key={row.sessionId}>
+                <button
+                  type="button"
+                  className={`${SHELL_CLASS}__add-option`}
+                  data-add-id={row.sessionId}
+                  title={row.sessionId}
+                  onClick={() => {
+                    setOpen(false);
+                    onAdd(row.sessionId);
+                  }}
+                >
+                  {row.title}
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div className={`${SHELL_CLASS}__add-empty`} data-add-empty="true">
+            {t("shell.add.empty")}
+          </div>
+        )
+      ) : null}
+    </div>
   );
 }
 
@@ -369,10 +510,18 @@ export function createDispatcherShell(
                       sessionId,
                     );
                   }}
+                  onDelete={hosts.onDeleteDispatcherSession}
                 />
               ))}
             </ul>
           )}
+          {hosts.onAddDispatcherSession !== undefined ? (
+            <AddDispatcherSection
+              t={t}
+              state={box.state}
+              onAdd={hosts.onAddDispatcherSession}
+            />
+          ) : null}
         </aside>
         <section className={`${SHELL_CLASS}__main`}>
           {panes.main.kind === "no-selection" ? (

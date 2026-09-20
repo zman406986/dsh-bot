@@ -17,6 +17,7 @@ import { Config, apply, inject, name } from "../src/plugin.js";
 import {
   DISPATCHER_RESOLVE_COMMAND,
   DISPATCHER_START_COMMAND,
+  DISPATCHER_STOP_COMMAND,
   DISPATCHER_STEER_COMMAND,
 } from "../src/adapter/index.js";
 import type {
@@ -256,6 +257,7 @@ describe("plugin scaffold", () => {
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
       DISPATCHER_RESOLVE_COMMAND,
+      DISPATCHER_STOP_COMMAND,
     ]);
     // Deferred to activation (ticket 19): the tool surface stays stock.
     assert.equal(ctx.registeredTools.length, 0);
@@ -269,14 +271,15 @@ describe("plugin scaffold", () => {
     // would invoke it right here and silently unregister the command — the
     // live 2026-09-18 re-pass bug (ticket 44). Both commands must still be
     // present, and each effect must have contributed exactly one real
-    // cleanup (two registrations + the teardown), so an HMR dispose-all
-    // unregisters everything through the collected disposers.
+    // cleanup (the command registrations + the teardown), so an HMR
+    // dispose-all unregisters everything through the collected disposers.
     assert.deepEqual(ctx.registeredCommands.map((c) => c.name), [
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
       DISPATCHER_RESOLVE_COMMAND,
+      DISPATCHER_STOP_COMMAND,
     ]);
-    assert.equal(ctx.disposers.length, 4);
+    assert.equal(ctx.disposers.length, 5);
     for (const dispose of [...ctx.disposers]) dispose();
     assert.equal(ctx.registeredCommands.length, 0);
   });
@@ -374,7 +377,7 @@ describe("plugin scaffold", () => {
     assert.equal(ctx.registeredCommands.length, 0);
     assert.equal(ctx.registeredTools.length, 0);
 
-    // HMR re-load: the fresh apply must re-register the same three command
+    // HMR re-load: the fresh apply must re-register the same dispatcher command
     // names and the tool surface WITHOUT hitting the host's duplicate rule —
     // teardown released every name (src/plugin.ts:664-687).
     assert.doesNotThrow(() => apply(ctx, { enabled: true }));
@@ -382,6 +385,7 @@ describe("plugin scaffold", () => {
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
       DISPATCHER_RESOLVE_COMMAND,
+      DISPATCHER_STOP_COMMAND,
     ]);
     ctx.runCommand({
       commandId: DISPATCHER_START_COMMAND,

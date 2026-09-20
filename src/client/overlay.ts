@@ -331,6 +331,19 @@ export const localeDictionary: LocaleDictionary = {
     "launcher.window.close": "Close the dispatcher window",
     "launcher.window.failed":
       "The dispatcher window hit an error and its content stopped rendering. Close it here and reopen it from the Dispatchers button.",
+    // Ticket 101 (ADR-0021 decision 3): the sidebar's session-lifecycle
+    // affordances. Add = activate a dispatcher in an EXISTING session (no
+    // client-side "create chat" seam exists — the empty state says so
+    // honestly); delete (per dispatcher row, two-step confirm) = deactivate
+    // the dispatcher binding in that session — the chat itself is never
+    // disposed, and /dispatcher-start there re-activates it.
+    "shell.add.label": "Add dispatcher session",
+    "shell.add.empty":
+      "No session is available to activate. Create the chat in dsh first, then add it here.",
+    "shell.row.delete": "Delete dispatcher session",
+    "shell.row.delete-confirm": "Confirm delete",
+    "shell.row.delete-title":
+      "Deactivates the dispatcher in this chat — the chat itself is not deleted. Run /dispatcher-start there to activate it again.",
   },
   zh: {
     "roster.title": "工作者",
@@ -473,6 +486,16 @@ export const localeDictionary: LocaleDictionary = {
     "launcher.window.close": "关闭调度窗口",
     "launcher.window.failed":
       "调度窗口遇到错误，内容已停止渲染。请在此关闭它，再通过“调度台”按钮重新打开。",
+    // Ticket 101（ADR-0021 决定 3）：侧栏的会话生命周期入口。添加 = 在一个
+    // 已存在的会话中激活调度器（客户端没有“新建聊天”缝隙——空状态如实说明）；
+    // 删除（每个调度会话行上，两步确认）= 停用该会话中的调度器绑定——聊天
+    // 本身不会被删除，在该聊天中运行 /dispatcher-start 可重新激活。
+    "shell.add.label": "添加调度会话",
+    "shell.add.empty": "没有可激活的会话。请先在 dsh 中创建聊天，再在这里添加。",
+    "shell.row.delete": "删除调度会话",
+    "shell.row.delete-confirm": "确认删除",
+    "shell.row.delete-title":
+      "停用该聊天中的调度器——聊天本身不会被删除。在该聊天中运行 /dispatcher-start 可重新激活。",
   },
 };
 

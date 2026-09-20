@@ -30,6 +30,7 @@ import {
 import { DISPATCHER_START_COMMAND } from "../src/adapter/activation-command.js";
 import { DISPATCHER_STEER_COMMAND } from "../src/adapter/steer-command.js";
 import { DISPATCHER_RESOLVE_COMMAND } from "../src/adapter/resolve-command.js";
+import { DISPATCHER_STOP_COMMAND } from "../src/adapter/stop-command.js";
 import type {
   AdapterContext,
   CommandDefinitionLike,
@@ -304,11 +305,13 @@ describe("feature flag — enabled path boots dormant (ticket 19)", () => {
     const ctx = createStubCtx({ withTools: true });
     apply(ctx, { enabled: true });
     // Dormant: the host commands are the visible affordances (ticket 22 added
-    // dispatcher-steer; ticket 69 the resolve command; all gate on activation).
+    // dispatcher-steer; ticket 69 the resolve command; ticket 101 the stop
+    // command; all gate on activation).
     assert.deepEqual(ctx.registeredCommands.map((c) => c.name), [
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
       DISPATCHER_RESOLVE_COMMAND,
+      DISPATCHER_STOP_COMMAND,
     ]);
     // Tools are deferred to activation (design-16 §3.3).
     assert.equal(ctx.registeredTools.length, 0);
@@ -317,7 +320,7 @@ describe("feature flag — enabled path boots dormant (ticket 19)", () => {
     assert.ok(ctx.listeners.has("agent/status"));
     assert.ok(ctx.listeners.has("subagent/end"));
     // Command disposers + lifecycle cleanup.
-    assert.equal(ctx.disposers.length, 4);
+    assert.equal(ctx.disposers.length, 5);
   });
 });
 
@@ -333,7 +336,7 @@ describe("feature flag — freeze semantics (ADR-0005)", () => {
     // Boot state unchanged (freeze copied the primitive at apply entry):
     // the commands are still registered and the lifecycle still activates
     // with policy, because `enabled` was true when apply froze it.
-    assert.equal(ctx.registeredCommands.length, 3);
+    assert.equal(ctx.registeredCommands.length, 4);
     const lifecycleAgent = {
       session: { id: "s-1", header: { parentSession: null, delegationDepth: 0 } },
       followup() {},
@@ -438,8 +441,8 @@ describe("feature flag — settings writes are a runtime no-op", () => {
     ]);
 
     // Running session unchanged: no teardown, commands still present.
-    assert.equal(ctx.registeredCommands.length, 3);
-    assert.equal(ctx.disposers.length, 4);
+    assert.equal(ctx.registeredCommands.length, 4);
+    assert.equal(ctx.disposers.length, 5);
     assert.ok(ctx.listeners.has("agent/status"));
   });
 
@@ -452,7 +455,7 @@ describe("feature flag — settings writes are a runtime no-op", () => {
     // running session is untouched (frozen flag, ADR-0005).
     await ctx.settingsScope?.update({ enabled: false });
     assert.deepEqual(ctx.settingsWrites, [{ enabled: false }]);
-    assert.equal(ctx.registeredCommands.length, 3);
+    assert.equal(ctx.registeredCommands.length, 4);
   });
 });
 
@@ -462,7 +465,9 @@ describe("feature flag — no off-while-running", () => {
     // The plugin holds no live config reference and no settings change hook
     // (ticket 93 removed the `installSection` seam entirely). No exported
     // function mutates a running Multitask's enabled state, and the command
-    // surface has no deactivate verb (activation is once per session).
+    // surface has no flag-off verb (the flag is frozen per session, ADR-0005;
+    // ticket 101's /dispatcher-stop deactivates a session BINDING under
+    // ADR-0021 decision 3 — it does not touch the flag or the core).
     const ctx = createStubCtx({ withTools: true, withSettings: true });
     const config = { enabled: true };
     apply(ctx, config);
@@ -470,7 +475,7 @@ describe("feature flag — no off-while-running", () => {
     // Even a config mutation storm leaves the session intact.
     config.enabled = false;
 
-    assert.equal(ctx.registeredCommands.length, 3);
+    assert.equal(ctx.registeredCommands.length, 4);
     assert.equal(ctx.registeredCommands[0]?.name, DISPATCHER_START_COMMAND);
     assert.ok(ctx.listeners.has("agent/status"));
   });

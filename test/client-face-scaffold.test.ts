@@ -476,6 +476,10 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
       "settings.card.save",
       "settings.card.title",
       "settings.card.unsaved",
+      // Ticket 101 (ADR-0021 decision 3): the session-lifecycle affordances
+      // (the sidebar's add picker copy).
+      "shell.add.empty",
+      "shell.add.label",
       // Ticket 81 (ADR-0020 slice 5): the approval cards' own chrome (the
       // option labels, location line, expired copy, and secret-stored
       // reassurance ride the projections as ticket 30's shipped copy —
@@ -523,7 +527,12 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
       "shell.onboard.step",
       "shell.onboard.tools.body",
       "shell.onboard.tools.title",
+      // Ticket 101 (ADR-0021 decision 3): the per-row delete affordance's
+      // copy (two-step confirm; the title states the deactivation semantics).
       "shell.row.copy-id",
+      "shell.row.delete",
+      "shell.row.delete-confirm",
+      "shell.row.delete-title",
       "shell.row.finished",
       "shell.row.needs-you",
       "shell.row.presence-unavailable",

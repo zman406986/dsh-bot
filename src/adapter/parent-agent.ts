@@ -135,6 +135,21 @@ export interface BindDispatcherLifecycleResult {
   activationGeneration(sessionId: string): number | null;
   /** Every activated dispatcher session id (ADR-0019). */
   dispatcherSessionIds(): readonly string[];
+  /**
+   * Deactivate ONE activated dispatcher session (ticket 101, ADR-0021
+   * decision 3 — the UI's delete affordance rides this). This is the SAME
+   * path the host `agent/disposed` handler runs — the internal
+   * `deactivateSession` sequence, never a fork: drop the session from the
+   * registry, `host.unbindParent(sessionId)`, fire `onDeactivated` (the
+   * plugin unregisters that session's tool surface, clears its access-policy
+   * rows, abandons its prompts, and clears its roster mirror). From any
+   * observer's perspective a command-path deactivation is indistinguishable
+   * from a host-side dispose of that session — the restart-honesty and
+   * durable-roster invariants hold unchanged. A no-op for a session that is
+   * not an activated dispatcher (the caller gates on
+   * {@link isDispatcherSession} first so the refusal copy is honest).
+   */
+  deactivate(sessionId: string): void;
   /** Tear down listeners and every activation, if any. */
   unbind(): void;
 }
@@ -337,6 +352,10 @@ export function bindDispatcherLifecycle(
 
     dispatcherSessionIds(): readonly string[] {
       return [...sessions.keys()];
+    },
+
+    deactivate(sessionId: string): void {
+      deactivateSession(sessionId);
     },
 
     unbind(): void {

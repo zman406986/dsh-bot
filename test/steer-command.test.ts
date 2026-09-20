@@ -20,6 +20,7 @@ import {
   DISPATCHER_RESOLVE_COMMAND,
   DISPATCHER_START_COMMAND,
   DISPATCHER_STEER_COMMAND,
+  DISPATCHER_STOP_COMMAND,
   DISPATCHER_STEER_DESCRIPTION,
   DISPATCHER_STEER_INPUT_HINT,
   DISPATCHER_STEER_NOT_ACTIVE,
@@ -272,6 +273,7 @@ describe("steer command — flag matrix and registration", () => {
       DISPATCHER_RESOLVE_COMMAND,
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
+      DISPATCHER_STOP_COMMAND,
     ]);
 
     const steer = ctx.command(DISPATCHER_STEER_COMMAND);
@@ -288,6 +290,7 @@ describe("steer command — flag matrix and registration", () => {
       DISPATCHER_RESOLVE_COMMAND,
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
+      DISPATCHER_STOP_COMMAND,
     ]);
   });
 
@@ -541,6 +544,7 @@ describe("steer command — HMR reversal", () => {
       DISPATCHER_RESOLVE_COMMAND,
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
+      DISPATCHER_STOP_COMMAND,
     ]);
 
     for (const dispose of [...ctx.disposers]) {

@@ -22,6 +22,7 @@ import {
   registerDispatcherResolveCommand,
   registerDispatcherStartCommand,
   registerDispatcherSteerCommand,
+  registerDispatcherStopCommand,
   registerDispatcherTools,
   resolveExecSessionId,
   RESTART_DEGRADED_NOTICE,
@@ -734,6 +735,26 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       isWildcardTarget: isWildcardAccessTarget,
     });
   }, "multitask-dispatcher: dispatcher-resolve command");
+
+  // Session deactivation command (ticket 101, ADR-0021 decision 3): the
+  // delete TRANSPORT the floating window's per-row affordance executes
+  // through the composer's own command transaction (the resolve command's
+  // pattern). The handler gates on the INVOKING chat's own activation and
+  // routes into `lifecycle.deactivate` — the SAME `deactivateSession`
+  // sequence the host `agent/disposed` listener runs (registry drop, parent
+  // unbind, `onDeactivated`: tool surface, access-policy rows, prompts, and
+  // the roster mirror for THAT session only; ADR-0019 keying). Delete never
+  // disposes the dsh chat itself — the binding is off, the chat stays, and
+  // `/dispatcher-start` re-activates it. Worker-turn stopping stays excluded
+  // (the U-G amendment is for dispatcher sessions ONLY; `stop_worker` stays
+  // agent-facing).
+  ctx.effect(function* () {
+    yield registerDispatcherStopCommand({
+      ctx,
+      activeSessionIds: () => lifecycle.dispatcherSessionIds(),
+      deactivate: (sessionId) => lifecycle.deactivate(sessionId),
+    });
+  }, "multitask-dispatcher: dispatcher-stop command");
 
   // Ticket 23: when the core parks a pending access ask, present it through
   // the prompt seam. The core's own onAccessRequest handler was registered

@@ -23,6 +23,7 @@ import {
   DISPATCHER_START_NOT_TOP_LEVEL,
   DISPATCHER_START_SUCCESS,
   DISPATCHER_START_UNRESOLVED,
+  DISPATCHER_STOP_COMMAND,
   DISPATCHER_STEER_COMMAND,
   type AdapterContext,
   type AgentLike,
@@ -283,11 +284,13 @@ describe("activation lifecycle — flag matrix (design-16 §3.7)", () => {
     assert.equal(agent.injected.length, 0);
 
     // The visible affordances are the host commands (ticket 22 added the
-    // steer command; its handler gates on activation).
+    // steer command, ticket 69 the resolve command; ticket 101 the stop
+    // command — all handlers gate on activation where it matters).
     assert.deepEqual(ctx.commandNames(), [
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
       DISPATCHER_RESOLVE_COMMAND,
+      DISPATCHER_STOP_COMMAND,
     ]);
     assert.deepEqual(ctx.toolNames(), []);
   });
@@ -295,7 +298,7 @@ describe("activation lifecycle — flag matrix (design-16 §3.7)", () => {
   // Ticket 32: the dormant-registration matrix. Tickets 27–31 (snapshot v2,
   // panel sections, live activity, approval UX, restart rebuild) all landed
   // after this matrix was written; the dormant surface must remain exactly
-  // the two commands with the passive listeners and no tool surface. The
+  // the host commands with the passive listeners and no tool surface. The
   // negative assertions pin the absence, so a future ticket cannot quietly
   // register a dormant-visible surface.
   it("tickets 27–31 add no dormant-visible registration: no tools, no listeners beyond the passive four", () => {
@@ -306,6 +309,7 @@ describe("activation lifecycle — flag matrix (design-16 §3.7)", () => {
       DISPATCHER_RESOLVE_COMMAND,
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
+      DISPATCHER_STOP_COMMAND,
     ]);
     assert.deepEqual(ctx.toolNames(), []);
     // Two lifecycle listeners (agent/disposed, agent/status) + two host
@@ -473,6 +477,7 @@ describe("activation lifecycle — command behavior", () => {
       "dispatcher-start",
       "dispatcher-steer",
       "dispatcher-resolve",
+      "dispatcher-stop",
     ]);
     assert.equal(
       DISPATCHER_START_DESCRIPTION,

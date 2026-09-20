@@ -27,6 +27,7 @@ import { apply as pluginApply } from "../src/plugin.js";
 import {
   DISPATCHER_RESOLVE_COMMAND,
   DISPATCHER_START_COMMAND,
+  DISPATCHER_STOP_COMMAND,
   DISPATCHER_STEER_COMMAND,
   MARKER_TABLE_NAME,
   RESTART_DEGRADED_NOTICE,
@@ -1095,7 +1096,17 @@ describe("restart honesty — no-stop guard (design-17 §4.6)", () => {
     }
   });
 
-  it("the plugin registers no stop/cancel command — the absence is the design", () => {
+  // Ticket 101 re-base (2026-09-20, ADR-0021 decision 3): this guard once
+  // forbade ANY stop-shaped command outright. ADR-0021 amends exception U-G
+  // for dispatcher sessions ONLY: `dispatcher-stop` is the sanctioned
+  // session-BINDING deactivation (the floating window's delete affordance
+  // executes it; the dsh chat itself is never disposed from our code). The
+  // guard keeps its full strength where the original ruling lives — worker
+  // turns / the worker runtime (design-17 §4.6, docs/surfaces.md "No stop
+  // control" stand unchanged for those) — so no command OTHER than the
+  // sanctioned one may carry a stop/cancel name, and a worker-turn stop
+  // surface still cannot sneak in.
+  it("the plugin registers no stop/cancel command beyond the sanctioned session deactivation (design-17 §4.6; re-based by ADR-0021 decision 3 — ticket 101)", () => {
     const ctx = createRestartCtx();
     pluginApply(ctx, { enabled: true });
     const names = ctx.commandNames().sort();
@@ -1103,9 +1114,16 @@ describe("restart honesty — no-stop guard (design-17 §4.6)", () => {
       DISPATCHER_RESOLVE_COMMAND,
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
+      DISPATCHER_STOP_COMMAND,
     ]);
-    const offenders = names.filter((name) => /stop|cancel/i.test(name));
-    assert.deepEqual(offenders, [], "no stop/cancel command may be registered");
+    const offenders = names.filter(
+      (name) => /stop|cancel/i.test(name) && name !== DISPATCHER_STOP_COMMAND,
+    );
+    assert.deepEqual(
+      offenders,
+      [],
+      "no stop/cancel command beyond dispatcher-stop may be registered",
+    );
   });
 });
 

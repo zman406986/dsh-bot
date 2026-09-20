@@ -33,6 +33,7 @@ import {
   DISPATCHER_RESOLVE_COMMAND,
   DISPATCHER_START_COMMAND,
   DISPATCHER_START_SUCCESS,
+  DISPATCHER_STOP_COMMAND,
   DISPATCHER_STEER_COMMAND,
   type AdapterContext,
   type AgentLike,
@@ -780,6 +781,7 @@ describe("coexistence — host face: fail-loud claims (Findings 1 and 2)", () =>
       DISPATCHER_RESOLVE_COMMAND,
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
+      DISPATCHER_STOP_COMMAND,
       FOREIGN.command,
     ]);
 
@@ -928,6 +930,7 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
       DISPATCHER_RESOLVE_COMMAND,
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
+      DISPATCHER_STOP_COMMAND,
       FOREIGN.command,
     ]);
   });
@@ -1043,6 +1046,7 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
       DISPATCHER_RESOLVE_COMMAND,
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
+      DISPATCHER_STOP_COMMAND,
     ]);
     assert.ok(ctx.hasSettingsNamespace("multitask-dispatcher"));
     assert.equal(ctx.hasSettingsNamespace(FOREIGN.settingsNs), false);

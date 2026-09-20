@@ -133,6 +133,16 @@ export {
   type WorkerAccessToolDeps,
 } from "./worker-access-tool.js";
 export {
+  createDispatcherStopCommand,
+  DISPATCHER_STOP_COMMAND,
+  DISPATCHER_STOP_DESCRIPTION,
+  DISPATCHER_STOP_NOT_DISPATCHER,
+  DISPATCHER_STOP_SUCCESS,
+  DISPATCHER_STOP_UNRESOLVED,
+  registerDispatcherStopCommand,
+  type RegisterDispatcherStopCommandOptions,
+} from "./stop-command.js";
+export {
   createDispatcherSteerCommand,
   DISPATCHER_STEER_COMMAND,
   DISPATCHER_STEER_DESCRIPTION,

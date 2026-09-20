@@ -104,6 +104,8 @@ import {
 import { createDispatcherShell, type ShellHosts } from "./shell.js";
 import {
   bindCommandTransport,
+  DISPATCHER_START_LINE,
+  DISPATCHER_STOP_LINE,
   submitAccessResolve,
   tryPrefillSteer,
   type SteerPrefillOutcome,
@@ -821,6 +823,28 @@ export function mountShellPage(
     // provides it (ticket 68); the seat itself settles to the no-selection
     // copy once suppressed. (Ticket 88: a component, rendered as an element.)
     onboarding: onboardingPane,
+    // Ticket 101 (ADR-0021 decision 3) — the session-lifecycle seats, both
+    // riding the ONE command transport (the composer's exact transaction,
+    // `commands.execute(sessionId, line, [])` — never a second channel):
+    // add = `/dispatcher-start` verbatim in the chosen session (the same
+    // host command a typed line reaches there); delete = `/dispatcher-stop`
+    // verbatim in that session (deactivates the binding through the host
+    // dispose path; never disposes the chat). Outcomes are host-owned: the
+    // command result copy is the surface, and the sidebar's dispatcher flags
+    // follow the MIRRORS (the roster publish / clear), never an optimistic
+    // flip — ADR-0010 honesty, honest mirror lag allowed. The seats are
+    // fire-and-forget here: a transport rejection is contained (nothing was
+    // changed anywhere — the mirrors are the truth either way).
+    onAddDispatcherSession: (sessionId) => {
+      void sendTransport.sendCommand(sessionId, DISPATCHER_START_LINE).catch(
+        () => {},
+      );
+    },
+    onDeleteDispatcherSession: (sessionId) => {
+      void sendTransport.sendCommand(sessionId, DISPATCHER_STOP_LINE).catch(
+        () => {},
+      );
+    },
   };
 
   return { store, seat, conversation, approvals: approvalsStore, hosts };

@@ -85,6 +85,26 @@ export const DISPATCHER_STEER_LINE = "/dispatcher-steer";
 export const DISPATCHER_RESOLVE_LINE = "/dispatcher-resolve";
 
 /**
+ * The session-ACTIVATION command line the sidebar's add affordance executes
+ * (ticket 101, ADR-0021 decision 3): `/dispatcher-start` verbatim in the
+ * TARGET session — the same host command a typed line reaches there. The
+ * retired capsule's start button once owned a constant of this shape
+ * (deleted with the capsule, ticket 89); this one is the sidebar picker's.
+ */
+export const DISPATCHER_START_LINE = "/dispatcher-start";
+
+/**
+ * The session-DEACTIVATION command line the sidebar's per-row delete
+ * affordance executes (ticket 101, ADR-0021 decision 3): `/dispatcher-stop`
+ * verbatim in the TARGET session — deactivate the dispatcher binding
+ * (tools unbound, roster mirror cleared), never dispose the dsh chat itself.
+ * Scope guard: this is a session-BINDING verb only; no worker-turn stop
+ * line exists or may exist in this module (the no-stop posture, re-based
+ * onto ADR-0021's boundary — U-G amended for dispatcher sessions ONLY).
+ */
+export const DISPATCHER_STOP_LINE = "/dispatcher-stop";
+
+/**
  * Exactly what the per-row steer affordance writes into the composer:
  * the exact-target power path with a trailing space, ready for the user's
  * instruction (ticket 40: `/dispatcher-steer <workerId> `). The command is

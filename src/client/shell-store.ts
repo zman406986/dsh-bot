@@ -308,6 +308,101 @@ export function describeShellPanes(state: ShellState): ShellPaneView {
   };
 }
 
+/**
+ * The sidebar's ADD affordance view model (ticket 101, ADR-0021 decision 3):
+ * the sessions the user could activate as a NEW dispatcher session, as a
+ * pure decision over the store state. "Add" activates an EXISTING dsh chat —
+ * there is no client-side "create chat" seam, so when no candidate exists
+ * the honest guidance is "create the chat in dsh first" (never a faked
+ * creation).
+ *
+ * Candidates are the feed-delivered rows the mirror authority does NOT flag
+ * as dispatchers (`row.dispatcher === false`, the same mirror-derived flag
+ * the sidebar renders). HONESTY LIMITATION (recorded here and on ticket
+ * 101): mirror presence is the signal, and a mirror lags its activation by
+ * at least one settings write + read — a chat activated moments ago can
+ * still appear here. Activating it again is harmless: the host command
+ * answers with its already-active copy and nothing changes. The inverse
+ * never happens (a deactivated session's mirror is cleared before it could
+ * be flagged active), so a candidate is always genuinely not-flagged.
+ */
+export type ShellAddPickerView =
+  | {
+      /** At least one not-flagged session exists — the picker lists them. */
+      readonly kind: "ready";
+      readonly candidates: readonly ShellSessionRow[];
+    }
+  | {
+      /** No candidate exists — the honest "create the chat in dsh" guidance. */
+      readonly kind: "empty";
+    };
+
+export function describeAddPicker(state: ShellState): ShellAddPickerView {
+  const candidates: ShellSessionRow[] = [];
+  for (const id of state.order) {
+    const row = state.rows.get(id);
+    if (row !== undefined && row.dispatcher === false) {
+      candidates.push(row);
+    }
+  }
+  return candidates.length === 0
+    ? { kind: "empty" }
+    : { kind: "ready", candidates };
+}
+
+/**
+ * The delete affordance's two-step confirmation state (ticket 101): a
+ * destructive-ish action (the dispatcher binding goes away) must not fire
+ * on a single click, but the codebase has no modal/toast seam and the shell
+ * adds none — the armed-window pattern is the whole confirmation: the first
+ * press ARMS the row, a second press within {@link SHELL_DELETE_CONFIRM_MS}
+ * CONFIRMS, and past the window (or after arming a different row — one arm
+ * slot total) the state re-arms. Pure and clock-explicit so offline tests
+ * drive the exact transitions (S8; the component only supplies `Date.now`).
+ */
+export const SHELL_DELETE_CONFIRM_MS = 4_000;
+
+export interface ShellDeleteArmState {
+  /** The row whose delete affordance is armed, or null when idle. */
+  readonly armedSessionId: string | null;
+  /** When the arm happened (client clock). */
+  readonly armedAtMs: number;
+}
+
+/** The idle (nothing armed) state. */
+export const SHELL_DELETE_IDLE: ShellDeleteArmState = {
+  armedSessionId: null,
+  armedAtMs: 0,
+};
+
+/** What one press of a delete affordance means. */
+export type ShellDeletePressAction = "arm" | "confirm";
+
+export function shellDeletePress(
+  state: ShellDeleteArmState,
+  sessionId: string,
+  nowMs: number,
+  windowMs: number = SHELL_DELETE_CONFIRM_MS,
+): {
+  readonly state: ShellDeleteArmState;
+  readonly action: ShellDeletePressAction;
+} {
+  const elapsed = nowMs - state.armedAtMs;
+  if (
+    state.armedSessionId === sessionId &&
+    elapsed >= 0 &&
+    elapsed <= windowMs
+  ) {
+    // Second press inside the window: confirmed. The host command's own
+    // result copy is the surface — nothing here claims success.
+    return { state: SHELL_DELETE_IDLE, action: "confirm" };
+  }
+  return {
+    state: { armedSessionId: sessionId, armedAtMs: nowMs },
+    action: "arm",
+  };
+}
+
 /** The store face the component binds through `useSyncExternalStore`. */
 export interface ShellStoreBox {
   readonly state: ShellState;
