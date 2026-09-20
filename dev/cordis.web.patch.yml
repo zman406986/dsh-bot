@@ -15,7 +15,11 @@
 #
 # This is the transient overlay route only. The web profile's package tree and
 # its own cordis.patch.yml are never touched, and the dispatcher's shipping
-# home stays the dedicated multitask profile (ADR-0005).
+# home stays the dedicated multitask profile — the plugin is always-on with no
+# flag or kill switch (ADR-0018, superseding ADR-0005's flag/toggle semantics).
+# Per ADR-0021 (2026-09-20) the patched boot serves stock dsh as the primary UI
+# and this module is purely additive: a "Dispatchers" launcher chip opens the
+# floating dispatcher window. No whole-UI replacement.
 - insert:
     - id: multitask-dispatcher
       name: '../lib/index.js'
