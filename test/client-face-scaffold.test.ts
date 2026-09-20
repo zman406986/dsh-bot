@@ -16,6 +16,7 @@ import { readFileSync } from "node:fs";
 import { apply, inject as clientInject } from "../src/client/index.js";
 import type { ClientContext } from "../src/client/context.js";
 import {
+  LAUNCHER_ENTRY_ID,
   LOCALE_NAMESPACE,
   ROSTER_ENTRY_ID,
   localeDictionary,
@@ -436,6 +437,11 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
     // keys left with the capsule's deletion — ticket 89, 2026-09-19.)
     assert.deepEqual(keys, [
       "activation.presence-hint",
+      // Ticket 100 (ADR-0021): the floating-window launcher chip + the
+      // window chrome (the titlebar reuses `shell.title`).
+      "launcher.chip.label",
+      "launcher.window.close",
+      "launcher.window.failed",
       "roster.activity.toolcalls",
       "roster.blocked.credential",
       "roster.blocked.filesystem",
@@ -557,7 +563,7 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
 });
 
 describe("client face scaffold — apply over fake client seams", () => {
-  it("registers the locale namespace and NO shell.overlay entry (capsule retired)", () => {
+  it("registers the locale namespace and the ONE shell.overlay launcher entry (ticket 100)", () => {
     const ctx = createClientCtx();
     apply(ctx);
 
@@ -570,15 +576,21 @@ describe("client face scaffold — apply over fake client seams", () => {
 
     // Ticket 24 adds a second inject (tool.call.toolview) and ticket 47 a
     // third (settings.plugin.item); the ticket-78 CUTOVER (2026-09-19)
-    // retires the additive overlay entries — the capsule (ticket 38) and
-    // the staging launcher chip — so NO `shell.overlay` inject remains.
-    // Ticket 99 (2026-09-20, ADR-0021) then retires the displacement
-    // registrations themselves (`main` page, `root` election): stock dsh is
-    // the primary UI and is never displaced — only additive slots register.
+    // retired the additive overlay entries — the capsule (ticket 38) and
+    // the staging launcher chip — and ticket 99 (2026-09-20, ADR-0021)
+    // retired the displacement registrations themselves (`main` page,
+    // `root` election): stock dsh is the primary UI and is never displaced.
+    // Ticket 100 registers THE one additive overlay entry again — the
+    // floating-window launcher (a fresh id, never the capsule's).
     const overlay = ctx.injects.find(
       (candidate) => candidate.parent === SHELL_OVERLAY_SLOT,
     );
-    assert.equal(overlay, undefined, "no shell.overlay inject post-cutover");
+    assert.ok(overlay, "the launcher's shell.overlay inject registers");
+    assert.equal(overlay.entries.length, 1, "one additive entry");
+    const capsule = ctx.injects
+      .flatMap((candidate) => candidate.entries)
+      .find((entry) => (entry.options as { id?: string }).id === ROSTER_ENTRY_ID);
+    assert.equal(capsule, undefined, "the capsule entry stays retired");
   });
 
   it("slot entries declare the locale namespace so the t seat resolves", () => {
@@ -595,11 +607,11 @@ describe("client face scaffold — apply over fake client seams", () => {
   it("fiber teardown (HMR/unload) reverses the namespace and the entry; re-apply restores", () => {
     const ctx = createClientCtx();
     apply(ctx);
-    // Two declaration waits since ticket 99 (ADR-0021): tool.call.toolview
-    // (ticket 24) and settings.plugin.item (ticket 47). The `main` page and
-    // the `root` election retired from the composition (ADR-0021); the
-    // capsule + launcher shell.overlay injects retired at the cutover.
-    assert.equal(ctx.injects.length, 2);
+    // Three declaration waits since ticket 100 (ADR-0021): tool.call.toolview
+    // (ticket 24), settings.plugin.item (ticket 47), and shell.overlay (the
+    // floating-window launcher). The `main` page and the `root` election
+    // stay retired from the composition.
+    assert.equal(ctx.injects.length, 3);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
 
     ctx.runFiberTeardown();
@@ -609,7 +621,7 @@ describe("client face scaffold — apply over fake client seams", () => {
 
     // A fresh fiber (post-HMR apply) registers everything again.
     apply(ctx);
-    assert.equal(ctx.injects.length, 2);
+    assert.equal(ctx.injects.length, 3);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
   });
 });
@@ -703,8 +715,17 @@ describe("client face scaffold — shipped slot register semantics (ticket 86)",
     // `main` page cell and the `root` frame cell stay unclaimed by us.
     assert.equal(ctx.cells.get(MAIN_PAGE_SLOT), undefined);
     assert.equal(ctx.cells.get(ROOT_FRAME_SLOT), undefined);
-    // No shell.overlay entry survives the ticket-78 cutover.
-    assert.equal(ctx.cells.get(SHELL_OVERLAY_SLOT), undefined);
+    // Ticket 100: the launcher is the ONE entry in the additive overlay
+    // cell (the capsule stays retired).
+    assert.equal(ctx.cells.get(SHELL_OVERLAY_SLOT)?.length, 1);
+    assert.equal(
+      (
+        ctx.cells.get(SHELL_OVERLAY_SLOT)?.[0] as {
+          options: { id?: string };
+        }
+      ).options.id,
+      LAUNCHER_ENTRY_ID,
+    );
   });
 
   it("fiber teardown frees every cell; a re-apply cannot collide with the dead fiber", () => {
@@ -773,8 +794,12 @@ describe("client face scaffold — built bundle registers through the module loa
 
     // Externals resolved through the factory's require (platform seed), and
     // no ESM import statements survive (CJS-only, materialization-safe).
+    // Ticket 100: the floating window's portal imports react-dom — ALSO a
+    // platform seed word the loader's require resolves
+    // (`src/client/wrapper.ts`, ticket 20 Finding 4) — so BOTH externals
+    // stay requires, never inlined.
     assert.ok(bundle.includes('require("react/jsx-runtime")'));
-    assert.ok(!bundle.includes('require("react-dom")'));
+    assert.ok(bundle.includes('require("react-dom")'));
     assert.ok(!/\bimport\s/.test(bundle));
 
     // The module exports the Cordis plugin face: apply + inject.

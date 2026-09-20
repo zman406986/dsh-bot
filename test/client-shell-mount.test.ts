@@ -5,11 +5,12 @@
  * Ticket 99 (2026-09-20, ADR-0021): the root election and the keyed
  * `main`-page registration LEFT the default composition — stock dsh is the
  * primary UI and is never displaced. The machinery stays (reversible at one
- * registration site — ticket 100's floating window), so this suite keeps
- * two kinds of pins: MACHINERY-ISOLATION pins (the pure contracts, the
- * election model, the collision rule — records of the retained, retired
- * path) and DEFAULT-POSTURE pins (what `apply` registers today: NO `root`
- * entry, NO `main` entry — the module renders nothing into dsh's layout).
+ * registration site), so this suite keeps two kinds of pins:
+ * MACHINERY-ISOLATION pins (the pure contracts, the election model, the
+ * collision rule — records of the retained, retired path) and
+ * DEFAULT-POSTURE pins (what `apply` registers today: NO `root` entry, NO
+ * `main` entry — the floating-window launcher is additive on
+ * `shell.overlay`, ticket 100; nothing of ours claims a layout cell).
  *
  * Offline only (S8): the registration contracts pinned over fakes in
  * the established overlay/toolview style — inject → register, one entry, id
@@ -379,17 +380,19 @@ describe("shell staging mount — apply() over the fake seams", () => {
     assert.equal(ctx.slotCell(MAIN_PAGE_SLOT).length, 0, "empty `main` cell");
   });
 
-  it("registers NO shell.overlay entries — the additive entries retired at the cutover", () => {
+  it("registers exactly ONE shell.overlay entry — the floating-window launcher (ticket 100, ADR-0021)", () => {
     const ctx = createMountCtx();
     apply(ctx);
-    // The cutover ends the capsule era (ticket 78's second AC): the roster
-    // capsule's additive entry AND the staging launcher chip's entry stop
-    // registering — no `shell.overlay` inject controller exists at all.
-    // Their sources were deleted outright (ticket 89, 2026-09-19).
+    // The additive entries retired at the ticket-78 cutover (roster capsule,
+    // staging launcher chip; sources deleted at ticket 89). Ticket 100
+    // (ADR-0021) registers THE one additive entry again: the floating
+    // window's launcher chip — a fresh id, never the capsule's.
     const overlayRecords = ctx.injects.filter(
       (record) => record.parent === SHELL_OVERLAY_SLOT,
     );
-    assert.equal(overlayRecords.length, 0, "no shell.overlay injects");
+    assert.equal(overlayRecords.length, 1, "exactly one shell.overlay inject");
+    const entries = overlayRecords[0]!.entries;
+    assert.equal(entries.length, 1, "one entry: the launcher");
     for (const record of ctx.injects) {
       for (const entry of record.entries) {
         assert.notEqual(
@@ -415,18 +418,24 @@ describe("shell staging mount — apply() over the fake seams", () => {
     assert.equal(ctx.slotCell(ROOT_FRAME_SLOT).length, 0, "empty `root` cell");
   });
 
-  it("the default posture renders NOTHING into dsh's layout: only additive slots register (ticket 99)", () => {
+  it("the default posture: additive slots only — launcher, toolviews, settings card (ticket 99 + 100, ADR-0021)", () => {
     const ctx = createMountCtx();
     apply(ctx);
-    // Exactly two declaration waits remain: the keyed toolview entries
-    // (serving the stock chat — ticket 89's AC 3, additive) and the keyed
-    // settings card (ticket 47, additive in the shipped settings tab). No
-    // layout surface of ours: no `root` entry, no `main` entry, and nothing
-    // claims the shipped `conversation` page key.
-    assert.equal(ctx.injects.length, 2);
+    // Three declaration waits: the keyed toolview entries (serving the
+    // stock chat — ticket 89's AC 3, additive), the keyed settings card
+    // (ticket 47, additive in the shipped settings tab), and the launcher
+    // chip (ticket 100, additive on shell.overlay). No layout surface of
+    // ours: no `root` entry, no `main` entry, and nothing claims the
+    // shipped `conversation` page key — the floating window is additive,
+    // never a displacement (ADR-0021 decision 1).
+    assert.equal(ctx.injects.length, 3);
     assert.deepEqual(
       ctx.injects.map((record) => record.parent).sort(),
-      [SETTINGS_PLUGIN_ITEM_SLOT, TOOL_CALL_TOOLVIEW_SLOT].sort(),
+      [
+        SETTINGS_PLUGIN_ITEM_SLOT,
+        SHELL_OVERLAY_SLOT,
+        TOOL_CALL_TOOLVIEW_SLOT,
+      ].sort(),
     );
     assert.equal(ctx.slotCell(ROOT_FRAME_SLOT).length, 0);
     assert.equal(ctx.slotCell(MAIN_PAGE_SLOT).length, 0);
@@ -583,11 +592,11 @@ describe("shell staging mount — apply() over the fake seams", () => {
   it("fiber teardown (HMR) reverses every registration; re-apply restores the additive posture", () => {
     const ctx = createMountCtx();
     apply(ctx);
-    // Two declaration waits since ticket 99 (ADR-0021):
-    // tool.call.toolview and settings.plugin.item. The `main` page and the
-    // `root` election retired from the composition; the capsule + launcher
-    // shell.overlay injects retired at the ticket-78 cutover.
-    assert.equal(ctx.injects.length, 2);
+    // Three declaration waits since ticket 100 (ADR-0021):
+    // tool.call.toolview, settings.plugin.item, and shell.overlay (the
+    // floating-window launcher). The `main` page and the `root` election
+    // stay retired from the composition.
+    assert.equal(ctx.injects.length, 3);
     assert.equal(ctx.slotCell(MAIN_PAGE_SLOT).length, 0);
     assert.equal(ctx.slotCell(ROOT_FRAME_SLOT).length, 0);
 
@@ -597,7 +606,7 @@ describe("shell staging mount — apply() over the fake seams", () => {
     // A fresh fiber (post-HMR apply) registers the same additive posture
     // again — same slots, no accumulation, still nothing in dsh's layout.
     apply(ctx);
-    assert.equal(ctx.injects.length, 2);
+    assert.equal(ctx.injects.length, 3);
     assert.equal(ctx.slotCell(MAIN_PAGE_SLOT).length, 0);
     assert.equal(ctx.slotCell(ROOT_FRAME_SLOT).length, 0);
   });

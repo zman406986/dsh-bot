@@ -51,15 +51,26 @@
  *    displaced, so this composition no longer registers the keyed `main`
  *    page (ticket 78 staging), the conversation pane / onboarding seats that
  *    hosted inside it (tickets 80/68), or the DYNAMIC `root` entry that
- *    displaced the shipped AppFrame (ticket 78 CUTOVER). The module renders
- *    NOTHING into dsh's layout; the registration machinery — `mountShellPage`
- *    (store + feeds + pane/seat wiring) and the `shell-mount.ts` contracts
- *    (`MAIN_PAGE_SLOT`/`shellPageRegistration`, `ROOT_FRAME_SLOT`/
- *    `shellRootRegistration`) — stays in the tree, reversible at ONE
- *    registration site: ticket 100's floating-window registration re-hosts
- *    the same surfaces additively (ADR-0021 decisions 1–2, 4). Fail
- *    isolation is re-based onto the additive posture: our registrations fail
- *    within our own module and the stock app is never shadowed.
+ *    displaced the shipped AppFrame (ticket 78 CUTOVER). The registration
+ *    machinery — `mountShellPage` (store + feeds + pane/seat wiring) and the
+ *    `shell-mount.ts` contracts (`MAIN_PAGE_SLOT`/`shellPageRegistration`,
+ *    `ROOT_FRAME_SLOT`/`shellRootRegistration`) — stays in the tree,
+ *    reversible at ONE registration site. Fail isolation is re-based onto
+ *    the additive posture: our registrations fail within our own module and
+ *    the stock app is never shadowed.
+ * 8. the floating dispatcher window + its stock-UI launcher (ticket 100,
+ *    ADR-0021 decisions 2 + 4): ONE additive `shell.overlay` entry — a
+ *    small chip that toggles a floating window hosting the EXISTING shell
+ *    surfaces (re-hosted, not rebuilt: sidebar roster, conversation pane,
+ *    approval cards, roster panel, onboarding — the `mountShellPage`
+ *    wiring runs again, pushed into `mounts`). The window portals into a
+ *    body-level container (the DOM-technique decision + citations live in
+ *    `floating-window.tsx`); the shell sits behind our own error boundary
+ *    inside the window, so a crashed window never takes the chip — or
+ *    stock dsh — down (isolation re-based onto the additive posture; the
+ *    host's per-entry boundary stands underneath as the second layer).
+ *    No `root` entry, no `main` entry: the window is additive, never a
+ *    displacement.
  *
  * Ticket 40 binds the capsule/panel intents to ticket 36's verified seams
  * at THIS composition point and nowhere else: the narrow CommandTransport
@@ -68,9 +79,9 @@
  * sink with the locale-keyed conversational phrasing) and the per-row steer
  * prefill seat (`input.for(actx).setDraft`) are built in `mountShellPage`
  * over lazy service sources — the conversation pane and hosted roster panel
- * are their only consumers. Since ticket 99 (ADR-0021) `mountShellPage` is
- * NOT composed by default (no inject calls it); the wiring runs when ticket
- * 100's floating-window registration re-hosts it.
+ * are their only consumers. Since ticket 100 (ADR-0021) the floating-window
+ * launcher inject composes `mountShellPage` again — the window hosts those
+ * two surfaces.
  * The faces are read lazily so their VALUES are fresh at send/click time;
  * the services themselves are DECLARED in the module inject (ticket 84 — an
  * undeclared property read throws on the real host wherever it happens),
@@ -80,11 +91,17 @@
 
 import { createElement } from "react";
 import type { JSX } from "react";
-import type { ClientContext } from "./context.js";
+import type {
+  ClientContext,
+  ClientSettingsScopeLike,
+} from "./context.js";
 import {
   LOCALE_NAMESPACE,
+  SHELL_OVERLAY_SLOT,
+  launcherOverlayRegistration,
   localeDictionary,
 } from "./overlay.js";
+import { createDispatcherShell, type ShellHosts } from "./shell.js";
 import {
   bindCommandTransport,
   submitAccessResolve,
@@ -110,7 +127,6 @@ import {
   shellSeatHostsPanel,
   shellSeatPanelState,
 } from "./shell-mount.js";
-import type { ShellHosts } from "./shell.js";
 import {
   createDispatcherShellStore,
   type DispatcherShellStore,
@@ -143,9 +159,15 @@ import {
 } from "./conversation.js";
 import {
   createOnboardingStore,
+  writeOnboardingSeenRecord,
   type OnboardingStore,
 } from "./onboarding.js";
 import { createOnboardingPane } from "./onboarding-pane.js";
+import { createFloatingWindowStore } from "./floating-window-store.js";
+import {
+  createLauncherChip,
+  disposeWindowLayer,
+} from "./floating-window.js";
 
 /**
  * Client services this module READS on `ctx`, declared per the shipped
@@ -208,14 +230,14 @@ export function apply(ctx: ClientContext): void {
  *   feeds and every mount attaches its shell store to (ticket 94; the
  *   read side the live surface was missing).
  * - `mounts` — every `mountShellPage` result the slot injects created, in
- *   registration order. Since ticket 99 (ADR-0021) the default composition
- *   creates NO mounts (the `main`/`root` injects retired), so this is empty
- *   after `apply`; it stays the push-site for a registration that re-hosts
- *   the shell (ticket 100's floating window), and offline tests attach the
- *   real `mountShellPage` to the returned feeds to drive the mount data
- *   path. The array is the SAME array such an inject pushes into, so it
- *   also collects mounts that arrive AFTER the call returns. Offline fakes
- *   run the callback synchronously, so the list is complete at return there.
+ *   registration order. Since ticket 100 (ADR-0021) the default composition
+ *   creates exactly ONE mount — the floating window's shell (the
+ *   `shell.overlay` launcher inject) — so it holds that mount after
+ *   `apply`. Offline tests can also attach MORE `mountShellPage` results to
+ *   the returned feeds to drive the mount data path (the ticket-99 pin
+ *   idiom). The array is the SAME array the inject pushes into, so it also
+ *   collects mounts that arrive AFTER the call returns. Offline fakes run
+ *   the callback synchronously, so the list is complete at return there.
  *
  * Additive only: `apply` ignores the return, and the mounted stores were
  * previously reachable only through the React component closure.
@@ -293,19 +315,24 @@ export function applyClientModule(
    * pinned but never called, so `state.mirrors` stayed empty forever
    * (`data-dispatcher="false"`, the `状态不可用` chip, no hosted panel). Fed
    * from the SAME single settings read as the two readers above, fanned out
-   * to every mount's shell store with a last-truth replay. (Since ticket 99
-   * the default composition creates no mounts; the hub stays live for
-   * ticket 100's floating-window mount and for offline tests that attach
-   * the real `mountShellPage` to it.)
+   * to every mount's shell store with a last-truth replay. (Since ticket
+   * 100 the floating-window launcher inject attaches the default mount's
+   * store to this hub; offline tests may attach more.)
    */
   const mirrorsFeed = createShellMirrorFeed();
   /**
    * Ticket 69 (L1): every mount this composition creates, in order. Since
-   * ticket 99 (ADR-0021) the default composition creates NO mounts — the
-   * array stays as the one place a registration site (ticket 100's floating
-   * window) pushes into again.
+   * ticket 100 (ADR-0021) the floating-window launcher inject creates the
+   * ONE default mount — the array stays the one place a registration site
+   * pushes into.
    */
   const mounts: ShellPageMount[] = [];
+  /**
+   * The ONE bound settings scope, kept for the onboarding seen-write
+   * hand-off below (A5: the write rides the same scope the watch reads —
+   * never a second channel). Nulled when the watch disposes.
+   */
+  let seenScope: ClientSettingsScopeLike | null = null;
   ctx.effect(() => {
     let disposeWatch: (() => void) | undefined;
     if (typeof ctx.inject !== "function") {
@@ -321,6 +348,7 @@ export function applyClientModule(
         return;
       }
       const scope = binder.bind({ namespace: LOCALE_NAMESPACE });
+      seenScope = scope;
       card.attach(scope);
       const readSnapshot = () => {
         const snapshot = scope.getSnapshot();
@@ -360,16 +388,23 @@ export function applyClientModule(
     });
     return () => {
       if (disposeWatch !== undefined) disposeWatch();
+      seenScope = null;
       card.detach();
     };
   }, "multitask-dispatcher: roster settings watch");
 
-  // The onboarding seen-write hand-off (ticket 68) moved with the mount
-  // machinery (ticket 99): the write rode the ONE bound scope into the
-  // shell's onboarding pane, and with no mount composed by default there is
-  // no pane to write from. The pure `writeOnboardingSeenRecord` (onboarding.ts,
-  // offline-pinned) re-wires at ticket 100's floating-window registration
-  // site, over the same single scope — never a second channel (A5).
+  // The onboarding seen-write hand-off (ticket 68; restored with the
+  // floating-window mount, ticket 100): a best-effort write of the seen
+  // record through the ONE bound scope (A5 — never a second channel),
+  // factored as the pure `writeOnboardingSeenRecord` (offline pinned). A
+  // resolved write stays silent — the watch re-delivers the document and
+  // the suppression decision closes the flow. A missing write path or a
+  // rejected write sets the honest save-failed notice instead: the flow
+  // closes for this visit and simply shows again next launch — fail-open,
+  // so nothing strands either way.
+  const writeOnboardingSeen = (): void => {
+    writeOnboardingSeenRecord(seenScope, () => onboarding.markSaveFailed());
+  };
 
   // Per-tool call views (ticket 24): one inject at the shipped keyed slot,
   // one entry per dispatcher wire tool name. Keys are the plugin-owned core
@@ -425,6 +460,61 @@ export function applyClientModule(
     );
   });
 
+  // ── The floating dispatcher window + its stock-UI launcher (ticket 100,
+  // ADR-0021 decisions 2 + 4) ──
+  //
+  // ONE additive `shell.overlay` entry (ADR-0013's sanctioned seam; unique
+  // `multitask-dispatcher-` id — coexistence by id, never shadowing): a
+  // small chip that toggles the floating window. The inject callback ALSO
+  // creates the window's shell mount HERE — the same `mountShellPage`
+  // wiring the retired `main`/`root` injects ran (the feed attaches, the
+  // sessions/conversation bindings, the seat projection — all effects on
+  // this module's fiber) — and pushes the result into `mounts`, the
+  // designated push-site, so offline tests drive the REAL data path. The
+  // mount's feeds stay attached while the window is CLOSED (the hubs
+  // replay last truth at attach), so opening shows live data immediately;
+  // fiber teardown detaches everything.
+  //
+  // DOM technique (this ticket's evidence, per ADR-0021's open question):
+  // the window PORTALS into a body-level container — see floating-window.tsx
+  // for the rejected second-overlay-entry alternative and the citations.
+  // The container's lifecycle rides this fiber (unload/HMR removes it);
+  // offline (no `document`) both the container and the window no-op.
+  //
+  // Crash isolation (ADR-0021 decision 2, re-based onto the additive
+  // posture — the retired root abdication has no successor because nothing
+  // is shadowed): dsh renders every slot entry inside its per-entry error
+  // boundary, and a crashing LIST entry abdicates — retired from the
+  // layer while siblings and the app stand (dsh-capsule-seams.md Seam 1,
+  // ui-renderer lib/client.js:511-532). The window additionally wraps the
+  // hosted shell in OUR OWN boundary inside the window
+  // (floating-window.tsx), so a shell crash never even reaches the host's:
+  // the chip and stock dsh survive, the window shows its honest failed
+  // line with working chrome, and close + reopen recovers.
+  const floatingWindow = createFloatingWindowStore();
+  ctx.effect(
+    () => () => disposeWindowLayer(),
+    "multitask-dispatcher: floating window layer",
+  );
+  ctx.slots.inject(SHELL_OVERLAY_SLOT, () => {
+    const t = ctx.locale.bind(LOCALE_NAMESPACE);
+    const mount = mountShellPage(ctx, {
+      store: onboarding,
+      onSeen: writeOnboardingSeen,
+      approvalsFeed: approvalFeed,
+      mirrorsFeed: mirrorsFeed,
+    });
+    mounts.push(mount);
+    return ctx.slots.register(
+      launcherOverlayRegistration(),
+      createLauncherChip(
+        t,
+        floatingWindow,
+        createElement(createDispatcherShell(t, mount.store, mount.hosts)),
+      ),
+    );
+  });
+
   // ── The displacement registrations RETIRED from the default posture
   // (2026-09-20, ticket 99, ADR-0021) ──
   //
@@ -439,19 +529,16 @@ export function applyClientModule(
   //    shipped AppFrame with an abdication failsafe.
   //
   // ADR-0021 (the human-ruled coexistence vehicle) retires both: stock dsh
-  // is the user's primary UI and is never displaced. This module now renders
-  // NOTHING into dsh's layout — the intermediate state before ticket 100
-  // re-hosts the shell surfaces into a separate floating window behind an
-  // additive launcher. The machinery is retained, NOT deleted: the
+  // is the user's primary UI and is never displaced. The re-host site this
+  // retired posture was waiting for is the floating-window registration
+  // ABOVE (ticket 100): the same surfaces, in a separate window, behind an
+  // additive launcher. The machinery stays retained, NOT deleted: the
   // registration contracts stay exported from `shell-mount.ts`
   // (`shellPageRegistration`, `shellRootRegistration`, the priority
   // constant) and the mounting path stays exported below
-  // (`mountShellPage`), so the vehicle is reversible at ONE registration
-  // site — exactly the site ticket 100 adds. Fail isolation is re-based
-  // onto the additive posture: with no shadowing entry there is no cell to
-  // abdicate; our registrations fail within our own module and the stock
-  // app is never shadowed. The retired-path tests remain records of that
-  // machinery in `test/client-shell-mount.test.ts`.
+  // (`mountShellPage`). Fail isolation is re-based onto the additive
+  // posture (see the launcher inject above). The retired-path tests remain
+  // records of that machinery in `test/client-shell-mount.test.ts`.
 
   return { approvalsFeed: approvalFeed, mirrorsFeed, mounts };
 }
@@ -460,14 +547,15 @@ export function applyClientModule(
  * The shell page's live mounting path (ticket 78 staging), factored over
  * explicit stores so offline tests can drive the data path end to end —
  * feed snapshot → shell store → hosted-panel seat — without a DOM harness
- * (same discipline as `applyClientModule`). RETAINED MACHINERY (ticket 99,
- * ADR-0021): the `main`/`root` injects that used to call it left the
- * default composition, so nothing in production calls it today — ticket
- * 100's floating-window registration is its next caller, and offline tests
- * drive it directly (also against the real composition's feeds). Its
- * effects still land on the caller's fiber, so unloading the caller's
- * registration reverses the feed bindings and the seat projection with it
- * (HMR-safe; the ticket's "reverse every registration" constraint).
+ * (same discipline as `applyClientModule`). RETAINED MACHINERY re-hosted
+ * (ticket 100, ADR-0021): the `main`/`root` injects that used to call it
+ * left the default composition (ticket 99), and the floating-window
+ * launcher inject is now its ONE production caller — the window hosts the
+ * same surfaces, additively. Offline tests also drive it directly (also
+ * against the real composition's feeds). Its effects still land on the
+ * caller's fiber, so unloading the caller's registration reverses the feed
+ * bindings and the seat projection with it (HMR-safe; the ticket's
+ * "reverse every registration" constraint).
  *
  * - The sidebar rides `bindShellSessionsFeed` (ticket 79's projection) over
  *   `ctx.sessions` — a DECLARED read (ticket 84), so it cannot throw; an

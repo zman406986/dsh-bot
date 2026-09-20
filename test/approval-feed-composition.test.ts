@@ -23,12 +23,13 @@
  *   → the card leaves; answering again is honestly refused.
  *
  * Ticket 99 (2026-09-20, ADR-0021): the default composition registers NO
- * mounts any more (the `main` page + `root` election left the posture —
- * stock dsh is primary and never displaced), so the mount leg of the chain
- * is driven by attaching the REAL `mountShellPage` to the composition's
- * OWN returned feeds — exactly the attach a re-host registration makes
- * (ticket 100's floating window). The feed/watch/hub half stays the real
- * composition, unmodified.
+ * displacement mounts any more (the `main` page + `root` election left the
+ * posture — stock dsh is primary and never displaced). Ticket 100 re-hosts
+ * the mount leg as the floating window: the launcher inject creates the
+ * composition's ONE mount, and the tests below ALSO attach the REAL
+ * `mountShellPage` to the composition's OWN returned feeds to drive a
+ * dedicated mount. The feed/watch/hub half stays the real composition,
+ * unmodified.
  *
  * Offline only (S8): no Cordis, no browser, no DOM, no network, no LLM.
  *
@@ -409,10 +410,12 @@ function createClientCtx(bridge: SettingsBridge) {
 // ── Assertion helpers ─────────────────────────────────────────────────────
 
 /**
- * Ticket 99 (ADR-0021): the default composition creates NO mounts, so the
- * mount data path is driven by attaching the REAL `mountShellPage` to the
- * composition's returned feeds — the same attach a re-host registration
- * (ticket 100's floating window) performs at its own site.
+ * Ticket 99 (ADR-0021) + ticket 100: the default composition's ONE mount is
+ * the floating window's (created by the `shell.overlay` launcher inject).
+ * These tests additionally attach their OWN `mountShellPage` to the
+ * composition's returned feeds — the same attach the registration site
+ * performs — so the assertions below observe a dedicated mount instead of
+ * sharing state with the window's.
  */
 function attachMount(
   client: ReturnType<typeof createClientCtx>,
@@ -473,18 +476,20 @@ describe("ticket 69 L1 — the offline composition pin (real apply → real watc
     await flush();
     assert.equal(publishedRoster(bridge)?.dispatcherSessionId, "s-1");
 
-    // ── Client half: the REAL module body. Since ticket 99 (ADR-0021) the
-    // composition creates NO mounts — its live data path is the feed pair,
-    // and the REAL mount machinery attaches to those feeds at a re-host
-    // registration site (here: the test; in production: ticket 100).
+    // ── Client half: the REAL module body. Since ticket 100 (ADR-0021) the
+    // composition creates exactly ONE mount — the floating window's shell,
+    // created by the `shell.overlay` launcher inject. The mount data path
+    // below is driven on a test-attached `mountShellPage` (same feeds, the
+    // attach a registration site makes) so the assertions observe a
+    // dedicated mount.
     const composition: ClientModuleComposition = applyClientModule(
       client,
       createRosterStore(),
     );
     assert.equal(
       composition.mounts.length,
-      0,
-      "the default posture registers no mounts",
+      1,
+      "the floating window's shell mount registers (ticket 100)",
     );
     assert.deepEqual(client.boundNamespaces, [SETTINGS_NAMESPACE]);
     const mount = attachMount(client, composition);
@@ -679,8 +684,8 @@ describe("ticket 69 L1 — the offline composition pin (real apply → real watc
     const composition = applyClientModule(client, createRosterStore());
     assert.equal(
       composition.mounts.length,
-      0,
-      "the default posture registers no mounts",
+      1,
+      "the floating window's shell mount registers (ticket 100)",
     );
     const mount = attachMount(client, composition);
 

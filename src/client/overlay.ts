@@ -18,7 +18,11 @@
  * - Slot entry `id`s are `multitask-dispatcher-` prefixed and unique;
  *   `shell.overlay` is an additive list slot (order-sorted, click-through
  *   by default — Finding 5, `registry.d.ts:16-38`), so coexistence is by
- *   unique id, not shadowing.
+ *   unique id, not shadowing. Since ticket 100 (2026-09-20, ADR-0021) the
+ *   launcher entry ({@link launcherOverlayRegistration}) is THE one
+ *   `shell.overlay` entry the composition registers — the floating
+ *   dispatcher window's launch affordance; the roster entry below stays
+ *   as retained contract data only.
  * - The locale namespace is the plugin id, matching the settings namespace
  *   (`src/adapter/settings-section.ts`).
  *
@@ -32,14 +36,34 @@ export const SHELL_OVERLAY_SLOT = "shell.overlay";
 /**
  * Overlay entry id for the roster panel (`multitask-dispatcher-` prefix).
  * Replaces ticket 20's retired `multitask-dispatcher-hello` placeholder.
+ *
+ * The roster CAPSULE entry itself stopped registering at the ticket-78
+ * cutover; this contract stays as retained registration data (the panel
+ * component is re-hosted inside the floating window — ticket 100).
  */
 export const ROSTER_ENTRY_ID = "multitask-dispatcher-roster";
 
 /**
- * Sort position within the additive overlay list. Low on purpose (design-16
- * §4.2 "low order"): the roster is a quiet status surface, sorted early in
- * the list ahead of higher-order entries, mirroring the shipped `-10`
- * convention from dsh-client-ui-agent-preset's header action.
+ * Overlay entry id for the floating-window LAUNCHER (ticket 100,
+ * ADR-0021): the one additive `shell.overlay` entry this module registers
+ * today. A fresh id — the capsule's entry is not revived, the launcher is
+ * a new affordance for the new vehicle.
+ */
+export const LAUNCHER_ENTRY_ID = "multitask-dispatcher-launcher";
+
+/**
+ * Sort position within the additive overlay list. Low on purpose — the
+ * same shipped `-10` convention `ROSTER_OVERLAY_ORDER` cited (design-16
+ * §4.2 "low order"; the header action's `-10` in
+ * dsh-client-ui-agent-preset): the launcher is a quiet control, sorted
+ * early in the list.
+ */
+export const LAUNCHER_OVERLAY_ORDER = -10;
+
+/**
+ * Sort position of the RETAINED roster overlay contract (the capsule's
+ * quiet-status surface ordering; the entry stopped registering at the
+ * ticket-78 cutover but the pinned contract stays).
  */
 export const ROSTER_OVERLAY_ORDER = -10;
 
@@ -64,6 +88,25 @@ export function rosterOverlayRegistration(): SlotRegistrationOptions {
     name: SHELL_OVERLAY_SLOT,
     id: ROSTER_ENTRY_ID,
     order: ROSTER_OVERLAY_ORDER,
+    locale: LOCALE_NAMESPACE,
+  };
+}
+
+/**
+ * Build the floating-window launcher's `shell.overlay` registration
+ * options (stable, pure). THE one additive entry this module registers
+ * today (ticket 100, ADR-0021 decision 2): a list entry with a unique
+ * `multitask-dispatcher-` id, so coexistence with shipped and foreign
+ * entries is by unique id, never shadowing. When the shipped overlay slot
+ * is absent the declaration wait simply never resolves and nothing of
+ * ours registers — the honest degrade (the toolview/card injects' own
+ * posture).
+ */
+export function launcherOverlayRegistration(): SlotRegistrationOptions {
+  return {
+    name: SHELL_OVERLAY_SLOT,
+    id: LAUNCHER_ENTRY_ID,
+    order: LAUNCHER_OVERLAY_ORDER,
     locale: LOCALE_NAMESPACE,
   };
 }
@@ -277,6 +320,17 @@ export const localeDictionary: LocaleDictionary = {
     "shell.approval.submitted":
       "Answer sent — this card updates when the dispatcher confirms.",
     "shell.dispatch.gating": "Gate",
+    // Ticket 100 (ADR-0021): the floating-window launcher chip + the
+    // window's own chrome. The chip's visible label is the launch
+    // affordance ONLY (no presence counters — the cancelled capsule's info
+    // model stays retired); the window titlebar reuses the shared
+    // `shell.title` face (one vocabulary). The failed line is the crash-
+    // isolation boundary's honest fallback — the window stays open with
+    // the line and working chrome; close + reopen recovers.
+    "launcher.chip.label": "Dispatchers",
+    "launcher.window.close": "Close the dispatcher window",
+    "launcher.window.failed":
+      "The dispatcher window hit an error and its content stopped rendering. Close it here and reopen it from the Dispatchers button.",
   },
   zh: {
     "roster.title": "工作者",
@@ -410,6 +464,15 @@ export const localeDictionary: LocaleDictionary = {
     "shell.approval.failed": "答复未能送达——没有任何更改。",
     "shell.approval.submitted": "答复已提交——待调度器确认后此卡片会更新。",
     "shell.dispatch.gating": "审批门",
+    // Ticket 100（ADR-0021）：浮动窗口的启动按钮与窗口自身镶边。按钮的可见
+    // 文本只是启动入口（不显示任何状态计数——已取消的胶囊信息模型保持废止）；
+    // 窗口标题栏复用共享的 `shell.title` 文案（同一套词汇）。失败文案是崩溃
+    // 隔离边界的如实回退——窗口保持打开并显示该行与可用的镶边；关闭后从
+    // “调度台”按钮重新打开即可恢复。
+    "launcher.chip.label": "调度台",
+    "launcher.window.close": "关闭调度窗口",
+    "launcher.window.failed":
+      "调度窗口遇到错误，内容已停止渲染。请在此关闭它，再通过“调度台”按钮重新打开。",
   },
 };
 

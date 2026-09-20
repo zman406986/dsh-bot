@@ -935,20 +935,25 @@ describe("roster panel — store applies the settings-watch feed", () => {
   });
 });
 
-describe("roster panel — apply() wires the fallback data path; the overlay entry is retired", () => {
-  it("registers locale, NO overlay entry (retired at the cutover), and the settings watch", () => {
+describe("roster panel — apply() wires the fallback data path; the capsule entry stays retired", () => {
+  it("registers locale, no ROSTER overlay entry (the launcher is the one overlay entry), and the settings watch", () => {
     const ctx = createClientCtx();
     apply(ctx);
 
-    // The ticket-78 CUTOVER (2026-09-19) ends the capsule era: the roster
-    // capsule's `shell.overlay` entry no longer registers — the wrapper
-    // shell frame (the `root` election) is the product surface. The panel
-    // component and its store stay as re-host assets (the wrapper's right
-    // seat hosts them; the 65/66/73 lane owns disposition).
+    // The ticket-78 CUTOVER (2026-09-19) ended the capsule era: the roster
+    // capsule's `shell.overlay` entry never registers again. Since ticket
+    // 100 (2026-09-20, ADR-0021) an overlay inject EXISTS again — the
+    // floating-window launcher — but the capsule's id is not on it: the
+    // panel is re-hosted INSIDE the floating window (the wrapper's right
+    // seat inventory), never re-registered as its own entry.
     const overlay = ctx.injects.find(
       (candidate) => candidate.parent === SHELL_OVERLAY_SLOT,
     );
-    assert.equal(overlay, undefined, "no overlay inject post-cutover");
+    assert.ok(overlay, "the launcher's overlay inject registers (ticket 100)");
+    const capsuleEntry = overlay.entries.find(
+      (entry) => (entry.options as { id?: string }).id === ROSTER_ENTRY_ID,
+    );
+    assert.equal(capsuleEntry, undefined, "the capsule entry stays retired");
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
   });
 
@@ -1090,14 +1095,14 @@ describe("roster panel — apply() wires the fallback data path; the overlay ent
   it("fiber teardown (HMR) unsubscribes the scope; re-apply binds one fresh", () => {
     const ctx = createClientCtx();
     apply(ctx);
-    // Two declaration waits since ticket 99 (ADR-0021): tool.call.toolview
-    // (ticket 24) and settings.plugin.item (ticket 47). The `main` page and
-    // the cutover's `root` frame election retired from the composition
-    // (ADR-0021); the capsule + launcher shell.overlay injects retired at
-    // the cutover. The settings scope stays ONE bind — the card attaches to
-    // the same scope the roster watch holds, so there are exactly TWO
-    // subscriptions on that one scope (roster watch + settings card).
-    assert.equal(ctx.injects.length, 2);
+    // Three declaration waits since ticket 100 (ADR-0021): tool.call.toolview
+    // (ticket 24), settings.plugin.item (ticket 47), and shell.overlay (the
+    // floating-window launcher). The `main` page and the cutover's `root`
+    // frame election stay retired from the composition (ADR-0021). The
+    // settings scope stays ONE bind — the card attaches to the same scope
+    // the roster watch holds, so there are exactly TWO subscriptions on
+    // that one scope (roster watch + settings card).
+    assert.equal(ctx.injects.length, 3);
     assert.equal(ctx.boundNamespaces.length, 1);
     assert.equal(ctx.watchDisposedCount(), 0);
 
@@ -1110,7 +1115,7 @@ describe("roster panel — apply() wires the fallback data path; the overlay ent
     // live cell would throw the shipped slot collision (the fake now models
     // that rule), so teardown really must free every cell — assert it.
     assert.doesNotThrow(() => apply(ctx));
-    assert.equal(ctx.injects.length, 2);
+    assert.equal(ctx.injects.length, 3);
     assert.equal(ctx.boundNamespaces.length, 2);
     assert.equal(ctx.watchDisposedCount(), 2);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
