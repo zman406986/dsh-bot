@@ -693,9 +693,9 @@ export function mountShellPage(
   }, "multitask-dispatcher: shell conversation window binding");
 
   // The conversation send transport: ticket 40's verified plain-prompt sink
-  // (the SAME one the capsule's stop ask uses), resolved lazily at send
-  // time. One sink for the whole module — the composer never builds a
-  // parallel channel (A4).
+  // (historical: the same transport the retired capsule's stop ask once used),
+  // resolved lazily at send time. One sink for the whole module — the
+  // composer never builds a parallel channel (A4).
   const sendTransport = bindCommandTransport({
     remote: () => ctx.remote,
     sessions: () => ctx.sessions,
