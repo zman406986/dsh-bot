@@ -233,10 +233,20 @@ export function bindCommandTransport(sources: TransportSources): CommandTranspor
   return {
     async sendCommand(sessionId, line) {
       const remote = sources.remote();
-      if (
-        remote === undefined ||
-        typeof remote.commands?.execute !== "function"
-      ) {
+      if (remote === undefined) return { kind: "no-channel" };
+      // The nested face read is where the inject contract bites: the resolver
+      // matches inject entries by EXACT STRING (never dot-splits), so
+      // `remote.commands` on a fiber declaring only `remote` THROWS
+      // `cannot get property "remote.commands" without inject`. A throw at a
+      // property READ is what the optional chain cannot catch, and it would
+      // escape this async method as a rejected promise — so guard the probe
+      // and report the honest `no-channel` (the same outcome as a
+      // structurally absent face), never a silent egress death.
+      try {
+        if (typeof remote.commands?.execute !== "function") {
+          return { kind: "no-channel" };
+        }
+      } catch {
         return { kind: "no-channel" };
       }
       // The composer's exact transaction: empty attachments, verbatim line.

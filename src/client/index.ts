@@ -177,9 +177,14 @@ import {
  * "X" without inject` on any undeclared service property — at read time,
  * wherever it happens — so every service face the module touches must
  * appear here unless it is reached through the runtime `ctx.inject([...])`
- * wrapper instead. Declared: the always-shipped load-bearing faces
- * (`slots` ← ui-renderer, `locale` ← client-locale, `sessions` ←
- * ui-session, `remote` ← api-gateway, `conversation` ← ui-conversation).
+ * wrapper instead. A NESTED face is its own entry under its full dotted
+ * name (`remote.commands`): the resolver matches inject entries by EXACT
+ * STRING and never dot-splits, so declaring only the parent service
+ * instance does not authorize reading a member of it. Declared: the
+ * always-shipped load-bearing faces (`slots` ← ui-renderer, `locale` ←
+ * client-locale, `sessions` ← ui-session, `remote` ← api-gateway and its
+ * nested `remote.commands` transaction face, `conversation` ←
+ * ui-conversation).
  * Wrapper-only, deliberately NOT declared because a hard requirement would
  * hold the whole module PENDING when absent: `settingsScope` (ticket 46's
  * settings watch — since ticket 69 L1 also the approval-cards relay feed's
@@ -187,10 +192,16 @@ import {
  * controller — stopped being requested at the ticket-78 cutover, and the
  * launcher contracts themselves were deleted by ticket 89.)
  *
- * Ticket 69 (L1/L3) face audit — why NOTHING new is declared here: the
+ * Ticket 69 (L1/L3) face audit — why NO NEW SERVICE is declared here: the
  * relay FEED rides the settingsScope wrapper above (the roster mirror, one
- * channel); the resolve TRANSPORT rides the already-declared `remote`
- * commands transaction plus the card's own `parentSessionId`; and the
+ * channel); the resolve TRANSPORT rides the `remote.commands` transaction
+ * declared below (`remote` for the parent instance, `remote.commands` for
+ * the nested face — the exact shipped precedent is
+ * `@deepseek-ai/dsh-client-ui-commands`' client, whose
+ * `static inject = ["inputTriggers","sessions","remote","remote.commands"]`
+ * declares BOTH the parent and the full nested path; every shipped caller
+ * of a nested face does the same, without exception) plus the card's own
+ * `parentSessionId`; and the
  * dispatch ANSWERER (`ctx.approval`, `@deepseek-ai/dsh-user-approval` —
  * adapter notes :220/:390) is a HOST service wired in `src/plugin.ts`'s
  * inject, never read client-side: the client half of that waterfall is the
@@ -205,6 +216,10 @@ export const inject: readonly string[] = [
   "locale",
   "sessions",
   "remote",
+  // Ticket 102b: the nested transaction face is its OWN inject entry — the
+  // resolver matches by exact string, so the parent `remote` above does not
+  // authorize this read (the shipped ui-commands precedent declares both).
+  "remote.commands",
   "conversation",
 ];
 
@@ -798,6 +813,31 @@ export function mountShellPage(
       ? createElement(seatPanel)
       : null;
 
+  // Ticket 102b diagnostic — the session-lifecycle seats' console-only
+  // tripwire. Contained must not mean SILENT: the seats are fire-and-forget
+  // (the mirrors are the truth, never an optimistic flip), but before this
+  // every failure mode of the ONE command egress vanished without a signal,
+  // so an under-declared Cordis inject read exactly like a dead click. This
+  // reports `executed` as the only silent outcome — `no-channel`,
+  // `unresolved`, or a rejected transport all warn, once, in the browser
+  // console. Deliberately NOT a UI surface: no state, no copy, no new result
+  // kinds (ticket 102b's defect scope is the egress, not the presentation).
+  const reportCommandFailure = (
+    line: string,
+    sessionId: string,
+    outcome: unknown,
+  ): void => {
+    const kind =
+      typeof outcome === "object" && outcome !== null
+        ? (outcome as { readonly kind?: unknown }).kind
+        : undefined;
+    if (kind === "executed") return;
+    console.warn(
+      `[multitask-dispatcher] "${line}" in session ${sessionId} did not reach the host command channel`,
+      outcome,
+    );
+  };
+
   const hosts: ShellHosts = {
     // Host the panel ONLY for a session our mirrors vouch for (a parsed or
     // corrupt dispatcher snapshot); anything else renders an empty pane —
@@ -833,17 +873,35 @@ export function mountShellPage(
     // command result copy is the surface, and the sidebar's dispatcher flags
     // follow the MIRRORS (the roster publish / clear), never an optimistic
     // flip — ADR-0010 honesty, honest mirror lag allowed. The seats are
-    // fire-and-forget here: a transport rejection is contained (nothing was
+    // fire-and-forget: a transport rejection is contained (nothing was
     // changed anywhere — the mirrors are the truth either way).
+    //
+    // Ticket 102b diagnostic: contained must not mean SILENT. Both seats
+    // previously ended in `.catch(() => {})` and ignored the result kind, so
+    // every failure mode of this egress — a throwing nested-face read (an
+    // under-declared Cordis inject), `no-channel`, `unresolved` — vanished
+    // with no signal, and the live symptom was indistinguishable from a dead
+    // click. `reportCommandFailure` (above) is a console-only tripwire: no
+    // UI, no copy, no state, no new result kinds.
     onAddDispatcherSession: (sessionId) => {
-      void sendTransport.sendCommand(sessionId, DISPATCHER_START_LINE).catch(
-        () => {},
-      );
+      void sendTransport
+        .sendCommand(sessionId, DISPATCHER_START_LINE)
+        .then((result) =>
+          reportCommandFailure(DISPATCHER_START_LINE, sessionId, result),
+        )
+        .catch((error: unknown) =>
+          reportCommandFailure(DISPATCHER_START_LINE, sessionId, error),
+        );
     },
     onDeleteDispatcherSession: (sessionId) => {
-      void sendTransport.sendCommand(sessionId, DISPATCHER_STOP_LINE).catch(
-        () => {},
-      );
+      void sendTransport
+        .sendCommand(sessionId, DISPATCHER_STOP_LINE)
+        .then((result) =>
+          reportCommandFailure(DISPATCHER_STOP_LINE, sessionId, result),
+        )
+        .catch((error: unknown) =>
+          reportCommandFailure(DISPATCHER_STOP_LINE, sessionId, error),
+        );
     },
   };
 

@@ -26,7 +26,7 @@ import {
   shellDeletePress,
   type ShellState,
 } from "../src/client/shell-store.js";
-import { mountShellPage } from "../src/client/index.js";
+import { mountShellPage, inject as clientInject } from "../src/client/index.js";
 import {
   DISPATCHER_START_LINE,
   DISPATCHER_STOP_LINE,
@@ -151,6 +151,13 @@ describe("delete confirmation — the armed window (ticket 101)", () => {
 
 // ── The real mount wiring over a minimal client fake ───────────────────────
 
+// Ticket 102b: the nested `remote.commands` face is its own inject entry —
+// the resolver matches by exact string and never dot-splits, so this guard
+// keys on the module's REAL exported declaration. If `src/client/index.ts`
+// ever drops the nested name again, `.commands` reads here throw exactly as
+// the live context proxy does and the seat tests below go red.
+const NESTED_FACE_DECLARED = clientInject.includes("remote.commands");
+
 function createMountCtx() {
   const executed: Array<{
     sessionId: string;
@@ -173,16 +180,28 @@ function createMountCtx() {
     },
     get remote() {
       if (remoteMissing) return undefined;
+      // The real service instance is reachable through the declared parent
+      // face; reading the NESTED member re-enters the resolver at the full
+      // dotted name and throws when that name is not declared (the live
+      // `cannot get property "remote.commands" without inject`).
+      const commands = {
+        execute(
+          sessionId: string,
+          line: string,
+          attachments: readonly unknown[],
+        ) {
+          executed.push({ sessionId, line, attachments });
+          return Promise.resolve({ kind: "success", text: "ok" });
+        },
+      };
       return {
-        commands: {
-          execute(
-            sessionId: string,
-            line: string,
-            attachments: readonly unknown[],
-          ) {
-            executed.push({ sessionId, line, attachments });
-            return Promise.resolve({ kind: "success", text: "ok" });
-          },
+        get commands() {
+          if (!NESTED_FACE_DECLARED) {
+            throw new Error(
+              'cannot get property "remote.commands" without inject',
+            );
+          }
+          return commands;
         },
       };
     },
@@ -318,5 +337,27 @@ describe("posture — session lifecycle only, never worker/turn management", () 
     // The session-lifecycle lines are the two sanctioned host commands.
     assert.equal(DISPATCHER_START_LINE, "/dispatcher-start");
     assert.equal(DISPATCHER_STOP_LINE, "/dispatcher-stop");
+  });
+
+  it("a THROWING nested-face read resolves to no-channel, never a rejection (ticket 102b)", async () => {
+    // The live defect's exact shape: the resolver throws at the property
+    // READ (not a call) when the nested dotted name is not in the inject
+    // list, and `typeof remote.commands?.execute` cannot catch a throwing
+    // getter. The transport must absorb it as the honest `no-channel`
+    // result — the same outcome a structurally absent face gives — instead
+    // of a rejected promise the seats swallow.
+    const transport = bindCommandTransport({
+      remote: () => ({
+        get commands(): never {
+          throw new Error(
+            'cannot get property "remote.commands" without inject',
+          );
+        },
+      }),
+      sessions: () => undefined,
+    });
+    assert.deepEqual(await transport.sendCommand("s-1", "/dispatcher-start"), {
+      kind: "no-channel",
+    });
   });
 });

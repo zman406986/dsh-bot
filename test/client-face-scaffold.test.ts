@@ -246,6 +246,10 @@ const CLIENT_SERVICE_FACES = new Set([
   "locale",
   "sessions",
   "remote",
+  // Ticket 102b: the nested transaction face is its own entry — the resolver
+  // matches inject entries by exact string and never dot-splits, so the
+  // parent `remote` does not authorize this read.
+  "remote.commands",
   "conversation",
   "layout",
   "settingsScope",
@@ -408,17 +412,22 @@ describe("client face scaffold — shell.overlay entry builder (Finding 5, desig
     // read time, wherever the read happens (live pass 2's launcher kill).
     // Declared: slots ← ui-renderer, locale ← dsh-client-locale, sessions ←
     // dsh-client-ui-session (the shipped provider itself exports
-    // `inject = ["sessions", "slots"]`), remote ← dsh-api-gateway,
-    // conversation ← dsh-client-ui-conversation. `layout` and
-    // `settingsScope` are deliberately NOT declared — genuinely optional
-    // faces reached through the runtime `ctx.inject([...])` wrapper instead
-    // (tickets 46/84); a hard declaration would hold the module PENDING
-    // when they are absent.
+    // `inject = ["sessions", "slots"]`), remote ← dsh-api-gateway AND its
+    // NESTED `remote.commands` transaction face (ticket 102b — the resolver
+    // matches by exact string and never dot-splits, so the parent entry does
+    // not authorize the member read; the shipped precedent is
+    // dsh-client-ui-commands' `["inputTriggers","sessions","remote",
+    // "remote.commands"]`), conversation ← dsh-client-ui-conversation.
+    // `layout` and `settingsScope` are deliberately NOT declared — genuinely
+    // optional faces reached through the runtime `ctx.inject([...])` wrapper
+    // instead (tickets 46/84); a hard declaration would hold the module
+    // PENDING when they are absent.
     assert.deepEqual([...clientInject], [
       "slots",
       "locale",
       "sessions",
       "remote",
+      "remote.commands",
       "conversation",
     ]);
   });

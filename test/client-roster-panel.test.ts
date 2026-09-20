@@ -1129,7 +1129,11 @@ describe("roster panel — module-level Cordis inject list", () => {
   it("declares every read face; the optional ones stay runtime injects (tickets 46 + 84)", () => {
     // The context proxy throws on any undeclared service-property read
     // (ticket 84): the always-shipped faces the module touches are all
-    // declared here. `settingsScope` and `layout` stay runtime-optional
+    // declared here. A NESTED face is its OWN entry under its full dotted
+    // name — the resolver matches by exact string and never dot-splits, so
+    // `remote.commands` must be declared alongside its parent `remote`
+    // (ticket 102b; the shipped dsh-client-ui-commands precedent declares
+    // both). `settingsScope` and `layout` stay runtime-optional
     // injects — a hard declaration would hold the module PENDING without
     // them (ticket 46's lesson, applied to the launcher's layout face).
     assert.deepEqual([...clientInject], [
@@ -1137,6 +1141,7 @@ describe("roster panel — module-level Cordis inject list", () => {
       "locale",
       "sessions",
       "remote",
+      "remote.commands",
       "conversation",
     ]);
   });

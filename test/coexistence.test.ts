@@ -642,6 +642,10 @@ function createClientCtx() {
     "locale",
     "sessions",
     "remote",
+    // Ticket 102b: the nested face is its own entry under the full dotted
+    // name — the resolver matches inject entries by exact string and never
+    // dot-splits.
+    "remote.commands",
     "conversation",
     "layout",
     "settingsScope",

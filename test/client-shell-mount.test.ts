@@ -615,11 +615,15 @@ describe("shell staging mount — apply() over the fake seams", () => {
 describe("shell staging mount — host inject guard semantics (ticket 84)", () => {
   /** Guard proxy: undeclared service reads throw like the real host proxy. */
   function guardCtx(ctx: ClientContext): ClientContext {
+    // Ticket 102b: the nested `remote.commands` face is its own inject entry
+    // under the full dotted name (the resolver matches by exact string and
+    // never dot-splits); it belongs in both sets.
     const declared = new Set([
       "slots",
       "locale",
       "sessions",
       "remote",
+      "remote.commands",
       "conversation",
     ]);
     const faces = new Set([
@@ -627,6 +631,7 @@ describe("shell staging mount — host inject guard semantics (ticket 84)", () =
       "locale",
       "sessions",
       "remote",
+      "remote.commands",
       "conversation",
       "layout",
       "settingsScope",
