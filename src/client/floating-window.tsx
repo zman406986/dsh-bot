@@ -251,9 +251,16 @@ function liveViewport(): { width: number; height: number } {
  * Drag: titlebar pointerdown seeds the last-seen point and rides window
  * pointermove deltas into `store.moveBy` (clamped there) until pointerup
  * or pointercancel. Listeners live on `window` so a fast drag that leaves
- * the titlebar never strands. Each move contributes only its OWN delta
- * (measured against the previous move, not the start), so the pointer and
- * the window advance 1:1 and no start-relative offset accumulates.
+ * the titlebar never strands. Each move applies only its OWN delta,
+ * measured against the previous move rather than the drag start, so the
+ * delta lands exactly once and no start-relative offset accumulates.
+ * Between clamp events the window tracks the pointer exactly. When the
+ * clamp absorbs part of a move (the position has hit a viewport bound)
+ * `moveBy` lands on the clamped edge, or early-returns when the position
+ * is already there, so the window keeps that clamped position and slips
+ * out of phase with the pointer by the absorbed amount; the slip is
+ * bounded and never compounds, and the next move measures from the
+ * pointer's own last point and continues from the clamped position.
  */
 function beginDrag(
   event: ReactPointerEvent<HTMLDivElement>,
