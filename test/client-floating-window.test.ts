@@ -63,6 +63,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { apply, applyClientModule } from "../src/client/index.js";
 import type { ClientContext } from "../src/client/context.js";
 import { createRosterStore } from "../src/client/roster-store.js";
+import { createDispatcherShell } from "../src/client/shell.js";
 import {
   createFloatingWindowStore,
   FLOATING_WINDOW_HEIGHT,
@@ -890,5 +891,90 @@ describe("floating window — crash isolation (the ticket's guarantee, rendered)
       content,
       "the boundary wraps exactly the hosted shell",
     );
+  });
+});
+
+// ── 5. The affordances INSIDE the window, rendered (ticket 102) ──────────
+//
+// Ticket 102's live report: "no way to summon new dispatcher/kill old ones
+// in our floating window". Both seats were mounted and rendered — the defect
+// was pure presentation (a hover-gated delete, an add section below the
+// sidebar's fold). These pins render the REAL shell (not `shellStub`) inside
+// the REAL window and assert the affordances are present, visible, and
+// clickable, all scoped to the `WINDOW` selector so they prove placement
+// inside the window rather than merely on the page.
+
+describe("floating window — the summon/kill affordances render INSIDE the window (ticket 102)", () => {
+  it("the delete seat is visible at rest and only on dispatcher rows; the add seat opens in place", async () => {
+    const composition = applyClientModule(createClientCtx(), createRosterStore());
+    const mount = composition.mounts[0]!;
+    const Shell = createDispatcherShell(t, mount.store, mount.hosts);
+    const store = createFloatingWindowStore();
+    const Chip = createLauncherChip(t, store, createElement(Shell));
+    const { root } = renderTree();
+    await act(async () => {
+      root.render(createElement(Chip));
+    });
+    await act(async () => {
+      click(query(CHIP)!);
+    });
+    assert.ok(query(WINDOW), "the window opened");
+
+    // The row set `bindShellSessionsFeed` would publish: one flagged
+    // dispatcher row (killable) and one plain chat (an add candidate).
+    await act(async () => {
+      mount.store.upsertSessions([
+        { sessionId: "s-disp", title: "Dispatcher", dispatcher: true },
+        { sessionId: "s-plain", title: "Plain" },
+      ]);
+    });
+
+    // ── the kill affordance ──
+    const del = query(`${WINDOW} [data-delete-id="s-disp"]`);
+    assert.ok(del, "the kill button renders inside the window");
+    const actions = del.parentElement;
+    assert.ok(actions, "the kill button has its row-actions parent");
+    assert.notEqual(
+      dom.window.getComputedStyle(actions).display,
+      "none",
+      "the kill affordance is visible at rest — its row-actions parent is " +
+        "display:none again (ticket 102 regression: present but unkillable)",
+    );
+    assert.equal(
+      query(`${WINDOW} [data-delete-id="s-plain"]`),
+      null,
+      "a non-dispatcher row carries no kill affordance",
+    );
+
+    // ── the summon affordance ──
+    const toggle = query(`${WINDOW} [data-add-toggle]`);
+    assert.ok(toggle, "the add toggle renders inside the window");
+    assert.equal(toggle.getAttribute("data-add-toggle"), "closed");
+    assert.equal(toggle.textContent, t("shell.add.label"));
+    assert.equal(
+      query(`${WINDOW} [data-add-id="s-plain"]`),
+      null,
+      "the picker is closed until the toggle is pressed",
+    );
+    await act(async () => {
+      click(toggle);
+    });
+    assert.equal(
+      query(`${WINDOW} [data-add-toggle]`)!.getAttribute("data-add-toggle"),
+      "open",
+      "the toggle opens in place",
+    );
+    const option = query(`${WINDOW} [data-add-id="s-plain"]`);
+    assert.ok(option, "the add candidate renders inside the window");
+    assert.equal(
+      query(`${WINDOW} [data-add-id="s-disp"]`),
+      null,
+      "a flagged dispatcher row is not offered as a summon candidate",
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    disposeWindowLayer();
   });
 });

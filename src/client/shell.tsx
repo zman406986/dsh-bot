@@ -114,12 +114,13 @@ export const SHELL_CSS = `
 .multitask-dispatcher-shell__chip--waiting{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 6px;border-radius:8px;border:1px solid currentColor;color:var(--dsw-alias-state-warn-primary)}
 .multitask-dispatcher-shell__row-preview{display:none;opacity:.6;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .multitask-dispatcher-shell__row:hover .multitask-dispatcher-shell__row-preview,.multitask-dispatcher-shell__row:focus-visible .multitask-dispatcher-shell__row-preview{display:block}
-.multitask-dispatcher-shell__row-actions{display:none;align-self:flex-start;gap:10px}
-.multitask-dispatcher-shell__list li:hover .multitask-dispatcher-shell__row-actions,.multitask-dispatcher-shell__row-actions:focus-within{display:flex}
+.multitask-dispatcher-shell__row-actions{display:flex;align-self:flex-start;gap:10px}
+.multitask-dispatcher-shell__row-copy{display:none}
+.multitask-dispatcher-shell__list li:hover .multitask-dispatcher-shell__row-copy,.multitask-dispatcher-shell__row-actions:focus-within .multitask-dispatcher-shell__row-copy{display:inline}
 .multitask-dispatcher-shell__row-actions button{border:none;padding:0;background:transparent;color:inherit;font:inherit;font-size:11px;opacity:.55;cursor:pointer;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .multitask-dispatcher-shell__row-actions button:hover{opacity:.9;text-decoration:underline}
 .multitask-dispatcher-shell__row-actions button[data-armed="true"]{opacity:1;color:var(--dsw-alias-state-warn-primary)}
-.multitask-dispatcher-shell__add{margin-top:auto;padding:6px 6px 2px;border-top:1px solid var(--dsw-alias-border-l3)}
+.multitask-dispatcher-shell__add{position:sticky;bottom:0;z-index:1;margin-top:auto;padding:6px 6px 2px;border-top:1px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-3)}
 .multitask-dispatcher-shell__add-toggle{width:100%;border:none;padding:4px 2px;background:transparent;color:inherit;font:inherit;font-size:12px;opacity:.7;cursor:pointer;text-align:left}
 .multitask-dispatcher-shell__add-toggle:hover{opacity:1;text-decoration:underline}
 .multitask-dispatcher-shell__add-list{list-style:none;margin:4px 0 0;padding:0;display:flex;flex-direction:column;gap:2px}
