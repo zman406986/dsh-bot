@@ -1,6 +1,6 @@
 # 105 — Floating window has a fixed 760×520 size — no resize, no maximize/restore affordance
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Related:** 103 (resolved — the per-event-delta drag pattern to reuse), ADR-0021 (accepted — the floating-window vehicle this window rides)
 
@@ -67,3 +67,51 @@ Ticket stays in `open/` — resolution waits for the live lane.
 ### 2026-09-22 — scribe session
 
 Filed from the human's in-session request of 2026-09-22 (quoted verbatim in Problem). The scribe pass verified the cited facts by code reading only (no implementation): the size is seeded once at store creation and has no writer, the store face has no size mutation, and the only `resize` anywhere in the client face is the composer textarea's. The implementer should reuse the two recorded contracts rather than inventing new ones: `moveBy`'s clamp-and-early-return discipline at store level, and the per-event-delta drag rule at component level (ticket 103's fix, pinned at `test/client-floating-window.test.ts:674-748`). Labelled ready-for-agent: the behavior is fully specified by the request plus the existing patterns; no design decision is left open beyond the handle/affordance details the implementing ticket records as it goes.
+
+### 2026-09-22 — live lane
+
+Live-verified against the real host + served bundle in the lane
+`.scratch/testing/2026-09-22-live-105-106-107/live/` (served plugin bundle rev
+`84138c72a6b3` carries this ticket's markers with counts identical to the local build —
+isolation per the 2026-09-21 lane's method; see `obs-00-load.json`). Verdict: **PASS on
+every clause.**
+
+- **Resize, per-event deltas (the ticket-103 rule with a face):** real CDP mouse drags on
+  the `data-resize-edge` handles; geometry recorded after every move. SE height ratio
+  **1.000** (+120 dispatched → +120); W face: x −80 / width +80 with the right edge fixed,
+  then +30/−30 exact; S face +50/50 exact; unclamped SE growth after repositioning:
+  +120/+80 dispatched → +120/+80 rendered, ratio **1.000** (`obs-105-resize.json`,
+  `obs-105-resize-supplement2.json`). One instructive non-bug: growing SE from the default
+  placement only added +24 px because the window sits 24 px from the viewport's right edge
+  and the store's east clamp (`viewport.width − x`) capped it EXACTLY.
+- **Min clamp:** SE drag sum (−3000,−2700) → 322×242 rendered = **320×240 state exact**.
+- **Viewport clamp:** SE drag sum (+4000,+3000) → 836×723 = (vw−x, vh−y) state exact.
+- **Maximize/restore:** click → rect (24, 24, 1330, 699) = viewport minus the 24 px margin
+  exactly, `data-window-maximized="true"`, aria-pressed true, label swaps 最大化/还原;
+  resize handles compute `pointer-events: none` and a drag attempt moves nothing; restore
+  click → the EXACT prior rect; maximize again + titlebar drag → restore-then-drag with the
+  net delta applied to the remembered rect (`obs-105-maximize.json`).
+- All five handles (`e/w/s/se/sw`) render with `data-resize-edge`; every press verified
+  `elementFromPoint`-on-handle before dragging.
+
+Probe misses recorded honestly in the lane README (off-viewport SE press in supplement v1;
+corrected in v2). Ticket stays in `open/` for the closer.
+
+### 2026-09-22 — resolution (team-leader close-out)
+
+Resolved by the independent closer, which re-ran every gate itself before closing:
+`npm run typecheck` green; `npm test` **1216 pass / 298 suites / 0 fail** (measured, not
+claimed); `npm run lint:docs` green; constraint spot-checks clean — the ONE command
+transport holds (the only client call site of `remote.commands.execute` remains
+`bindCommandTransport`, `src/client/actions.ts:253`; none in shell.tsx / floating-window.tsx
+/ index.ts), `launcher.window.maximize` / `launcher.window.restore` exist in BOTH en and zh
+faces under `validateLocaleDictionary`, and no commit touches a `.scratch/` path.
+
+**Shipped** (`b8d883c`): the floating window is resizable via e/w/s/se/sw edge handles over
+clamped, pure store paths (`resizeBy`), with a Windows-style maximize/restore toggle in the
+titlebar (`toggleMaximize`); north faces deliberately unwired (the titlebar owns the top
+strip). Live lane: **PASS on every clause** — resize ratios 1.000, min 320×240 and viewport
+clamps exact, maximize/restore rect-exact — evidence
+`.scratch/testing/2026-09-22-live-105-106-107/live/` (`obs-105-resize*.json`,
+`obs-105-maximize.json`, README per-claim verdict map). Final gates: **1216/298/0**; lint
+green.
