@@ -1,6 +1,6 @@
 # 107 — Replace the plain launcher chip with a floating capsule showing [dispatcher count | running workers]
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Related:** 102 (resolved — in-window affordances), 103 (resolved — the per-event-delta drag pattern to reuse), ADR-0021 (accepted — partially superseded by ADR-0022), ADR-0022 (human-ruled 2026-09-22 — the ruling this ticket implements), ADR-0010 (mirror honesty — where the counts come from)
 
@@ -155,3 +155,27 @@ git-ignored — nothing bundle-shaped to commit). Evidence:
 `.scratch/testing/2026-09-22-live-105-106-107/offline-107/` (`repair-README.md`
 with the artifact→claim map, `repair-before-typecheck-test.txt`,
 `repair-after-all-gates.txt`). Ticket left in `open/` for the closer.
+
+### 2026-09-22 — resolution (team-leader close-out)
+
+Resolved by the independent closer, which re-ran every gate itself before closing:
+`npm run typecheck` green; `npm test` **1216 pass / 298 suites / 0 fail** (measured, not
+claimed); `npm run lint:docs` green; constraint spot-checks clean — still exactly ONE
+`shell.overlay` launcher entry (same id `multitask-dispatcher-launcher`, order −10), the
+`launcher.capsule.aria` key exists in BOTH en and zh faces under
+`validateLocaleDictionary`, the counts derive from the ADR-0010 non-stale mirror snapshots
+(no new channel, no optimistic flips), and ADR-0022 is indexed with the human's verbatim
+2026-09-22 ruling quoted.
+
+**Shipped** (`1ad8744`, live-lane repair `40505ca`): the launcher chip is a floating,
+draggable capsule with live `[dispatchers | running workers]` counts (pure
+`describeCapsuleCounts`, its own placement store, 4 px trailing-click suppression) per the
+human-ruled ADR-0022; the live lane's two findings were repaired in `40505ca` — the
+capsule's `CAPSULE_CSS` now renders from the always-mounted launcher entry (styled while
+the window is closed) and the capsule portals into the shared body-level layer at
+`z-index:1001` so it paints above the window. Live lane: **PASS on every functional
+clause** — counts live 0|0 → 1|1 → 1|0 → 0|0 with stale mirrors excluded
+(`obs-capsule-*.json`, README per-claim verdict map), evidence
+`.scratch/testing/2026-09-22-live-105-106-107/live/`; the CSS-lifecycle/paint-order repair
+is offline-verified only, exactly as its own comment records. Final gates: **1216/298/0**;
+lint green.
