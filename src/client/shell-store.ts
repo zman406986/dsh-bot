@@ -183,6 +183,65 @@ export function describeWaiting(
   return null;
 }
 
+/**
+ * The ONE staleness predicate for mirror snapshots — the sidebar's `view()`
+ * and the launcher capsule's counts (ticket 107, ADR-0022) share it, so the
+ * sidebar chips and the capsule can never disagree about what counts as
+ * live. A mirror snapshot older than {@link ROSTER_STALE_WINDOW_MS} is not
+ * live presence (the channel has no heartbeat, so a silent gap means
+ * "unconfirmed" — the panel's rule, one stale rule total). Without a render
+ * clock nothing is declared stale.
+ */
+function mirrorSnapshotStale(
+  mirror: ShellMirror,
+  nowMs: number | undefined,
+): boolean {
+  return (
+    nowMs !== undefined &&
+    mirror.kind === "snapshot" &&
+    nowMs - mirror.snapshot.publishedAtMs > ROSTER_STALE_WINDOW_MS
+  );
+}
+
+/**
+ * The launcher capsule's presence counts (ticket 107, ADR-0022 — the
+ * human's 2026-09-22 ruling revived the collapsed affordance's information
+ * model): `dispatchers` is the number of live mirror snapshots (one
+ * activated dispatcher session each), `workers` the sum of
+ * {@link describePresence}'s working counters over those snapshots.
+ *
+ * The mirrors ARE the activation authority (ADR-0010 honesty: the mirror
+ * feed is the truth, no invented push channel, no optimistic flips), so the
+ * derivation reads the store's mirror map directly — a `cleared` mirror
+ * (deactivation), an `unavailable` one (corrupt value), and a snapshot
+ * older than the stale window (judged only when the caller supplies a
+ * render clock, exactly like the sidebar's view) contribute nothing. Zero
+ * mirrors derive zero — never a fabricated count.
+ *
+ * Pure: no clock reads, no store reads — the component passes
+ * `store.getBox().state.mirrors` and `Date.now()`.
+ */
+export interface CapsuleCounts {
+  readonly dispatchers: number;
+  readonly workers: number;
+}
+
+export function describeCapsuleCounts(
+  mirrors: ReadonlyMap<string, ShellMirror>,
+  nowMs?: number,
+): CapsuleCounts {
+  let dispatchers = 0;
+  let workers = 0;
+  for (const mirror of mirrors.values()) {
+    if (mirror.kind !== "snapshot" || mirrorSnapshotStale(mirror, nowMs)) {
+      continue;
+    }
+    dispatchers += 1;
+    workers += describePresence(mirror.snapshot).working;
+  }
+  return { dispatchers, workers };
+}
+
 /** One sidebar row view: the row plus whether it is the selection. */
 export interface ShellRowView extends ShellSessionRow {
   readonly selected: boolean;
@@ -238,10 +297,9 @@ function view(
   selected: boolean,
 ): ShellRowView {
   const mirror = state.mirrors.get(row.sessionId);
-  const stale =
-    nowMs !== undefined &&
-    mirror?.kind === "snapshot" &&
-    nowMs - mirror.snapshot.publishedAtMs > ROSTER_STALE_WINDOW_MS;
+  // The shared staleness predicate (see mirrorSnapshotStale): the same
+  // rule the capsule counts apply, so the two faces never disagree.
+  const stale = mirror !== undefined && mirrorSnapshotStale(mirror, nowMs);
   return {
     ...row,
     selected,

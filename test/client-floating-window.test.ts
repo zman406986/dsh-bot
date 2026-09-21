@@ -66,6 +66,11 @@ import { createRosterStore } from "../src/client/roster-store.js";
 import { createDispatcherShell } from "../src/client/shell.js";
 import {
   createFloatingWindowStore,
+  CAPSULE_NOMINAL_HEIGHT,
+  CAPSULE_NOMINAL_WIDTH,
+  createCapsuleStore,
+  clampCapsulePosition,
+  defaultCapsulePlacement,
   FLOATING_WINDOW_HEIGHT,
   FLOATING_WINDOW_MARGIN,
   FLOATING_WINDOW_MIN_HEIGHT,
@@ -78,10 +83,17 @@ import {
 } from "../src/client/floating-window-store.js";
 import {
   DispatcherWindowBoundary,
+  CAPSULE_DRAG_THRESHOLD_PX,
   createLauncherChip,
   describeFloatingWindow,
   disposeWindowLayer,
 } from "../src/client/floating-window.js";
+import {
+  createDispatcherShellStore,
+  describeCapsuleCounts,
+  type ShellMirror,
+} from "../src/client/shell-store.js";
+import { formatTemplate } from "../src/client/roster-store.js";
 import {
   LAUNCHER_ENTRY_ID,
   LOCALE_NAMESPACE,
@@ -97,6 +109,7 @@ import {
   ROOT_FRAME_SLOT,
   SHIPPED_MAIN_PAGE_KEY,
 } from "../src/client/shell-mount.js";
+import { ROSTER_STALE_WINDOW_MS } from "../src/core/roster-snapshot.js";
 import type { RosterSnapshot } from "../src/core/roster-snapshot.js";
 
 const t = (key: string): string => localeDictionary.en[key] ?? key;
@@ -565,8 +578,8 @@ function createClientCtx() {
   };
 }
 
-describe("floating window launcher — registration posture (ticket 100, ADR-0021)", () => {
-  it("registers exactly ONE shell.overlay entry — the launcher; the capsule entry stays retired", () => {
+describe("floating window launcher — registration posture (ticket 100, ADR-0021; capsule form ticket 107, ADR-0022)", () => {
+  it("registers exactly ONE shell.overlay entry — the launcher; the retired roster-capsule entry stays retired", () => {
     const ctx = createClientCtx();
     apply(ctx);
 
@@ -578,15 +591,21 @@ describe("floating window launcher — registration posture (ticket 100, ADR-002
       options: Record<string, unknown>;
       component: unknown;
     }>;
-    assert.equal(entries.length, 1, "one additive entry: the launcher chip");
+    assert.equal(
+      entries.length,
+      1,
+      "one additive entry: the launcher capsule",
+    );
     assert.deepEqual(entries[0]!.options, launcherOverlayRegistration());
     assert.equal(
       (entries[0]!.options as { id: string }).id,
       LAUNCHER_ENTRY_ID,
     );
     assert.equal(typeof entries[0]!.component, "function");
-    // The cancelled capsule's entry id never registers again (resolved 89;
-    // the window hosts the WHOLE shell, not a chip info model).
+    // The cancelled roster capsule's entry id never registers again
+    // (resolved 89; the window hosts the WHOLE shell, and since ADR-0022
+    // the launcher ITSELF is the information-bearing floating capsule —
+    // not a revival of that roster entry).
     for (const record of ctx.injects) {
       for (const entry of record.entries as Array<{ options: { id?: string } }>) {
         assert.notEqual(entry.options.id, ROSTER_ENTRY_ID);
@@ -759,8 +778,480 @@ describe("floating window mount — feeds attached from the composition, dispose
   });
 });
 
+// ── 3b. The launcher capsule — counts + float (ticket 107, ADR-0022) ─────
+//
+// The human's 2026-09-22 ruling: the collapsed launcher becomes a floating
+// capsule showing [dispatcher count | running workers]. Three pin layers,
+// the repo's usual discipline:
+// - the PURE counts derivation (`describeCapsuleCounts`) — snapshots count,
+//   stale excluded, working sums, cleared/unavailable contribute nothing;
+// - the PURE capsule placement store — default top-left placement, clamp,
+//   absorbed delta silent (the `moveBy` contract);
+// - the RENDERED capsule over jsdom — counts re-render from real shell-store
+//   mirror writes, drag = sum of per-event deltas through the REAL clamp,
+//   and a drag's trailing click never toggles the window.
+
+function capsuleSnapshot(
+  sessionId: string,
+  publishedAtMs: number,
+  workers: RosterSnapshot["workers"],
+): RosterSnapshot {
+  return {
+    schemaVersion: 4,
+    dispatcherSessionId: sessionId,
+    publishedAtMs,
+    workers,
+    recentResult: null,
+    pendingAsks: [],
+  };
+}
+
+describe("capsule counts — pure derivation (ticket 107, ADR-0022)", () => {
+  /** Run a build script against a real shell store; return its mirror map. */
+  function mirrors(
+    build: (store: ReturnType<typeof createDispatcherShellStore>) => void,
+  ): ReadonlyMap<string, ShellMirror> {
+    const store = createDispatcherShellStore();
+    build(store);
+    return store.getBox().state.mirrors;
+  }
+
+  it("zero mirrors derive 0 | 0", () => {
+    assert.deepEqual(describeCapsuleCounts(new Map()), {
+      dispatchers: 0,
+      workers: 0,
+    });
+  });
+
+  it("two snapshots with 2 and 3 working derive 2 | 5", () => {
+    const map = mirrors((store) => {
+      store.applyPresence(
+        capsuleSnapshot("s-1", 1000, [
+          worker("w-1", "running"),
+          worker("w-2", "running"),
+        ]),
+      );
+      store.applyPresence(
+        capsuleSnapshot("s-2", 1000, [
+          worker("w-3", "running"),
+          worker("w-4", "running"),
+          worker("w-5", "running"),
+        ]),
+      );
+    });
+    assert.deepEqual(describeCapsuleCounts(map, 1000), {
+      dispatchers: 2,
+      workers: 5,
+    });
+  });
+
+  it("only non-terminal rows count as running workers; finished rows do not", () => {
+    const map = mirrors((store) => {
+      store.applyPresence(
+        capsuleSnapshot("s-1", 1000, [
+          worker("w-1", "running"),
+          worker("w-2", "completed"),
+        ]),
+      );
+    });
+    assert.deepEqual(describeCapsuleCounts(map, 1000), {
+      dispatchers: 1,
+      workers: 1,
+    });
+  });
+
+  it("a snapshot older than the stale window is not live (render clock supplied)", () => {
+    const map = mirrors((store) => {
+      store.applyPresence(
+        capsuleSnapshot("s-1", 1000, [worker("w-1", "running")]),
+      );
+    });
+    // Exactly at the window edge: still live (the `>` rule, the sidebar's).
+    assert.deepEqual(describeCapsuleCounts(map, 1000 + ROSTER_STALE_WINDOW_MS), {
+      dispatchers: 1,
+      workers: 1,
+    });
+    // One ms past it: not live — the dispatcher and its workers drop out
+    // together (a stale snapshot never reads as a live count).
+    assert.deepEqual(
+      describeCapsuleCounts(map, 1000 + ROSTER_STALE_WINDOW_MS + 1),
+      { dispatchers: 0, workers: 0 },
+    );
+  });
+
+  it("without a render clock nothing is declared stale (the view()'s rule)", () => {
+    const map = mirrors((store) => {
+      store.applyPresence(
+        capsuleSnapshot("s-1", 0, [worker("w-1", "running")]),
+      );
+    });
+    assert.deepEqual(describeCapsuleCounts(map), {
+      dispatchers: 1,
+      workers: 1,
+    });
+  });
+
+  it("cleared (deactivation) and unavailable (corrupt) mirrors contribute nothing", () => {
+    const map = mirrors((store) => {
+      store.applyPresence(
+        capsuleSnapshot("s-1", 1000, [worker("w-1", "running")]),
+      );
+      store.applySessionMirror("s-2", null); // cleared
+      store.applySessionMirror("s-3", "{not a snapshot"); // unavailable
+    });
+    assert.deepEqual(describeCapsuleCounts(map, 1000), {
+      dispatchers: 1,
+      workers: 1,
+    });
+  });
+});
+
+describe("capsule placement store (ticket 107)", () => {
+  const VIEWPORT = { width: 1600, height: 900 };
+
+  it("defaults to the top-left margin placement (the ruling's 'top left')", () => {
+    const store = createCapsuleStore();
+    assert.deepEqual(store.getBox().state, {
+      x: FLOATING_WINDOW_MARGIN,
+      y: FLOATING_WINDOW_MARGIN,
+    });
+    assert.deepEqual(
+      defaultCapsulePlacement(VIEWPORT),
+      { x: FLOATING_WINDOW_MARGIN, y: FLOATING_WINDOW_MARGIN },
+    );
+  });
+
+  it("moveBy moves; a drag is the sum of per-event moveBy calls (no store magic)", () => {
+    const store = createCapsuleStore();
+    store.moveBy(10, 5, VIEWPORT);
+    store.moveBy(10, 5, VIEWPORT);
+    store.moveBy(10, 5, VIEWPORT);
+    assert.deepEqual(store.getBox().state, { x: 24 + 30, y: 24 + 15 });
+  });
+
+  it("moveBy clamps: the capsule stays wholly inside the viewport", () => {
+    const store = createCapsuleStore();
+    store.moveBy(-1000, -1000, VIEWPORT);
+    assert.deepEqual(store.getBox().state, { x: 0, y: 0 });
+    store.moveBy(2000, 2000, VIEWPORT);
+    assert.deepEqual(store.getBox().state, {
+      x: VIEWPORT.width - CAPSULE_NOMINAL_WIDTH,
+      y: VIEWPORT.height - CAPSULE_NOMINAL_HEIGHT,
+    });
+    // The pure clamp agrees; a viewport smaller than the capsule pins at 0
+    // deterministically (never a NaN, never a throw).
+    assert.deepEqual(clampCapsulePosition(10_000, 10_000, VIEWPORT), {
+      x: VIEWPORT.width - CAPSULE_NOMINAL_WIDTH,
+      y: VIEWPORT.height - CAPSULE_NOMINAL_HEIGHT,
+    });
+    assert.deepEqual(clampCapsulePosition(24, 24, { width: 50, height: 20 }), {
+      x: 0,
+      y: 0,
+    });
+    assert.deepEqual(defaultCapsulePlacement({ width: 50, height: 20 }), {
+      x: 0,
+      y: 0,
+    });
+  });
+
+  it("an absorbed delta emits nothing (the box reference is stable, like moveBy's)", () => {
+    const store = createCapsuleStore();
+    store.moveBy(2000, 0, VIEWPORT);
+    const pinned = store.getBox();
+    store.moveBy(50, 0, VIEWPORT);
+    assert.equal(
+      store.getBox(),
+      pinned,
+      "a delta the clamp fully absorbs never emits",
+    );
+    store.moveBy(-2000, 0, VIEWPORT);
+    const leftPinned = store.getBox();
+    store.moveBy(-50, 0, VIEWPORT);
+    assert.equal(store.getBox(), leftPinned);
+  });
+
+  it("subscribe fires on every emitted move; the disposer stops it", () => {
+    const store = createCapsuleStore();
+    let calls = 0;
+    const dispose = store.subscribe(() => {
+      calls += 1;
+    });
+    store.moveBy(5, 5, VIEWPORT);
+    store.moveBy(5, 5, VIEWPORT);
+    assert.equal(calls, 2);
+    dispose();
+    store.moveBy(5, 5, VIEWPORT);
+    assert.equal(calls, 2);
+  });
+});
+
+describe("launcher capsule — rendered: counts re-render from mirror writes (ticket 107)", () => {
+  it("snapshot writes update the counts; a stale snapshot is not counted; a clear drops the dispatcher", async () => {
+    const store = createFloatingWindowStore();
+    const shellStore = createDispatcherShellStore();
+    const Capsule = createLauncherChip(t, store, shellStore, shellStub());
+    const { root } = renderTree();
+    await act(async () => {
+      root.render(createElement(Capsule));
+    });
+    const capsule = () => query(CHIP)!;
+    assert.equal(capsule().getAttribute("data-dispatcher-count"), "0");
+
+    // Two live snapshots: 2 dispatchers, 5 running workers. The counts land
+    // on the data attributes, the visible text, and the words of the
+    // accessible label — all from the SAME derivation.
+    const now = Date.now();
+    await act(async () => {
+      shellStore.applyPresence(
+        capsuleSnapshot("s-1", now, [
+          worker("w-1", "running"),
+          worker("w-2", "running"),
+        ]),
+      );
+      shellStore.applyPresence(
+        capsuleSnapshot("s-2", now, [
+          worker("w-3", "running"),
+          worker("w-4", "running"),
+          worker("w-5", "running"),
+        ]),
+      );
+    });
+    assert.equal(capsule().getAttribute("data-dispatcher-count"), "2");
+    assert.equal(capsule().getAttribute("data-worker-count"), "5");
+    assert.equal(capsule().textContent, "2 | 5");
+    assert.equal(
+      capsule().getAttribute("aria-label"),
+      formatTemplate(localeDictionary.en["launcher.capsule.aria"]!, {
+        dispatchers: "2",
+        workers: "5",
+      }),
+    );
+
+    // A mirror for a THIRD session arrives stale (older than the window):
+    // it must NOT read as live — the honest-lag rule, same as the sidebar.
+    await act(async () => {
+      shellStore.applyPresence(
+        capsuleSnapshot("s-3", now - ROSTER_STALE_WINDOW_MS - 1000, [
+          worker("w-6", "running"),
+        ]),
+      );
+    });
+    assert.equal(
+      capsule().getAttribute("data-dispatcher-count"),
+      "2",
+      "a stale snapshot is not counted as a live dispatcher",
+    );
+    assert.equal(
+      capsule().getAttribute("data-worker-count"),
+      "5",
+      "its workers are not counted either",
+    );
+
+    // Deactivation clear (the host writes null): the dispatcher drops out.
+    await act(async () => {
+      shellStore.applySessionMirror("s-2", null);
+    });
+    assert.equal(capsule().getAttribute("data-dispatcher-count"), "1");
+    assert.equal(capsule().getAttribute("data-worker-count"), "2");
+    assert.equal(capsule().textContent, "1 | 2");
+
+    await act(async () => {
+      root.unmount();
+    });
+    disposeWindowLayer();
+  });
+});
+
+describe("launcher capsule — rendered: drag and click discrimination (ticket 107)", () => {
+  /** jsdom's viewport — what `liveViewport()` sees here. */
+  const VP = {
+    width: dom.window.innerWidth,
+    height: dom.window.innerHeight,
+  };
+
+  /** One pointerdown on the capsule + window moves + the mandatory up. */
+  async function capsuleDrag(
+    downs: { clientX: number; clientY: number; button?: number },
+    moves: Array<{ clientX: number; clientY: number }>,
+  ): Promise<void> {
+    await act(async () => {
+      query(CHIP)!.dispatchEvent(
+        new dom.window.MouseEvent("pointerdown", {
+          bubbles: true,
+          cancelable: true,
+          button: downs.button ?? 0,
+          clientX: downs.clientX,
+          clientY: downs.clientY,
+        }),
+      );
+    });
+    for (const at of moves) {
+      await act(async () => {
+        dom.window.dispatchEvent(
+          new dom.window.MouseEvent("pointermove", {
+            bubbles: true,
+            cancelable: true,
+            clientX: at.clientX,
+            clientY: at.clientY,
+          }),
+        );
+      });
+    }
+    await act(async () => {
+      dom.window.dispatchEvent(
+        new dom.window.MouseEvent("pointerup", {
+          bubbles: true,
+          cancelable: true,
+          clientX: moves.at(-1)?.clientX ?? downs.clientX,
+          clientY: moves.at(-1)?.clientY ?? downs.clientY,
+        }),
+      );
+    });
+  }
+
+  it("three monotonic pointermoves move the capsule by the SUM of per-event deltas", async () => {
+    const store = createFloatingWindowStore();
+    const Capsule = createLauncherChip(t, store, createDispatcherShellStore(), shellStub());
+    const { root } = renderTree();
+    await act(async () => {
+      root.render(createElement(Capsule));
+    });
+    // Default placement: the top-left margin (clamped against the live
+    // viewport's FALLBACK stand-in — well inside jsdom's own).
+    assert.equal(query(CHIP)!.style.left, `${FLOATING_WINDOW_MARGIN}px`);
+    assert.equal(query(CHIP)!.style.top, `${FLOATING_WINDOW_MARGIN}px`);
+
+    await capsuleDrag(
+      { clientX: 40, clientY: 40 },
+      [
+        { clientX: 50, clientY: 45 },
+        { clientX: 60, clientY: 50 },
+        { clientX: 70, clientY: 55 },
+      ],
+    );
+
+    assert.equal(
+      query(CHIP)!.style.left,
+      `${FLOATING_WINDOW_MARGIN + 30}px`,
+      "three 10px moves land 30px right — each pointermove contributes its " +
+        "OWN delta (the ticket-103 drag rule, now on the capsule)",
+    );
+    assert.equal(
+      query(CHIP)!.style.top,
+      `${FLOATING_WINDOW_MARGIN + 15}px`,
+      "three 5px moves land 15px down, not the compounding 30",
+    );
+    assert.equal(
+      store.getBox().state.open,
+      false,
+      "dragging never toggles the window by itself",
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    disposeWindowLayer();
+  });
+
+  it("dragging clamps at the viewport; a right-button press starts no drag", async () => {
+    const store = createFloatingWindowStore();
+    const Capsule = createLauncherChip(t, store, createDispatcherShellStore(), shellStub());
+    const { root } = renderTree();
+    await act(async () => {
+      root.render(createElement(Capsule));
+    });
+
+    await capsuleDrag(
+      { clientX: 40, clientY: 40 },
+      [
+        { clientX: 9000, clientY: 9000 },
+        { clientX: 9100, clientY: 9100 },
+      ],
+    );
+    assert.deepEqual(
+      {
+        left: query(CHIP)!.style.left,
+        top: query(CHIP)!.style.top,
+      },
+      {
+        left: `${VP.width - CAPSULE_NOMINAL_WIDTH}px`,
+        top: `${VP.height - CAPSULE_NOMINAL_HEIGHT}px`,
+      },
+      "the capsule clamps wholly inside jsdom's own viewport",
+    );
+
+    // A right-button press + moves must not move it (left-button only).
+    await capsuleDrag(
+      { clientX: 10, clientY: 10, button: 2 },
+      [{ clientX: 500, clientY: 500 }],
+    );
+    assert.equal(
+      query(CHIP)!.style.left,
+      `${VP.width - CAPSULE_NOMINAL_WIDTH}px`,
+      "right-button drag ignored",
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    disposeWindowLayer();
+  });
+
+  it("a drag's trailing click never toggles the window; a press below the threshold still toggles", async () => {
+    const store = createFloatingWindowStore();
+    const Capsule = createLauncherChip(t, store, createDispatcherShellStore(), shellStub());
+    const { root } = renderTree();
+    await act(async () => {
+      root.render(createElement(Capsule));
+    });
+    assert.equal(store.getBox().state.open, false);
+
+    // A real drag: the browser fires a click after pointerup. The capsule
+    // must treat it as the drag's tail, not a toggle.
+    await capsuleDrag(
+      { clientX: 40, clientY: 40 },
+      [{ clientX: 90, clientY: 90 }],
+    );
+    await act(async () => {
+      click(query(CHIP)!);
+    });
+    assert.equal(
+      store.getBox().state.open,
+      false,
+      "the click that follows a drag is suppressed (a drag must not toggle)",
+    );
+
+    // A genuine press (travel under the threshold) still toggles: down,
+    // a 1px jitter move, up, click — exactly a real click's event tail.
+    await capsuleDrag(
+      { clientX: 40, clientY: 40 },
+      [{ clientX: 41, clientY: 40 }],
+    );
+    assert.ok(
+      CAPSULE_DRAG_THRESHOLD_PX > 0,
+      "the threshold is positive (a jitter move stays a click)",
+    );
+    await act(async () => {
+      click(query(CHIP)!);
+    });
+    assert.equal(
+      store.getBox().state.open,
+      true,
+      "a press below the drag threshold toggles the window",
+    );
+    assert.equal(query(CHIP)!.getAttribute("aria-pressed"), "true");
+
+    await act(async () => {
+      root.unmount();
+    });
+    disposeWindowLayer();
+  });
+});
+
 // ── 4. Crash isolation + window behavior, rendered (jsdom + react-dom) ───
 
+// The launcher capsule — the selector is the launch role's stable marker
+// (the chip became the floating capsule in ticket 107; the marker stays).
 const CHIP = '[data-launcher="dispatcher"]';
 const WINDOW = '[data-window="dispatcher"]';
 const FAILED = '[data-window="failed"]';
@@ -790,20 +1281,31 @@ function shellStub(): JSX.Element {
   return createElement("div", { "data-shell": "dispatcher" });
 }
 
-describe("floating window — rendered: chip toggles, window portals to body, close reopens", () => {
-  it("the chip toggles the window; the window renders OUTSIDE the entry's container (body-level portal); close works", async () => {
+describe("floating window — rendered: capsule toggles, window portals to body, close reopens", () => {
+  it("the capsule toggles the window; the window renders OUTSIDE the entry's container (body-level portal); close works", async () => {
     const store = createFloatingWindowStore();
-    const Chip = createLauncherChip(t, store, shellStub());
+    const Chip = createLauncherChip(t, store, createDispatcherShellStore(), shellStub());
     const { root, container } = renderTree();
     await act(async () => {
       root.render(createElement(Chip));
     });
 
-    // Closed by default: the chip renders, the window does not.
+    // Closed by default: the capsule renders, the window does not. The
+    // empty shell store derives 0 | 0 — counts in the ruling's own shape,
+    // never the retired chip label (ticket 107, ADR-0022); the counts in
+    // words live on the accessible label/title.
     const chip = query(CHIP);
-    assert.ok(chip, "the launcher chip renders");
+    assert.ok(chip, "the launcher capsule renders");
     assert.equal(chip.getAttribute("aria-pressed"), "false");
-    assert.equal(chip.textContent, localeDictionary.en["launcher.chip.label"]);
+    assert.equal(chip.getAttribute("data-dispatcher-count"), "0");
+    assert.equal(chip.getAttribute("data-worker-count"), "0");
+    assert.equal(chip.textContent, "0 | 0");
+    const aria0 = formatTemplate(
+      localeDictionary.en["launcher.capsule.aria"]!,
+      { dispatchers: "0", workers: "0" },
+    );
+    assert.equal(chip.getAttribute("aria-label"), aria0);
+    assert.equal(chip.getAttribute("title"), aria0);
     assert.equal(query(WINDOW), null, "no window while closed");
 
     // Click: the window opens — portaled to the body-level layer, NOT a
@@ -820,7 +1322,7 @@ describe("floating window — rendered: chip toggles, window portals to body, cl
     assert.equal(
       chip.getAttribute("aria-pressed"),
       "true",
-      "chip reflects the open state",
+      "capsule reflects the open state",
     );
     assert.ok(query(DRAG), "the drag handle (titlebar) renders");
     assert.ok(query(CLOSE), "the close button renders");
@@ -837,14 +1339,14 @@ describe("floating window — rendered: chip toggles, window portals to body, cl
     assert.equal(
       query(CHIP)?.getAttribute("aria-pressed"),
       "false",
-      "chip reflects the closed state",
+      "capsule reflects the closed state",
     );
 
-    // The chip reopens (epoch 2 — a fresh boundary mounts).
+    // The capsule reopens (epoch 2 — a fresh boundary mounts).
     await act(async () => {
       click(query(CHIP)!);
     });
-    assert.ok(query(WINDOW), "the chip reopens the window");
+    assert.ok(query(WINDOW), "the capsule reopens the window");
     assert.equal(store.getBox().state.openEpoch, 2);
 
     await act(async () => {
@@ -855,7 +1357,7 @@ describe("floating window — rendered: chip toggles, window portals to body, cl
 
   it("dragging the titlebar moves the window through the REAL store clamp", async () => {
     const store = createFloatingWindowStore();
-    const Chip = createLauncherChip(t, store, shellStub());
+    const Chip = createLauncherChip(t, store, createDispatcherShellStore(), shellStub());
     const { root } = renderTree();
     await act(async () => {
       root.render(createElement(Chip));
@@ -940,7 +1442,7 @@ describe("floating window — rendered: chip toggles, window portals to body, cl
 
   it("three monotonic pointermoves advance the window by the SUM of per-event deltas (no start-relative compounding)", async () => {
     const store = createFloatingWindowStore();
-    const Chip = createLauncherChip(t, store, shellStub());
+    const Chip = createLauncherChip(t, store, createDispatcherShellStore(), shellStub());
     const { root } = renderTree();
     await act(async () => {
       root.render(createElement(Chip));
@@ -1031,7 +1533,7 @@ describe("floating window — resize handles and maximize/restore (ticket 105, r
 
   async function openWindow(): Promise<{ store: ReturnType<typeof createFloatingWindowStore>; root: Root }> {
     const store = createFloatingWindowStore();
-    const Chip = createLauncherChip(t, store, shellStub());
+    const Chip = createLauncherChip(t, store, createDispatcherShellStore(), shellStub());
     const { root } = renderTree();
     await act(async () => {
       root.render(createElement(Chip));
@@ -1291,7 +1793,12 @@ describe("floating window — crash isolation (the ticket's guarantee, rendered)
       if (boom) throw new Error("shell exploded");
       return createElement("div", { "data-shell": "dispatcher" });
     };
-    const Chip = createLauncherChip(t, store, createElement(ThrowingShell));
+    const Chip = createLauncherChip(
+      t,
+      store,
+      createDispatcherShellStore(),
+      createElement(ThrowingShell),
+    );
     const { root } = renderTree();
     await act(async () => {
       root.render(createElement(Chip));
@@ -1316,7 +1823,7 @@ describe("floating window — crash isolation (the ticket's guarantee, rendered)
     );
     assert.ok(query(DRAG), "the titlebar (drag) survives the crash");
     assert.ok(query(CLOSE), "the close button survives the crash");
-    assert.ok(query(CHIP), "the launcher chip survives the crash");
+    assert.ok(query(CHIP), "the launcher capsule survives the crash");
     assert.equal(
       query(`${WINDOW} [data-shell="dispatcher"]`),
       null,
@@ -1442,7 +1949,12 @@ describe("floating window — the summon/kill affordances render INSIDE the wind
     const mount = composition.mounts[0]!;
     const Shell = createDispatcherShell(t, mount.store, mount.hosts);
     const store = createFloatingWindowStore();
-    const Chip = createLauncherChip(t, store, createElement(Shell));
+    const Chip = createLauncherChip(
+      t,
+      store,
+      createDispatcherShellStore(),
+      createElement(Shell),
+    );
     const { root } = renderTree();
     await act(async () => {
       root.render(createElement(Chip));
@@ -1569,7 +2081,12 @@ describe("floating window — right-click close menu on dispatcher rows (ticket 
     const mount = composition.mounts[0]!;
     const Shell = createDispatcherShell(t, mount.store, mount.hosts);
     const store = createFloatingWindowStore();
-    const Chip = createLauncherChip(t, store, createElement(Shell));
+    const Chip = createLauncherChip(
+      t,
+      store,
+      createDispatcherShellStore(),
+      createElement(Shell),
+    );
     const { root } = renderTree();
     await act(async () => {
       root.render(createElement(Chip));

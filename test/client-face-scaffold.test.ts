@@ -446,10 +446,12 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
     // keys left with the capsule's deletion — ticket 89, 2026-09-19.)
     assert.deepEqual(keys, [
       "activation.presence-hint",
-      // Ticket 100 (ADR-0021): the floating-window launcher chip + the
-      // window chrome (the titlebar reuses `shell.title`). Ticket 105 adds
-      // the maximize/restore toggle's label pair (one button, two states).
-      "launcher.chip.label",
+      // Ticket 100 (ADR-0021): the floating-window launcher + the window
+      // chrome (the titlebar reuses `shell.title`). Ticket 105 adds the
+      // maximize/restore toggle's label pair (one button, two states).
+      // Ticket 107 (ADR-0022): the chip became the floating capsule — the
+      // counts-in-words aria face replaces the retired chip label.
+      "launcher.capsule.aria",
       "launcher.window.close",
       "launcher.window.failed",
       "launcher.window.maximize",

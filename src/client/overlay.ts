@@ -320,14 +320,20 @@ export const localeDictionary: LocaleDictionary = {
     "shell.approval.submitted":
       "Answer sent — this card updates when the dispatcher confirms.",
     "shell.dispatch.gating": "Gate",
-    // Ticket 100 (ADR-0021): the floating-window launcher chip + the
-    // window's own chrome. The chip's visible label is the launch
-    // affordance ONLY (no presence counters — the cancelled capsule's info
-    // model stays retired); the window titlebar reuses the shared
-    // `shell.title` face (one vocabulary). The failed line is the crash-
-    // isolation boundary's honest fallback — the window stays open with
-    // the line and working chrome; close + reopen recovers.
-    "launcher.chip.label": "Dispatchers",
+    // Ticket 100 (ADR-0021): the floating-window launcher + the window's
+    // own chrome. Ticket 107 (ADR-0022, the human's dated 2026-09-22
+    // ruling): the launcher chip became the floating CAPSULE — the
+    // collapsed affordance now carries presence counts in the ruling's own
+    // shape [dispatchers | workers]; the visible text is the two counts,
+    // and this key says them in words on the accessible label/title (the
+    // launch role is unchanged: toggle the floating window, aria-pressed).
+    // The chip-only `launcher.chip.label` retired with the chip. The
+    // window titlebar reuses the shared `shell.title` face (one
+    // vocabulary). The failed line is the crash-isolation boundary's
+    // honest fallback — the window stays open with the line and working
+    // chrome; close + reopen recovers.
+    "launcher.capsule.aria":
+      "{dispatchers} dispatchers, {workers} workers running",
     "launcher.window.close": "Close the dispatcher window",
     // Ticket 105: the titlebar's maximize/restore toggle — the label swaps
     // with the window's maximized state (one button, two faces).
@@ -489,12 +495,16 @@ export const localeDictionary: LocaleDictionary = {
     "shell.approval.failed": "答复未能送达——没有任何更改。",
     "shell.approval.submitted": "答复已提交——待调度器确认后此卡片会更新。",
     "shell.dispatch.gating": "审批门",
-    // Ticket 100（ADR-0021）：浮动窗口的启动按钮与窗口自身镶边。按钮的可见
-    // 文本只是启动入口（不显示任何状态计数——已取消的胶囊信息模型保持废止）；
-    // 窗口标题栏复用共享的 `shell.title` 文案（同一套词汇）。失败文案是崩溃
-    // 隔离边界的如实回退——窗口保持打开并显示该行与可用的镶边；关闭后从
-    // “调度台”按钮重新打开即可恢复。
-    "launcher.chip.label": "调度台",
+    // Ticket 100（ADR-0021）：浮动窗口的启动入口与窗口自身镶边。Ticket 107
+    // （ADR-0022，2026-09-22 的人工裁定）：启动芯片变为浮动胶囊——收起态
+    // 入口现在按裁定自定的形状 [调度会话数 | 进行中工作者数] 显示存在计数；
+    // 可见文本就是两个数字，本键把它们用文字放到无障碍标签/提示上（启动
+    // 角色不变：切换浮动窗口，aria-pressed）。芯片专用的
+    // `launcher.chip.label` 随芯片一并退场。窗口标题栏复用共享的
+    // `shell.title` 文案（同一套词汇）。失败文案是崩溃隔离边界的如实回退
+    // ——窗口保持打开并显示该行与可用的镶边；关闭后重新打开即可恢复。
+    "launcher.capsule.aria":
+      "{dispatchers} 个调度会话，{workers} 个工作者进行中",
     "launcher.window.close": "关闭调度窗口",
     // Ticket 105：标题栏的最大化/还原切换按钮——标签随窗口的最大化状态切换
     // （一个按钮，两份文案）。

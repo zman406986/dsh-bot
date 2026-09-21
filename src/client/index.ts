@@ -478,16 +478,22 @@ export function applyClientModule(
   });
 
   // ── The floating dispatcher window + its stock-UI launcher (ticket 100,
-  // ADR-0021 decisions 2 + 4) ──
+  // ADR-0021 decisions 2 + 4; the launcher's capsule form — ticket 107,
+  // ADR-0022) ──
   //
   // ONE additive `shell.overlay` entry (ADR-0013's sanctioned seam; unique
   // `multitask-dispatcher-` id — coexistence by id, never shadowing): a
-  // small chip that toggles the floating window. The inject callback ALSO
-  // creates the window's shell mount HERE — the same `mountShellPage`
+  // floating capsule that toggles the window and, since ticket 107
+  // (ADR-0022), shows [dispatcher count | running workers] derived purely
+  // from the mount's shell-store mirrors (the launch seam is unchanged;
+  // only the affordance's shape and content changed). The inject callback
+  // ALSO creates the window's shell mount HERE — the same `mountShellPage`
   // wiring the retired `main`/`root` injects ran (the feed attaches, the
   // sessions/conversation bindings, the seat projection — all effects on
   // this module's fiber) — and pushes the result into `mounts`, the
   // designated push-site, so offline tests drive the REAL data path. The
+  // mount's shell store is passed into `createLauncherChip` so the capsule
+  // subscribes to the same mirror truth the hosted shell renders. The
   // mount's feeds stay attached while the window is CLOSED (the hubs
   // replay last truth at attach), so opening shows live data immediately;
   // fiber teardown detaches everything.
@@ -527,6 +533,7 @@ export function applyClientModule(
       createLauncherChip(
         t,
         floatingWindow,
+        mount.store,
         createElement(createDispatcherShell(t, mount.store, mount.hosts)),
       ),
     );

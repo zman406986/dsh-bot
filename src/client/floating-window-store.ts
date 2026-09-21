@@ -44,6 +44,17 @@
  *   titlebar or the button to leave maximize). A maximized window stays
  *   maximized across close/reopen — reopen re-fills the CURRENT viewport;
  *   the remembered rect survives until restore.
+ *
+ * Launcher capsule placement rules (ticket 107, ADR-0022, pinned offline —
+ * see the capsule section at the bottom of this file):
+ * - The collapsed launcher affordance is an information-bearing floating
+ *   capsule (the human's 2026-09-22 ruling). Its own position is
+ *   in-memory like the window's — no persistence is claimed — with the
+ *   same store discipline: pure clamp math here, pointer deltas fed in
+ *   from the component, an absorbed delta emits nothing.
+ * - The capsule clamps FULLY visible (unlike the window's peek rule): it
+ *   is small enough that "wholly on-screen" is the honest simple rule and
+ *   it has no titlebar strip that must stay grabbable.
  */
 
 /** The viewport the clamp math works against (width/height in px). */
@@ -481,6 +492,121 @@ export function createFloatingWindowStore(): FloatingWindowStore {
         width: fill.width,
         height: fill.height,
       });
+    },
+  };
+}
+
+// ── The launcher capsule's own placement (ticket 107, ADR-0022) ───────────
+//
+// The human's 2026-09-22 ruling turned the collapsed launcher chip into an
+// information-bearing floating capsule. The capsule keeps the LAUNCH role
+// (it toggles the floating window — ADR-0021 decision 2's seam is
+// unchanged) but carries its own in-memory position, exactly like the
+// window's x/y: pure clamp math here, pointer deltas fed in from the
+// component, no persistence, no `window` reads.
+
+/**
+ * The capsule's nominal clamp size (px). The rendered capsule's real size
+ * varies with its counts ("12 | 345" is wider than "0 | 0") and the store
+ * must stay pure — it never measures the DOM — so the clamp works against
+ * one assumed nominal size. It only has to keep the honest "fully visible"
+ * promise approximately for a capsule this small; the component's real
+ * render is a few px either way and stays on-screen.
+ */
+export const CAPSULE_NOMINAL_WIDTH = 96;
+export const CAPSULE_NOMINAL_HEIGHT = 32;
+
+/**
+ * Clamp a capsule top-left so the whole capsule stays inside the viewport.
+ * A viewport smaller than the capsule pins the position at 0 on that axis
+ * (deterministic collapse — never a NaN, never a throw). Deliberately NOT
+ * the window's peek rule: the window keeps a grabbable strip off-screen
+ * because it is large; the capsule is small enough to keep wholly visible.
+ */
+export function clampCapsulePosition(
+  x: number,
+  y: number,
+  viewport: WindowViewport,
+): { x: number; y: number } {
+  const maxX = Math.max(0, viewport.width - CAPSULE_NOMINAL_WIDTH);
+  const maxY = Math.max(0, viewport.height - CAPSULE_NOMINAL_HEIGHT);
+  return {
+    x: Math.min(maxX, Math.max(0, x)),
+    y: Math.min(maxY, Math.max(0, y)),
+  };
+}
+
+/**
+ * The capsule's default placement: a {@link FLOATING_WINDOW_MARGIN} offset
+ * from the viewport's TOP-LEFT corner — the ruling's own "collapses at top
+ * left" — run through the same clamp as a drag (one visibility rule, never
+ * two).
+ */
+export function defaultCapsulePlacement(viewport: WindowViewport): {
+  x: number;
+  y: number;
+} {
+  return clampCapsulePosition(
+    FLOATING_WINDOW_MARGIN,
+    FLOATING_WINDOW_MARGIN,
+    viewport,
+  );
+}
+
+/** One published snapshot of the capsule's placement state. */
+export interface CapsuleState {
+  /** Top-left position (px, viewport coordinates; clamped by `moveBy`). */
+  readonly x: number;
+  readonly y: number;
+}
+
+/** The store face the capsule binds through `useSyncExternalStore`. */
+export interface CapsuleBox {
+  readonly state: CapsuleState;
+  readonly version: number;
+}
+
+export interface CapsuleStore {
+  subscribe(listener: () => void): () => void;
+  getBox(): CapsuleBox;
+  /**
+   * Drag: move by a pointer delta, clamped so the capsule stays wholly
+   * visible. When the clamp absorbs the whole delta (the capsule is
+   * already at the bound the delta pushes toward) nothing emits — the
+   * exact `FloatingWindowStore.moveBy` early-return contract, so a silent
+   * move never churns a render.
+   */
+  moveBy(dx: number, dy: number, viewport: WindowViewport): void;
+}
+
+export function createCapsuleStore(): CapsuleStore {
+  // In-memory only: the first mount sits at the default top-left placement
+  // against the fallback viewport (re-clamped on the first real drag, the
+  // same posture as the window's fallback placement).
+  let state: CapsuleState = defaultCapsulePlacement(FALLBACK_VIEWPORT);
+  let version = 0;
+  let box: CapsuleBox = { state, version };
+  const listeners = new Set<() => void>();
+
+  function emit(next: CapsuleState): void {
+    state = next;
+    version += 1;
+    box = { state, version };
+    for (const listener of [...listeners]) listener();
+  }
+
+  return {
+    getBox() {
+      return box;
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    moveBy(dx, dy, viewport) {
+      const placed = clampCapsulePosition(state.x + dx, state.y + dy, viewport);
+      if (placed.x === state.x && placed.y === state.y) return;
+      emit(placed);
     },
   };
 }

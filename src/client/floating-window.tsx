@@ -1,15 +1,19 @@
 /**
- * Floating dispatcher window + the stock-UI launcher chip (ticket 100,
- * ADR-0021).
+ * Floating dispatcher window + the stock-UI launcher capsule (ticket 100,
+ * ADR-0021; the capsule's counts and float — ticket 107, ADR-0022).
  *
- * VEHICLE. The launcher chip is THE one additive `shell.overlay` entry
- * (ADR-0013's sanctioned seam; the retired capsule's slot, a fresh id). The
- * chip toggles the floating window, which HOSTS the existing
+ * VEHICLE. The launcher capsule is THE one additive `shell.overlay` entry
+ * (ADR-0013's sanctioned seam; the retired capsule's slot, a fresh id). It
+ * toggles the floating window, which HOSTS the existing
  * `createDispatcherShell` tree — re-hosted surface inventory, never a
- * rebuild (ADR-0021 decisions 2 and 4) and never a capsule revival (the
- * whole shell, not a collapsed chip; the chip itself is launch affordance
- * ONLY — no presence counters; those stay in the sidebar rows inside the
- * window).
+ * rebuild (ADR-0021 decisions 2 and 4). Since ticket 107 (ADR-0022, the
+ * human's dated 2026-09-22 ruling) the collapsed affordance is an
+ * INFORMATION-BEARING floating capsule — it shows the ruling's own shape
+ * [dispatcher count | running workers], derived purely from the shell
+ * store's mirrors under ADR-0010's honesty rules — which supersedes
+ * ADR-0021's launch-affordance-only posture in part. The window itself
+ * remains the whole dispatcher shell (ADR-0022 decision 3): the capsule is
+ * not a second shell, and the launch seam (entry id + order) is unchanged.
  *
  * DOM TECHNIQUE — React portal (decided on this ticket's evidence, per
  * ADR-0021's open question): the window renders through `createPortal`
@@ -44,13 +48,13 @@
  *   crashing entry (`docs/research/dsh-capsule-seams.md` Seam 1). Stock dsh
  *   was never shadowed, so ANY crash of our entry leaves the app standing.
  * - Our layer (stricter than the host's): the ticket requires that the
- *   LAUNCHER CHIP survive a crash of the window's shell tree. A portal
- *   keeps the window in the chip entry's React subtree, so an uncaught
- *   crash there would retire the WHOLE entry at the host layer — chip
+ *   LAUNCHER CAPSULE survive a crash of the window's shell tree. A portal
+ *   keeps the window in the capsule entry's React subtree, so an uncaught
+ *   crash there would retire the WHOLE entry at the host layer — capsule
  *   included. {@link DispatcherWindowBoundary} therefore wraps the hosted
  *   shell INSIDE the window, below the portal: a shell crash renders the
  *   honest failed line in the window body while the titlebar (drag +
- *   close) and the chip are untouched. A fresh boundary mounts per open
+ *   close) and the capsule are untouched. A fresh boundary mounts per open
  *   (keyed by the store's `openEpoch`), so close + reopen recovers.
  *
  * Presentation only: positioning/drag/close/resize/maximize state lives in
@@ -71,34 +75,45 @@ import { Component, useSyncExternalStore, createElement } from "react";
 import type { JSX, PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 import type {
+  CapsuleStore,
   FloatingWindowResizeEdge,
   FloatingWindowState,
   FloatingWindowStore,
 } from "./floating-window-store.js";
-import { FALLBACK_VIEWPORT } from "./floating-window-store.js";
+import {
+  createCapsuleStore,
+  FALLBACK_VIEWPORT,
+} from "./floating-window-store.js";
+import type { DispatcherShellStore } from "./shell-store.js";
+import { describeCapsuleCounts } from "./shell-store.js";
+import { formatTemplate } from "./roster-store.js";
 
 /** Class prefix — ours, namespaced, no shipped kit classes. */
 export const FLOATING_WINDOW_CLASS = "multitask-dispatcher-fwin";
 
 /**
- * Window + chip styles (ticket 100, themed per ticket 49; ticket 105 adds
- * the maximize button and the resize handles). Colours:
- * `--dsw-alias-bg-layer-1/3` (the host's own floating-surface value for
- * layer-3), `--dsw-alias-border-l3`. The `z-index` is a plain integer —
- * the body-level container must stand above the app frame; the tokens
- * govern colours, not stacking. The resize handles are invisible hit zones
- * (no colours at all) with the face's cursor; while maximized they go
- * inert (`pointer-events:none` via the root's `data-window-maximized`)
- * because the store rejects resizes there. The chip rides the overlay
- * layer's click-through contract: the entry subtree inherits pointer
- * events through the outlet's `display:contents` anchor
- * (dsh-capsule-seams.md Seam 1), so the chip is interactive and draws
+ * Window + capsule styles (ticket 100, themed per ticket 49; ticket 105 adds
+ * the maximize button and the resize handles; ticket 107 replaces the chip's
+ * rules with the floating capsule's). Colours: `--dsw-alias-bg-layer-1/3`
+ * (the host's own floating-surface value for layer-3),
+ * `--dsw-alias-border-l3`. The `z-index` values are plain integers — the
+ * body-level container must stand above the app frame, and the capsule
+ * (position:fixed INSIDE the overlay entry, per ticket 107 — no second
+ * entry) must stand above the layer's own context; the tokens govern
+ * colours, not stacking. The resize handles are invisible hit zones (no
+ * colours at all) with the face's cursor; while maximized they go inert
+ * (`pointer-events:none` via the root's `data-window-maximized`) because
+ * the store rejects resizes there. The capsule rides the overlay layer's
+ * click-through contract: the entry subtree inherits pointer events
+ * through the outlet's `display:contents` anchor
+ * (dsh-capsule-seams.md Seam 1), so the capsule is interactive and draws
  * nothing where it is not.
  */
 export const FLOATING_WINDOW_CSS = `
-.multitask-dispatcher-fwin-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;border:1px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-3);font-size:12px;font-weight:600;opacity:.85;cursor:pointer;color:inherit;font-family:inherit}
-.multitask-dispatcher-fwin-chip:hover{opacity:1}
-.multitask-dispatcher-fwin-chip[aria-pressed="true"]{border-color:var(--dsw-alias-state-business-primary)}
+.multitask-dispatcher-fwin__capsule{position:fixed;z-index:1000;display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-3);font-size:12px;font-weight:600;letter-spacing:.04em;opacity:.85;cursor:grab;user-select:none;touch-action:none;color:inherit;font-family:inherit}
+.multitask-dispatcher-fwin__capsule:hover{opacity:1}
+.multitask-dispatcher-fwin__capsule:active{cursor:grabbing}
+.multitask-dispatcher-fwin__capsule[aria-pressed="true"]{border-color:var(--dsw-alias-state-business-primary)}
 .multitask-dispatcher-fwin{position:fixed;z-index:1000;display:flex;flex-direction:column;background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l3);border-radius:10px;overflow:hidden;font-size:13px;line-height:1.5;font-family:inherit;color:inherit}
 .multitask-dispatcher-fwin__titlebar{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px 6px 12px;background:var(--dsw-alias-bg-layer-3);border-bottom:1px solid var(--dsw-alias-border-l3);cursor:move;user-select:none;touch-action:none}
 .multitask-dispatcher-fwin__title{font-weight:600;opacity:.75;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -117,7 +132,7 @@ export const FLOATING_WINDOW_CSS = `
 .multitask-dispatcher-fwin__failed{padding:14px;opacity:.7}
 `;
 
-/** Resolved chrome copy for the window + chip (one vocabulary, see keys). */
+/** Resolved chrome copy for the window (one vocabulary, see keys). */
 export interface FloatingWindowChrome {
   /** Window titlebar title — the shared `shell.title` face. */
   readonly title: string;
@@ -211,7 +226,7 @@ const RESIZE_EDGES = ["e", "w", "s", "se", "sw"] as const;
  * same "pure describe + thin component" split as the shell). The isolation
  * boundary sits in the BODY only: the titlebar (drag + maximize + close)
  * renders outside it, so a crashed shell never takes the window chrome —
- * or the chip, or stock dsh — down with it. The boundary is keyed by the
+ * or the capsule, or stock dsh — down with it. The boundary is keyed by the
  * store's `openEpoch`, so every open mounts a fresh boundary (a crashed
  * window recovers on reopen).
  *
@@ -396,6 +411,63 @@ function beginResize(
 }
 
 /**
+ * Cumulative pointer travel (px) past which a capsule press is a DRAG and
+ * not a click: below it the button's click still toggles the window (a
+ * jittery press is a press), above it the click that follows pointerup is
+ * suppressed (a drag must not toggle). Pinned offline with the capsule's
+ * rendered drag pins.
+ */
+export const CAPSULE_DRAG_THRESHOLD_PX = 4;
+
+/**
+ * Capsule drag (ticket 107): EXACTLY the {@link beginDrag} pattern with a
+ * face — capsule pointerdown seeds the last-seen point, each window
+ * pointermove feeds its OWN delta into the capsule store's `moveBy`
+ * (clamped there against the live viewport), pointerup/cancel removes the
+ * three window listeners. Left-button only, like a drag.
+ *
+ * One capsule-specific wrinkle: the capsule is a BUTTON, so the browser
+ * fires a click after pointerup even when the pointer dragged it across
+ * the screen — and an untreated click would toggle the window on every
+ * drag-end. The press therefore accumulates its travel and calls
+ * `onDragged` once past {@link CAPSULE_DRAG_THRESHOLD_PX}; the click
+ * handler consults (and clears) that flag, so a genuine press toggles and
+ * a drag only moves. A bare press that never crosses the threshold is
+ * untouched — the common click path behaves exactly as before.
+ */
+function beginCapsuleDrag(
+  event: ReactPointerEvent<HTMLButtonElement>,
+  store: CapsuleStore,
+  onDragged: () => void,
+): void {
+  if (event.button !== 0) return;
+  let lastX = event.clientX;
+  let lastY = event.clientY;
+  let travelled = 0;
+  let reported = false;
+  const onMove = (move: PointerEvent) => {
+    const dx = move.clientX - lastX;
+    const dy = move.clientY - lastY;
+    lastX = move.clientX;
+    lastY = move.clientY;
+    travelled += Math.abs(dx) + Math.abs(dy);
+    if (!reported && travelled > CAPSULE_DRAG_THRESHOLD_PX) {
+      reported = true;
+      onDragged();
+    }
+    store.moveBy(dx, dy, liveViewport());
+  };
+  const onUp = () => {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    window.removeEventListener("pointercancel", onUp);
+  };
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+  window.addEventListener("pointercancel", onUp);
+}
+
+/**
  * The floating window surface: subscribes to the window store and, while
  * open, portals {@link describeFloatingWindow} — hosting `content` (the
  * re-hosted `createDispatcherShell` element tree) behind the isolation
@@ -434,30 +506,77 @@ export function createFloatingWindow(
 }
 
 /**
- * The launcher chip (THE one `shell.overlay` entry, ticket 100): a small
- * toggler for the floating window — launch affordance ONLY (no presence
- * counters; the cancelled capsule's info model stays retired). Renders the
- * chip button and the window surface beside it (the surface portals itself
- * out of the overlay layer at body level).
+ * The launcher capsule (THE one `shell.overlay` entry, ticket 100; the
+ * capsule's shape and counts — ticket 107, ADR-0022): the collapsed
+ * affordance is an information-bearing floating capsule showing the
+ * ruling's own shape [dispatcher count | running workers], derived purely
+ * from the shell store's mirror map (`describeCapsuleCounts`; ADR-0010
+ * honesty — the mirrors are the truth, no optimistic flips). The launch
+ * role is unchanged (toggle the floating window, `aria-pressed`); the
+ * counts in words live on the accessible label/title
+ * (`launcher.capsule.aria`, en+zh). Floating is positional only:
+ * `position:fixed` inside this single injected entry, placement from the
+ * capsule's own in-memory store (draggable; a drag past the threshold
+ * suppresses the trailing click so moving the capsule never toggles the
+ * window). Renders the capsule button and the window surface beside it
+ * (the surface portals itself out of the overlay layer at body level).
+ *
+ * Subscribes to TWO stores (ticket 107's wiring gap): the window store as
+ * before, and the shell store — the same `mount.store` the hosted shell
+ * consumes — so mirror writes re-render the counts (the same
+ * `useSyncExternalStore` pair the shell binds through).
  */
 export function createLauncherChip(
   t: (key: string) => string,
   store: FloatingWindowStore,
+  shellStore: DispatcherShellStore,
   content: JSX.Element,
 ): () => JSX.Element {
   const Window = createFloatingWindow(t, store, content);
+  const capsuleStore = createCapsuleStore();
+  // One-shot flag shared by the drag and the click (single entry, single
+  // capsule): set by `beginCapsuleDrag` past the threshold, consumed by
+  // the next click — and reset by the next press, so it can never stick.
+  let suppressNextClick = false;
   return () => {
     const box = useSyncExternalStore(store.subscribe, store.getBox);
+    const shellBox = useSyncExternalStore(shellStore.subscribe, shellStore.getBox);
+    const capsuleBox = useSyncExternalStore(
+      capsuleStore.subscribe,
+      capsuleStore.getBox,
+    );
+    const counts = describeCapsuleCounts(shellBox.state.mirrors, Date.now());
+    const aria = formatTemplate(t("launcher.capsule.aria"), {
+      dispatchers: String(counts.dispatchers),
+      workers: String(counts.workers),
+    });
     return (
       <>
         <button
           type="button"
-          className={`${FLOATING_WINDOW_CLASS}-chip`}
+          className={`${FLOATING_WINDOW_CLASS}__capsule`}
           data-launcher="dispatcher"
           aria-pressed={box.state.open}
-          onClick={() => store.toggle(liveViewport())}
+          aria-label={aria}
+          title={aria}
+          data-dispatcher-count={counts.dispatchers}
+          data-worker-count={counts.workers}
+          style={{ left: capsuleBox.state.x, top: capsuleBox.state.y }}
+          onClick={() => {
+            if (suppressNextClick) {
+              suppressNextClick = false;
+              return;
+            }
+            store.toggle(liveViewport());
+          }}
+          onPointerDown={(event) => {
+            suppressNextClick = false;
+            beginCapsuleDrag(event, capsuleStore, () => {
+              suppressNextClick = true;
+            });
+          }}
         >
-          {t("launcher.chip.label")}
+          {`${counts.dispatchers} | ${counts.workers}`}
         </button>
         {createElement(Window)}
       </>
