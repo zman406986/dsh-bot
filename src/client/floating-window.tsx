@@ -53,17 +53,25 @@
  *   close) and the chip are untouched. A fresh boundary mounts per open
  *   (keyed by the store's `openEpoch`), so close + reopen recovers.
  *
- * Presentation only: positioning/drag/close state lives in
+ * Presentation only: positioning/drag/close/resize/maximize state lives in
  * `floating-window-store.ts` (in-memory only — no persistence is claimed);
  * this component maps store state to DOM and feeds pointer deltas back.
  * Styles are the shell discipline: `multitask-dispatcher-` prefixed
  * classes, every colour a host `--dsw-alias-*` token, opacity-based
  * hierarchy, no animation, no text colour (the host theme's inherits).
+ *
+ * Ticket 105 adds resize + maximize without moving any decision here: the
+ * titlebar gains a Windows-style maximize/restore toggle next to close,
+ * edge/corner resize handles render after the body (the pinned child
+ * order — style, titlebar, body — is untouched), and `beginResize` is the
+ * ticket-103 `beginDrag` pattern with a face. While maximized the STORE
+ * restores on the first drag move — this module stays maximized-blind.
  */
 import { Component, useSyncExternalStore, createElement } from "react";
 import type { JSX, PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 import type {
+  FloatingWindowResizeEdge,
   FloatingWindowState,
   FloatingWindowStore,
 } from "./floating-window-store.js";
@@ -73,14 +81,19 @@ import { FALLBACK_VIEWPORT } from "./floating-window-store.js";
 export const FLOATING_WINDOW_CLASS = "multitask-dispatcher-fwin";
 
 /**
- * Window + chip styles (ticket 100, themed per ticket 49). Colours:
+ * Window + chip styles (ticket 100, themed per ticket 49; ticket 105 adds
+ * the maximize button and the resize handles). Colours:
  * `--dsw-alias-bg-layer-1/3` (the host's own floating-surface value for
  * layer-3), `--dsw-alias-border-l3`. The `z-index` is a plain integer —
  * the body-level container must stand above the app frame; the tokens
- * govern colours, not stacking. The chip rides the overlay layer's
- * click-through contract: the entry subtree inherits pointer events
- * through the outlet's `display:contents` anchor (dsh-capsule-seams.md
- * Seam 1), so the chip is interactive and draws nothing where it is not.
+ * govern colours, not stacking. The resize handles are invisible hit zones
+ * (no colours at all) with the face's cursor; while maximized they go
+ * inert (`pointer-events:none` via the root's `data-window-maximized`)
+ * because the store rejects resizes there. The chip rides the overlay
+ * layer's click-through contract: the entry subtree inherits pointer
+ * events through the outlet's `display:contents` anchor
+ * (dsh-capsule-seams.md Seam 1), so the chip is interactive and draws
+ * nothing where it is not.
  */
 export const FLOATING_WINDOW_CSS = `
 .multitask-dispatcher-fwin-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;border:1px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-3);font-size:12px;font-weight:600;opacity:.85;cursor:pointer;color:inherit;font-family:inherit}
@@ -91,6 +104,15 @@ export const FLOATING_WINDOW_CSS = `
 .multitask-dispatcher-fwin__title{font-weight:600;opacity:.75;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .multitask-dispatcher-fwin__close{flex:none;border:none;background:transparent;color:inherit;font:inherit;font-size:14px;opacity:.6;cursor:pointer;padding:0 6px}
 .multitask-dispatcher-fwin__close:hover{opacity:.95}
+.multitask-dispatcher-fwin__maximize{flex:none;border:none;background:transparent;color:inherit;font:inherit;font-size:12px;opacity:.6;cursor:pointer;padding:0 6px}
+.multitask-dispatcher-fwin__maximize:hover{opacity:.95}
+.multitask-dispatcher-fwin__maximize[aria-pressed="true"]{opacity:.95}
+.multitask-dispatcher-fwin__resize-e{position:absolute;top:0;right:0;width:6px;height:100%;cursor:ew-resize;touch-action:none}
+.multitask-dispatcher-fwin__resize-w{position:absolute;top:0;left:0;width:6px;height:100%;cursor:ew-resize;touch-action:none}
+.multitask-dispatcher-fwin__resize-s{position:absolute;left:0;bottom:0;width:100%;height:6px;cursor:ns-resize;touch-action:none}
+.multitask-dispatcher-fwin__resize-se{position:absolute;right:0;bottom:0;width:12px;height:12px;cursor:nwse-resize;touch-action:none}
+.multitask-dispatcher-fwin__resize-sw{position:absolute;left:0;bottom:0;width:12px;height:12px;cursor:nesw-resize;touch-action:none}
+.multitask-dispatcher-fwin[data-window-maximized="true"] [data-resize-edge]{pointer-events:none}
 .multitask-dispatcher-fwin__body{flex:1;min-height:0}
 .multitask-dispatcher-fwin__failed{padding:14px;opacity:.7}
 `;
@@ -101,6 +123,10 @@ export interface FloatingWindowChrome {
   readonly title: string;
   /** Close button's accessible label/title — `launcher.window.close`. */
   readonly close: string;
+  /** Maximize button's accessible label — `launcher.window.maximize`. */
+  readonly maximize: string;
+  /** Restore button's accessible label — `launcher.window.restore`. */
+  readonly restore: string;
   /** The isolation boundary's honest failed line — `launcher.window.failed`. */
   readonly failed: string;
 }
@@ -113,6 +139,8 @@ export function floatingWindowChrome(t: (key: string) => string): FloatingWindow
   return {
     title: t("shell.title"),
     close: t("launcher.window.close"),
+    maximize: t("launcher.window.maximize"),
+    restore: t("launcher.window.restore"),
     failed: t("launcher.window.failed"),
   };
 }
@@ -153,21 +181,43 @@ export class DispatcherWindowBoundary extends Component<
   }
 }
 
-/** The drag/close handlers the pure tree builder attaches. */
+/** The drag/close/maximize/resize handlers the pure tree builder attaches. */
 export interface FloatingWindowActions {
   readonly onClose: () => void;
   readonly onTitlebarPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  /** The maximize/restore toggle (ticket 105). */
+  readonly onToggleMaximize: () => void;
+  /** A resize handle grabbed: the face plus the pointerdown (ticket 105). */
+  readonly onResizePointerDown: (
+    edge: FloatingWindowResizeEdge,
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => void;
 }
+
+/**
+ * The resize faces wired onto the window (ticket 105). The store math
+ * supports all eight compass edges; these five are the clean subset: the
+ * north faces are NOT wired because the titlebar owns the window's top
+ * strip (drag) and the close/maximize buttons own the top-right corner —
+ * a north/ne/nw handle there would steal drags or button clicks (the
+ * window has no non-client area to park them in, unlike a real window
+ * manager). Recorded in the ticket comment.
+ */
+const RESIZE_EDGES = ["e", "w", "s", "se", "sw"] as const;
 
 /**
  * The window's element tree, as a PURE function of the store state (no
  * hooks — the hooked component below subscribes and delegates here, the
  * same "pure describe + thin component" split as the shell). The isolation
- * boundary sits in the BODY only: the titlebar (drag + close) renders
- * outside it, so a crashed shell never takes the window chrome — or the
- * chip, or stock dsh — down with it. The boundary is keyed by the store's
- * `openEpoch`, so every open mounts a fresh boundary (a crashed window
- * recovers on reopen).
+ * boundary sits in the BODY only: the titlebar (drag + maximize + close)
+ * renders outside it, so a crashed shell never takes the window chrome —
+ * or the chip, or stock dsh — down with it. The boundary is keyed by the
+ * store's `openEpoch`, so every open mounts a fresh boundary (a crashed
+ * window recovers on reopen).
+ *
+ * Child order is PINNED (ticket 100's structural pin): children[0] is the
+ * `<style>`, children[1] the titlebar, children[2] the body/boundary. The
+ * ticket-105 resize handles append AFTER the body so that order stands.
  */
 export function describeFloatingWindow(
   state: FloatingWindowState,
@@ -176,10 +226,12 @@ export function describeFloatingWindow(
   content: JSX.Element,
   openEpoch: number,
 ): JSX.Element {
+  const maximizeLabel = state.maximized ? chrome.restore : chrome.maximize;
   return (
     <div
       className={FLOATING_WINDOW_CLASS}
       data-window="dispatcher"
+      data-window-maximized={state.maximized || undefined}
       style={{
         left: state.x,
         top: state.y,
@@ -196,6 +248,17 @@ export function describeFloatingWindow(
         <span className={`${FLOATING_WINDOW_CLASS}__title`}>{chrome.title}</span>
         <button
           type="button"
+          className={`${FLOATING_WINDOW_CLASS}__maximize`}
+          data-window-maximize="true"
+          aria-pressed={state.maximized}
+          aria-label={maximizeLabel}
+          title={maximizeLabel}
+          onClick={actions.onToggleMaximize}
+        >
+          {state.maximized ? "❐" : "□"}
+        </button>
+        <button
+          type="button"
           className={`${FLOATING_WINDOW_CLASS}__close`}
           aria-label={chrome.close}
           title={chrome.close}
@@ -209,6 +272,16 @@ export function describeFloatingWindow(
           {content}
         </DispatcherWindowBoundary>
       </div>
+      {/* Spread (not a nested array) so the pinned child order stays FLAT:
+          children[0] style, [1] titlebar, [2] body, [3..] the handles. */}
+      {...RESIZE_EDGES.map((edge) => (
+        <div
+          key={edge}
+          className={`${FLOATING_WINDOW_CLASS}__resize-${edge}`}
+          data-resize-edge={edge}
+          onPointerDown={(event) => actions.onResizePointerDown(edge, event)}
+        />
+      ))}
     </div>
   );
 }
@@ -261,6 +334,8 @@ function liveViewport(): { width: number; height: number } {
  * out of phase with the pointer by the absorbed amount; the slip is
  * bounded and never compounds, and the next move measures from the
  * pointer's own last point and continues from the clamped position.
+ * While maximized the STORE restores on the first move (the drag-restore
+ * rule) — this handler stays maximized-blind.
  */
 function beginDrag(
   event: ReactPointerEvent<HTMLDivElement>,
@@ -275,6 +350,40 @@ function beginDrag(
     lastX = move.clientX;
     lastY = move.clientY;
     store.moveBy(dx, dy, liveViewport());
+  };
+  const onUp = () => {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    window.removeEventListener("pointercancel", onUp);
+  };
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+  window.addEventListener("pointercancel", onUp);
+}
+
+/**
+ * Resize (ticket 105): EXACTLY the {@link beginDrag} pattern with a face —
+ * handle pointerdown seeds the last-seen point, each window pointermove
+ * feeds its OWN delta into `store.resizeBy(edge, dx, dy, viewport)` (the
+ * clamping and the edge geometry are store decisions), pointerup/cancel
+ * removes the three window listeners. Left-button only, like a drag.
+ * A no-op resize (maximized, or the clamp absorbed everything) simply
+ * emits nothing — the listener teardown below is unconditional.
+ */
+function beginResize(
+  edge: FloatingWindowResizeEdge,
+  event: ReactPointerEvent<HTMLDivElement>,
+  store: FloatingWindowStore,
+): void {
+  if (event.button !== 0) return;
+  let lastX = event.clientX;
+  let lastY = event.clientY;
+  const onMove = (move: PointerEvent) => {
+    const dx = move.clientX - lastX;
+    const dy = move.clientY - lastY;
+    lastX = move.clientX;
+    lastY = move.clientY;
+    store.resizeBy(edge, dx, dy, liveViewport());
   };
   const onUp = () => {
     window.removeEventListener("pointermove", onMove);
@@ -312,6 +421,9 @@ export function createFloatingWindow(
         {
           onClose: () => store.close(),
           onTitlebarPointerDown: (event) => beginDrag(event, store),
+          onToggleMaximize: () => store.toggleMaximize(liveViewport()),
+          onResizePointerDown: (edge, event) =>
+            beginResize(edge, event, store),
         },
         content,
         box.state.openEpoch,

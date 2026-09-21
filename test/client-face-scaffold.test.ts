@@ -447,10 +447,13 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
     assert.deepEqual(keys, [
       "activation.presence-hint",
       // Ticket 100 (ADR-0021): the floating-window launcher chip + the
-      // window chrome (the titlebar reuses `shell.title`).
+      // window chrome (the titlebar reuses `shell.title`). Ticket 105 adds
+      // the maximize/restore toggle's label pair (one button, two states).
       "launcher.chip.label",
       "launcher.window.close",
       "launcher.window.failed",
+      "launcher.window.maximize",
+      "launcher.window.restore",
       "roster.activity.toolcalls",
       "roster.blocked.credential",
       "roster.blocked.filesystem",

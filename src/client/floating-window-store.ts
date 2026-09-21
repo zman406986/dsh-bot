@@ -24,6 +24,26 @@
  * - A viewport smaller than the peek margin pins the window at the
  *   viewport's right/bottom edge deterministically (the bounds collapse to
  *   that edge; never a NaN, never a throw).
+ *
+ * Resize + maximize rules (ticket 105, pinned offline):
+ * - `resizeBy` grows/shrinks the window from the dragged face: east/south
+ *   faces keep the top-left corner put; west/north faces keep the OPPOSITE
+ *   edge put (x/y adjust, the size compensates), then the position runs
+ *   through the same clamp as a drag (position validity wins if the two
+ *   ever disagree). Size clamps to the {@link FLOATING_WINDOW_MIN_WIDTH}/
+ *   {@link FLOATING_WINDOW_MIN_HEIGHT} minimum and to the viewport (a face
+ *   never crosses a viewport edge). An absorbed delta emits nothing — the
+ *   exact `moveBy` early-return contract.
+ * - `toggleMaximize` fills the viewport minus {@link FLOATING_WINDOW_MARGIN}
+ *   on every side and remembers the prior rect; the second toggle restores
+ *   that rect exactly, re-clamped in POSITION against the given viewport
+ *   (the remembered size is exact even if the viewport shrank while
+ *   maximized — the peek clamp keeps the titlebar reachable). While
+ *   maximized, `moveBy` RESTORES FIRST and then applies the delta (the
+ *   Windows-like drag-restore rule), and `resizeBy` is a no-op (grab the
+ *   titlebar or the button to leave maximize). A maximized window stays
+ *   maximized across close/reopen — reopen re-fills the CURRENT viewport;
+ *   the remembered rect survives until restore.
  */
 
 /** The viewport the clamp math works against (width/height in px). */
@@ -46,9 +66,19 @@ export interface FloatingWindowState {
   /** Top-left position (px, viewport coordinates; clamped by `moveBy`). */
   readonly x: number;
   readonly y: number;
-  /** The window's size — fixed for now (no resize affordance is ticketed). */
+  /**
+   * The window's size (px) — mutated through `resizeBy`/`toggleMaximize`
+   * (ticket 105), clamped to the minimum size and to the viewport. Still
+   * in-memory only: a reload starts at the default size again.
+   */
   readonly width: number;
   readonly height: number;
+  /**
+   * True while the window fills the viewport minus the margin
+   * (`toggleMaximize`); the pre-maximize rect lives in the store until
+   * restore (ticket 105).
+   */
+  readonly maximized: boolean;
 }
 
 /** The store face the chip and the window component bind through. */
@@ -74,14 +104,63 @@ export interface FloatingWindowStore {
   toggle(viewport?: WindowViewport): void;
   /**
    * Drag: move by a pointer delta, clamped so the window stays reachable.
-   * A no-op while closed (nothing visible to move).
+   * A no-op while closed (nothing visible to move). While maximized this
+   * RESTORES first (the Windows-like drag-restore rule, ticket 105) and
+   * then applies the delta to the restored rect.
    */
   moveBy(dx: number, dy: number, viewport: WindowViewport): void;
+  /**
+   * Resize from a dragged face (ticket 105): `dx`/`dy` are the pointer's
+   * per-event delta (the drag pattern — each move feeds its OWN delta) and
+   * `edge` says which face the pointer drags. East/south faces keep the
+   * top-left corner put; west/north faces keep the opposite edge put, then
+   * the position runs through the drag clamp. Size clamps to the minimum
+   * and to the viewport; an absorbed delta emits nothing (the `moveBy`
+   * contract). A no-op while closed or while maximized.
+   */
+  resizeBy(
+    edge: FloatingWindowResizeEdge,
+    dx: number,
+    dy: number,
+    viewport: WindowViewport,
+  ): void;
+  /**
+   * Windows-style maximize/restore toggle (ticket 105): maximize fills the
+   * viewport minus {@link FLOATING_WINDOW_MARGIN} on every side and
+   * remembers the prior rect; restore returns that rect exactly (position
+   * re-clamped against the given viewport). Rejected while closed.
+   */
+  toggleMaximize(viewport: WindowViewport): void;
 }
 
-/** The window's fixed size (px) — fits the shell's three panes comfortably. */
+/** The window's default size (px) — fits the shell's three panes comfortably. */
 export const FLOATING_WINDOW_WIDTH = 760;
 export const FLOATING_WINDOW_HEIGHT = 520;
+
+/**
+ * The smallest resizable size (px, ticket 105): small enough to stay usable
+ * on a crowded viewport, large enough that the titlebar and the shell's
+ * panes keep working. `resizeBy` never goes below either axis, and the
+ * maximize fill clamps to them on absurdly small viewports.
+ */
+export const FLOATING_WINDOW_MIN_WIDTH = 320;
+export const FLOATING_WINDOW_MIN_HEIGHT = 240;
+
+/**
+ * Which face(s) a resize drags (ticket 105): compass edges, corners
+ * combining two. The store math supports all eight; the window component
+ * wires the clean subset (the north faces would steal the titlebar's drag
+ * strip and the buttons — see `floating-window.tsx`).
+ */
+export type FloatingWindowResizeEdge =
+  | "n"
+  | "s"
+  | "e"
+  | "w"
+  | "ne"
+  | "nw"
+  | "se"
+  | "sw";
 
 /**
  * The default placement's offset from the viewport's top-right corner (px).
@@ -144,6 +223,56 @@ export function clampWindowPosition(
   };
 }
 
+/** `Math.min(hi, Math.max(lo, v))` under a name (resize/maximize clamps). */
+function clampScalar(value: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, value));
+}
+
+/**
+ * The maximized rect (ticket 105): the viewport minus
+ * {@link FLOATING_WINDOW_MARGIN} on every side, clamped to the minimum
+ * size (a viewport smaller than the fill pins at the minimum) and run
+ * through the position clamp like every other placement — one visibility
+ * rule, never two. Pure; pinned offline.
+ */
+export function maximizedWindowPlacement(viewport: WindowViewport): {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+} {
+  const width = Math.max(
+    FLOATING_WINDOW_MIN_WIDTH,
+    viewport.width - 2 * FLOATING_WINDOW_MARGIN,
+  );
+  const height = Math.max(
+    FLOATING_WINDOW_MIN_HEIGHT,
+    viewport.height - 2 * FLOATING_WINDOW_MARGIN,
+  );
+  const placed = clampWindowPosition(
+    FLOATING_WINDOW_MARGIN,
+    FLOATING_WINDOW_MARGIN,
+    width,
+    height,
+    viewport,
+  );
+  return { x: placed.x, y: placed.y, width, height };
+}
+
+/** Whether two states carry the same rendered geometry (no emit needed). */
+function sameWindowGeometry(
+  a: Pick<FloatingWindowState, "x" | "y" | "width" | "height" | "maximized">,
+  b: Pick<FloatingWindowState, "x" | "y" | "width" | "height" | "maximized">,
+): boolean {
+  return (
+    a.x === b.x &&
+    a.y === b.y &&
+    a.width === b.width &&
+    a.height === b.height &&
+    a.maximized === b.maximized
+  );
+}
+
 export function createFloatingWindowStore(): FloatingWindowStore {
   let state: FloatingWindowState = {
     open: false,
@@ -152,7 +281,17 @@ export function createFloatingWindowStore(): FloatingWindowStore {
     y: 0,
     width: FLOATING_WINDOW_WIDTH,
     height: FLOATING_WINDOW_HEIGHT,
+    maximized: false,
   };
+  // The pre-maximize rect (ticket 105): render-invisible bookkeeping, so it
+  // lives in the closure rather than the published state. It survives
+  // close/reopen (a maximized window reopens maximized) until restore.
+  let preMaximize: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null = null;
   let version = 0;
   let box: FloatingWindowBox = { state, version };
   const listeners = new Set<() => void>();
@@ -164,20 +303,60 @@ export function createFloatingWindowStore(): FloatingWindowStore {
     for (const listener of [...listeners]) listener();
   }
 
+  /** The state after leaving maximize: remembered rect, position re-clamped. */
+  function restoredState(viewport: WindowViewport): FloatingWindowState {
+    const remembered = preMaximize ?? {
+      x: state.x,
+      y: state.y,
+      width: state.width,
+      height: state.height,
+    };
+    const placed = clampWindowPosition(
+      remembered.x,
+      remembered.y,
+      remembered.width,
+      remembered.height,
+      viewport,
+    );
+    return {
+      ...state,
+      maximized: false,
+      x: placed.x,
+      y: placed.y,
+      width: remembered.width,
+      height: remembered.height,
+    };
+  }
+
   function open(viewport?: WindowViewport): void {
     if (state.open) return;
     const vp = viewport ?? FALLBACK_VIEWPORT;
     const firstOpen = state.openEpoch === 0;
-    const placed = firstOpen
-      ? defaultWindowPlacement(state, vp)
-      : // Reopen where it was — re-clamped against the live viewport.
-        clampWindowPosition(state.x, state.y, state.width, state.height, vp);
+    let rect: { x: number; y: number; width: number; height: number };
+    if (!firstOpen && state.maximized) {
+      // A maximized window reopens maximized — re-filled against the
+      // CURRENT viewport (the fill is re-clamped, never stale).
+      rect = maximizedWindowPlacement(vp);
+    } else {
+      const placed = firstOpen
+        ? defaultWindowPlacement(state, vp)
+        : // Reopen where it was — re-clamped against the live viewport.
+          clampWindowPosition(state.x, state.y, state.width, state.height, vp);
+      rect = {
+        x: placed.x,
+        y: placed.y,
+        width: state.width,
+        height: state.height,
+      };
+    }
     emit({
       ...state,
       open: true,
       openEpoch: state.openEpoch + 1,
-      x: placed.x,
-      y: placed.y,
+      x: rect.x,
+      y: rect.y,
+      width: rect.width,
+      height: rect.height,
     });
   }
 
@@ -202,6 +381,13 @@ export function createFloatingWindowStore(): FloatingWindowStore {
     },
     moveBy(dx, dy, viewport) {
       if (!state.open) return;
+      if (state.maximized) {
+        // Windows-like drag-restore (ticket 105): the first drag move
+        // leaves maximize, THEN the delta applies to the restored rect.
+        // A bare click (down + up, no move) never restores.
+        const restored = restoredState(viewport);
+        if (!sameWindowGeometry(restored, state)) emit(restored);
+      }
       const placed = clampWindowPosition(
         state.x + dx,
         state.y + dy,
@@ -211,6 +397,90 @@ export function createFloatingWindowStore(): FloatingWindowStore {
       );
       if (placed.x === state.x && placed.y === state.y) return;
       emit({ ...state, x: placed.x, y: placed.y });
+    },
+    resizeBy(edge, dx, dy, viewport) {
+      if (!state.open || state.maximized) return;
+      let x = state.x;
+      let y = state.y;
+      let width = state.width;
+      let height = state.height;
+      // East face: the right edge tracks the pointer; the left edge stays.
+      // The face never crosses the viewport's right edge.
+      if (edge === "e" || edge === "ne" || edge === "se") {
+        width = clampScalar(
+          state.width + dx,
+          FLOATING_WINDOW_MIN_WIDTH,
+          Math.max(FLOATING_WINDOW_MIN_WIDTH, viewport.width - state.x),
+        );
+      }
+      // West face: the left edge tracks the pointer; the right edge stays
+      // put (the size compensates). The left edge never crosses the
+      // viewport's left edge, and the minimum size caps the travel.
+      if (edge === "w" || edge === "nw" || edge === "sw") {
+        const left = clampScalar(
+          state.x + dx,
+          0,
+          state.x + state.width - FLOATING_WINDOW_MIN_WIDTH,
+        );
+        width = state.x + state.width - left;
+        x = left;
+      }
+      // South face: the bottom edge tracks the pointer; the top edge stays.
+      if (edge === "s" || edge === "se" || edge === "sw") {
+        height = clampScalar(
+          state.height + dy,
+          FLOATING_WINDOW_MIN_HEIGHT,
+          Math.max(FLOATING_WINDOW_MIN_HEIGHT, viewport.height - state.y),
+        );
+      }
+      // North face: the top edge tracks the pointer; the bottom edge stays.
+      if (edge === "n" || edge === "ne" || edge === "nw") {
+        const top = clampScalar(
+          state.y + dy,
+          0,
+          state.y + state.height - FLOATING_WINDOW_MIN_HEIGHT,
+        );
+        height = state.y + state.height - top;
+        y = top;
+      }
+      // Position validity last (the ticket's "…then clamp"): identity in
+      // the normal case, decisive only for windows already hanging
+      // off-screen.
+      const placed = clampWindowPosition(x, y, width, height, viewport);
+      x = placed.x;
+      y = placed.y;
+      if (
+        x === state.x &&
+        y === state.y &&
+        width === state.width &&
+        height === state.height
+      ) {
+        return;
+      }
+      emit({ ...state, x, y, width, height });
+    },
+    toggleMaximize(viewport) {
+      if (!state.open) return;
+      if (state.maximized) {
+        const restored = restoredState(viewport);
+        if (!sameWindowGeometry(restored, state)) emit(restored);
+        return;
+      }
+      preMaximize = {
+        x: state.x,
+        y: state.y,
+        width: state.width,
+        height: state.height,
+      };
+      const fill = maximizedWindowPlacement(viewport);
+      emit({
+        ...state,
+        maximized: true,
+        x: fill.x,
+        y: fill.y,
+        width: fill.width,
+        height: fill.height,
+      });
     },
   };
 }

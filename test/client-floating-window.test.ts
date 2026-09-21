@@ -67,10 +67,14 @@ import { createDispatcherShell } from "../src/client/shell.js";
 import {
   createFloatingWindowStore,
   FLOATING_WINDOW_HEIGHT,
+  FLOATING_WINDOW_MARGIN,
+  FLOATING_WINDOW_MIN_HEIGHT,
   FLOATING_WINDOW_MIN_PEEK,
+  FLOATING_WINDOW_MIN_WIDTH,
   FLOATING_WINDOW_WIDTH,
   clampWindowPosition,
   defaultWindowPlacement,
+  maximizedWindowPlacement,
 } from "../src/client/floating-window-store.js";
 import {
   DispatcherWindowBoundary,
@@ -219,6 +223,268 @@ describe("floating window store (ticket 100) — open/close/toggle and placement
     dispose();
     store.open(VIEWPORT);
     assert.equal(calls, 2);
+  });
+});
+
+// ── 1b. The pure store — resize + maximize/restore (ticket 105) ──────────
+
+describe("floating window store (ticket 105) — edge resize and maximize/restore", () => {
+  const VIEWPORT = { width: 1600, height: 900 };
+
+  it("resizeBy from the east face grows and shrinks width; the top-left corner stays", () => {
+    const store = createFloatingWindowStore();
+    store.open(VIEWPORT);
+    // Off the default top-right placement so the east face has viewport
+    // room to grow into.
+    store.moveBy(-300, 0, VIEWPORT);
+    const before = store.getBox().state;
+    store.resizeBy("e", 100, 0, VIEWPORT);
+    let after = store.getBox().state;
+    assert.equal(after.width, before.width + 100, "east: width tracks +dx");
+    assert.equal(after.x, before.x, "east: x stays");
+    assert.equal(after.y, before.y, "east: y stays");
+    assert.equal(after.height, before.height, "east: height untouched");
+    store.resizeBy("e", -40, 0, VIEWPORT);
+    after = store.getBox().state;
+    assert.equal(after.width, before.width + 60, "each resizeBy applies its own delta");
+  });
+
+  it("resizeBy from the west face keeps the RIGHT edge put (x adjusts, width compensates)", () => {
+    const store = createFloatingWindowStore();
+    store.open(VIEWPORT);
+    const before = store.getBox().state;
+    const rightEdge = before.x + before.width;
+    store.resizeBy("w", -80, 0, VIEWPORT);
+    const after = store.getBox().state;
+    assert.equal(after.width, before.width + 80, "dragging left edge left grows width");
+    assert.equal(after.x, before.x - 80, "x follows the pointer");
+    assert.equal(
+      after.x + after.width,
+      rightEdge,
+      "the opposite (right) edge stays exactly put",
+    );
+  });
+
+  it("resizeBy from the north face keeps the BOTTOM edge put; the south face keeps the top", () => {
+    const store = createFloatingWindowStore();
+    store.open(VIEWPORT);
+    // Off the default top placement so the north face has room to grow up.
+    store.moveBy(0, 100, VIEWPORT);
+    const before = store.getBox().state;
+    const bottomEdge = before.y + before.height;
+    store.resizeBy("n", 0, -60, VIEWPORT);
+    const grown = store.getBox().state;
+    assert.equal(grown.height, before.height + 60);
+    assert.equal(grown.y, before.y - 60);
+    assert.equal(grown.y + grown.height, bottomEdge, "bottom edge stays put");
+    store.resizeBy("s", 0, 25, VIEWPORT);
+    const after = store.getBox().state;
+    assert.equal(after.height, before.height + 85);
+    assert.equal(after.y, before.y - 60, "south face: top edge stays");
+  });
+
+  it("resizeBy clamps at the minimum size and stops emitting once the clamp absorbs the delta", () => {
+    const store = createFloatingWindowStore();
+    store.open(VIEWPORT);
+    const before = store.getBox().state;
+    // West face driven far past the minimum: width pins at MIN_WIDTH, the
+    // right edge stays put.
+    store.resizeBy("w", 100_000, 0, VIEWPORT);
+    const pinned = store.getBox().state;
+    assert.equal(pinned.width, FLOATING_WINDOW_MIN_WIDTH);
+    assert.equal(
+      pinned.x + pinned.width,
+      before.x + before.width,
+      "right edge still put at the minimum",
+    );
+    // Further absorption emits NOTHING (the moveBy box-stability contract).
+    store.resizeBy("w", 50, 0, VIEWPORT);
+    assert.equal(store.getBox().state, pinned, "absorbed west delta: no emit");
+    // East face driven far below the minimum.
+    store.resizeBy("e", -100_000, 0, VIEWPORT);
+    const pinnedEast = store.getBox().state;
+    assert.equal(pinnedEast.width, FLOATING_WINDOW_MIN_WIDTH);
+    store.resizeBy("e", -50, 0, VIEWPORT);
+    assert.equal(store.getBox().state, pinnedEast, "absorbed east delta: no emit");
+    // The same absorption on the vertical axis.
+    store.resizeBy("s", 0, -100_000, VIEWPORT);
+    const pinnedSouth = store.getBox().state;
+    assert.equal(pinnedSouth.height, FLOATING_WINDOW_MIN_HEIGHT);
+    store.resizeBy("sw", 0, -50, VIEWPORT);
+    assert.equal(store.getBox().state, pinnedSouth, "absorbed south delta: no emit");
+  });
+
+  it("resizeBy clamps against the viewport: a face never crosses a viewport edge", () => {
+    const store = createFloatingWindowStore();
+    store.open(VIEWPORT);
+    const before = store.getBox().state;
+    store.resizeBy("e", 100_000, 0, VIEWPORT);
+    const after = store.getBox().state;
+    assert.equal(after.x, before.x);
+    assert.equal(
+      after.x + after.width,
+      VIEWPORT.width,
+      "the right edge lands exactly on the viewport's right edge",
+    );
+    store.resizeBy("s", 0, 100_000, VIEWPORT);
+    const south = store.getBox().state;
+    assert.equal(
+      south.y + south.height,
+      VIEWPORT.height,
+      "the bottom edge lands exactly on the viewport's bottom edge",
+    );
+    // Pure math pin: the maximized fill runs through the same discipline.
+    const fill = maximizedWindowPlacement(VIEWPORT);
+    assert.deepEqual(
+      fill,
+      {
+        x: FLOATING_WINDOW_MARGIN,
+        y: FLOATING_WINDOW_MARGIN,
+        width: VIEWPORT.width - 2 * FLOATING_WINDOW_MARGIN,
+        height: VIEWPORT.height - 2 * FLOATING_WINDOW_MARGIN,
+      },
+      "maximizedWindowPlacement is the viewport minus the margin on all sides",
+    );
+    const tiny = maximizedWindowPlacement({ width: 100, height: 80 });
+    assert.equal(tiny.width, FLOATING_WINDOW_MIN_WIDTH, "tiny viewport: width pins at the minimum");
+    assert.equal(tiny.height, FLOATING_WINDOW_MIN_HEIGHT);
+    assert.ok(tiny.x >= 0 && tiny.y >= 0, "position stays deterministic (no NaN)");
+  });
+
+  it("resizeBy is a no-op while closed and while maximized", () => {
+    const store = createFloatingWindowStore();
+    const closed = store.getBox().state;
+    store.resizeBy("se", 10, 10, VIEWPORT);
+    assert.equal(store.getBox().state, closed, "nothing resizes while closed");
+
+    store.open(VIEWPORT);
+    store.toggleMaximize(VIEWPORT);
+    const maximized = store.getBox().state;
+    assert.equal(maximized.maximized, true);
+    store.resizeBy("se", 10, 10, VIEWPORT);
+    assert.equal(
+      store.getBox().state,
+      maximized,
+      "resize handles are inert while maximized (drag or the button leaves maximize)",
+    );
+  });
+
+  it("toggleMaximize fills the viewport minus the margin on every side and flags maximized", () => {
+    const store = createFloatingWindowStore();
+    store.open(VIEWPORT);
+    store.toggleMaximize(VIEWPORT);
+    const after = store.getBox().state;
+    assert.equal(after.maximized, true);
+    assert.deepEqual(
+      maximizedWindowPlacement(VIEWPORT),
+      { x: after.x, y: after.y, width: after.width, height: after.height },
+      "the live fill equals the pure placement math",
+    );
+    assert.equal(after.x, FLOATING_WINDOW_MARGIN);
+    assert.equal(after.y, FLOATING_WINDOW_MARGIN);
+    assert.equal(after.width, VIEWPORT.width - 2 * FLOATING_WINDOW_MARGIN);
+    assert.equal(after.height, VIEWPORT.height - 2 * FLOATING_WINDOW_MARGIN);
+  });
+
+  it("the second toggle restores the exact prior geometry (position AND size)", () => {
+    const store = createFloatingWindowStore();
+    store.open(VIEWPORT);
+    store.moveBy(-100, 30, VIEWPORT);
+    const before = store.getBox().state;
+    store.toggleMaximize(VIEWPORT);
+    assert.equal(store.getBox().state.maximized, true);
+    store.toggleMaximize(VIEWPORT);
+    const restored = store.getBox().state;
+    assert.equal(restored.maximized, false);
+    assert.equal(restored.x, before.x);
+    assert.equal(restored.y, before.y);
+    assert.equal(restored.width, before.width);
+    assert.equal(restored.height, before.height);
+  });
+
+  it("toggleMaximize is rejected while closed (no emit, mirroring moveBy)", () => {
+    const store = createFloatingWindowStore();
+    const before = store.getBox().state;
+    store.toggleMaximize(VIEWPORT);
+    assert.equal(store.getBox().state, before, "nothing maximizes while closed");
+  });
+
+  it("restore re-clamps the remembered POSITION against a shrunken viewport (size stays exact)", () => {
+    const store = createFloatingWindowStore();
+    store.open({ width: 1600, height: 900 });
+    store.moveBy(-100, 30, VIEWPORT);
+    const before = store.getBox().state;
+    store.toggleMaximize(VIEWPORT);
+    // The viewport shrank while maximized; restoring re-clamps the
+    // remembered position (peek rule) and keeps the remembered SIZE exact.
+    store.toggleMaximize({ width: 700, height: 500 });
+    const restored = store.getBox().state;
+    assert.equal(restored.maximized, false);
+    assert.equal(restored.width, before.width, "remembered width is exact");
+    assert.equal(restored.height, before.height, "remembered height is exact");
+    assert.equal(
+      restored.x,
+      700 - FLOATING_WINDOW_MIN_PEEK,
+      "x re-clamps so the peek strip stays on the shrunken viewport",
+    );
+    assert.ok(restored.y <= 500 - FLOATING_WINDOW_MIN_PEEK);
+  });
+
+  it("moveBy while maximized restores first, then applies the delta (drag-restore)", () => {
+    const store = createFloatingWindowStore();
+    store.open(VIEWPORT);
+    const before = store.getBox().state;
+    store.toggleMaximize(VIEWPORT);
+    store.moveBy(30, 20, VIEWPORT);
+    const after = store.getBox().state;
+    assert.equal(after.maximized, false, "the drag leaves maximize");
+    assert.equal(after.x, before.x + 30, "the delta applies to the RESTORED rect");
+    assert.equal(after.y, before.y + 20);
+    assert.equal(after.width, before.width);
+    assert.equal(after.height, before.height);
+    // Subsequent moves behave like ordinary drags again.
+    store.moveBy(5, 5, VIEWPORT);
+    assert.equal(store.getBox().state.x, before.x + 35);
+  });
+
+  it("maximized persists across close/reopen: reopen re-fills the CURRENT viewport", () => {
+    const store = createFloatingWindowStore();
+    store.open({ width: 1600, height: 900 });
+    store.toggleMaximize({ width: 1600, height: 900 });
+    store.close();
+    const closed = store.getBox().state;
+    assert.equal(closed.maximized, true, "close keeps the maximized state");
+    store.open({ width: 1000, height: 700 });
+    const reopened = store.getBox().state;
+    assert.equal(reopened.maximized, true);
+    assert.equal(reopened.width, 1000 - 2 * FLOATING_WINDOW_MARGIN);
+    assert.equal(reopened.height, 700 - 2 * FLOATING_WINDOW_MARGIN);
+    assert.equal(reopened.x, FLOATING_WINDOW_MARGIN);
+    // Restore still knows the ORIGINAL pre-maximize rect (re-clamped).
+    store.toggleMaximize({ width: 1000, height: 700 });
+    const restored = store.getBox().state;
+    assert.equal(restored.maximized, false);
+    assert.equal(restored.width, FLOATING_WINDOW_WIDTH, "the remembered size survives");
+    assert.ok(
+      restored.x <= 1000 - FLOATING_WINDOW_MIN_PEEK,
+      "and its position re-clamps to the current viewport",
+    );
+  });
+
+  it("a resize that keeps position valid: west-face absorption re-clamps through the drag rule", () => {
+    // Sanity on the clampWindowPosition pass: resize math on an in-bounds
+    // window never moves a valid position (the "then clamp" is identity).
+    const store = createFloatingWindowStore();
+    store.open(VIEWPORT);
+    const before = store.getBox().state;
+    store.resizeBy("w", 120, 0, VIEWPORT);
+    const after = store.getBox().state;
+    assert.deepEqual(
+      clampWindowPosition(after.x, after.y, after.width, after.height, VIEWPORT),
+      { x: after.x, y: after.y },
+      "the post-resize position is already clamp-valid",
+    );
+    assert.equal(after.x + after.width, before.x + before.width);
   });
 });
 
@@ -499,6 +765,7 @@ const CHIP = '[data-launcher="dispatcher"]';
 const WINDOW = '[data-window="dispatcher"]';
 const FAILED = '[data-window="failed"]';
 const DRAG = "[data-window-drag-handle='true']";
+const MAXIMIZE = "[data-window-maximize='true']";
 const CLOSE = ".multitask-dispatcher-fwin__close";
 
 function query(selector: string): Element | null {
@@ -747,6 +1014,247 @@ describe("floating window — rendered: chip toggles, window portals to body, cl
   });
 });
 
+// ── 4b. Resize handles + maximize/restore, rendered (ticket 105) ──────────
+//
+// The rendered face of the ticket: handles dispatch the SAME real DOM
+// pointer events as the drag pins above and grow/shrink through the REAL
+// store math; the maximize button toggles through the store and swaps its
+// accessible state. All clamps come from the store — these pins only prove
+// the component wires the right deltas to the right faces.
+
+describe("floating window — resize handles and maximize/restore (ticket 105, rendered)", () => {
+  /** jsdom's default window size — what `liveViewport()` sees here. */
+  const VP = {
+    width: dom.window.innerWidth,
+    height: dom.window.innerHeight,
+  };
+
+  async function openWindow(): Promise<{ store: ReturnType<typeof createFloatingWindowStore>; root: Root }> {
+    const store = createFloatingWindowStore();
+    const Chip = createLauncherChip(t, store, shellStub());
+    const { root } = renderTree();
+    await act(async () => {
+      root.render(createElement(Chip));
+    });
+    await act(async () => {
+      click(query(CHIP)!);
+    });
+    return { store, root };
+  }
+
+  /** One pointerdown on an element + window moves + the mandatory up. */
+  async function dragPointer(
+    on: Element,
+    downs: { clientX: number; clientY: number },
+    moves: Array<{ clientX: number; clientY: number }>,
+  ): Promise<void> {
+    await act(async () => {
+      on.dispatchEvent(
+        new dom.window.MouseEvent("pointerdown", {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          clientX: downs.clientX,
+          clientY: downs.clientY,
+        }),
+      );
+    });
+    for (const at of moves) {
+      await act(async () => {
+        dom.window.dispatchEvent(
+          new dom.window.MouseEvent("pointermove", {
+            bubbles: true,
+            cancelable: true,
+            clientX: at.clientX,
+            clientY: at.clientY,
+          }),
+        );
+      });
+    }
+    await act(async () => {
+      dom.window.dispatchEvent(
+        new dom.window.MouseEvent("pointerup", {
+          bubbles: true,
+          cancelable: true,
+          clientX: moves.at(-1)?.clientX ?? downs.clientX,
+          clientY: moves.at(-1)?.clientY ?? downs.clientY,
+        }),
+      );
+    });
+  }
+
+  function handle(edge: string): Element | null {
+    return query(`${WINDOW} [data-resize-edge='${edge}']`);
+  }
+
+  it("the five wired resize handles render inside the window; the north faces stay unwired", async () => {
+    const { root } = await openWindow();
+    for (const edge of ["e", "w", "s", "se", "sw"]) {
+      assert.ok(handle(edge), `the ${edge} handle renders inside the window`);
+    }
+    // Deliberate: the titlebar owns the top strip (drag) and the
+    // maximize/close buttons own the top-right corner — north faces would
+    // steal drags or button clicks (recorded in the ticket comment).
+    assert.equal(handle("n"), null, "no north handle");
+    assert.equal(handle("ne"), null, "no north-east handle");
+    assert.equal(handle("nw"), null, "no north-west handle");
+
+    await act(async () => {
+      root.unmount();
+    });
+    disposeWindowLayer();
+  });
+
+  it("dragging the east handle grows the window by the SUM of per-event deltas (no compounding)", async () => {
+    const { store, root } = await openWindow();
+    // Off the default top-right placement so the east face has room.
+    store.moveBy(-200, 0, VP);
+    const before = store.getBox().state;
+
+    await dragPointer(
+      handle("e")!,
+      { clientX: before.x + before.width, clientY: 400 },
+      [
+        { clientX: before.x + before.width + 10, clientY: 400 },
+        { clientX: before.x + before.width + 20, clientY: 400 },
+        { clientX: before.x + before.width + 30, clientY: 400 },
+      ],
+    );
+
+    const after = store.getBox().state;
+    assert.equal(
+      after.width,
+      before.width + 30,
+      "three 10px moves widen the window 30px — each pointermove contributes " +
+        "its OWN delta (the ticket-103 drag rule, now on a resize face)",
+    );
+    assert.equal(after.x, before.x, "the top-left corner stays");
+    assert.equal(after.height, before.height, "height untouched");
+
+    await act(async () => {
+      root.unmount();
+    });
+    disposeWindowLayer();
+  });
+
+  it("dragging the west handle moves x left while the right edge stays exactly put", async () => {
+    const { store, root } = await openWindow();
+    const before = store.getBox().state;
+    const rightEdge = before.x + before.width;
+
+    await dragPointer(
+      handle("w")!,
+      { clientX: before.x, clientY: 400 },
+      [
+        { clientX: before.x - 10, clientY: 400 },
+        { clientX: before.x - 20, clientY: 400 },
+        { clientX: before.x - 30, clientY: 400 },
+      ],
+    );
+
+    const after = store.getBox().state;
+    assert.equal(after.x, before.x - 30, "x tracks the pointer");
+    assert.equal(after.width, before.width + 30, "width compensates");
+    assert.equal(
+      after.x + after.width,
+      rightEdge,
+      "the opposite (right) edge never moves",
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    disposeWindowLayer();
+  });
+
+  it("the maximize button toggles geometry and aria state through the store", async () => {
+    const { store, root } = await openWindow();
+    const before = store.getBox().state;
+    const maximizeCopy = localeDictionary.en["launcher.window.maximize"];
+    const restoreCopy = localeDictionary.en["launcher.window.restore"];
+
+    const button = query(MAXIMIZE);
+    assert.ok(button, "the maximize button renders in the titlebar");
+    assert.equal(button.getAttribute("aria-label"), maximizeCopy);
+    assert.equal(button.getAttribute("title"), maximizeCopy);
+    assert.equal(button.getAttribute("aria-pressed"), "false");
+    assert.equal(
+      query(WINDOW)!.getAttribute("data-window-maximized"),
+      null,
+      "the maximized marker is absent at rest",
+    );
+
+    await act(async () => {
+      click(button!);
+    });
+    const maximized = store.getBox().state;
+    assert.equal(maximized.maximized, true);
+    assert.equal(maximized.x, FLOATING_WINDOW_MARGIN);
+    assert.equal(maximized.y, FLOATING_WINDOW_MARGIN);
+    assert.equal(
+      maximized.width,
+      VP.width - 2 * FLOATING_WINDOW_MARGIN,
+      "fills the viewport minus the margin",
+    );
+    assert.equal(maximized.height, VP.height - 2 * FLOATING_WINDOW_MARGIN);
+    assert.equal(
+      query(MAXIMIZE)!.getAttribute("aria-pressed"),
+      "true",
+      "aria state follows the store",
+    );
+    assert.equal(query(MAXIMIZE)!.getAttribute("aria-label"), restoreCopy);
+    assert.equal(
+      query(WINDOW)!.getAttribute("data-window-maximized"),
+      "true",
+      "the maximized marker lands on the root (the CSS inert-handles hook)",
+    );
+
+    await act(async () => {
+      click(query(MAXIMIZE)!);
+    });
+    const restored = store.getBox().state;
+    assert.equal(restored.maximized, false);
+    assert.equal(restored.x, before.x, "exact prior geometry: x");
+    assert.equal(restored.y, before.y, "y");
+    assert.equal(restored.width, before.width, "width");
+    assert.equal(restored.height, before.height, "height");
+    assert.equal(query(MAXIMIZE)!.getAttribute("aria-pressed"), "false");
+    assert.equal(query(MAXIMIZE)!.getAttribute("aria-label"), maximizeCopy);
+
+    await act(async () => {
+      root.unmount();
+    });
+    disposeWindowLayer();
+  });
+
+  it("dragging the titlebar while maximized restores first, then tracks the pointer (Windows-like)", async () => {
+    const { store, root } = await openWindow();
+    const before = store.getBox().state;
+    await act(async () => {
+      click(query(MAXIMIZE)!);
+    });
+    assert.equal(store.getBox().state.maximized, true);
+
+    await dragPointer(
+      query(DRAG)!,
+      { clientX: 400, clientY: 40 },
+      [{ clientX: 415, clientY: 50 }],
+    );
+
+    const after = store.getBox().state;
+    assert.equal(after.maximized, false, "the first drag move leaves maximize");
+    assert.equal(after.x, before.x + 15, "the delta applies to the RESTORED rect");
+    assert.equal(after.y, before.y + 10);
+    assert.equal(after.width, before.width);
+    assert.equal(after.height, before.height);
+
+    await act(async () => {
+      root.unmount();
+    });
+    disposeWindowLayer();
+  });
+});
+
 describe("floating window — crash isolation (the ticket's guarantee, rendered)", () => {
   it("boundary unit: getDerivedStateFromError flips to the fallback; the fallback is the honest line", () => {
     assert.deepEqual(
@@ -849,13 +1357,25 @@ describe("floating window — crash isolation (the ticket's guarantee, rendered)
       y: 20,
       width: FLOATING_WINDOW_WIDTH,
       height: FLOATING_WINDOW_HEIGHT,
+      maximized: false,
     };
-    const chrome = { title: "T", close: "C", failed: "F" };
+    const chrome = {
+      title: "T",
+      close: "C",
+      maximize: "M",
+      restore: "R",
+      failed: "F",
+    };
     const content = createElement("div", { id: "content" });
     const tree = describeFloatingWindow(
       state,
       chrome,
-      { onClose: () => {}, onTitlebarPointerDown: () => {} },
+      {
+        onClose: () => {},
+        onTitlebarPointerDown: () => {},
+        onToggleMaximize: () => {},
+        onResizePointerDown: () => {},
+      },
       content,
       1,
     ) as unknown as {
@@ -865,7 +1385,7 @@ describe("floating window — crash isolation (the ticket's guarantee, rendered)
           {
             props: {
               onPointerDown: unknown;
-              children: [{ props: { children: string } }, unknown];
+              children: [{ props: { children: string } }, unknown, unknown];
             };
           },
           {
@@ -874,12 +1394,15 @@ describe("floating window — crash isolation (the ticket's guarantee, rendered)
               children: { type: unknown; props: { failed: string; children: unknown } };
             };
           },
+          ...Array<{ props: { "data-resize-edge": string } }>,
         ];
       };
     };
     // children[0] is the <style> element; children[1] the titlebar (drag
-    // handle + close) — OUTSIDE the boundary; children[2] the body div
-    // holding the boundary around exactly the hosted shell content.
+    // handle + maximize + close) — OUTSIDE the boundary; children[2] the
+    // body div holding the boundary around exactly the hosted shell
+    // content. Ticket 105 appends the resize handles AFTER the body
+    // (children[3..]) — the pinned prefix stands.
     const titlebar = tree.props.children[1];
     assert.equal(typeof titlebar.props.onPointerDown, "function");
     assert.equal(titlebar.props.children[0]!.props.children, "T");
@@ -890,6 +1413,15 @@ describe("floating window — crash isolation (the ticket's guarantee, rendered)
       boundary.props.children,
       content,
       "the boundary wraps exactly the hosted shell",
+    );
+    // The resize handles are the tail: five faces, e/w/s/se/sw (the north
+    // faces stay unwired — the titlebar and buttons own the top strip).
+    assert.equal(tree.props.children.length, 3 + 5);
+    assert.deepEqual(
+      tree.props.children
+        .slice(3)
+        .map((handle) => handle.props["data-resize-edge"]),
+      ["e", "w", "s", "se", "sw"],
     );
   });
 });

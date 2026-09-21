@@ -329,6 +329,10 @@ export const localeDictionary: LocaleDictionary = {
     // the line and working chrome; close + reopen recovers.
     "launcher.chip.label": "Dispatchers",
     "launcher.window.close": "Close the dispatcher window",
+    // Ticket 105: the titlebar's maximize/restore toggle — the label swaps
+    // with the window's maximized state (one button, two faces).
+    "launcher.window.maximize": "Maximize the dispatcher window",
+    "launcher.window.restore": "Restore the dispatcher window",
     "launcher.window.failed":
       "The dispatcher window hit an error and its content stopped rendering. Close it here and reopen it from the Dispatchers button.",
     // Ticket 101 (ADR-0021 decision 3): the sidebar's session-lifecycle
@@ -484,6 +488,10 @@ export const localeDictionary: LocaleDictionary = {
     // “调度台”按钮重新打开即可恢复。
     "launcher.chip.label": "调度台",
     "launcher.window.close": "关闭调度窗口",
+    // Ticket 105：标题栏的最大化/还原切换按钮——标签随窗口的最大化状态切换
+    // （一个按钮，两份文案）。
+    "launcher.window.maximize": "最大化调度窗口",
+    "launcher.window.restore": "还原调度窗口",
     "launcher.window.failed":
       "调度窗口遇到错误，内容已停止渲染。请在此关闭它，再通过“调度台”按钮重新打开。",
     // Ticket 101（ADR-0021 决定 3）：侧栏的会话生命周期入口。添加 = 在一个

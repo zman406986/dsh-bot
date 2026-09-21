@@ -36,6 +36,34 @@ The store face has position mutation (`moveBy`, `src/client/floating-window-stor
 
 ## Comments
 
+### 2026-09-22 — implementation session
+
+Implemented offline (no live lane touched). All geometry stays in the store; the component only feeds pointer deltas, a viewport, and a face.
+
+**Store (`src/client/floating-window-store.ts`)** — the "fixed for now" comment is replaced; the size is now mutable, still in-memory only:
+- `resizeBy(edge, dx, dy, viewport)` — edge-aware resize mirroring `moveBy`'s contract: immutable emit, early return when the clamp absorbs the whole delta (box reference stable), no-op while closed or maximized. East/south faces keep the top-left put (the face cannot cross a viewport edge); west/north faces keep the OPPOSITE edge put (x/y follow the pointer, the size compensates), then the position runs through `clampWindowPosition` — position validity wins if it ever disagrees with edge preservation (the ticket's "…then clamp" wording; identity for any in-bounds window, pinned).
+- `toggleMaximize(viewport)` — fills the viewport minus `FLOATING_WINDOW_MARGIN` on every side and remembers the prior rect (closure field, not published state); second toggle restores the remembered rect exactly (size exact, position re-clamped). Rejected while closed (mirrors `moveBy`'s closed pin). `maximizedWindowPlacement` is the exported pure fill math (also clamps to the minimum on absurdly small viewports — deterministic, no NaN).
+- **Viewport shrinks while maximized (recorded per the session brief):** nothing re-clamps until the next interaction, because the store only ever sees a viewport as a call argument (no listener). Every path that carries a viewport re-clamps: a drag (`moveBy`) restores first against the live viewport, an explicit restore re-clamps the remembered POSITION (size stays exact — the peek rule keeps the titlebar reachable), and a maximized close/reopen re-FILLS against the current viewport (maximized survives close; the remembered rect survives until restore).
+- **Maximized-drag decision: Windows-like restore-on-drag, decided entirely in the store.** `moveBy` while maximized restores on the first move and then applies the delta to the restored rect; a bare click (down+up) never restores. The component's `beginDrag` stays maximized-blind — the ticket-103 pattern untouched. `resizeBy` while maximized is a plain no-op (restore via drag or the button); wiring restore-on-resize would yank the rect out from under the grabbed edge.
+- **Minimum size: 320×240** (`FLOATING_WINDOW_MIN_WIDTH/HEIGHT`) — small enough to stay usable on a crowded viewport, large enough that the titlebar and the shell's panes keep working.
+
+**Component (`src/client/floating-window.tsx`)**:
+- `beginResize(edge, event, store)` is exactly the `beginDrag` pattern with a face (left-button only, own-delta-per-move, three window listeners removed on up/cancel).
+- Resize handles render AFTER the body as JSX-spread children so the pinned structural order stays flat and untouched (children[0]=style, [1]=titlebar, [2]=body — the pin's runtime assertions needed no change, only its type cast and a new tail assertion). Five faces wired: `e/w/s/se/sw` with `multitask-dispatcher-fwin__resize-<edge>` classes + `data-resize-edge` hooks. **The north faces (n/ne/nw) are deliberately NOT wired** — the titlebar owns the top strip (drag) and the buttons own the top-right corner; a north handle would steal drags or button clicks (the window has no non-client area to park them in, unlike a real window manager). The store math supports all eight edges if ever needed.
+- Windows-style maximize/restore button in the titlebar next to close (`data-window-maximize="true"`, `aria-pressed`, glyph □/❐); aria-label/title swap with state. The root carries `data-window-maximized` while maximized; CSS turns the handles inert there (`pointer-events:none`) since the store rejects resizes.
+- CSS: handle hit zones (6px edges, 12px corners) with face cursors (`ew-resize`, `ns-resize`, `nwse-resize`, `nesw-resize`), `touch-action:none`, NO colour properties at all (token rule trivially met), no animation.
+- **Drag-while-maximized pinned** (the store rule above) in both store and rendered pins.
+
+**Locales (`src/client/overlay.ts`)**: `launcher.window.maximize` / `launcher.window.restore` added to BOTH faces in lockstep (en "Maximize/Restore the dispatcher window", zh 最大化/还原调度窗口); `validateLocaleDictionary` stays green.
+
+**`client/index.js`**: `npm run build:client` ran; the bundle is git-ignored build output (untracked per `.gitignore` `/client/`), so tracked-git shows no bundle change to include.
+
+**Pins**: 18 added (13 store: east/west/north-south faces, min-size clamp + absorbed no-emit ×3 axes, viewport-edge clamp + fill math, closed/maximized no-op, maximize fill, exact restore, closed reject, restore re-clamp on shrunken viewport, drag-restore via `moveBy`, maximized-persists-reopen re-fill, post-resize position validity; 5 rendered: handles present/north absent, east per-event-delta sum, west opposite-edge-put, maximize aria+geometry toggle, titlebar-drag-while-maximized). 3 updated deliberately: the structural-pin literals (state `maximized`, chrome `maximize`/`restore`, actions `onToggleMaximize`/`onResizePointerDown`) + its tail handles assertion; the scaffold suite's exact locale key list (+2 keys). The 539 chip-text pin is untouched (ticket 107's). All pre-existing pins green.
+
+**Gates**: before 1176/288/0, typecheck green, lint:docs green → after **1194/290/0** (pass/suites/fail), typecheck green, lint:docs green. Evidence: `.scratch/testing/2026-09-22-live-105-106-107/offline-105/` (before/after gate outputs + README artifact map).
+
+Ticket stays in `open/` — resolution waits for the live lane.
+
 ### 2026-09-22 — scribe session
 
 Filed from the human's in-session request of 2026-09-22 (quoted verbatim in Problem). The scribe pass verified the cited facts by code reading only (no implementation): the size is seeded once at store creation and has no writer, the store face has no size mutation, and the only `resize` anywhere in the client face is the composer textarea's. The implementer should reuse the two recorded contracts rather than inventing new ones: `moveBy`'s clamp-and-early-return discipline at store level, and the per-event-delta drag rule at component level (ticket 103's fix, pinned at `test/client-floating-window.test.ts:674-748`). Labelled ready-for-agent: the behavior is fully specified by the request plus the existing patterns; no design decision is left open beyond the handle/affordance details the implementing ticket records as it goes.
