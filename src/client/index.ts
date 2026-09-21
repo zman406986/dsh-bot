@@ -501,8 +501,14 @@ export function applyClientModule(
   // DOM technique (this ticket's evidence, per ADR-0021's open question):
   // the window PORTALS into a body-level container — see floating-window.tsx
   // for the rejected second-overlay-entry alternative and the citations.
-  // The container's lifecycle rides this fiber (unload/HMR removes it);
-  // offline (no `document`) both the container and the window no-op.
+  // Since the 2026-09-22 live-lane repair the launcher capsule portals into
+  // the SAME container (still this ONE entry), and the capsule's styles ship
+  // with the entry itself — see CAPSULE_CSS in floating-window.tsx: with the
+  // window closed the capsule must stay floating (its styles can no longer
+  // ride the window's portal <style>), and its surface must stack above the
+  // window's. The container's lifecycle rides this fiber (unload/HMR removes
+  // it); offline (no `document`) the container, the window, and the capsule
+  // all no-op.
   //
   // Crash isolation (ADR-0021 decision 2, re-based onto the additive
   // posture — the retired root abdication has no successor because nothing

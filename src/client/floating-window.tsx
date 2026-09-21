@@ -18,7 +18,14 @@
  * DOM TECHNIQUE — React portal (decided on this ticket's evidence, per
  * ADR-0021's open question): the window renders through `createPortal`
  * into a module-owned container appended to `document.body`, NOT as a
- * second overlay entry. Evidence:
+ * second overlay entry. Since the 2026-09-22 live-lane repair the
+ * LAUNCHER CAPSULE portals into the SAME container (the entry itself
+ * stays the ONE seam — a portal is view technique, not a second entry):
+ * its styles must exist while the window is closed (they ship with the
+ * launcher entry — `CAPSULE_CSS`), and its surface must stack ABOVE the
+ * window's (`CAPSULE_CSS`'s z-index note) — inside the overlay layer's
+ * own stacking context no integer could outrank the body-level window.
+ * Evidence:
  * - The overlay seam has no geometry/anchor/positioning API — "entries are
  *   plain React roots inside a frame-wide absolute layer … position and
  *   size themselves with their own DOM" (`docs/research/dsh-capsule-seams.md`
@@ -92,28 +99,60 @@ import { formatTemplate } from "./roster-store.js";
 export const FLOATING_WINDOW_CLASS = "multitask-dispatcher-fwin";
 
 /**
- * Window + capsule styles (ticket 100, themed per ticket 49; ticket 105 adds
- * the maximize button and the resize handles; ticket 107 replaces the chip's
- * rules with the floating capsule's). Colours: `--dsw-alias-bg-layer-1/3`
- * (the host's own floating-surface value for layer-3),
- * `--dsw-alias-border-l3`. The `z-index` values are plain integers — the
- * body-level container must stand above the app frame, and the capsule
- * (position:fixed INSIDE the overlay entry, per ticket 107 — no second
- * entry) must stand above the layer's own context; the tokens govern
- * colours, not stacking. The resize handles are invisible hit zones (no
- * colours at all) with the face's cursor; while maximized they go inert
- * (`pointer-events:none` via the root's `data-window-maximized`) because
- * the store rejects resizes there. The capsule rides the overlay layer's
- * click-through contract: the entry subtree inherits pointer events
- * through the outlet's `display:contents` anchor
- * (dsh-capsule-seams.md Seam 1), so the capsule is interactive and draws
- * nothing where it is not.
+ * Window + capsule styles — SPLIT by the 2026-09-22 live-lane repair
+ * (shape (a) of the two shapes the repair weighed: capsule rules ship with
+ * the launcher entry, window rules stay in the window portal — chosen over
+ * hoisting one merged stylesheet because it keeps the window's portal tree
+ * self-contained and its pinned child order untouched). Before the repair
+ * BOTH rule sets rode `FLOATING_WINDOW_CSS`, which renders inside the
+ * window's portal `<style>` — so with the window CLOSED (the capsule's
+ * primary state) the capsule rendered unstyled: `position:static`, pill
+ * shape gone, the capsule store's left/top ignored. The live lane
+ * (`.scratch/testing/2026-09-22-live-105-106-107/live/`) recorded exactly
+ * that; {@link CAPSULE_CSS} is the fix. Colours are token-only
+ * (`--dsw-alias-*`, the ticket-49 contract) across both halves; no
+ * animation; the tokens govern colours, not stacking.
  */
-export const FLOATING_WINDOW_CSS = `
-.multitask-dispatcher-fwin__capsule{position:fixed;z-index:1000;display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-3);font-size:12px;font-weight:600;letter-spacing:.04em;opacity:.85;cursor:grab;user-select:none;touch-action:none;color:inherit;font-family:inherit}
+
+/**
+ * The capsule's styles, rendered by the LAUNCHER ENTRY itself (a `<style>`
+ * in the entry's tree — see {@link createLauncherChip}), so they exist
+ * whenever the entry is mounted, regardless of window state. The
+ * `z-index` is a plain integer, 1001 — one ABOVE the window root's 1000:
+ * the 2026-09-22 live-lane repair's second finding was that the capsule
+ * could be dragged UNDER the floating window (a covered capsule was
+ * unclickable until the window moved). The capsule is the always-present
+ * affordance (Windows-taskbar-like), so it paints above the window. That
+ * ordering holds because both surfaces are `position:fixed` inside the
+ * SAME body-level layer container (see the DOM-technique note on the
+ * module header: the capsule portals there since the same repair — inside
+ * the overlay layer's own stacking context no integer could outrank the
+ * body-level window), where the higher integer wins deterministically.
+ * The capsule is interactive the way the window is — the layer draws
+ * nothing where its fixed children are not.
+ */
+export const CAPSULE_CSS = `
+.multitask-dispatcher-fwin__capsule{position:fixed;z-index:1001;display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;border:1px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-3);font-size:12px;font-weight:600;letter-spacing:.04em;opacity:.85;cursor:grab;user-select:none;touch-action:none;color:inherit;font-family:inherit}
 .multitask-dispatcher-fwin__capsule:hover{opacity:1}
 .multitask-dispatcher-fwin__capsule:active{cursor:grabbing}
 .multitask-dispatcher-fwin__capsule[aria-pressed="true"]{border-color:var(--dsw-alias-state-business-primary)}
+`;
+
+/**
+ * The floating window's styles, rendered inside the window's portal (the
+ * `<style>` child of `describeFloatingWindow`'s root — the pinned child
+ * order keeps it; ticket 105's maximize button and resize handles ride
+ * here; ticket 107's capsule rules moved OUT to {@link CAPSULE_CSS} in the
+ * 2026-09-22 live-lane repair). Colours: `--dsw-alias-bg-layer-1/3` (the
+ * host's own floating-surface value for layer-3), `--dsw-alias-border-l3`.
+ * The window root's `z-index` is the plain integer 1000 — the body-level
+ * container must stand above the app frame; the CAPSULE outranks it (1001,
+ * see {@link CAPSULE_CSS}). The resize handles are invisible hit zones (no
+ * colours at all) with the face's cursor; while maximized they go inert
+ * (`pointer-events:none` via the root's `data-window-maximized`) because
+ * the store rejects resizes there.
+ */
+export const FLOATING_WINDOW_CSS = `
 .multitask-dispatcher-fwin{position:fixed;z-index:1000;display:flex;flex-direction:column;background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l3);border-radius:10px;overflow:hidden;font-size:13px;line-height:1.5;font-family:inherit;color:inherit}
 .multitask-dispatcher-fwin__titlebar{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px 6px 12px;background:var(--dsw-alias-bg-layer-3);border-bottom:1px solid var(--dsw-alias-border-l3);cursor:move;user-select:none;touch-action:none}
 .multitask-dispatcher-fwin__title{font-weight:600;opacity:.75;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -515,11 +554,24 @@ export function createFloatingWindow(
  * role is unchanged (toggle the floating window, `aria-pressed`); the
  * counts in words live on the accessible label/title
  * (`launcher.capsule.aria`, en+zh). Floating is positional only:
- * `position:fixed` inside this single injected entry, placement from the
- * capsule's own in-memory store (draggable; a drag past the threshold
- * suppresses the trailing click so moving the capsule never toggles the
- * window). Renders the capsule button and the window surface beside it
- * (the surface portals itself out of the overlay layer at body level).
+ * `position:fixed` in `CAPSULE_CSS`, placement from the capsule's own
+ * in-memory store (draggable; a drag past the threshold suppresses the
+ * trailing click so moving the capsule never toggles the window).
+ *
+ * 2026-09-22 live-lane repair (this factory's render shape): the capsule
+ * BUTTON portals into the same module-owned body-level layer the window
+ * uses, and the capsule's RULES ship with the entry itself — a `<style>`
+ * rendered beside the portal, present whenever the entry is mounted,
+ * regardless of window state (shape (a): capsule rules ride the launcher
+ * entry, window rules stay in the window portal). Before the repair the
+ * button rendered inline in the entry and its styles rode the window's
+ * portal `<style>` — with the window CLOSED the capsule computed
+ * `position:static` and its store placement was ignored; and inside the
+ * overlay layer it could be covered by the body-level window no matter
+ * its z-index. The entry stays the ONE `shell.overlay` seam — exactly as
+ * with the window, a portal is view technique, not a second entry. With
+ * no document (offline) the capsule renders nothing — the window's own
+ * no-document posture.
  *
  * Subscribes to TWO stores (ticket 107's wiring gap): the window store as
  * before, and the shell store — the same `mount.store` the hosted shell
@@ -550,34 +602,52 @@ export function createLauncherChip(
       dispatchers: String(counts.dispatchers),
       workers: String(counts.workers),
     });
+    // The portal target is the SAME module-owned body-level layer the
+    // window portals into (see the DOM-technique note on the module
+    // header): it escapes the overlay layer's stacking context, so
+    // `CAPSULE_CSS`'s z-index 1001 deterministically outranks the window's
+    // 1000 where they overlap. Offline (no document) it is null and the
+    // capsule renders nothing — the window's own posture.
+    const target = windowLayer();
+    const capsule = (
+      <button
+        type="button"
+        className={`${FLOATING_WINDOW_CLASS}__capsule`}
+        data-launcher="dispatcher"
+        aria-pressed={box.state.open}
+        aria-label={aria}
+        title={aria}
+        data-dispatcher-count={counts.dispatchers}
+        data-worker-count={counts.workers}
+        style={{ left: capsuleBox.state.x, top: capsuleBox.state.y }}
+        onClick={() => {
+          if (suppressNextClick) {
+            suppressNextClick = false;
+            return;
+          }
+          store.toggle(liveViewport());
+        }}
+        onPointerDown={(event) => {
+          suppressNextClick = false;
+          beginCapsuleDrag(event, capsuleStore, () => {
+            suppressNextClick = true;
+          });
+        }}
+      >
+        {`${counts.dispatchers} | ${counts.workers}`}
+      </button>
+    );
     return (
       <>
-        <button
-          type="button"
-          className={`${FLOATING_WINDOW_CLASS}__capsule`}
-          data-launcher="dispatcher"
-          aria-pressed={box.state.open}
-          aria-label={aria}
-          title={aria}
-          data-dispatcher-count={counts.dispatchers}
-          data-worker-count={counts.workers}
-          style={{ left: capsuleBox.state.x, top: capsuleBox.state.y }}
-          onClick={() => {
-            if (suppressNextClick) {
-              suppressNextClick = false;
-              return;
-            }
-            store.toggle(liveViewport());
-          }}
-          onPointerDown={(event) => {
-            suppressNextClick = false;
-            beginCapsuleDrag(event, capsuleStore, () => {
-              suppressNextClick = true;
-            });
-          }}
-        >
-          {`${counts.dispatchers} | ${counts.workers}`}
-        </button>
+        {/* The capsule's RULES ride the ENTRY (always mounted), not the
+            window's portal: closed is the capsule's primary state, and the
+            2026-09-22 live lane found the old merged stylesheet inside the
+            window's portal <style> — with the window closed the capsule
+            rendered unstyled (position:static, store placement ignored).
+            Shape (a) of the repair: capsule rules here (`CAPSULE_CSS`),
+            window rules in the window's own portal <style>. */}
+        <style>{CAPSULE_CSS}</style>
+        {target === null ? null : createPortal(capsule, target)}
         {createElement(Window)}
       </>
     );

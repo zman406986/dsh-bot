@@ -55,3 +55,103 @@ Implemented offline only (no live dsh/LLM/browser work; no push).
 - `test/client-face-scaffold.test.ts` — the exact-locale-key-list pin: `launcher.chip.label` → `launcher.capsule.aria` (sorted position kept), both faces still asserted identical.
 
 **Gates (before → after)**: `npm run typecheck` green → green; `npm test` **1199/293/0 → 1214/297/0** (+15 tests); `npm run lint:docs` green → green; `npm run build:client` green (`client/index.js` regenerated locally; git-ignored, so nothing bundle-shaped to commit — verified via `git check-ignore`). One intermediate red run (1214/297/1) was a bad edge calculation in a NEW test fixture (the "aged" snapshot was already past the window at the edge check), fixed in the pin; no production code changed. Evidence: `.scratch/testing/2026-09-22-live-105-106-107/offline-107/` (README with the artifact→claim map, baseline/after gate outputs). Ticket left in `open/`.
+
+### 2026-09-22 — live lane
+
+Live-verified against the real host + served bundle (lane
+`.scratch/testing/2026-09-22-live-105-106-107/live/`, served bundle fingerprinted first).
+Verdict: **PASS on every functional clause**, plus ONE live finding (styling lifecycle,
+below — recorded, not fixed).
+
+- **One launcher entry, information-bearing at rest:** exactly one
+  `[data-launcher="dispatcher"]` in the page; text `[N | W]` ("0 | 0"), matching
+  `data-dispatcher-count`/`data-worker-count`; aria-label/title
+  "0 个调度会话，0 个工作者进行中"; `aria-pressed` reflects the closed window
+  (`obs-capsule-initial.json`).
+- **Click toggles, drag moves, drag's trailing click does NOT toggle:** capsule dragged by
+  measured deltas moved (24,24)→(204,114) for a (+180,+90) dispatched sum — EXACT, per-step
+  +60/+30 — and the window stayed OPEN through the drag's trailing click (the 4 px
+  threshold works live); with the window moved aside, a plain click toggled CLOSED and
+  another toggled OPEN (`obs-capsule-drag.json` + `obs-capsule-click-control.json`).
+- **Counts are LIVE and honor ADR-0010's non-stale rule:** with THREE dispatcher rows
+  rendering (two stale persisted mirrors from prior boots + one live) the capsule counted
+  exactly 1; picker activations +1 each; the working worker showed within 2 s of the
+  spawn-style trivial prompt — capsule `1 | 1`, row chip "1 个进行中", worker pane
+  "Reply OK only / 进行中" — and dropped back to `1 | 0` when the worker finished; the
+  right-click close took it to `0 | 0`. A reply-only prompt (no spawn) left the count at
+  `1 | 0` for 120 s — no fabricated count (`obs-activate-1.json`,
+  `obs-capsule-counts*.json`, screenshot 17-worker-working.png).
+- **LIVE FINDING (offline pins missed it; needs a ruling/repair decision):** the capsule's
+  floating CSS — `position:fixed`, the pill shape, `cursor:grab` — lives in
+  `FLOATING_WINDOW_CSS`, which renders as a `<style>` INSIDE the window's portal tree, so
+  it exists ONLY while the window is open. Observed live: with the window closed the
+  capsule computes `position: static`, `cursor: default`, 41×23 px at its overlay-flow
+  spot, and its store `left/top` are ignored (the draggable-fixed capsule shape returns the
+  moment the window opens). All FUNCTIONALITY (counts, aria, click-toggle, drag store
+  updates, trailing-click suppression) holds in both states — the gap is the ruling's
+  "floating capsule" shape when the window is closed. Suggested direction: mount the
+  capsule's CSS at the overlay-entry/body level, not inside the window's portal.
+- **Residue note:** the capsule can be dragged UNDER the floating window (the body-level
+  portal paints above the overlay layer where they overlap); a covered capsule is
+  unclickable until the window moves. No clamp prevents the overlap.
+
+Ticket stays in `open/` for the closer (along with the finding above).
+
+### 2026-09-22 — live-lane repair session
+
+Repaired both findings recorded by the live lane above. Offline work only —
+no live dsh/LLM/browser pass was run for the repair; the live lane's styling
+observation stands as the motivating evidence, and the repair is
+**offline-verified only** (a future live pass should confirm the capsule's
+computed `position:fixed` and paint order on the real host).
+
+**Finding 1 (capsule unstyled while the window is closed) — fixed, shape (a).**
+The capsule's rules split out of the merged stylesheet into `CAPSULE_CSS`
+(`src/client/floating-window.tsx`), rendered as the launcher ENTRY's own
+`<style>`, present whenever the entry is mounted regardless of window state;
+the window's rules stay in `FLOATING_WINDOW_CSS` inside the window's portal.
+Shape (a) was chosen over (b) (hoisting one merged stylesheet into the entry)
+because it keeps the window's portal tree self-contained and its pinned child
+order (style, titlebar, body) untouched — the ticket-100/105 structural pin
+needed no update because the window tree keeps its `<style>` child.
+
+**Finding 2 (capsule draggable under the floating window) — fixed.** Two
+halves, both inside the single injected entry: the capsule BUTTON now portals
+into the SAME module-owned body-level layer the window uses
+(`.multitask-dispatcher-fwin-layer`) — a plain z-index bump inside the overlay
+entry could not be trusted, because the module's own recorded DOM-technique
+evidence says the overlay layer carries a stacking context in which no integer
+outranks the body-level window (the same reason the window portals) — and
+`CAPSULE_CSS` gives the capsule `z-index:1001`, one above the window root's
+1000, so with both surfaces `position:fixed` in the ONE shared layer the
+higher integer wins deterministically. The capsule is the always-present
+affordance (Windows-taskbar-like) and stays clickable where the two overlap.
+The entry remains the ONE `shell.overlay` seam (id and order unchanged;
+`launcherOverlayRegistration()` byte-identical) — a portal is view technique,
+not a second entry, the window's own recorded posture. Offline (no document)
+the capsule now renders nothing — the window's existing no-document posture
+(`src/client/index.ts` comment updated in place).
+
+**Pins added** (`test/client-floating-window.test.ts`, new describe
+`launcher capsule — styling lifecycle (2026-09-22 live-lane repair)`, +2
+tests): finding 1 rendered over a CLOSED store — the window renders nothing,
+the entry renders its own `<style>` carrying
+`.multitask-dispatcher-fwin__capsule{position:fixed`, the capsule carries the
+styled class and its store placement while closed, and it portals out of the
+entry's container into the shared layer; finding 2 at source level (jsdom does
+not cascade stylesheet rules into getComputedStyle) — entry style declares
+`z-index:1001`, the window's portal `<style>` keeps the window root at
+`z-index:1000` with no capsule rules, and both fixed surfaces `closest()` into
+the ONE layer container. **No existing pins were updated or removed** — the
+structural pin stays truthful, and the ticket 105/106 pins stay green. The
+window-open path keeps its stylesheet (drag/resize/maximize rules ride the
+window's own portal `<style>`), and the capsule's rules are disjoint
+selectors, so both surfaces style correctly while open.
+
+**Gates (before → after)**: `npm run typecheck` green → green; `npm test`
+**1214/297/0 → 1216/298/0** (+2 tests, +1 suite); `npm run lint:docs` green →
+green; `npm run build:client` green (`client/index.js` regenerated locally;
+git-ignored — nothing bundle-shaped to commit). Evidence:
+`.scratch/testing/2026-09-22-live-105-106-107/offline-107/` (`repair-README.md`
+with the artifact→claim map, `repair-before-typecheck-test.txt`,
+`repair-after-all-gates.txt`). Ticket left in `open/` for the closer.

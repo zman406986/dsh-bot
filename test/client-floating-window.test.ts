@@ -1248,6 +1248,142 @@ describe("launcher capsule — rendered: drag and click discrimination (ticket 1
   });
 });
 
+// ── 3½. The 2026-09-22 live-lane repair: styling lifecycle + paint order ──
+//
+// The live lane (`.scratch/testing/2026-09-22-live-105-106-107/live/`)
+// recorded two findings the offline pins had missed:
+// 1. the capsule's floating CSS rode the merged stylesheet, which renders
+//    inside the window's portal <style> — with the window CLOSED (the
+//    capsule's primary state) the capsule computed position:static,
+//    cursor:default, and its store placement was ignored;
+// 2. the capsule could be dragged UNDER the floating window — the
+//    body-level portal painted above it, and a covered capsule was
+//    unclickable until the window moved.
+// The repair (recorded in floating-window.tsx): shape (a) — the capsule's
+// rules ship with the launcher entry itself (`CAPSULE_CSS`, an entry-level
+// <style>, present whenever the entry is mounted), the window's rules stay
+// in the window's portal; and the capsule portals into the SAME body-level
+// layer as the window with z-index 1001 over the window's 1000 (inside the
+// overlay layer's own stacking context no integer could outrank the
+// body-level window — the module's DOM-technique evidence applies to the
+// capsule too).
+
+describe("launcher capsule — styling lifecycle (2026-09-22 live-lane repair)", () => {
+  it("the capsule's floating styling ships with the launcher entry — present while the window is CLOSED", async () => {
+    const store = createFloatingWindowStore();
+    const Chip = createLauncherChip(t, store, createDispatcherShellStore(), shellStub());
+    const { root, container } = renderTree();
+    await act(async () => {
+      root.render(createElement(Chip));
+    });
+
+    // Finding 1, pinned over a CLOSED store: no window renders, so the old
+    // merged stylesheet (a child of the window's portal) did not exist at
+    // all in this state — the repair renders the capsule's rules from the
+    // ENTRY's own <style> instead.
+    assert.equal(query(WINDOW), null, "the window stays closed throughout");
+    const entryStyle = container.querySelector("style");
+    assert.ok(entryStyle, "the launcher entry renders its own <style>");
+    assert.match(
+      entryStyle!.textContent ?? "",
+      /\.multitask-dispatcher-fwin__capsule\{position:fixed/,
+      "the floating rule ships with the ENTRY — present while closed",
+    );
+
+    // The capsule itself is styled and placed while closed: the class from
+    // CAPSULE_CSS's selector, the placement from the capsule store (the
+    // left/top the live lane saw ignored when the rules were missing).
+    const chip = query(CHIP)!;
+    assert.equal(chip.getAttribute("aria-pressed"), "false");
+    assert.equal(
+      chip.className,
+      "multitask-dispatcher-fwin__capsule",
+      "the capsule carries the styled class while closed",
+    );
+    assert.equal(chip.style.left, `${FLOATING_WINDOW_MARGIN}px`);
+    assert.equal(chip.style.top, `${FLOATING_WINDOW_MARGIN}px`);
+
+    // And the capsule portals to the shared body-level layer — never an
+    // inline child of the entry's container (the pre-repair button was).
+    assert.equal(
+      container.querySelector(CHIP),
+      null,
+      "the capsule is portaled OUT of the entry's container",
+    );
+    assert.ok(
+      query(CHIP)!.closest(".multitask-dispatcher-fwin-layer"),
+      "the capsule portals into the shared body-level layer",
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    disposeWindowLayer();
+  });
+
+  it("the capsule paints ABOVE the floating window: capsule z-index 1001 over the window's 1000, one shared body-level layer", async () => {
+    const store = createFloatingWindowStore();
+    const Chip = createLauncherChip(t, store, createDispatcherShellStore(), shellStub());
+    const { root, container } = renderTree();
+    await act(async () => {
+      root.render(createElement(Chip));
+    });
+    await act(async () => {
+      click(query(CHIP)!);
+    });
+    assert.ok(query(WINDOW), "the window is open for the overlap pin");
+
+    // Finding 2, pinned at the source level (jsdom does not cascade
+    // stylesheet rules into getComputedStyle): both surfaces are
+    // position:fixed inside the SAME body-level layer, so the integers
+    // decide — the capsule's 1001 outranks the window's 1000, keeping the
+    // always-present affordance clickable where the two overlap.
+    const entryStyle = container.querySelector("style")!;
+    assert.match(
+      entryStyle.textContent ?? "",
+      /z-index:1001/,
+      "the capsule's rule outranks the window's z-index",
+    );
+    assert.doesNotMatch(
+      entryStyle.textContent ?? "",
+      /__titlebar|__resize-|__body/,
+      "the entry's stylesheet carries no window rules (the split)",
+    );
+    const windowStyle = query(`${WINDOW} style`);
+    assert.ok(windowStyle, "the window portal keeps its own <style> child");
+    assert.match(
+      windowStyle!.textContent ?? "",
+      /\.multitask-dispatcher-fwin\{position:fixed;z-index:1000/,
+      "the window root sits at 1000 — one under the capsule",
+    );
+    assert.doesNotMatch(
+      windowStyle!.textContent ?? "",
+      /__capsule/,
+      "the window's stylesheet no longer carries the capsule's rules",
+    );
+    // Both fixed surfaces portal into the one layer container, where the
+    // integer comparison is the whole paint-order story.
+    const capsuleLayer = query(CHIP)!.closest(
+      ".multitask-dispatcher-fwin-layer",
+    );
+    const windowLayerEl = query(WINDOW)!.closest(
+      ".multitask-dispatcher-fwin-layer",
+    );
+    assert.ok(capsuleLayer, "the capsule portals into the body-level layer");
+    assert.ok(windowLayerEl, "the window portals into the body-level layer");
+    assert.equal(
+      capsuleLayer,
+      windowLayerEl,
+      "both surfaces share ONE body-level layer — one stacking comparison",
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    disposeWindowLayer();
+  });
+});
+
 // ── 4. Crash isolation + window behavior, rendered (jsdom + react-dom) ───
 
 // The launcher capsule — the selector is the launch role's stable marker
