@@ -1510,3 +1510,201 @@ describe("floating window — the summon/kill affordances render INSIDE the wind
     disposeWindowLayer();
   });
 });
+
+// ── 6. The right-click close menu, rendered (ticket 106) ─────────────────
+//
+// Ticket 106: right-click on a dispatcher row opens a minimal in-window
+// context menu whose one item sends `/dispatcher-stop` (the close seat)
+// after the SAME two-press arming the row's delete button uses. These pins
+// render the REAL shell (with the REAL mount hosts) inside the REAL window
+// and drive real DOM events: contextmenu opens — dispatcher rows only;
+// first click arms, second click inside the window sends exactly once;
+// outside pointer-down, Escape, scroll, and the row's own deactivation all
+// dismiss. Stale-mirror LIVENESS is out of scope here (ticket 104 owns
+// mirror honesty) — only the affordance-level hygiene is pinned.
+
+function contextMenuAt(element: Element, clientX = 120, clientY = 90): void {
+  element.dispatchEvent(
+    new dom.window.MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      button: 2,
+      clientX,
+      clientY,
+    }),
+  );
+}
+
+function pointerDownAt(element: Element): void {
+  element.dispatchEvent(
+    new dom.window.MouseEvent("pointerdown", {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    }),
+  );
+}
+
+describe("floating window — right-click close menu on dispatcher rows (ticket 106)", () => {
+  it("contextmenu opens only on dispatcher rows; two presses send /dispatcher-stop once; hygiene dismissals work", async () => {
+    const executed: Array<{
+      sessionId: string;
+      line: string;
+      attachments: readonly unknown[];
+    }> = [];
+    const ctx = createClientCtx();
+    ctx.remote = {
+      commands: {
+        execute(
+          sessionId: string,
+          line: string,
+          attachments: readonly unknown[],
+        ) {
+          executed.push({ sessionId, line, attachments });
+          return Promise.resolve({ kind: "success", text: "ok" });
+        },
+      },
+    };
+    const composition = applyClientModule(ctx, createRosterStore());
+    const mount = composition.mounts[0]!;
+    const Shell = createDispatcherShell(t, mount.store, mount.hosts);
+    const store = createFloatingWindowStore();
+    const Chip = createLauncherChip(t, store, createElement(Shell));
+    const { root } = renderTree();
+    await act(async () => {
+      root.render(createElement(Chip));
+    });
+    await act(async () => {
+      click(query(CHIP)!);
+    });
+    assert.ok(query(WINDOW), "the window opened");
+    await act(async () => {
+      mount.store.upsertSessions([
+        { sessionId: "s-disp", title: "Dispatcher", dispatcher: true },
+        { sessionId: "s-plain", title: "Plain" },
+      ]);
+    });
+
+    const dispRow = query(`${WINDOW} [data-session-id="s-disp"]`);
+    const plainRow = query(`${WINDOW} [data-session-id="s-plain"]`);
+    assert.ok(dispRow && plainRow, "both rows render");
+
+    // Right-click on the dispatcher row opens the menu, inside the window.
+    await act(async () => {
+      contextMenuAt(dispRow);
+    });
+    const menu = query(`${WINDOW} [data-row-menu="s-disp"]`);
+    assert.ok(menu, "right-click on a dispatcher row opens the menu");
+    assert.ok(
+      query(WINDOW)!.contains(menu),
+      "the menu is part of the window's tree (no body portal)",
+    );
+    assert.ok(
+      menu.getAttribute("style")?.includes("left:") === true,
+      "the menu is positioned near the cursor (inline left/top)",
+    );
+    const item = query(`${WINDOW} [data-row-menu-close="s-disp"]`);
+    assert.ok(item, "the one menu item renders");
+    assert.equal(item.getAttribute("data-armed"), "false");
+    assert.equal(item.textContent, t("shell.row.close"));
+
+    // Right-click on a NORMAL row: no menu. (A real right-click's
+    // pointer-down lands first — which also dismisses the open menu.)
+    await act(async () => {
+      pointerDownAt(plainRow);
+      contextMenuAt(plainRow);
+    });
+    assert.equal(
+      query(`${WINDOW} [data-row-menu]`),
+      null,
+      "normal sessions ignore right-click; the outside pointer-down dismissed the open menu",
+    );
+
+    // Reopen; the first click ARMS only — no send.
+    await act(async () => {
+      contextMenuAt(dispRow);
+    });
+    const armedItem = query(`${WINDOW} [data-row-menu-close="s-disp"]`);
+    assert.ok(armedItem);
+    await act(async () => {
+      click(armedItem);
+    });
+    assert.equal(armedItem.getAttribute("data-armed"), "true");
+    assert.equal(armedItem.textContent, t("shell.row.close-confirm"));
+    assert.deepEqual(executed, [], "arming never sends");
+
+    // Second click inside the window sends the stop exactly once, verbatim.
+    await act(async () => {
+      click(armedItem);
+    });
+    await act(async () => {}); // let the transport's promise settle
+    assert.deepEqual(executed, [
+      { sessionId: "s-disp", line: "/dispatcher-stop", attachments: [] },
+    ]);
+    assert.equal(
+      query(`${WINDOW} [data-row-menu]`),
+      null,
+      "the confirmed send closes the menu",
+    );
+
+    // Escape dismisses.
+    await act(async () => {
+      contextMenuAt(dispRow);
+    });
+    assert.ok(query(`${WINDOW} [data-row-menu="s-disp"]`));
+    await act(async () => {
+      dom.window.document.dispatchEvent(
+        new dom.window.KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+        }),
+      );
+    });
+    assert.equal(query(`${WINDOW} [data-row-menu]`), null, "Escape dismisses");
+
+    // Scroll dismisses (capture-phase listener; scroll does not bubble).
+    await act(async () => {
+      contextMenuAt(dispRow);
+    });
+    assert.ok(query(`${WINDOW} [data-row-menu]`));
+    await act(async () => {
+      query(`${WINDOW} .multitask-dispatcher-shell__sidebar`)!.dispatchEvent(
+        new dom.window.Event("scroll"),
+      );
+    });
+    assert.equal(query(`${WINDOW} [data-row-menu]`), null, "scroll dismisses");
+
+    // Row re-render honesty: the host's mirror clear (the recorded
+    // deactivation) re-renders the row as a normal session, and an open
+    // menu for it is gone — no stale menu on a former dispatcher. No
+    // liveness is pinned here (ticket 104 owns mirror honesty).
+    await act(async () => {
+      contextMenuAt(dispRow);
+    });
+    assert.ok(query(`${WINDOW} [data-row-menu="s-disp"]`));
+    await act(async () => {
+      mount.store.applySessionMirror("s-disp", null);
+    });
+    assert.equal(
+      query(`${WINDOW} [data-row-menu]`),
+      null,
+      "a row that stopped being a dispatcher loses its menu",
+    );
+    assert.equal(
+      dispRow.getAttribute("data-dispatcher"),
+      "false",
+      "the row re-rendered as a normal session (mirror-derived, no optimistic flip)",
+    );
+
+    // The dethroned row no longer opens the menu either.
+    await act(async () => {
+      contextMenuAt(dispRow);
+    });
+    assert.equal(query(`${WINDOW} [data-row-menu]`), null);
+
+    await act(async () => {
+      root.unmount();
+    });
+    disposeWindowLayer();
+  });
+});

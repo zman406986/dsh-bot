@@ -348,6 +348,14 @@ export const localeDictionary: LocaleDictionary = {
     "shell.row.delete-confirm": "Confirm delete",
     "shell.row.delete-title":
       "Deactivates the dispatcher in this chat — the chat itself is not deleted. Run /dispatcher-start there to activate it again.",
+    // Ticket 106: the row context menu's one item — the SAME semantics as
+    // the row delete above (deactivate the dispatcher binding; the chat
+    // itself stays), its own wording because the menu says "close" where
+    // the row button says "delete".
+    "shell.row.close": "Close dispatcher",
+    "shell.row.close-confirm": "Confirm close",
+    "shell.row.close-title":
+      "Deactivates the dispatcher in this chat — the chat itself stays. Run /dispatcher-start there to activate it again.",
   },
   zh: {
     "roster.title": "工作者",
@@ -504,6 +512,12 @@ export const localeDictionary: LocaleDictionary = {
     "shell.row.delete-confirm": "确认删除",
     "shell.row.delete-title":
       "停用该聊天中的调度器——聊天本身不会被删除。在该聊天中运行 /dispatcher-start 可重新激活。",
+    // Ticket 106：行右键菜单的唯一一项——与上面的行内删除同一语义（停用调度
+    // 绑定；聊天本身保留）。菜单里说“关闭”，行内按钮说“删除”，各用各的词。
+    "shell.row.close": "关闭调度会话",
+    "shell.row.close-confirm": "确认关闭",
+    "shell.row.close-title":
+      "停用该聊天中的调度器——聊天本身保留。在该聊天中运行 /dispatcher-start 可重新激活。",
   },
 };
 

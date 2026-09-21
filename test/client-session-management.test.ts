@@ -15,6 +15,12 @@
  * - the no-worker-stop posture is pinned structurally (no banned verb in
  *   the hosts' key set; the one egress transport carries exactly its two
  *   user-path methods).
+ *
+ * Ticket 106 (2026-09-22) extends the suite: the right-click close menu's
+ * seat (`onCloseDispatcherSession` — "close" deliberately clear of the
+ * banned-verb scan) rides the SAME `/dispatcher-stop` egress, the menu
+ * reuses the delete affordance's armed-window reducer with its own slot,
+ * and the menu's fixed-position clamp is pinned pure.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -27,6 +33,10 @@ import {
   type ShellState,
 } from "../src/client/shell-store.js";
 import { mountShellPage, inject as clientInject } from "../src/client/index.js";
+import {
+  clampRowMenuPosition,
+  SHELL_ROW_MENU_BOX,
+} from "../src/client/shell.js";
 import {
   DISPATCHER_START_LINE,
   DISPATCHER_STOP_LINE,
@@ -149,6 +159,63 @@ describe("delete confirmation — the armed window (ticket 101)", () => {
   });
 });
 
+/**
+ * Ticket 106 — the right-click close menu REUSES the delete affordance's
+ * armed-window reducer (`shellDeletePress`); the pure rule is already pinned
+ * above (arm → confirm, timeout expiry, second arm replaces, displaced-arm
+ * isolation). What is new here is the SLOT discipline: the menu holds its
+ * own arm state, independent of a row button's, so arming one surface can
+ * never confirm the other — same reducer, separate state.
+ */
+describe("close menu — the reused reducer with its own arm slot (ticket 106)", () => {
+  it("the menu item arms then confirms inside the window via shellDeletePress", () => {
+    let menuArm = SHELL_DELETE_IDLE;
+    const first = shellDeletePress(menuArm, "s-menu", 2_000);
+    assert.equal(first.action, "arm");
+    menuArm = first.state;
+    const second = shellDeletePress(
+      menuArm,
+      "s-menu",
+      2_000 + SHELL_DELETE_CONFIRM_MS - 1,
+    );
+    assert.equal(second.action, "confirm", "inside the window: confirmed");
+    assert.deepEqual(second.state, SHELL_DELETE_IDLE, "confirmed: disarm");
+  });
+
+  it("the menu slot is independent of a row's delete slot — one cannot confirm the other", () => {
+    const deleteArm = shellDeletePress(SHELL_DELETE_IDLE, "s-1", 1_000).state;
+    const menuArm = shellDeletePress(SHELL_DELETE_IDLE, "s-1", 2_000).state;
+    // Displacing the DELETE slot's arm (arming another row there) cannot
+    // disarm the MENU slot's: separate state, one shared rule.
+    const displacedDelete = shellDeletePress(deleteArm, "s-2", 1_100).state;
+    const menuConfirm = shellDeletePress(menuArm, "s-1", 2_100);
+    assert.equal(displacedDelete.armedSessionId, "s-2");
+    assert.equal(menuConfirm.action, "confirm");
+  });
+});
+
+describe("row menu position clamp (ticket 106)", () => {
+  it("a cursor point away from the edges passes through; edge points pull the menu on-screen", () => {
+    assert.deepEqual(clampRowMenuPosition(40, 30, 1600, 900), {
+      left: 40,
+      top: 30,
+    });
+    assert.deepEqual(
+      clampRowMenuPosition(1590, 880, 1600, 900),
+      {
+        left: 1600 - SHELL_ROW_MENU_BOX.width,
+        top: 900 - SHELL_ROW_MENU_BOX.height,
+      },
+      "near the bottom-right edge the menu stays inside the viewport",
+    );
+    assert.deepEqual(
+      clampRowMenuPosition(-20, -5, 1600, 900),
+      { left: 0, top: 0 },
+      "negative cursor points pin at the corner, never NaN",
+    );
+  });
+});
+
 // ── The real mount wiring over a minimal client fake ───────────────────────
 
 // Ticket 102b: the nested `remote.commands` face is its own inject entry —
@@ -263,6 +330,21 @@ describe("mount wiring — the seats ride the ONE command transport (ticket 101)
     });
   });
 
+  it("close seat (the right-click menu, ticket 106) executes /dispatcher-stop in that session through the same transport", async () => {
+    const { ctx, executed } = createMountCtx();
+    const mount = mountShellPage(ctx);
+
+    mount.hosts.onCloseDispatcherSession?.("s-target");
+    await drain();
+
+    assert.equal(executed.length, 1);
+    assert.deepEqual(executed[0], {
+      sessionId: "s-target",
+      line: "/dispatcher-stop",
+      attachments: [],
+    });
+  });
+
   it("an absent remote face is contained (no throw, honest no-channel)", async () => {
     const { ctx, executed } = createMountCtx();
     ctx.setRemoteMissing();
@@ -270,6 +352,7 @@ describe("mount wiring — the seats ride the ONE command transport (ticket 101)
 
     assert.doesNotThrow(() => mount.hosts.onDeleteDispatcherSession?.("s-1"));
     assert.doesNotThrow(() => mount.hosts.onAddDispatcherSession?.("s-1"));
+    assert.doesNotThrow(() => mount.hosts.onCloseDispatcherSession?.("s-1"));
     await drain();
     assert.deepEqual(executed, []);
   });
@@ -303,6 +386,7 @@ describe("mount wiring — the seats ride the ONE command transport (ticket 101)
     const mount = mountShellPage(rejecting);
     await assert.doesNotReject(async () => {
       mount.hosts.onDeleteDispatcherSession?.("s-1");
+      mount.hosts.onCloseDispatcherSession?.("s-1");
       await drain();
     });
   });
@@ -320,9 +404,12 @@ describe("posture — session lifecycle only, never worker/turn management", () 
       [],
       `the shell hosts must not carry worker-kill-style affordance keys; found: ${offenders.join(", ")}`,
     );
-    // The lifecycle seats ARE present, under the sanctioned vocabulary.
+    // The lifecycle seats ARE present, under the sanctioned vocabulary —
+    // add, delete, and ticket 106's close (the right-click menu's seat;
+    // "close" names the session-lifecycle verb without tripping the scan).
     assert.equal(typeof mount.hosts.onAddDispatcherSession, "function");
     assert.equal(typeof mount.hosts.onDeleteDispatcherSession, "function");
+    assert.equal(typeof mount.hosts.onCloseDispatcherSession, "function");
   });
 
   it("the one egress transport carries exactly the two user send paths", () => {

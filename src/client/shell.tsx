@@ -50,7 +50,11 @@
  * session, delete after confirmation = `/dispatcher-stop`): the shell only
  * gates and routes the click; the composition owns the transports, and the
  * worker/turn no-stop posture is untouched (the U-G amendment is for
- * dispatcher sessions ONLY). Pane decisions
+ * dispatcher sessions ONLY). Ticket 106 extends the dispatcher row's
+ * lifecycle affordances with a right-click context menu whose one item
+ * ("Close dispatcher", two-press armed, the same `shellDeletePress`
+ * discipline) rides the close seat — the same `/dispatcher-stop`, the same
+ * ONE transport, no optimistic flip. Pane decisions
  * come from the pure `describeShellPanes`; this component only maps them to
  * seats. Rendering is covered by build + typecheck (S8: no DOM harness); the
  * store and pane logic are asserted purely in tests.
@@ -62,7 +66,7 @@
  * hierarchy is opacity-based, there is no animation at all, and no text
  * colour is set (the shell inherits the host's theme colour).
  */
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { ComponentType, JSX } from "react";
 import type { TranslateFn } from "./overlay.js";
 import { formatTemplate, rosterBlockedKey } from "./roster-store.js";
@@ -120,6 +124,10 @@ export const SHELL_CSS = `
 .multitask-dispatcher-shell__row-actions button{border:none;padding:0;background:transparent;color:inherit;font:inherit;font-size:11px;opacity:.55;cursor:pointer;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .multitask-dispatcher-shell__row-actions button:hover{opacity:.9;text-decoration:underline}
 .multitask-dispatcher-shell__row-actions button[data-armed="true"]{opacity:1;color:var(--dsw-alias-state-warn-primary)}
+.multitask-dispatcher-shell__row-menu{position:fixed;z-index:1001;min-width:180px;padding:4px;background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l3);border-radius:8px}
+.multitask-dispatcher-shell__row-menu-item{display:block;width:100%;border:none;border-radius:6px;padding:5px 8px;background:transparent;color:inherit;font:inherit;font-size:12px;opacity:.85;cursor:pointer;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.multitask-dispatcher-shell__row-menu-item:hover{background:color-mix(in srgb,var(--dsw-alias-bg-layer-3) 75%,transparent);opacity:1}
+.multitask-dispatcher-shell__row-menu-item[data-armed="true"]{opacity:1;color:var(--dsw-alias-state-warn-primary)}
 .multitask-dispatcher-shell__add{position:sticky;bottom:0;z-index:1;margin-top:auto;padding:6px 6px 2px;border-top:1px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-3)}
 .multitask-dispatcher-shell__add-toggle{width:100%;border:none;padding:4px 2px;background:transparent;color:inherit;font:inherit;font-size:12px;opacity:.7;cursor:pointer;text-align:left}
 .multitask-dispatcher-shell__add-toggle:hover{opacity:1;text-decoration:underline}
@@ -133,6 +141,43 @@ export const SHELL_CSS = `
 .multitask-dispatcher-shell__noselection{margin:auto;opacity:.6;padding:14px}
 .multitask-dispatcher-shell__right{min-height:0;overflow-y:auto;border-left:1px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-3);padding:10px}
 `;
+
+/**
+ * Ticket 106 — the row context menu's estimated rendered box. The menu is
+ * one item tall; the estimate exists only so the pure position clamp below
+ * can keep the menu on-screen near a viewport edge. Presentation geometry,
+ * not data: it lives here, not in the store.
+ */
+export const SHELL_ROW_MENU_BOX = { width: 190, height: 38 } as const;
+
+/**
+ * Pure position clamp for the fixed-position row menu (ticket 106): the
+ * cursor point pulled inside the viewport so the menu never opens past an
+ * edge. Clock-free and DOM-free so offline tests drive it directly.
+ */
+export function clampRowMenuPosition(
+  clientX: number,
+  clientY: number,
+  viewportWidth: number,
+  viewportHeight: number,
+): { readonly left: number; readonly top: number } {
+  const maxLeft = Math.max(0, viewportWidth - SHELL_ROW_MENU_BOX.width);
+  const maxTop = Math.max(0, viewportHeight - SHELL_ROW_MENU_BOX.height);
+  return {
+    left: Math.min(Math.max(0, clientX), maxLeft),
+    top: Math.min(Math.max(0, clientY), maxTop),
+  };
+}
+
+/**
+ * The open row context menu (ticket 106): which dispatcher row it acts on,
+ * and where the cursor was — the shell's own UI state, not store state.
+ */
+export interface ShellRowMenuState {
+  readonly sessionId: string;
+  readonly clientX: number;
+  readonly clientY: number;
+}
 
 /**
  * The session's aggregate dot state (pure; ticket 79). Same role vocabulary
@@ -245,6 +290,20 @@ export interface ShellHosts {
    * ABSENT, no delete affordance renders.
    */
   readonly onDeleteDispatcherSession?: (sessionId: string) => void;
+  /**
+   * Ticket 106: the CLOSE seat — the right-click context menu's one action,
+   * called with a dispatcher session id ONLY after the menu's two-press
+   * armed-window confirmation completed. Identical semantics to the delete
+   * seat above: the composition executes `/dispatcher-stop` in that session
+   * through the ONE command transport — the binding deactivates, the host's
+   * mirror clear arrives, and the row re-renders as a normal session (no
+   * optimistic flip, ADR-0010). ABSENT, right-click opens no menu anywhere
+   * (an offline/stub shell shows no dead control, same rule as delete).
+   * The key's "close" wording is deliberate: it names the session-lifecycle
+   * verb the human asked for while staying clear of the pinned banned-verb
+   * scan (no stop/cancel/kill-style host key).
+   */
+  readonly onCloseDispatcherSession?: (sessionId: string) => void;
 }
 
 /** Best-effort default clipboard writer (host browser provides the seam). */
@@ -268,6 +327,10 @@ function defaultCopyToClipboard(text: string): void {
  * two-step confirmation (armed window, `shellDeletePress`), never a
  * single-click fire; the armed label reverts when the window expires. The
  * seat itself is the composition's command transaction; the row only gates.
+ * Ticket 106: dispatcher rows with a close seat also answer RIGHT-CLICK —
+ * the row reports the cursor position up to the shell, which opens the
+ * in-window context menu (one level, in this component tree, no portal).
+ * Normal sessions ignore right-click entirely.
  */
 function ShellRow(props: {
   t: TranslateFn;
@@ -275,8 +338,11 @@ function ShellRow(props: {
   onSelect: (sessionId: string) => void;
   onCopyId: (sessionId: string) => void;
   onDelete?: ((sessionId: string) => void) | undefined;
+  onRowContextMenu?:
+    | ((sessionId: string, clientX: number, clientY: number) => void)
+    | undefined;
 }): JSX.Element {
-  const { t, row, onSelect, onCopyId, onDelete } = props;
+  const { t, row, onSelect, onCopyId, onDelete, onRowContextMenu } = props;
   const [arm, setArm] = useState<ShellDeleteArmState>(SHELL_DELETE_IDLE);
   const armedHere = arm.armedSessionId === row.sessionId;
   // Visual honesty: the armed ("confirm") label never outlives the window
@@ -313,6 +379,18 @@ function ShellRow(props: {
         data-selected={row.selected ? "true" : "false"}
         data-presence={dot}
         onClick={() => onSelect(row.sessionId)}
+        onContextMenu={
+          onRowContextMenu !== undefined && row.dispatcher
+            ? (event) => {
+                // Dispatcher rows only (ticket 106): right-click opens the
+                // close menu; the native menu is suppressed for this row.
+                // Normal sessions ignore right-click — no preventDefault,
+                // no menu.
+                event.preventDefault();
+                onRowContextMenu(row.sessionId, event.clientX, event.clientY);
+              }
+            : undefined
+        }
       >
         <span className={`${SHELL_CLASS}__row-head`}>
           <span
@@ -476,6 +554,97 @@ export function createDispatcherShell(
     const sidebar = describeShellSidebar(box.state, Date.now());
     const panes = describeShellPanes(box.state);
 
+    // Ticket 106 — the row context menu: the shell's own UI state (which
+    // dispatcher row, where the cursor was) plus an arm slot for its one
+    // item. The menu exists only while a close seat exists; the row gates
+    // on `row.dispatcher`, and the derivation below keeps it honest.
+    const [menu, setMenu] = useState<ShellRowMenuState | null>(null);
+    const [menuArm, setMenuArm] = useState<ShellDeleteArmState>(
+      SHELL_DELETE_IDLE,
+    );
+    const menuRef = useRef<HTMLDivElement | null>(null);
+
+    const menuVisible = (() => {
+      if (menu === null || sidebar.kind !== "ready") return false;
+      const row = sidebar.rows.find(
+        (candidate) => candidate.sessionId === menu.sessionId,
+      );
+      return row !== undefined && row.dispatcher;
+    })();
+
+    // Hygiene (1): the menu never outlives its row's dispatcher state. A
+    // mirror clear (the host recorded the deactivation) or a feed removal
+    // re-renders the row as a normal session and the menu is gone — no
+    // stale menu acting on a former dispatcher (ADR-0010 honesty at the
+    // affordance level; no liveness is guessed here).
+    useEffect(() => {
+      if (menu !== null && !menuVisible) setMenu(null);
+    }, [menu, menuVisible]);
+
+    // Hygiene (2): outside pointer-down, Escape, and any scroll dismiss the
+    // menu. (An outside RIGHT-click also dismisses: a real right-click's
+    // pointer-down arrives before its contextmenu.) Listeners are attached
+    // only while the menu is open; a pointer-down INSIDE the menu (the item
+    // itself) never dismisses.
+    useEffect(() => {
+      if (menu === null) return;
+      const dismiss = (event: Event): void => {
+        if (menuRef.current?.contains(event.target as Node | null)) return;
+        setMenu(null);
+      };
+      const onKey = (event: KeyboardEvent): void => {
+        if (event.key === "Escape") setMenu(null);
+      };
+      const onScroll = (): void => setMenu(null);
+      document.addEventListener("pointerdown", dismiss, true);
+      document.addEventListener("keydown", onKey);
+      document.addEventListener("scroll", onScroll, true);
+      return () => {
+        document.removeEventListener("pointerdown", dismiss, true);
+        document.removeEventListener("keydown", onKey);
+        document.removeEventListener("scroll", onScroll, true);
+      };
+    }, [menu]);
+
+    // The armed ("Confirm close") label never outlives the window that
+    // would confirm it — the same revert-timer discipline as the row's
+    // delete affordance. (The press decision below re-checks the clock
+    // regardless, so a lapsed timer can never confirm.)
+    const menuArmedHere =
+      menu !== null && menuArm.armedSessionId === menu.sessionId;
+    useEffect(() => {
+      if (!menuArmedHere) return;
+      const remaining = menuArm.armedAtMs + SHELL_DELETE_CONFIRM_MS - Date.now();
+      if (remaining <= 0) {
+        setMenuArm(SHELL_DELETE_IDLE);
+        return;
+      }
+      const timer = setTimeout(() => setMenuArm(SHELL_DELETE_IDLE), remaining);
+      return () => clearTimeout(timer);
+    }, [menuArmedHere, menuArm.armedAtMs]);
+
+    const openRowMenu = (
+      sessionId: string,
+      clientX: number,
+      clientY: number,
+    ): void => {
+      setMenuArm(SHELL_DELETE_IDLE); // a fresh menu is never born pre-armed
+      setMenu({ sessionId, clientX, clientY });
+    };
+    const menuClosePress = (): void => {
+      if (menu === null) return;
+      const sessionId = menu.sessionId;
+      // The SAME two-press reducer as the row's delete affordance: first
+      // press arms, second press inside the window confirms. Reused, not
+      // duplicated — one arming discipline, a menu-owned state slot.
+      const press = shellDeletePress(menuArm, sessionId, Date.now());
+      setMenuArm(press.state);
+      if (press.action === "confirm") {
+        setMenu(null);
+        hosts.onCloseDispatcherSession?.(sessionId);
+      }
+    };
+
     const selectedTitle = (() => {
       if (panes.main.kind !== "conversation") return null;
       const sessionId = panes.main.sessionId;
@@ -512,6 +681,11 @@ export function createDispatcherShell(
                     );
                   }}
                   onDelete={hosts.onDeleteDispatcherSession}
+                  onRowContextMenu={
+                    hosts.onCloseDispatcherSession !== undefined
+                      ? openRowMenu
+                      : undefined
+                  }
                 />
               ))}
             </ul>
@@ -563,6 +737,38 @@ export function createDispatcherShell(
             <hosts.rosterPanel sessionId={panes.right.sessionId} />
           ) : null}
         </aside>
+        {menu !== null && menuVisible ? (
+          // Ticket 106: the in-window context menu — part of THIS tree (no
+          // body portal; `position:fixed` only lifts it over the layout).
+          // One item, two-press armed (shellDeletePress), token-only face.
+          <div
+            className={`${SHELL_CLASS}__row-menu`}
+            data-row-menu={menu.sessionId}
+            ref={menuRef}
+            style={clampRowMenuPosition(
+              menu.clientX,
+              menu.clientY,
+              window.innerWidth,
+              window.innerHeight,
+            )}
+          >
+            <button
+              type="button"
+              className={`${SHELL_CLASS}__row-menu-item`}
+              data-row-menu-close={menu.sessionId}
+              data-armed={menuArmedHere ? "true" : "false"}
+              aria-label={
+                menuArmedHere ? t("shell.row.close-confirm") : t("shell.row.close")
+              }
+              title={t("shell.row.close-title")}
+              onClick={menuClosePress}
+            >
+              {menuArmedHere
+                ? t("shell.row.close-confirm")
+                : t("shell.row.close")}
+            </button>
+          </div>
+        ) : null}
       </div>
     );
   };

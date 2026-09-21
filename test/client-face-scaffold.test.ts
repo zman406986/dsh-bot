@@ -541,6 +541,11 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
       "shell.onboard.tools.title",
       // Ticket 101 (ADR-0021 decision 3): the per-row delete affordance's
       // copy (two-step confirm; the title states the deactivation semantics).
+      // Ticket 106: the right-click close menu's copy — same semantics as
+      // the delete pair, its own "close" wording (en+zh lockstep).
+      "shell.row.close",
+      "shell.row.close-confirm",
+      "shell.row.close-title",
       "shell.row.copy-id",
       "shell.row.delete",
       "shell.row.delete-confirm",

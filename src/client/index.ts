@@ -903,6 +903,25 @@ export function mountShellPage(
           reportCommandFailure(DISPATCHER_STOP_LINE, sessionId, error),
         );
     },
+    // Ticket 106 — the CLOSE seat: the sidebar rows' right-click context
+    // menu sends the exact same line through the exact same ONE command
+    // transport as the delete seat above (`/dispatcher-stop` verbatim, the
+    // composer's transaction), with the same `reportCommandFailure`
+    // tripwire. Nothing new here but the seat itself: no second transport,
+    // no host-side change. After a confirmed stop the row re-renders as a
+    // normal session only when the host's mirror clear arrives — never an
+    // optimistic local flip (ADR-0010). The key says "close" (the
+    // affordance's word) and stays clear of the pinned banned-verb scan.
+    onCloseDispatcherSession: (sessionId) => {
+      void sendTransport
+        .sendCommand(sessionId, DISPATCHER_STOP_LINE)
+        .then((result) =>
+          reportCommandFailure(DISPATCHER_STOP_LINE, sessionId, result),
+        )
+        .catch((error: unknown) =>
+          reportCommandFailure(DISPATCHER_STOP_LINE, sessionId, error),
+        );
+    },
   };
 
   return { store, seat, conversation, approvals: approvalsStore, hosts };
