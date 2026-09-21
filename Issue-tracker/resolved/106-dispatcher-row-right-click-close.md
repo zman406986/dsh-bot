@@ -1,6 +1,6 @@
 # 106 — Dispatcher rows offer no direct right-click close — the human wants right-click on a session to close its dispatcher, leaving a normal session
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Related:** 101 (resolved — add/delete dispatcher sessions; the delete seat this rides), 104 (open — stale-mirror honesty; right-clicking a stale row may hit a host refusal), 102 (resolved — row-actions discoverability), ADR-0021 decision 3 (add/delete = deactivate the binding), ADR-0010 (mirror honesty)
 
@@ -56,3 +56,55 @@ Implemented offline only (no live dsh/LLM/browser work; no push).
 - `test/client-face-scaffold.test.ts`: the exact-locale-key-list pin extended with the three new keys (lockstep itself enforced by `validateLocaleDictionary`).
 
 **Gates (before → after)**: `npm run typecheck` green → green; `npm test` **1194/290/0 → 1199/293/0**; `npm run lint:docs` green → green; `npm run build:client` green (`client/` git-ignored, nothing bundle-shaped to commit). Evidence: `.scratch/testing/2026-09-22-live-105-106-107/offline-106/` (README with the artifact→claim map, baseline/after gate outputs). Ticket left in `open/`.
+
+### 2026-09-22 — live lane
+
+Live-verified against the real host + served bundle (lane
+`.scratch/testing/2026-09-22-live-105-106-107/live/`, served bundle fingerprinted first).
+Verdict: **PASS on every clause**, exercised THREE times on two genuinely-live activations
+(both activated through the add picker's real click path — `POST /api/commands/execute`
+`/dispatcher-start` captured each time).
+
+- **Normal rows ignore right-click:** a real right-click (CDP button:"right") on normal row
+  `session-fede613f…` opened NO menu (`menuAfterNormalRightClick: null`).
+- **Dispatcher row right-click → in-window menu:** on live dispatcher row
+  `session-88f28f78…` the menu `[data-row-menu=<sid>]` appeared at the cursor with one item,
+  un-armed (关闭调度会话, `data-armed="false"`).
+- **Two-press arming:** press 1 → `data-armed="true"`, label 确认关闭, and
+  **`httpDuringFirstPress: []`** — zero wire traffic (presses 854 ms apart, inside the 4 s
+  window). Press 2 → `POST /api/commands/execute` with
+  `{"agentId":"session-88f28f78…","line":"/dispatcher-stop"}` verbatim — the ONE command
+  transport, no second channel.
+- **Host-driven flip, no optimism:** first 1 s poll after confirm: the row is STILL PRESENT
+  with `data-dispatcher="false"` (a normal session, chat not deleted), the menu is gone,
+  and the capsule's dispatcher count dropped 1→0.
+- The close path was re-driven on a second dispatcher (`obs-capsule-counts.json` — armed,
+  stop POST captured, flip t=1) and a third time with a worker live
+  (`obs-capsule-counts-stop.json` — flip t=1; that instance's wire capture raced and missed
+  the POST, the two prior captures plus the host-side flip carry it).
+
+Ticket stays in `open/` for the closer. Evidence:
+`.scratch/testing/2026-09-22-live-105-106-107/live/obs-106-rightclick-close.json` (+13–16
+screenshots).
+
+### 2026-09-22 — resolution (team-leader close-out)
+
+Resolved by the independent closer, which re-ran every gate itself before closing:
+`npm run typecheck` green; `npm test` **1216 pass / 298 suites / 0 fail** (measured, not
+claimed); `npm run lint:docs` green; constraint spot-checks clean — the ONE command
+transport holds (the only client call site of `remote.commands.execute` remains
+`bindCommandTransport`, `src/client/actions.ts:253`; the close seat composes through it, no
+client call site in shell.tsx / floating-window.tsx / index.ts), the seat key
+`onCloseDispatcherSession` passes the pinned
+/stop|cancel|kill|abort/deactivate|terminate|destroy host-seat scan, and
+`shell.row.close` / `shell.row.close-confirm` / `shell.row.close-title` exist in BOTH en
+and zh faces under `validateLocaleDictionary`.
+
+**Shipped** (`418357e`): dispatcher roster rows close via right-click — the in-window
+context menu with two-press arming sends `/dispatcher-stop` through the ONE transport, and
+the host's mirror clear flips the row to a normal session (no optimistic flip). Live lane:
+**PASS on every clause, proven on the wire three times** (press 1 arms with zero HTTP;
+press 2 → `POST /api/commands/execute /dispatcher-stop`; `data-dispatcher="false"` at t=1)
+— evidence `.scratch/testing/2026-09-22-live-105-106-107/live/`
+(`obs-106-rightclick-close.json`, README per-claim verdict map). Final gates:
+**1216/298/0**; lint green.
