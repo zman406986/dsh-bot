@@ -156,6 +156,7 @@ Surface names are **dsh-native**; do not ship Sand tool names.
 | Worker error | Report honest state to user; decide retry / steer / drop |
 | Worker aborted | Close todo as cancelled; tell user if it was visible work |
 | Peer message (P2) | Hidden turn with `[peer]` cue style *concept*; new copy |
+| External event — opt-in file inbox | Dispatcher wake turn presenting the job prompt as work material; joins the existing coalescing/batching semantics unchanged *(amended 2026-10-02, ticket 111, ADR-0023: docs/adr/0023-file-driven-external-intake.md — first producer of the `external-event` wake source)* |
 
 **Anti-patterns (explicitly out of policy)**
 
@@ -200,6 +201,8 @@ States: `pending` | `in_progress` | `completed` | `cancelled`.
 ```
 
 **Rule:** Multitask core owns **state machines and policy**; dsh owns **processes, LLM calls, storage**.
+
+**Amended 2026-10-02 (ticket 111, ADR-0023: docs/adr/0023-file-driven-external-intake.md):** the component map gains the **inbox watcher** — adapter-owned (`fs.watch` + rescan-interval fallback; config `inbox.enabled` / `inbox.dir` / `inbox.rescanIntervalMs`); queued jobs enter the dispatcher wake path, and replies are written into the job dir per ADR-0023. Design detail stays in the ADR.
 
 ### 7.2 Lifecycle (worker)
 

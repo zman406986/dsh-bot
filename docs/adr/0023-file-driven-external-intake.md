@@ -1,6 +1,6 @@
 # File-driven external work intake (inbox)
 
-**Status:** draft (nonhuman-approved)
+**Status:** accepted (human-ruled, 2026-10-02 in-session directive)
 
 **Approval:** non-human — agent-drafted 2026-10-02 from the upstream-compare paperwork pass, pending human sign-off
 

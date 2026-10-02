@@ -10,5 +10,5 @@ Generated from `Issue-tracker/open/*.md` — 6 open tickets. The row set is owne
 | 108 | [108-wake-coalesce-window](open/108-wake-coalesce-window.md) | Opt-in wake coalescing window (idle-window batching) | open | ready-for-agent |
 | 109 | [109-spawn-stream-inflight-guard](open/109-spawn-stream-inflight-guard.md) | Per-stream in-flight guard closing the spawn check-then-set window | open | ready-for-agent |
 | 110 | [110-worker-activity-ring-wake-digest](open/110-worker-activity-ring-wake-digest.md) | Bounded worker-activity ring + inline wake digest | open | ready-for-agent |
-| 111 | [111-file-inbox-scope](open/111-file-inbox-scope.md) | File-driven external work intake (inbox): PRD amendment + ADR sign-off gate | open | needs-triage, ready-for-human |
 | 112 | [112-wake-bus-disposal-wiring](open/112-wake-bus-disposal-wiring.md) | Wire wake-bus disposal into plugin teardown (plus dead-field cleanup) | open | ready-for-agent |
+| 113 | [113-implement-file-inbox-per-adr-0023](open/113-implement-file-inbox-per-adr-0023.md) | Implement file inbox per ADR-0023 | open | ready-for-agent |
