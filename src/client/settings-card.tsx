@@ -132,8 +132,10 @@ function Chevron(): JSX.Element {
  * One field control. A `boolean` field is a checkbox (its staged drafts are
  * only ever "true"/"false"; a clear is staged by the reset control, and an
  * unreadable value renders indeterminate rather than asserting `false`). A
- * `number` field is a numeric input with the draft as its value. Both are
- * disabled while the document is read-only or a save is in flight.
+ * `number` field is a numeric input with the draft as its value. A `string`
+ * field (ticket 113 `inboxDir`) is a plain text input — the draft is the
+ * value, and only emptiness (a staged clear) is special. All are disabled
+ * while the document is read-only or a save is in flight.
  */
 function FieldControl(props: {
   t: TranslateFn;
@@ -186,6 +188,15 @@ function FieldControl(props: {
             checked={box.checked === true}
             disabled={disabled}
             onChange={(event) => onEdit(event.target.checked ? "true" : "false")}
+          />
+        ) : box.kind === "string" ? (
+          <input
+            id={id}
+            type="text"
+            className={`${CARD_CLASS}__input`}
+            value={box.text}
+            disabled={disabled}
+            onChange={(event) => onEdit(event.target.value)}
           />
         ) : (
           <input

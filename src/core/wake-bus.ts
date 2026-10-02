@@ -44,6 +44,18 @@ export interface SettledWorkerNotice {
   readonly resultText: string;
 }
 
+/**
+ * One external intake job carried by a wake (ticket 113, ADR-0023).
+ * The adapter claims the job from the watched directory and hands the
+ * payload here; the core never touches the filesystem. `promptText` is the
+ * job's resolved prompt (prompt.md over entry.text, resolved adapter-side).
+ */
+export interface ExternalJobNotice {
+  readonly jobId: string;
+  readonly promptText: string;
+  readonly jobDir: string;
+}
+
 /** A wake ready for a dispatcher session. */
 export interface WakeEvent {
   readonly sessionId: string;
@@ -58,6 +70,11 @@ export interface WakeEvent {
    * Never mixed into a worker-settled wake.
    */
   readonly peerMessages?: readonly PeerNotice[];
+  /**
+   * Ticket 113: external intake jobs for this wake. Background-rank —
+   * they join the settled/access batch lane, never a peer wake.
+   */
+  readonly externalJobs?: readonly ExternalJobNotice[];
 }
 
 export interface EnqueueSettledInput {
@@ -86,6 +103,11 @@ export interface EnqueuePeerInput {
   readonly notice: PeerNotice;
   /** Already the caller's effective lane choice (1:1 priority; ticket 70 §3). */
   readonly effectivePriority: boolean;
+}
+
+export interface EnqueueExternalJobInput {
+  readonly sessionId: string;
+  readonly job: ExternalJobNotice;
 }
 
 /**
@@ -127,6 +149,13 @@ export interface WakeBus {
    * non-user turn; it never interrupts a user turn.
    */
   enqueuePeer(input: EnqueuePeerInput): void;
+  /**
+   * Queue one external intake job (ticket 113, ADR-0023). Background-rank:
+   * joins the settled/access batching lane and the ticket-108 coalescing
+   * window exactly like a worker settle — never a peer lane, never an
+   * interrupt. The core (not the bus) owns todo creation.
+   */
+  enqueueExternalJob(input: EnqueueExternalJobInput): void;
   /** Record a user wake; preempts any queued or ready non-user wake. */
   enqueueUserWake(sessionId: string): void;
   /**
@@ -181,6 +210,8 @@ interface SessionWakeState {
   priorityPeers: PeerNotice[];
   /** Normal peer notices (non-priority 1:1; group/broadcast retired, ticket 70 §3). */
   normalPeers: PeerNotice[];
+  /** External intake jobs waiting for a future turn (ticket 113). */
+  pendingExternalJobs: ExternalJobNotice[];
   /** Wake already prepared for the next (or current) turn. */
   ready: WakeEvent | null;
   /**
@@ -249,7 +280,11 @@ export const DEFAULT_COALESCE_FAIL_BUDGET = 3;
 
 function isBackground(source: WakeSource): boolean {
   return (
-    source === "worker-settled" || source === "worker-access-request"
+    source === "worker-settled" ||
+    source === "worker-access-request" ||
+    // Ticket 113: external intake rides the background rank — it joins
+    // settle batches and subsumes an owed redrive like any other batch.
+    source === "external-event"
   );
 }
 
@@ -271,11 +306,13 @@ function sourceFor(
   settled: readonly SettledWorkerNotice[],
   accessRequests: readonly AccessRequestNotice[],
   accessNotices: readonly AccessNotice[],
+  externalJobs: readonly ExternalJobNotice[],
 ): WakeSource {
   if (settled.length > 0) return "worker-settled";
   if (accessRequests.length > 0 || accessNotices.length > 0) {
     return "worker-access-request";
   }
+  if (externalJobs.length > 0) return "external-event";
   return "worker-settled";
 }
 
@@ -324,6 +361,7 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
         pendingAccessNotices: [],
         priorityPeers: [],
         normalPeers: [],
+        pendingExternalJobs: [],
         ready: null,
         pendingRedrive: false,
         coalescing: null,
@@ -409,21 +447,30 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
     const hasPending =
       state.pending.length > 0 ||
       state.pendingAccessRequests.length > 0 ||
-      state.pendingAccessNotices.length > 0;
+      state.pendingAccessNotices.length > 0 ||
+      state.pendingExternalJobs.length > 0;
     if (!hasPending) return;
     const settledWorkers = state.pending;
     const accessRequests = state.pendingAccessRequests;
     const accessNotices = state.pendingAccessNotices;
+    const externalJobs = state.pendingExternalJobs;
     state.pending = [];
     state.pendingAccessRequests = [];
     state.pendingAccessNotices = [];
-    const source = sourceFor(settledWorkers, accessRequests, accessNotices);
+    state.pendingExternalJobs = [];
+    const source = sourceFor(
+      settledWorkers,
+      accessRequests,
+      accessNotices,
+      externalJobs,
+    );
     state.ready = {
       sessionId,
       source,
       settledWorkers,
       accessRequests,
       accessNotices,
+      externalJobs,
     };
     // A real background batch subsumes any owed redrive: this turn will
     // surface the undelivered items anyway, so a second turn would be noise.
@@ -509,6 +556,12 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
       // (ticket 58). Re-arming it keeps the obligation alive for the next
       // idle turn instead of silently dropping it.
       state.pendingRedrive = true;
+    } else if (state.ready.source === "external-event") {
+      // Ticket 113: external jobs re-queue at the FRONT of their lane so
+      // the reclaimed batch re-presents in its original order.
+      state.pendingExternalJobs.unshift(
+        ...(state.ready.externalJobs ?? []),
+      );
     } else {
       state.pending.unshift(...state.ready.settledWorkers);
       state.pendingAccessRequests.unshift(
@@ -666,6 +719,35 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
         scheduleCoalescedDrain(input.sessionId, state);
       } else {
         tryFlush(input.sessionId, state);
+      }
+    },
+
+    enqueueExternalJob(input: EnqueueExternalJobInput): void {
+      const state = ensure(input.sessionId);
+      // Join the batch already waiting for the next turn — one wake, not
+      // several. Same join rule as settles (never a peer/user wake).
+      if (state.ready !== null && canJoinBackground(state.ready.source)) {
+        state.ready = {
+          ...state.ready,
+          externalJobs: [...(state.ready.externalJobs ?? []), input.job],
+          // A wake that carried only a redrive flag (source "timer") is now
+          // an external-event wake; one with real settles/access keeps its
+          // more specific source.
+          source:
+            state.ready.settledWorkers.length > 0 ||
+            (state.ready.accessRequests ?? []).length > 0 ||
+            (state.ready.accessNotices ?? []).length > 0
+              ? state.ready.source
+              : "external-event",
+        };
+        return;
+      }
+      state.pendingExternalJobs.push(input.job);
+      // Mid-turn: queue only. Idle with a user/peer wake waiting: stay
+      // behind it. Ticket 108: idle and nothing ready → join/arm the
+      // coalescing window instead of waking immediately.
+      if (!state.busy && state.ready === null) {
+        coalesceOrFlush(input.sessionId, state);
       }
     },
 

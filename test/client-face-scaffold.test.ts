@@ -483,6 +483,14 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
       "settings.card.field.accessRequestTimeoutMs.label",
       "settings.card.field.enabled.hint",
       "settings.card.field.enabled.label",
+      // Ticket 113 / ADR-0023: the file-inbox settings-card fields (one
+      // label/hint pair per schema field, in the same pairing rule).
+      "settings.card.field.inboxDir.hint",
+      "settings.card.field.inboxDir.label",
+      "settings.card.field.inboxEnabled.hint",
+      "settings.card.field.inboxEnabled.label",
+      "settings.card.field.inboxRescanIntervalMs.hint",
+      "settings.card.field.inboxRescanIntervalMs.label",
       // Ticket 108: the wake-coalescing window field (one label/hint pair
       // per schema field, in the same pairing rule).
       "settings.card.field.wakeCoalesceWindowMs.hint",

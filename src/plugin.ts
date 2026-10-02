@@ -1,5 +1,10 @@
 import z from "@deepseek-ai/schemastery";
-import { createMultitask, type Multitask } from "./core/multitask.js";
+import { join, resolve } from "node:path";
+import {
+  createMultitask,
+  type InboxJobResolution,
+  type Multitask,
+} from "./core/multitask.js";
 import { projectRosterSnapshot } from "./core/roster-snapshot.js";
 import {
   assemblePeerWakeTurn,
@@ -19,15 +24,25 @@ import {
   createStorageDomainDurability,
   installMultitaskSettingsSection,
   isWildcardAccessTarget,
+  readInboxJobDiskState,
   registerDispatcherResolveCommand,
   registerDispatcherStartCommand,
   registerDispatcherSteerCommand,
   registerDispatcherStopCommand,
   registerDispatcherTools,
   resolveExecSessionId,
+  resolveInboxJobText,
   RESTART_DEGRADED_NOTICE,
-  type DispatchApprovalFn,
   secretStoredAccessNotice,
+  startInboxWatcher,
+  writeInboxCancelled,
+  writeInboxFailed,
+  writeInboxReply,
+  type DispatchApprovalFn,
+  type InboxJobCheckpoint,
+  type InboxJobDiskState,
+  type InboxJobState,
+  type InboxQueueEntry,
   type AccessPromptPump,
   type AdapterContext,
   type CordisDshHost,
@@ -36,7 +51,7 @@ import {
 } from "./adapter/index.js";
 import { registerWorkerAccessTool, createPendingAskSettleWaiter } from "./adapter/worker-access-tool.js";
 import type { WorkerActivityEntry } from "./adapter/cordis-dsh-host.js";
-import { clampActivity } from "./core/report-clamp.js";
+import { clampActivity, clampReport } from "./core/report-clamp.js";
 import { createWorkerAgentDef } from "./worker/agent-def.js";
 
 /**
@@ -69,6 +84,24 @@ export const Config = z.object({
    * dispatcher-session start like `enabled`.
    */
   wakeCoalesceWindowMs: z.number().min(0).default(0),
+  /**
+   * Ticket 113 / ADR-0023: opt-in file inbox. When on and `inboxDir` is
+   * non-empty, the adapter watches `<inboxDir>/queue.jsonl` plus per-job
+   * dirs and presents each claimed job to the earliest-activated dispatcher
+   * session as a wake. Off (default) starts nothing at all.
+   *
+   * Flat keys (not a nested `inbox` object) deliberately: the settings card
+   * maps Config rows 1:1 to flat controls (pinned parity test), and
+   * `scope.set` persists flat fields only. Read once at apply like `enabled`.
+   */
+  inboxEnabled: z.boolean().default(false),
+  /** Inbox root directory. Empty (default) disables intake even when enabled. */
+  inboxDir: z.string().default(""),
+  /**
+   * Fallback rescan interval in ms (ADR-0023 decision 1: fs.watch plus an
+   * interval). Clamped to the protocol floor of 1000 ms.
+   */
+  inboxRescanIntervalMs: z.number().min(1000).default(5000),
 });
 
 export const name = "multitask-dispatcher";
@@ -106,6 +139,12 @@ export interface PluginConfig {
   accessRequestTimeoutMs?: number;
   /** Ticket 108: idle wake coalescing window in ms (0 = off). */
   wakeCoalesceWindowMs?: number;
+  /** Ticket 113: opt-in file inbox (flat keys — see Config doc). */
+  inboxEnabled?: boolean;
+  /** Ticket 113: inbox root directory; empty disables intake. */
+  inboxDir?: string;
+  /** Ticket 113: fallback rescan interval in ms (min 1000). */
+  inboxRescanIntervalMs?: number;
 }
 
 /**
@@ -173,6 +212,9 @@ export const WAKE_DIGEST_ACTIVITY_COUNT = 3;
 
 /** Heading of the wake digest's recent-activity section (ticket 110). */
 export const WAKE_ACTIVITY_DIGEST_HEADING = "## Recent worker activity";
+
+/** Heading of the wake turn's external inbox-jobs section (ticket 113). */
+export const INBOX_JOBS_HEADING = "## Inbox jobs";
 
 /**
  * Ticket 110: the "Recent worker activity" digest section for a wake turn.
@@ -281,10 +323,18 @@ export function composeWakeText(
     (request) => suppressPromptedAccessAsk?.(request.requestId) !== true,
   );
 
+  // Ticket 113: drained external (inbox) jobs render as inline sections —
+  // job id plus the prompt clamped through the core report clamp (D21:
+  // the wake turn is self-contained, inline text only, no stored text and
+  // no file pointers). The peer-wake early-return above is untouched:
+  // external jobs ride normal and background wakes only.
+  const externalJobs = drained.wake.externalJobs ?? [];
+
   if (
     notices.length === 0 &&
     accessRequests.length === 0 &&
-    (drained.wake.accessNotices ?? []).length === 0
+    (drained.wake.accessNotices ?? []).length === 0 &&
+    externalJobs.length === 0
   ) {
     return null;
   }
@@ -294,7 +344,20 @@ export function composeWakeText(
     requests: accessRequests,
     resolved: drained.wake.accessNotices ?? [],
   });
-  const body = `${reminder}\n\n${wake}`;
+  const inboxSection =
+    externalJobs.length > 0
+      ? [
+          INBOX_JOBS_HEADING,
+          "",
+          ...externalJobs.map(
+            (job) =>
+              `### Inbox job ${job.jobId}\n${clampReport(job.promptText)}`,
+          ),
+        ].join("\n")
+      : "";
+  const body = inboxSection.length > 0
+    ? `${reminder}\n\n${wake}\n\n${inboxSection}`
+    : `${reminder}\n\n${wake}`;
   // Ticket 110: the digest rides the wake turn itself — inline text,
   // appended after the wake body, and only when at least one referenced
   // worker has observed activity (empty rings contribute no lines).
@@ -348,6 +411,124 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   const markers: StorageDomainDurability = createStorageDomainDurability(
     ctx.storageDomain,
   );
+
+  // ── Ticket 113 / ADR-0023: opt-in file inbox ──────────────────────────
+  // Flat config keys (see Config doc — settings-card parity pin). The
+  // watcher is the only fs dependency and lives in the adapter; the core
+  // never sees a filesystem (ADR-0023 consequence 1).
+  const inboxEnabled = config.inboxEnabled === true;
+  const inboxRoot =
+    typeof config.inboxDir === "string" && config.inboxDir.trim().length > 0
+      ? resolve(config.inboxDir.trim())
+      : "";
+  // Defensive floor — the schema enforces min 1000; apply never trusts it.
+  const inboxRescanIntervalMs =
+    typeof config.inboxRescanIntervalMs === "number" &&
+    Number.isFinite(config.inboxRescanIntervalMs)
+      ? Math.max(1000, config.inboxRescanIntervalMs)
+      : 5000;
+
+  /**
+   * Honest error sink for inbox intake/checkpoint problems (malformed queue
+   * lines, failed claims, failed writes). The plugin has no logger seam, so
+   * `console.warn` is the shipped channel. Never fatal — intake outlives
+   * every individual failure.
+   */
+  const inboxError = (error: unknown, context: string): void => {
+    try {
+      console.warn(`[multitask-dispatcher] inbox ${context}:`, error);
+    } catch {
+      // A broken console must never break intake.
+    }
+  };
+
+  /**
+   * The `onInboxJobResolved` hook — the reply writer (ticket 113). The core
+   * fires it from terminal paths: delivery (`markDelivered`) → replied,
+   * worker error → failed, abort → cancelled. This writes the job-dir files
+   * (reply.md + status.json on replied; status.json only otherwise — a
+   * non-empty reply.md IS the done signal) and closes the checkpoint row.
+   * One immediate retry on write failure; persistent failure leaves the
+   * checkpoint non-terminal so the boot rescan re-presents the job (the
+   * redrive-safe retry the ticket allows — documented: the job may then
+   * re-run, because the external system never saw a reply). Hook failures
+   * never crash the settle path: the core swallows synchronous throws and
+   * every async rejection lands in `inboxError`.
+   *
+   * Intentionally NOT gated on `inboxEnabled`: a job taken while the inbox
+   * was on is finished even if intake is off by the time it resolves (the
+   * job dir comes from the todo's own origin, not from current config).
+   */
+  const writeInboxResolution = (resolution: InboxJobResolution): void => {
+    void (async () => {
+      const checkpoint: InboxJobCheckpoint | undefined = await markers.inbox
+        .get(resolution.jobId)
+        .catch(() => undefined);
+      const startedAtMs =
+        checkpoint?.presentedAtMs ?? checkpoint?.claimedAtMs ?? null;
+      const dir =
+        resolution.jobDir.length > 0
+          ? resolution.jobDir
+          : join(inboxRoot, resolution.jobId);
+      const write = async (): Promise<void> => {
+        const nowMs = Date.now();
+        if (resolution.kind === "replied") {
+          await writeInboxReply(
+            dir,
+            resolution.jobId,
+            resolution.replyText,
+            startedAtMs,
+            nowMs,
+          );
+        } else if (resolution.kind === "failed") {
+          await writeInboxFailed(
+            dir,
+            resolution.jobId,
+            resolution.error,
+            startedAtMs,
+            nowMs,
+          );
+        } else {
+          await writeInboxCancelled(
+            dir,
+            resolution.jobId,
+            resolution.reason,
+            startedAtMs,
+            nowMs,
+          );
+        }
+      };
+      try {
+        await write();
+      } catch (first) {
+        try {
+          await write();
+        } catch (second) {
+          inboxError(
+            [first, second],
+            `reply write ${resolution.jobId} (${resolution.kind}); the boot rescan will retry`,
+          );
+          return;
+        }
+      }
+      await markers.inbox
+        .record({
+          jobId: resolution.jobId,
+          state: resolution.kind,
+          jobDir: dir,
+          sessionId: resolution.sessionId,
+          todoId: resolution.todoId,
+          claimedAtMs: checkpoint?.claimedAtMs ?? startedAtMs ?? Date.now(),
+          presentedAtMs: checkpoint?.presentedAtMs ?? startedAtMs,
+          endedAtMs: Date.now(),
+          presentAttempts: checkpoint?.presentAttempts ?? 1,
+        })
+        .catch((error) =>
+          inboxError(error, `checkpoint terminal ${resolution.jobId}`),
+        );
+    })().catch((error) => inboxError(error, `resolution ${resolution.jobId}`));
+  };
+
   /**
    * Activation rebuilds currently in flight: sessionId → the activation
    * generation the rebuild was started for (ticket 90, F3). While a rebuild
@@ -431,6 +612,9 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       if (rebuildsInFlight.has(sessionId)) return;
       publishRosterSnapshot(sessionId);
     },
+    // Ticket 113: the reply writer — the core decides WHEN (terminal paths),
+    // this owns HOW (job-dir files; the core never touches the filesystem).
+    onInboxJobResolved: writeInboxResolution,
   });
   multitaskRef = multitask;
 
@@ -738,6 +922,16 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       // unconditionally: it is a cheap no-op when nothing is owed, and it is
       // also the pass that escalates an already-exhausted obligation to `lost`.
       multitask.redriveUndelivered(sessionId);
+      // Ticket 113: activation is also the inbox re-presentation opportunity.
+      // Claimed-but-unpresented jobs (no dispatcher was live) and crash
+      // orphans route to the earliest live session — idempotent (core
+      // dedupe by jobId; a still-live owner is never stolen). No-op when
+      // the inbox is off or was never on for this install.
+      if (inboxEnabled && inboxRoot.length > 0) {
+        await rescanInboxCheckpoints().catch((error) =>
+          inboxError(error, "boot rescan"),
+        );
+      }
     } finally {
       // Only clear OUR entry: a stale chain must not reopen the gate while a
       // later activation's rebuild is still in flight (ticket 90, F2/F3).
@@ -778,6 +972,190 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       rosterChannel.clearSession(sessionId);
     },
   });
+
+  // ── Ticket 113: presentation + intake wiring (needs `lifecycle`) ──────
+
+  /**
+   * Present one claimed job to the routing policy's session (ticket 113):
+   * exactly one live dispatcher session → it; several → the
+   * earliest-activated (`dispatcherSessionIds()[0]` — the lifecycle map is
+   * insertion-ordered); none → stay claimed-but-unpresented (the boot
+   * rescan re-presents on the next activation). A job owned by a STILL-LIVE
+   * session is never re-presented elsewhere — one presentation, ever. Core
+   * dedupe (ledger scan by jobId) makes repeated calls idempotent.
+   */
+  const presentInboxJob = async (
+    jobId: string,
+    jobDir: string,
+    promptText: string,
+  ): Promise<void> => {
+    const sessionId = lifecycle.dispatcherSessionIds()[0];
+    if (sessionId === undefined) return;
+    const checkpoint: InboxJobCheckpoint | undefined = await markers.inbox
+      .get(jobId)
+      .catch(() => undefined);
+    if (
+      checkpoint !== undefined &&
+      checkpoint.sessionId !== null &&
+      lifecycle.isDispatcherSession(checkpoint.sessionId)
+    ) {
+      // One presentation, ever — but only while the owner's core still holds
+      // the todo. After a crash restart the fresh ledger is empty (the marker
+      // rebuild only recreates todos that had a worker), so the same session
+      // id re-activating must re-present instead of leaving the job stuck.
+      const ownerTodo = multitask
+        .listTodos(checkpoint.sessionId)
+        .find(
+          (todo) =>
+            todo.external?.kind === "inbox" && todo.external.jobId === jobId,
+        );
+      if (ownerTodo !== undefined) return;
+    }
+    const result = multitask.enqueueExternalJob({
+      sessionId,
+      jobId,
+      jobDir,
+      promptText,
+    });
+    const nowMs = Date.now();
+    await markers.inbox
+      .record({
+        jobId,
+        state: "presented",
+        jobDir,
+        sessionId,
+        todoId: result.ok ? result.todoId : (checkpoint?.todoId ?? null),
+        claimedAtMs: checkpoint?.claimedAtMs ?? nowMs,
+        presentedAtMs: checkpoint?.presentedAtMs ?? nowMs,
+        endedAtMs: null,
+        presentAttempts: (checkpoint?.presentAttempts ?? 0) + 1,
+      })
+      .catch((error) => inboxError(error, `checkpoint presented ${jobId}`));
+  };
+
+  /**
+   * Watcher claim callback: persist the claimed state (A5 — what WE did)
+   * and present immediately. Both halves are independently failure-tolerant;
+   * a failed present leaves the row claimed for the boot rescan.
+   */
+  const onInboxJobClaimed = async (entry: InboxQueueEntry): Promise<void> => {
+    await markers.inbox
+      .record({
+        jobId: entry.jobId,
+        state: "claimed",
+        jobDir: entry.dir,
+        sessionId: null,
+        todoId: null,
+        claimedAtMs: Date.now(),
+        presentedAtMs: null,
+        endedAtMs: null,
+        presentAttempts: 0,
+      })
+      .catch((error) => inboxError(error, `checkpoint claimed ${entry.jobId}`));
+    await presentInboxJob(entry.jobId, entry.dir, entry.text).catch((error) =>
+      inboxError(error, `present ${entry.jobId}`),
+    );
+  };
+
+  /**
+   * Boot rescan (ticket 113): re-present checkpoint rows that never reached
+   * a terminal state — claimed-but-unpresented jobs plus crash orphans.
+   * Disk truth wins: a job dir whose status.json (or non-empty reply.md)
+   * already shows a terminal outcome is ADOPTED into that outcome instead
+   * of re-presented (the file write succeeded but the checkpoint update
+   * crashed); only a job still showing claimed/queued/no-reply on disk is
+   * re-presented, and only when its prompt is still resolvable.
+   */
+  const rescanInboxCheckpoints = async (): Promise<void> => {
+    let checkpoints: readonly InboxJobCheckpoint[];
+    try {
+      checkpoints = await markers.inbox.list();
+    } catch (error) {
+      inboxError(error, "boot rescan list");
+      return;
+    }
+    for (const checkpoint of checkpoints) {
+      // Defensive row-shape guard: a tolerant fake (or a corrupted row) must
+      // never take the activation chain down. Real rows always carry both.
+      if (
+        checkpoint === null ||
+        typeof checkpoint !== "object" ||
+        typeof (checkpoint as InboxJobCheckpoint).jobId !== "string" ||
+        typeof (checkpoint as InboxJobCheckpoint).jobDir !== "string" ||
+        typeof (checkpoint as InboxJobCheckpoint).state !== "string"
+      ) {
+        continue;
+      }
+      if (
+        checkpoint.state === "replied" ||
+        checkpoint.state === "failed" ||
+        checkpoint.state === "cancelled"
+      ) {
+        continue;
+      }
+      const dir =
+        checkpoint.jobDir.length > 0
+          ? checkpoint.jobDir
+          : join(inboxRoot, checkpoint.jobId);
+      const disk: InboxJobDiskState | null = await readInboxJobDiskState(
+        dir,
+      ).catch(() => null);
+      const diskOutcome: InboxJobState | null = disk?.replyPresent
+        ? "replied"
+        : disk !== null &&
+            (disk.status === "replied" ||
+              disk.status === "failed" ||
+              disk.status === "cancelled")
+          ? disk.status
+          : null;
+      if (diskOutcome !== null) {
+        await markers.inbox
+          .record({
+            ...checkpoint,
+            state: diskOutcome,
+            endedAtMs: checkpoint.endedAtMs ?? Date.now(),
+          })
+          .catch((error) =>
+            inboxError(error, `checkpoint adopt ${checkpoint.jobId}`),
+          );
+        continue;
+      }
+      const text = await resolveInboxJobText(inboxRoot, dir, checkpoint.jobId);
+      if (text === null) {
+        inboxError(
+          new Error(
+            `no resolvable prompt for job ${checkpoint.jobId}; keeping ${checkpoint.state}`,
+          ),
+          "boot rescan",
+        );
+        continue;
+      }
+      await presentInboxJob(checkpoint.jobId, dir, text).catch((error) =>
+        inboxError(error, `boot re-present ${checkpoint.jobId}`),
+      );
+    }
+  };
+
+  // The watcher starts ONLY when the inbox is on and a root is set:
+  // disabled or empty dir → nothing starts at all (no fs.watch, no timers,
+  // no directory creation). Cleanup under the effect contract (ticket 44):
+  // the disposer is RETURNED, never passed as execute.
+  if (inboxEnabled && inboxRoot.length > 0) {
+    const inboxWatcher = startInboxWatcher({
+      root: inboxRoot,
+      rescanIntervalMs: inboxRescanIntervalMs,
+      onJob: (entry) => {
+        void onInboxJobClaimed(entry);
+      },
+      onError: (error, context) => inboxError(error, context),
+    });
+    ctx.effect(
+      () => () => {
+        inboxWatcher.stop();
+      },
+      "multitask-dispatcher: inbox watcher",
+    );
+  }
 
   // The dormant plugin's only visible affordance (design-16 §3.3).
   // Cordis effect contract (ticket 44): the generator effect registers now

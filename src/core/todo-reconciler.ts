@@ -37,6 +37,20 @@ export type DeliveryReason =
   | "session-unavailable";
 
 /**
+ * Where an externally-intaked item came from (ticket 113, ADR-0023).
+ * Present only on ledger items created for an external intake job; it makes
+ * delivery routing distinguishable (the plugin's reply writer targets the
+ * job dir) without inventing a new wake or worker kind (C15). The inbox
+ * never spawns (ADR-0003) — this marker does not change that; it only
+ * records provenance.
+ */
+export interface TodoExternalOrigin {
+  readonly kind: "inbox";
+  readonly jobId: string;
+  readonly jobDir: string;
+}
+
+/**
  * Delivery attempts we make *beyond* the settle wake's own opportunity, before
  * escalating to `lost` (ticket 58, register D-5).
  *
@@ -72,6 +86,8 @@ export interface TodoItem {
   /** How the obligation ended, once terminal (ticket 58, D-6). */
   readonly disposition: DeliveryDisposition | null;
   readonly dispositionReason: DeliveryReason | null;
+  /** External intake provenance (ticket 113); null for ordinary items. */
+  readonly external: TodoExternalOrigin | null;
   readonly createdAtMs: number;
   readonly updatedAtMs: number;
 }
@@ -453,6 +469,8 @@ export interface CreateTodoInput {
    * activation, so a restart continues the same budget (ticket 58).
    */
   readonly redriveAttempts?: number;
+  /** External intake provenance (ticket 113); omit for ordinary items. */
+  readonly external?: TodoExternalOrigin;
   readonly nowMs?: number;
 }
 
@@ -567,6 +585,7 @@ export function createTodoLedger(options?: {
         redriveAttempts: input.redriveAttempts ?? 0,
         disposition: null,
         dispositionReason: null,
+        external: input.external ?? null,
         createdAtMs: at,
         updatedAtMs: at,
       });

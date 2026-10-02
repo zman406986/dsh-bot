@@ -5,18 +5,22 @@ import {
   markerDomainSpec,
   MARKER_DOMAIN_NAME,
   MARKER_TABLE_NAME,
+  INBOX_TABLE_NAME,
   type DomainLike,
   type KvTableLike,
   type StorageDomainLike,
+  type InboxJobCheckpoint,
 } from "../src/adapter/durable-marker.js";
 import type { DurableWorkerMarker } from "../src/core/durability.js";
 
 function createStubStorageDomain(): StorageDomainLike & {
   opens: unknown[];
   table: Map<string, DurableWorkerMarker>;
+  inbox: Map<string, InboxJobCheckpoint>;
   closed: boolean;
 } {
   const table = new Map<string, DurableWorkerMarker>();
+  const inbox = new Map<string, InboxJobCheckpoint>();
   const opens: unknown[] = [];
   let closed = false;
 
@@ -35,9 +39,25 @@ function createStubStorageDomain(): StorageDomainLike & {
     },
   };
 
+  const inboxKv: KvTableLike<InboxJobCheckpoint> = {
+    get(key: string) {
+      return inbox.get(key);
+    },
+    entries() {
+      return inbox.entries();
+    },
+    async put(key: string, value: InboxJobCheckpoint) {
+      inbox.set(key, { ...value });
+    },
+    async delete(key: string) {
+      return inbox.delete(key);
+    },
+  };
+
   return {
     opens,
     table,
+    inbox,
     get closed() {
       return closed;
     },
@@ -50,13 +70,14 @@ function createStubStorageDomain(): StorageDomainLike & {
         tables: Record<string, { valueSchema: { parse(v: unknown): unknown } }>;
       };
       assert.equal(s.name, MARKER_DOMAIN_NAME);
-      assert.equal(s.version, 1);
-      const tableSpec = s.tables[MARKER_TABLE_NAME];
-      assert.ok(tableSpec);
+      assert.equal(s.version, 2);
+      assert.ok(s.tables[MARKER_TABLE_NAME]);
+      assert.ok(s.tables[INBOX_TABLE_NAME]);
       return {
         table(name: string) {
-          assert.equal(name, MARKER_TABLE_NAME);
-          return kv;
+          if (name === MARKER_TABLE_NAME) return kv;
+          if (name === INBOX_TABLE_NAME) return inboxKv;
+          throw new Error(`unexpected table ${name}`);
         },
         async close() {
           closed = true;
@@ -77,6 +98,23 @@ function marker(overrides: Partial<DurableWorkerMarker> = {}): DurableWorkerMark
     todoId: null,
     startedAtMs: 1000,
     updatedAtMs: 2000,
+    ...overrides,
+  };
+}
+
+function checkpoint(
+  overrides: Partial<InboxJobCheckpoint> = {},
+): InboxJobCheckpoint {
+  return {
+    jobId: "job-1",
+    state: "claimed",
+    jobDir: "/tmp/inbox/job-1",
+    sessionId: null,
+    todoId: null,
+    claimedAtMs: 1000,
+    presentedAtMs: null,
+    endedAtMs: null,
+    presentAttempts: 0,
     ...overrides,
   };
 }
@@ -126,6 +164,48 @@ describe("durable marker store over storageDomain", () => {
     assert.doesNotThrow(() => parse(marker()));
   });
 
+  it("opens ONE domain for both tables (lazy, shared)", async () => {
+    const sd = createStubStorageDomain();
+    const durability = createStorageDomainDurability(sd);
+    await durability.writeWorkerMarker(marker());
+    await durability.inbox.record(checkpoint());
+    assert.equal(sd.opens.length, 1, "second table must reuse the open domain");
+    const listed = await durability.inbox.list();
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0]?.jobId, "job-1");
+    const got = await durability.inbox.get("job-1");
+    assert.equal(got?.state, "claimed");
+  });
+
+  it("records, updates, and lists inbox checkpoints", async () => {
+    const sd = createStubStorageDomain();
+    const durability = createStorageDomainDurability(sd);
+    await durability.inbox.record(checkpoint());
+    await durability.inbox.record(
+      checkpoint({ jobId: "job-2", state: "presented", sessionId: "s-9", presentAttempts: 1 }),
+    );
+    await durability.inbox.record(
+      checkpoint({ state: "replied", endedAtMs: 5000, presentAttempts: 1 }),
+    );
+    const listed = await durability.inbox.list();
+    assert.equal(listed.length, 2);
+    const job1 = listed.find((c) => c.jobId === "job-1");
+    assert.equal(job1?.state, "replied");
+    assert.equal(job1?.endedAtMs, 5000);
+  });
+
+  it("schema parse rejects malformed inbox checkpoints", () => {
+    const spec = markerDomainSpec() as {
+      tables: Record<string, { valueSchema: { parse(v: unknown): unknown } }>;
+    };
+    const parse = spec.tables[INBOX_TABLE_NAME]?.valueSchema.parse;
+    assert.ok(parse);
+    assert.throws(() => parse({}));
+    assert.throws(() => parse(checkpoint({ jobDir: "" })));
+    assert.throws(() => parse(checkpoint({ state: "meh" })));
+    assert.doesNotThrow(() => parse(checkpoint()));
+  });
+
   it("dispose closes the domain and rejects further writes", async () => {
     const sd = createStubStorageDomain();
     const durability = createStorageDomainDurability(sd);
@@ -133,5 +213,6 @@ describe("durable marker store over storageDomain", () => {
     await durability.dispose();
     assert.equal(sd.closed, true);
     await assert.rejects(() => durability.writeWorkerMarker(marker()));
+    await assert.rejects(() => durability.inbox.record(checkpoint()));
   });
 });

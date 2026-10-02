@@ -1,4 +1,5 @@
 import type { WorkerRecord, WorkerStatus } from "./types.js";
+import type { TodoExternalOrigin } from "./todo-reconciler.js";
 
 /**
  * Minimum-to-reconstruct durable marker (ADR-0006).
@@ -23,6 +24,13 @@ export interface DurableWorkerMarker {
    * lifetime budget rather than a per-boot one.
    */
   readonly redriveAttempts?: number;
+  /**
+   * External intake provenance (ticket 113). Optional because markers
+   * written before the inbox exist; a restored marker re-creates the ledger
+   * item with this origin so delivery routing and re-presentation dedupe
+   * still recognize the job.
+   */
+  readonly external?: TodoExternalOrigin;
   readonly startedAtMs: number;
   readonly updatedAtMs: number;
 }
@@ -76,8 +84,16 @@ export interface RebuildReport {
   readonly unknownState: readonly UnknownStateWorker[];
 }
 
-/** Project a roster record onto its durable marker. */
-export function toDurableMarker(record: WorkerRecord): DurableWorkerMarker {
+/**
+ * Project a roster record onto its durable marker.
+ * `external` stamps the linked todo's intake provenance when the caller
+ * knows it (ticket 113) — the core passes the ledger item's origin so a
+ * rebuild can re-create the inbox link.
+ */
+export function toDurableMarker(
+  record: WorkerRecord,
+  external?: TodoExternalOrigin | null,
+): DurableWorkerMarker {
   return {
     workerId: record.workerId,
     parentSessionId: record.parentSessionId,
@@ -87,6 +103,7 @@ export function toDurableMarker(record: WorkerRecord): DurableWorkerMarker {
     transcriptRef: record.transcriptRef,
     todoId: record.todoId,
     redriveAttempts: record.redriveAttempts,
+    ...(external ? { external } : {}),
     startedAtMs: record.startedAtMs,
     updatedAtMs: Date.now(),
   };

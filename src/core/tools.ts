@@ -603,7 +603,9 @@ export function createDispatcherTools(
 
       let todoCompleted: string | null = null;
       if (todoId !== undefined) {
-        const marked = multitask.markDelivered(todoId);
+        // Ticket 113: the delivered text rides to the core so an inbox-origin
+        // item's reply writer can land it in the job dir (reply.md).
+        const marked = multitask.markDelivered(todoId, text);
         todoCompleted = marked ? todoId : null;
         if (!marked) {
           detail = `todo ${todoId} could not be marked delivered`;

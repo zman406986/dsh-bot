@@ -475,11 +475,15 @@ describe("settings card — render model (ticket 47)", () => {
         // Ticket 108: absent from the served document → seeds empty (the
         // schema default applies host-side, never guessed here).
         ["wakeCoalesceWindowMs", "number", "", null],
+        // Ticket 113: the inbox trio — boolean, string (text input), number.
+        ["inboxEnabled", "boolean", "", null],
+        ["inboxDir", "string", "", null],
+        ["inboxRescanIntervalMs", "number", "", null],
       ],
     );
     assert.deepEqual(
       view.fields.map((field) => field.overridden),
-      [false, false, false],
+      [false, false, false, false, false, false],
     );
   });
 
@@ -502,6 +506,9 @@ describe("settings card — render model (ticket 47)", () => {
         ["enabled", true],
         ["accessRequestTimeoutMs", false],
         ["wakeCoalesceWindowMs", false],
+        ["inboxEnabled", false],
+        ["inboxDir", false],
+        ["inboxRescanIntervalMs", false],
       ],
     );
   });
@@ -666,7 +673,8 @@ describe("settings card — store: staging, saving, and the honest failure path 
     assert.deepEqual(
       store.getBox().view.fields.map((field) => field.text),
       // Ticket 108: the untouched third field seeds empty from the read-back.
-      ["false", "90000", ""],
+      // Ticket 113: the three inbox fields likewise.
+      ["false", "90000", "", "", "", ""],
     );
   });
 

@@ -48,6 +48,7 @@ import {
   reconcileTodos,
   type CreateTodoInput,
   type ReconcileReport,
+  type TodoExternalOrigin,
   type TodoItem,
   type TodoLedger,
 } from "./todo-reconciler.js";
@@ -63,6 +64,58 @@ export interface DrainedWake {
   readonly wake: WakeEvent;
   readonly reconcile: ReconcileReport;
 }
+
+/**
+ * Ticket 113: one inbox-origin job resolution fired through the
+ * `onInboxJobResolved` hook. The core decides WHEN (terminal paths and
+ * delivery); the hook implementation owns HOW (the plugin writes the job
+ * dir files — the core never touches the filesystem).
+ */
+export type InboxJobResolution =
+  | {
+      /** Worker completed and the result was delivered to the user. */
+      readonly kind: "replied";
+      readonly todoId: string;
+      readonly sessionId: string;
+      readonly jobId: string;
+      readonly jobDir: string;
+      /** The delivered text; non-empty reply.md is the completion signal. */
+      readonly replyText: string;
+    }
+  | {
+      /** Worker errored (fires from the settle path, delivery or not). */
+      readonly kind: "failed";
+      readonly todoId: string;
+      readonly sessionId: string;
+      readonly jobId: string;
+      readonly jobDir: string;
+      readonly error: string;
+    }
+  | {
+      /** Worker aborted (stop command or an abort-shaped settle). */
+      readonly kind: "cancelled";
+      readonly todoId: string;
+      readonly sessionId: string;
+      readonly jobId: string;
+      readonly jobDir: string;
+      readonly reason: string;
+    };
+
+/** Input to {@link Multitask.enqueueExternalJob} (ticket 113). */
+export interface EnqueueExternalJobInput {
+  readonly sessionId: string;
+  readonly jobId: string;
+  readonly jobDir: string;
+  /** The job's resolved prompt (prompt.md over entry.text, adapter-side). */
+  readonly promptText: string;
+  /** Ledger title; defaults to a short inbox-flavored line. */
+  readonly title?: string;
+}
+
+/** Result of {@link Multitask.enqueueExternalJob} (ticket 113). */
+export type EnqueueExternalJobResult =
+  | { readonly ok: true; readonly todoId: string }
+  | { readonly ok: false; readonly reason: "duplicate-job" };
 
 /**
  * What one delivery-redrive pass did (ticket 58, register D-5).
@@ -149,6 +202,17 @@ export interface MultitaskOptions {
    * wires `lifecycle.isDispatcherSession`. Offline-testable both ways.
    */
   readonly isLiveDispatcherSession?: (sessionId: string) => boolean;
+  /**
+   * Ticket 113: fired when an inbox-origin obligation reaches a terminal
+   * outcome — `replied` (worker settled AND the result was delivered via
+   * `markDelivered`), `failed` (worker error, delivery or not), or
+   * `cancelled` (abort, delivery or not). The hook is injected like
+   * `onRosterChanged` so the core never touches the filesystem; a throwing
+   * hook is swallowed — it must never break the settle path. The plugin's
+   * implementation writes `reply.md`/`status.json` atomically and surfaces
+   * its own write failures honestly.
+   */
+  readonly onInboxJobResolved?: (resolution: InboxJobResolution) => void;
 }
 
 /**
@@ -204,13 +268,26 @@ export interface Multitask {
    * user-visible work; pure chat and trivial lookups create no entry.
    */
   createTodo(input: CreateTodoInput): TodoItem;
+  /**
+   * Present one external intake job to a dispatcher session (ticket 113,
+   * ADR-0023). Creates a pending ledger item tagged with the inbox origin
+   * and enqueues an `external-event` wake (background rank, ticket-108
+   * coalescing applies). Idempotent per session: a job whose ledger item
+   * still exists is refused with `duplicate-job` — re-presentation after a
+   * restart relies on the fresh core's empty ledger, never on overwriting.
+   * The inbox never spawns (ADR-0003): the dispatcher model decides via the
+   * normal spawn_worker path.
+   */
+  enqueueExternalJob(input: EnqueueExternalJobInput): EnqueueExternalJobResult;
   /** Ledger items for a session. Never passed into a worker. */
   listTodos(sessionId: string): TodoItem[];
   /**
    * Mark a todo delivered to the user and completed. Call only after a
    * successful user-facing send — completed means delivered (S4).
+   * `replyText` (ticket 113) carries the delivered text for inbox-origin
+   * items so the plugin's reply writer can land it in the job dir.
    */
-  markDelivered(todoId: string): boolean;
+  markDelivered(todoId: string, replyText?: string): boolean;
   /**
    * Run the pure reconciler against current todo + roster state for a wake
    * (or an empty user/timer wake when omitted), apply the mutations, and
@@ -449,6 +526,29 @@ export function createMultitask(
   }
 
   /**
+   * Ticket 113: fire the inbox resolution hook. Same swallow discipline as
+   * the roster observer — a throwing hook (the plugin's own fs writes live
+   * behind it) must never break the settle or delivery path.
+   */
+  function fireInboxHook(resolution: InboxJobResolution): void {
+    const hook = options?.onInboxJobResolved;
+    if (hook === undefined) return;
+    try {
+      hook(resolution);
+    } catch {
+      // The plugin surfaces its own failures; the core stays unaffected.
+    }
+  }
+
+  /** The inbox origin of a record's linked todo, if any (ticket 113). */
+  function todoExternalOf(
+    todoId: string | null,
+  ): TodoExternalOrigin | undefined {
+    if (todoId === null) return undefined;
+    return todoLedger.get(todoId)?.external ?? undefined;
+  }
+
+  /**
    * The stream-uniqueness map's composite key (ADR-0019): one dispatcher
    * session's stream keys never collide with a sibling's.
    */
@@ -483,9 +583,22 @@ export function createMultitask(
   /** Close the linked todo when a worker is aborted for good. */
   function cancelLinkedTodo(record: WorkerRecord): void {
     if (record.todoId === null) return;
+    // Read BEFORE the close: cancelled items are pruned below, and the
+    // ticket-113 hook needs the inbox origin while it still exists.
+    const todo = todoLedger.get(record.todoId);
     todoLedger.markCancelled(record.todoId);
     // dsh has no cancelled status — drop the item so the list stays usable.
     todoLedger.prune(record.todoId);
+    if (todo?.external?.kind === "inbox") {
+      fireInboxHook({
+        kind: "cancelled",
+        todoId: todo.id,
+        sessionId: todo.sessionId,
+        jobId: todo.external.jobId,
+        jobDir: todo.external.jobDir,
+        reason: "worker-aborted",
+      });
+    }
   }
 
   /** Pure-reconcile against the session roster. Does not apply mutations. */
@@ -555,10 +668,35 @@ export function createMultitask(
     if (event.status === "aborted") {
       cancelLinkedTodo(record);
       void durability?.deleteWorkerMarker(record.workerId);
-    } else if (durability !== undefined) {
-      // Snapshot terminal status (+ transcript pointer) so a crash before
-      // user delivery still lets a restart notice the undelivered result.
-      void Promise.resolve(durability.writeWorkerMarker(toDurableMarker(record)));
+    } else {
+      // Ticket 113: an inbox-origin worker's ERROR maps to a `failed` job
+      // status. The todo itself stays open (the dispatcher still reports and
+      // may re-plan), but the job dir gets its honest terminal signal from
+      // the terminal path, delivery or not.
+      if (event.status === "error") {
+        const external = todoExternalOf(record.todoId);
+        if (external?.kind === "inbox") {
+          fireInboxHook({
+            kind: "failed",
+            todoId: record.todoId ?? "",
+            sessionId: record.parentSessionId,
+            jobId: external.jobId,
+            jobDir: external.jobDir,
+            error: event.report,
+          });
+        }
+      }
+      if (durability !== undefined) {
+        // Snapshot terminal status (+ transcript pointer) so a crash before
+        // user delivery still lets a restart notice the undelivered result.
+        // Ticket 113: the marker carries the inbox origin so a rebuild
+        // re-creates the ledger link with it intact.
+        void Promise.resolve(
+          durability.writeWorkerMarker(
+            toDurableMarker(record, todoExternalOf(record.todoId)),
+          ),
+        );
+      }
     }
     // One enqueue per accepted settle; the bus batches and routes the wake.
     // The ledger is never included — workers and host never see todos (ADR-0007).
@@ -681,9 +819,14 @@ export function createMultitask(
         }
         // Obligation marker (ADR-0006): minimum-to-reconstruct, written at
         // spawn through the host storage seam. Awaited so the marker exists
-        // before the spawn resolves.
+        // before the spawn resolves. Ticket 113: the inbox origin rides the
+        // marker so a rebuild can re-create the ledger link with it.
         if (durability !== undefined) {
-          await Promise.resolve(durability.writeWorkerMarker(toDurableMarker(record)));
+          await Promise.resolve(
+            durability.writeWorkerMarker(
+              toDurableMarker(record, todoExternalOf(record.todoId)),
+            ),
+          );
         }
         notifyRosterChanged(request.parentSessionId);
         return { ok: true, workerId };
@@ -818,11 +961,50 @@ export function createMultitask(
       return todoLedger.create(input);
     },
 
+    enqueueExternalJob(
+      input: EnqueueExternalJobInput,
+    ): EnqueueExternalJobResult {
+      // Idempotent per session (ticket 113): a ledger item for this job
+      // means the job was already presented — never a duplicate todo, never
+      // a second wake for one job. Re-presentation after a restart works
+      // because the fresh core's ledger is empty (or the rebuilt item came
+      // from the marker and dedupes here all the same).
+      const existing = todoLedger
+        .list(input.sessionId)
+        .find(
+          (todo) =>
+            todo.external?.kind === "inbox" &&
+            todo.external.jobId === input.jobId,
+        );
+      if (existing !== undefined) {
+        return { ok: false, reason: "duplicate-job" };
+      }
+      const todo = todoLedger.create({
+        sessionId: input.sessionId,
+        title: input.title ?? `Inbox job ${input.jobId}`,
+        status: "pending",
+        external: { kind: "inbox", jobId: input.jobId, jobDir: input.jobDir },
+      });
+      // The wake carries the payload; the ledger is never sent into a
+      // worker or the bus (ADR-0007). Background rank + coalescing apply
+      // inside the bus exactly as they do for settles.
+      wakeBus.enqueueExternalJob({
+        sessionId: input.sessionId,
+        job: {
+          jobId: input.jobId,
+          promptText: input.promptText,
+          jobDir: input.jobDir,
+        },
+      });
+      notifyRosterChanged(input.sessionId);
+      return { ok: true, todoId: todo.id };
+    },
+
     listTodos(sessionId: string): TodoItem[] {
       return todoLedger.list(sessionId);
     },
 
-    markDelivered(todoId: string): boolean {
+    markDelivered(todoId: string, replyText?: string): boolean {
       const ok = todoLedger.markDelivered(todoId);
       if (!ok) return false;
       // Ticket 27: the delivered flag flipped — presence must re-project.
@@ -834,6 +1016,19 @@ export function createMultitask(
         if (workerId != null) {
           void durability.deleteWorkerMarker(workerId);
         }
+      }
+      // Ticket 113: an inbox-origin item's delivered completion is the
+      // `replied` resolution — the settle AND delivery conditions are both
+      // met exactly here.
+      if (todo?.external?.kind === "inbox") {
+        fireInboxHook({
+          kind: "replied",
+          todoId: todo.id,
+          sessionId: todo.sessionId,
+          jobId: todo.external.jobId,
+          jobDir: todo.external.jobDir,
+          replyText: replyText ?? "",
+        });
       }
       return true;
     },
@@ -912,7 +1107,9 @@ export function createMultitask(
         record.redriveAttempts = todo.redriveAttempts;
         if (durability !== undefined) {
           void Promise.resolve(
-            durability.writeWorkerMarker(toDurableMarker(record)),
+            durability.writeWorkerMarker(
+              toDurableMarker(record, todoExternalOf(record.todoId)),
+            ),
           );
         }
       }
@@ -1010,6 +1207,9 @@ export function createMultitask(
             // Restore the spent budget too — otherwise every restart would
             // hand the obligation a fresh set of redrives (D-5).
             redriveAttempts: marker.redriveAttempts ?? 0,
+            // Ticket 113: the inbox origin rides the marker so the rebuilt
+            // item keeps its delivery routing (and re-present dedupe works).
+            ...(marker.external ? { external: marker.external } : {}),
             nowMs: marker.updatedAtMs,
           });
           todoLedger.linkWorker(
@@ -1137,6 +1337,7 @@ export type {
   SpawnResult,
   SteerResult,
   StopResult,
+  TodoExternalOrigin,
   TodoItem,
   TodoLedger,
   WorkerRecord,

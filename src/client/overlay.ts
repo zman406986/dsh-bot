@@ -235,6 +235,19 @@ export const localeDictionary: LocaleDictionary = {
       "Wake coalescing window (ms)",
     "settings.card.field.wakeCoalesceWindowMs.hint":
       "Batches rapid background completions into one dispatcher turn per window while the dispatcher is idle; a message from you always goes first. 0 wakes immediately (default).",
+    // Ticket 113: the opt-in file inbox. The hint states the same
+    // new-chats rule as `enabled` and points at the queue file the external
+    // system writes.
+    "settings.card.field.inboxEnabled.label": "Enable the file inbox",
+    "settings.card.field.inboxEnabled.hint":
+      "Saved as the dispatcher's setting: it applies to new chats. When on, the dispatcher also picks up jobs from the inbox directory below.",
+    "settings.card.field.inboxDir.label": "Inbox directory",
+    "settings.card.field.inboxDir.hint":
+      "The folder the external system writes queue jobs into. Leave empty to keep the inbox off.",
+    "settings.card.field.inboxRescanIntervalMs.label":
+      "Inbox rescan interval (ms)",
+    "settings.card.field.inboxRescanIntervalMs.hint":
+      "How often the inbox directory is re-scanned as a safety net. Minimum 1000; leave empty to use the default.",
     // Ticket 77 (ADR-0020 slice 1): the wrapper shell's chrome copy. The
     // main-surface line survives as the no-seat fallback: since ticket 80
     // the pane is a host seat, and this copy shows only when a composition
@@ -428,6 +441,17 @@ export const localeDictionary: LocaleDictionary = {
     "settings.card.field.wakeCoalesceWindowMs.label": "唤醒合并窗口（毫秒）",
     "settings.card.field.wakeCoalesceWindowMs.hint":
       "调度器空闲时，把窗口内先后到达的多个后台完成合并为一次唤醒；你的消息始终优先。0 表示立即唤醒（默认）。",
+    // Ticket 113：可选的文件收件箱。提示同样说明“新会话生效”规则，
+    // 并指出外部系统写入队列任务的目录。
+    "settings.card.field.inboxEnabled.label": "启用文件收件箱",
+    "settings.card.field.inboxEnabled.hint":
+      "保存为调度器的设置：对新会话生效。开启后，调度器还会从下方目录接收任务。",
+    "settings.card.field.inboxDir.label": "收件箱目录",
+    "settings.card.field.inboxDir.hint":
+      "外部系统写入队列任务的文件夹。留空则保持收件箱关闭。",
+    "settings.card.field.inboxRescanIntervalMs.label": "收件箱重扫间隔（毫秒）",
+    "settings.card.field.inboxRescanIntervalMs.hint":
+      "作为兜底，重新扫描收件箱目录的间隔。最小 1000；留空以使用默认值。",
     // Ticket 77（ADR-0020 切片 1）：外壳的界面文案。主 surface 的一行是
     // 诚实的骨架状态——会话表面随 ticket 80 接入，文案如实说明。命名与措辞
     // 均为自创（例外 B9：不逐字复制参考文本）。

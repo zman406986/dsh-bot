@@ -112,7 +112,7 @@ export interface SettingsCardFieldSpec {
   /** Field name inside the namespace section. */
   readonly field: string;
   /** Which control the card renders for this field. */
-  readonly kind: "boolean" | "number";
+  readonly kind: "boolean" | "number" | "string";
   /** Locale key of the visible label. */
   readonly labelKey: string;
   /** Locale key of the one-line explanation under the control. */
@@ -158,6 +158,22 @@ function parseNumber(field: string, text: string): SettingsCardWrite | undefined
   return { kind: "set", field, value };
 }
 
+/** Stored string → draft text, verbatim. Anything unreadable renders empty. */
+function formatString(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+/**
+ * Draft text → string write (ticket 113 `inboxDir`). Empty means clear; the
+ * trimmed text stages verbatim otherwise — every non-empty string is a
+ * string, so nothing but emptiness blocks the save.
+ */
+function parseString(field: string, text: string): SettingsCardWrite | undefined {
+  const trimmed = text.trim();
+  if (trimmed === "") return { kind: "clear", field };
+  return { kind: "set", field, value: trimmed };
+}
+
 /** One draft-text field spec of the given kind, bound to its own field name. */
 function booleanFieldSpec(
   field: string,
@@ -190,10 +206,27 @@ function numberFieldSpec(
   };
 }
 
+/** One string field spec (ticket 113), bound to its own field name. */
+function stringFieldSpec(
+  field: string,
+  labelKey: string,
+  hintKey: string,
+): SettingsCardFieldSpec {
+  return {
+    field,
+    kind: "string",
+    labelKey,
+    hintKey,
+    format: formatString,
+    parse: (text) => parseString(field, text),
+  };
+}
+
 /**
  * The schema fields this card edits — EXACTLY the fields of the host half's
  * `Config` (`src/plugin.ts`: `enabled`, `accessRequestTimeoutMs`,
- * `wakeCoalesceWindowMs`), in schema order. The pair is pinned offline against
+ * `wakeCoalesceWindowMs`, `inboxEnabled`, `inboxDir`,
+ * `inboxRescanIntervalMs`), in schema order. The pair is pinned offline against
  * `Config.dict`, so a field added to the schema without a control fails the
  * suite instead of silently rendering an editable card that hides part of the
  * namespace.
@@ -216,6 +249,21 @@ export const SETTINGS_CARD_FIELDS: readonly SettingsCardFieldSpec[] = [
     "wakeCoalesceWindowMs",
     "settings.card.field.wakeCoalesceWindowMs.label",
     "settings.card.field.wakeCoalesceWindowMs.hint",
+  ),
+  booleanFieldSpec(
+    "inboxEnabled",
+    "settings.card.field.inboxEnabled.label",
+    "settings.card.field.inboxEnabled.hint",
+  ),
+  stringFieldSpec(
+    "inboxDir",
+    "settings.card.field.inboxDir.label",
+    "settings.card.field.inboxDir.hint",
+  ),
+  numberFieldSpec(
+    "inboxRescanIntervalMs",
+    "settings.card.field.inboxRescanIntervalMs.label",
+    "settings.card.field.inboxRescanIntervalMs.hint",
   ),
 ];
 
@@ -241,7 +289,7 @@ export interface SettingsCardSnapshotInput {
 /** One field as the card's control renders it. */
 export interface SettingsCardFieldBox {
   readonly field: string;
-  readonly kind: "boolean" | "number";
+  readonly kind: "boolean" | "number" | "string";
   readonly labelKey: string;
   readonly hintKey: string;
   /** Draft text the control renders. */
