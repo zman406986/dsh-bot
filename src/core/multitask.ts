@@ -25,7 +25,12 @@ import {
   type SteerQueue,
   wrapParentCorrection,
 } from "./steer-queue.js";
-import { createWakeBus, type WakeBus, type WakeEvent } from "./wake-bus.js";
+import {
+  createWakeBus,
+  type WakeBus,
+  type WakeBusDegradedInfo,
+  type WakeEvent,
+} from "./wake-bus.js";
 import {
   createPeerInbox,
   type PeerInbox,
@@ -80,6 +85,27 @@ export interface MultitaskAccessOptions {
   readonly schedule?: (fn: () => void, ms: number) => () => void;
 }
 
+/**
+ * Ticket 108: wake-bus coalescing knobs (window size plus the clock and
+ * scheduler seams, mirroring the access-relay option shape).
+ */
+export interface MultitaskWakeOptions {
+  /**
+   * Idle-side coalescing window in ms. Default 0 = immediate delivery
+   * (pre-108 semantics, unchanged). When >0, idle background/peer enqueues
+   * share one per-session drain per window.
+   */
+  readonly coalesceWindowMs?: number;
+  /** Injectable clock for tests. */
+  readonly now?: () => number;
+  /** Injectable one-shot scheduler for tests. Returns a cancel function. */
+  readonly schedule?: (fn: () => void, ms: number) => () => void;
+  /** Consecutive coalesced-drain failures before degraded immediate mode. */
+  readonly coalesceFailBudget?: number;
+  /** Called once when the bus degrades to immediate mode. */
+  readonly onDegraded?: (info: WakeBusDegradedInfo) => void;
+}
+
 /** Optional ports the multitask core depends on beyond the host. */
 export interface MultitaskOptions {
   /**
@@ -90,6 +116,8 @@ export interface MultitaskOptions {
   readonly durability?: DurabilityPort;
   /** Access-relay configuration (timeout, test seams). */
   readonly access?: MultitaskAccessOptions;
+  /** Wake-bus coalescing configuration (ticket 108; window, test seams). */
+  readonly wake?: MultitaskWakeOptions;
   /** Peer inbox knobs (ticket 14). */
   readonly peer?: PeerInboxOptions;
   /**
@@ -317,7 +345,24 @@ export function createMultitask(
   const steerQueue: SteerQueue = createSteerQueue();
   const todoLedger: TodoLedger = createTodoLedger();
   const peerInbox: PeerInbox = createPeerInbox(options?.peer);
+  // Ticket 108: coalescing knobs flow through like the access seams —
+  // conditionally spread so an unset option stays truly absent (the bus
+  // applies its own defaults).
+  const wakeOptions = options?.wake;
   const wakeBus: WakeBus = createWakeBus({
+    ...(wakeOptions?.coalesceWindowMs !== undefined
+      ? { coalesceWindowMs: wakeOptions.coalesceWindowMs }
+      : {}),
+    ...(wakeOptions?.now !== undefined ? { now: wakeOptions.now } : {}),
+    ...(wakeOptions?.schedule !== undefined
+      ? { schedule: wakeOptions.schedule }
+      : {}),
+    ...(wakeOptions?.coalesceFailBudget !== undefined
+      ? { coalesceFailBudget: wakeOptions.coalesceFailBudget }
+      : {}),
+    ...(wakeOptions?.onDegraded !== undefined
+      ? { onDegraded: wakeOptions.onDegraded }
+      : {}),
     onDeliver: (sessionId) => {
       void host.requestDispatcherWakeup(sessionId);
     },

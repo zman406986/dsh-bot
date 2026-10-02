@@ -472,11 +472,14 @@ describe("settings card — render model (ticket 47)", () => {
       [
         ["enabled", "boolean", "true", true],
         ["accessRequestTimeoutMs", "number", "120000", null],
+        // Ticket 108: absent from the served document → seeds empty (the
+        // schema default applies host-side, never guessed here).
+        ["wakeCoalesceWindowMs", "number", "", null],
       ],
     );
     assert.deepEqual(
       view.fields.map((field) => field.overridden),
-      [false, false],
+      [false, false, false],
     );
   });
 
@@ -498,6 +501,7 @@ describe("settings card — render model (ticket 47)", () => {
       [
         ["enabled", true],
         ["accessRequestTimeoutMs", false],
+        ["wakeCoalesceWindowMs", false],
       ],
     );
   });
@@ -661,7 +665,8 @@ describe("settings card — store: staging, saving, and the honest failure path 
     assert.equal(store.getBox().dirty, false);
     assert.deepEqual(
       store.getBox().view.fields.map((field) => field.text),
-      ["false", "90000"],
+      // Ticket 108: the untouched third field seeds empty from the read-back.
+      ["false", "90000", ""],
     );
   });
 

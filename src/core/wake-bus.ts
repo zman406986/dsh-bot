@@ -106,6 +106,13 @@ export interface EnqueuePeerInput {
  *   Unknown ownership fails closed as user-owned.
  * - Workers are never interrupted by peer priority — only the dispatcher
  *   *turn* is reclaimed; in-flight workers keep running.
+ * - Ticket 108 (opt-in, `coalesceWindowMs > 0`): idle background/peer
+ *   enqueues schedule ONE per-session drain at now+window instead of an
+ *   immediate wake; enqueues landing inside the window join the pending
+ *   batch. User wakes preempt the window immediately (ticket-06
+ *   discipline). Consecutive failed coalesced deliveries trip a fail
+ *   budget (default 3) into degraded immediate mode — wakes are never
+ *   dropped, and the default (window 0) is byte-identical to pre-108.
  */
 export interface WakeBus {
   /** Queue a settled-worker notice for its parent session. */
@@ -138,6 +145,13 @@ export interface WakeBus {
   noteTurnStarted(sessionId: string, owner?: TurnOwner): void;
   /** Mark the dispatcher session idle; flush pending work in rank order. */
   noteTurnEnded(sessionId: string): void;
+  /**
+   * Ticket 108: invalidate every pending coalescing window — bump the
+   * generation, cancel all armed timers, and make any timer that still
+   * fires a no-op. Pending wake data is untouched; delivery of it stays
+   * the caller's business (turn-end flush or a later window).
+   */
+  dispose(): void;
   /** Take the ready wake for this session, or undefined when none. */
   drain(sessionId: string): WakeEvent | undefined;
   /** Read the ready wake without taking it. */
@@ -175,6 +189,19 @@ interface SessionWakeState {
    * anyway, so coalescing N redrives into the next turn is correct.
    */
   pendingRedrive: boolean;
+  /**
+   * Ticket 108: the pending coalescing window for this session, or null.
+   * At most ONE timer per session; enqueues inside the window join the
+   * batch instead of arming another timer.
+   */
+  coalescing: { cancel: () => void; dueAtMs: number } | null;
+}
+
+export interface WakeBusDegradedInfo {
+  /** Consecutive coalesced-drain delivery failures at degrade time. */
+  readonly consecutiveFailures: number;
+  /** The last delivery error that tipped the budget. */
+  readonly lastError: unknown;
 }
 
 export interface WakeBusOptions {
@@ -188,7 +215,37 @@ export interface WakeBusOptions {
   onInterrupt?: (sessionId: string) => void;
   /** Called after drain hands a ready wake to the caller. */
   onDrain?: (event: WakeEvent) => void;
+  /**
+   * Ticket 108: idle-side coalescing window in ms. Default 0 keeps the
+   * current semantics byte-for-byte: every idle background/peer enqueue
+   * wakes the dispatcher immediately. When >0, an idle enqueue schedules
+   * ONE per-session drain at now+window instead; further enqueues for that
+   * session inside the window join the pending batch. User wakes preempt
+   * the window immediately (same discipline as the ticket-06 mid-turn
+   * hold). Never applies while the session is mid-turn.
+   */
+  coalesceWindowMs?: number;
+  /** Injectable clock for tests. Defaults to Date.now. */
+  now?: () => number;
+  /**
+   * Schedule a one-shot timeout. Returns a cancel function.
+   * Default uses setTimeout. Tests inject a manual scheduler — no real
+   * timer may stay armed past a test.
+   */
+  schedule?: (fn: () => void, ms: number) => () => void;
+  /**
+   * Ticket 108 fail budget: consecutive coalesced-drain deliveries whose
+   * `onDeliver` throws before the bus degrades to immediate mode. Default
+   * {@link DEFAULT_COALESCE_FAIL_BUDGET}. Degraded mode bypasses the window
+   * for every subsequent drain — wakes are never dropped.
+   */
+  coalesceFailBudget?: number;
+  /** Called once when the bus flips into degraded immediate mode. */
+  onDegraded?: (info: WakeBusDegradedInfo) => void;
 }
+
+/** Ticket 108: consecutive coalesced-drain failures tolerated before degrade. */
+export const DEFAULT_COALESCE_FAIL_BUDGET = 3;
 
 function isBackground(source: WakeSource): boolean {
   return (
@@ -228,9 +285,32 @@ function ownerForSource(source: WakeSource): TurnOwner {
   return "worker-settled";
 }
 
+function defaultSchedule(fn: () => void, ms: number): () => void {
+  const handle = setTimeout(fn, ms);
+  return () => clearTimeout(handle);
+}
+
 export function createWakeBus(options: WakeBusOptions): WakeBus {
   const { onDeliver, onInterrupt, onDrain } = options;
+  const coalesceWindowMs = options.coalesceWindowMs ?? 0;
+  const now = options.now ?? Date.now;
+  const schedule = options.schedule ?? defaultSchedule;
+  const coalesceFailBudget =
+    options.coalesceFailBudget ?? DEFAULT_COALESCE_FAIL_BUDGET;
+  const onDegraded = options.onDegraded;
   const sessions = new Map<string, SessionWakeState>();
+  /**
+   * Ticket 108: bumped by dispose; a timer armed under an older generation
+   * no-ops when it fires, so a stale window can never deliver after a
+   * teardown/rebuild.
+   */
+  let generation = 0;
+  /**
+   * Ticket 108: once true, every drain bypasses the window and behaves
+   * exactly like window 0 (immediate). Tripped by the fail budget below.
+   */
+  let degraded = false;
+  let coalesceFailures = 0;
 
   function ensure(sessionId: string): SessionWakeState {
     let state = sessions.get(sessionId);
@@ -246,10 +326,82 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
         normalPeers: [],
         ready: null,
         pendingRedrive: false,
+        coalescing: null,
       };
       sessions.set(sessionId, state);
     }
     return state;
+  }
+
+  /** Whether idle enqueues currently coalesce instead of waking at once. */
+  function coalescingActive(): boolean {
+    return !degraded && coalesceWindowMs > 0;
+  }
+
+  /**
+   * Arm the per-session window drain (ticket 108). Already-armed windows
+   * are joined, never duplicated — one pending timer per session, and
+   * sibling dispatcher sessions coexist independently.
+   */
+  function scheduleCoalescedDrain(
+    sessionId: string,
+    state: SessionWakeState,
+  ): void {
+    if (state.coalescing !== null) return;
+    const gen = generation;
+    const dueAtMs = now() + coalesceWindowMs;
+    const cancel = schedule(() => {
+      // Stale timer: dispose/rebuild bumped the generation — no-op.
+      if (gen !== generation) return;
+      const current = sessions.get(sessionId);
+      if (current === undefined || current.coalescing === null) return;
+      current.coalescing = null;
+      // Mid-turn: the turn-end flush owns delivery (ticket-06 hold).
+      if (current.busy) return;
+      runCoalescedDrain(sessionId, current);
+    }, coalesceWindowMs);
+    state.coalescing = { cancel, dueAtMs };
+  }
+
+  /** Cancel a pending window without delivering it. */
+  function cancelCoalescedDrain(state: SessionWakeState): void {
+    const pending = state.coalescing;
+    if (pending === null) return;
+    state.coalescing = null;
+    pending.cancel();
+  }
+
+  /**
+   * Run the normal flush path for a coalesced window drain, wrapped in the
+   * ticket-108 fail budget: N consecutive throwing deliveries flip the bus
+   * into degraded immediate mode. The flush marks `ready` BEFORE notifying,
+   * so a throw never drops the wake — the host just wasn't told, and
+   * delivery redrive remains the backstop.
+   */
+  function runCoalescedDrain(sessionId: string, state: SessionWakeState): void {
+    try {
+      tryFlush(sessionId, state);
+      coalesceFailures = 0;
+    } catch (error) {
+      coalesceFailures += 1;
+      if (degraded) return;
+      if (coalesceFailures >= coalesceFailBudget) {
+        degraded = true;
+        onDegraded?.({
+          consecutiveFailures: coalesceFailures,
+          lastError: error,
+        });
+      }
+    }
+  }
+
+  /** Idle background enqueue: join the window when active, else wake now. */
+  function coalesceOrFlush(sessionId: string, state: SessionWakeState): void {
+    if (coalescingActive()) {
+      scheduleCoalescedDrain(sessionId, state);
+    } else {
+      flushBackground(sessionId, state);
+    }
   }
 
   /** Move pending background items into a ready batch and notify the host. */
@@ -405,8 +557,10 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
       }
       state.pending.push(notice);
       // Mid-turn: queue only. Idle with a user/peer wake waiting: stay behind it.
+      // Ticket 108: idle and nothing ready → join/arm the coalescing window
+      // instead of waking immediately (immediate at the default window 0).
       if (!state.busy && state.ready === null) {
-        flushBackground(input.parentSessionId, state);
+        coalesceOrFlush(input.parentSessionId, state);
       }
     },
 
@@ -432,7 +586,7 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
       }
       state.pendingAccessRequests.push(notice);
       if (!state.busy && state.ready === null) {
-        flushBackground(input.parentSessionId, state);
+        coalesceOrFlush(input.parentSessionId, state);
       }
     },
 
@@ -448,7 +602,7 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
       }
       state.pendingAccessNotices.push(input.notice);
       if (!state.busy && state.ready === null) {
-        flushBackground(input.parentSessionId, state);
+        coalesceOrFlush(input.parentSessionId, state);
       }
     },
 
@@ -505,13 +659,28 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
       }
 
       // Nothing ready, not busy → queue then flush in rank order.
+      // Ticket 108: the flush rides the coalescing window when active.
       if (effectivePriority) state.priorityPeers.push(notice);
       else state.normalPeers.push(notice);
-      tryFlush(input.sessionId, state);
+      if (coalescingActive()) {
+        scheduleCoalescedDrain(input.sessionId, state);
+      } else {
+        tryFlush(input.sessionId, state);
+      }
     },
 
     enqueueUserWake(sessionId: string): void {
       const state = ensure(sessionId);
+      // Ticket 108: a pending coalescing window is flushed immediately —
+      // same preemption discipline as the ticket-06 mid-turn hold. The
+      // drain runs now (timer cancelled); the reclaim below then puts the
+      // non-user batch back behind the user wake so the user goes first.
+      if (state.coalescing !== null) {
+        cancelCoalescedDrain(state);
+        if (!state.busy && state.ready === null) {
+          runCoalescedDrain(sessionId, state);
+        }
+      }
       // Reclaim any undelivered non-user batch so the user goes first.
       reclaimReadyNonUser(state);
       // The host opens the user's turn itself — no onDeliver for user wakes.
@@ -530,6 +699,13 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
       // Mid-turn: hold it as a flag. Waking now would interrupt a live turn
       // for work that is already waiting on that turn's outcome.
       if (state.busy) {
+        state.pendingRedrive = true;
+        return;
+      }
+      // Ticket 108: a pending coalescing window opens a turn momentarily,
+      // and its flush subsumes an owed redrive (the same rule as a real
+      // background batch) — no separate immediate wake is needed.
+      if (state.coalescing !== null) {
         state.pendingRedrive = true;
         return;
       }
@@ -554,6 +730,10 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
     noteTurnStarted(sessionId: string, owner?: TurnOwner): void {
       const state = ensure(sessionId);
       state.busy = true;
+      // Ticket 108: a window timer can do nothing useful mid-turn — the
+      // turn-end flush owns delivery of anything pending. Cancel it here so
+      // no stale timer lingers across the turn.
+      cancelCoalescedDrain(state);
       // Explicit owner wins; else pending owner from the last flush;
       // else fail closed to user.
       state.currentTurn = owner ?? state.pendingOwner ?? "user";
@@ -570,6 +750,16 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
       }
       if (state.ready === null) {
         tryFlush(sessionId, state);
+      }
+    },
+
+    dispose(): void {
+      // Ticket 108: bump first, then cancel — any timer that still fires
+      // sees a stale generation and no-ops, even if the host scheduler
+      // ignores the cancel.
+      generation += 1;
+      for (const state of sessions.values()) {
+        cancelCoalescedDrain(state);
       }
     },
 

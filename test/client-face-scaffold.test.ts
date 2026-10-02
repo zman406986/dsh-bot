@@ -483,6 +483,10 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
       "settings.card.field.accessRequestTimeoutMs.label",
       "settings.card.field.enabled.hint",
       "settings.card.field.enabled.label",
+      // Ticket 108: the wake-coalescing window field (one label/hint pair
+      // per schema field, in the same pairing rule).
+      "settings.card.field.wakeCoalesceWindowMs.hint",
+      "settings.card.field.wakeCoalesceWindowMs.label",
       "settings.card.invalid",
       "settings.card.overridden",
       "settings.card.readonly",

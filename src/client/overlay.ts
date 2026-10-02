@@ -231,6 +231,10 @@ export const localeDictionary: LocaleDictionary = {
       "Access-request timeout (ms)",
     "settings.card.field.accessRequestTimeoutMs.hint":
       "How long an unanswered permission request waits before it is denied. Leave empty to use the default.",
+    "settings.card.field.wakeCoalesceWindowMs.label":
+      "Wake coalescing window (ms)",
+    "settings.card.field.wakeCoalesceWindowMs.hint":
+      "Batches rapid background completions into one dispatcher turn per window while the dispatcher is idle; a message from you always goes first. 0 wakes immediately (default).",
     // Ticket 77 (ADR-0020 slice 1): the wrapper shell's chrome copy. The
     // main-surface line survives as the no-seat fallback: since ticket 80
     // the pane is a host seat, and this copy shows only when a composition
@@ -421,6 +425,9 @@ export const localeDictionary: LocaleDictionary = {
     "settings.card.field.accessRequestTimeoutMs.label": "访问请求超时（毫秒）",
     "settings.card.field.accessRequestTimeoutMs.hint":
       "权限请求未获答复时可等待的时长，超时后按拒绝处理。留空以使用默认值。",
+    "settings.card.field.wakeCoalesceWindowMs.label": "唤醒合并窗口（毫秒）",
+    "settings.card.field.wakeCoalesceWindowMs.hint":
+      "调度器空闲时，把窗口内先后到达的多个后台完成合并为一次唤醒；你的消息始终优先。0 表示立即唤醒（默认）。",
     // Ticket 77（ADR-0020 切片 1）：外壳的界面文案。主 surface 的一行是
     // 诚实的骨架状态——会话表面随 ticket 80 接入，文案如实说明。命名与措辞
     // 均为自创（例外 B9：不逐字复制参考文本）。

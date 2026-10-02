@@ -35,6 +35,8 @@ import {
   type StorageDomainDurability,
 } from "./adapter/index.js";
 import { registerWorkerAccessTool, createPendingAskSettleWaiter } from "./adapter/worker-access-tool.js";
+import type { WorkerActivityEntry } from "./adapter/cordis-dsh-host.js";
+import { clampActivity } from "./core/report-clamp.js";
 import { createWorkerAgentDef } from "./worker/agent-def.js";
 
 /**
@@ -59,6 +61,14 @@ export const Config = z.object({
    * Default deny after this wait. Tests inject a tiny value.
    */
   accessRequestTimeoutMs: z.number().default(120_000),
+  /**
+   * Ticket 108: idle-side wake coalescing window in ms. 0 (default) keeps
+   * current semantics — every idle settle/peer wakes the dispatcher at once.
+   * >0 batches rapid background wakes into one dispatcher turn per window;
+   * user messages still preempt the window immediately. Read once at
+   * dispatcher-session start like `enabled`.
+   */
+  wakeCoalesceWindowMs: z.number().min(0).default(0),
 });
 
 export const name = "multitask-dispatcher";
@@ -94,6 +104,8 @@ export const inject: string[] = [
 export interface PluginConfig {
   enabled: boolean;
   accessRequestTimeoutMs?: number;
+  /** Ticket 108: idle wake coalescing window in ms (0 = off). */
+  wakeCoalesceWindowMs?: number;
 }
 
 /**
@@ -147,6 +159,57 @@ export function dispatchApprovalSeamFor(
 }
 
 /**
+ * Ticket 110: digest-side view of the host's bounded per-worker activity
+ * ring (`CordisDshHost.recentActivities`) — newest-first entries. A narrow
+ * structural type so offline tests can stub the provider without a host.
+ */
+type WakeActivitySource = (
+  workerId: string,
+  n: number,
+) => readonly WorkerActivityEntry[];
+
+/** Max activity phrases shown per worker in the wake digest (ticket 110). */
+export const WAKE_DIGEST_ACTIVITY_COUNT = 3;
+
+/** Heading of the wake digest's recent-activity section (ticket 110). */
+export const WAKE_ACTIVITY_DIGEST_HEADING = "## Recent worker activity";
+
+/**
+ * Ticket 110: the "Recent worker activity" digest section for a wake turn.
+ * Inline text only (U-F): for every worker referenced by the wake's settle
+ * notices, up to {@link WAKE_DIGEST_ACTIVITY_COUNT} firehose-observed
+ * phrases, newest-first, each re-clamped through the core activity clamp
+ * (`clampActivity` — import, never a rewrite of stored state; the core
+ * stores no report or activity text). Empty string when no referenced
+ * worker has observed activity — the post-restart honest-amnesia case —
+ * so the section is omitted entirely rather than rendered empty.
+ *
+ * Exported as the regression-visible surface for offline tests, mirroring
+ * `dispatchApprovalSeamFor`'s rationale: the shipped wiring is exercised
+ * through `composeWakeText`, and this helper is its digest half.
+ */
+export function assembleActivityDigest(
+  notices: readonly WakeNotice[],
+  recentActivities: WakeActivitySource,
+): string {
+  const lines: string[] = [];
+  for (const notice of notices) {
+    const entries = recentActivities(
+      notice.workerId,
+      WAKE_DIGEST_ACTIVITY_COUNT,
+    );
+    for (const entry of entries) {
+      const phrase = clampActivity(entry.phrase);
+      if (phrase !== null) {
+        lines.push(`- ${notice.workerId} · ${phrase}`);
+      }
+    }
+  }
+  if (lines.length === 0) return "";
+  return [WAKE_ACTIVITY_DIGEST_HEADING, "", ...lines].join("\n");
+}
+
+/**
  * Compose the wake follow-up body: drain the ready wake (reconcile runs),
  * map settle notices, and include undelivered landed items whose report
  * text is only in the child transcript (T10 follow-up).
@@ -154,11 +217,22 @@ export function dispatchApprovalSeamFor(
  * `suppressPromptedAccessAsk` (ticket 23) filters asks that are currently
  * presented through the host prompt seam so an ask is never rendered both
  * ways at once (design-16 §4.4 dedupe; one presentation per ask at a time).
+ *
+ * `recentActivities` (ticket 110) appends the inline "Recent worker
+ * activity" digest for the workers referenced by the wake's settle
+ * notices — the wake turn stays self-contained (D21): the digest lives in
+ * the wake text itself, with no storage writes and no prompt-side
+ * references to stored outputs.
+ *
+ * Exported for offline tests (see `dispatchApprovalSeamFor`): the shipped
+ * caller is the `composeWakeText` option wired into `createCordisDshHost`
+ * in `apply` below.
  */
-function composeWakeText(
+export function composeWakeText(
   multitask: Multitask,
   sessionId: string,
   suppressPromptedAccessAsk?: (requestId: string) => boolean,
+  recentActivities?: WakeActivitySource,
 ): string | null {
   const drained = multitask.drainWake(sessionId);
   if (drained === undefined) return null;
@@ -220,7 +294,15 @@ function composeWakeText(
     requests: accessRequests,
     resolved: drained.wake.accessNotices ?? [],
   });
-  return `${reminder}\n\n${wake}`;
+  const body = `${reminder}\n\n${wake}`;
+  // Ticket 110: the digest rides the wake turn itself — inline text,
+  // appended after the wake body, and only when at least one referenced
+  // worker has observed activity (empty rings contribute no lines).
+  const digest =
+    recentActivities !== undefined
+      ? assembleActivityDigest(notices, recentActivities)
+      : "";
+  return digest.length > 0 ? `${body}\n\n${digest}` : body;
 }
 
 /**
@@ -292,9 +374,17 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     composeWakeText: (sessionId) => {
       if (multitaskRef === null) return null;
       // Ticket 23: `pumpFor` is declared below — this closure only runs once
-      // wakes are delivered, never during apply.
-      return composeWakeText(multitaskRef, sessionId, (requestId) =>
-        pumpFor(sessionId).suppressesConversational(requestId),
+      // wakes are delivered, never during apply. Ticket 110: `host` is read
+      // under the same rule — the binding is initialized by the very call
+      // this closure is passed to, and the first invocation happens at wake
+      // delivery, long after apply has returned, so the closure never sees
+      // the uninitialized binding.
+      return composeWakeText(
+        multitaskRef,
+        sessionId,
+        (requestId) =>
+          pumpFor(sessionId).suppressesConversational(requestId),
+        (workerId, n) => host.recentActivities(workerId, n),
       );
     },
   });
@@ -302,10 +392,22 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     typeof config.accessRequestTimeoutMs === "number"
       ? config.accessRequestTimeoutMs
       : undefined;
+  // Ticket 108: clamped defensively here too — the schema enforces min 0,
+  // but apply() must never trust raw config for a window that arms timers.
+  const wakeCoalesceWindowMs =
+    typeof config.wakeCoalesceWindowMs === "number" &&
+    Number.isFinite(config.wakeCoalesceWindowMs)
+      ? Math.max(0, config.wakeCoalesceWindowMs)
+      : 0;
   const multitask: Multitask = createMultitask(host, {
     durability: markers,
     ...(accessTimeoutMs !== undefined
       ? { access: { timeoutMs: accessTimeoutMs } }
+      : {}),
+    // Ticket 108: the coalescing window is opt-in — omitted entirely at the
+    // default so the bus keeps pre-108 semantics byte-for-byte.
+    ...(wakeCoalesceWindowMs > 0
+      ? { wake: { coalesceWindowMs: wakeCoalesceWindowMs } }
       : {}),
     // Ticket 70 §2: the send_peer liveness fence is the activation truth —
     // a peer send to a session that is not a live dispatcher refuses with

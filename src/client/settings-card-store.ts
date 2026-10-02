@@ -192,10 +192,11 @@ function numberFieldSpec(
 
 /**
  * The schema fields this card edits — EXACTLY the fields of the host half's
- * `Config` (`src/plugin.ts`: `enabled`, `accessRequestTimeoutMs`), in schema
- * order. The pair is pinned offline against `Config.dict`, so a field added to
- * the schema without a control fails the suite instead of silently rendering an
- * editable card that hides part of the namespace.
+ * `Config` (`src/plugin.ts`: `enabled`, `accessRequestTimeoutMs`,
+ * `wakeCoalesceWindowMs`), in schema order. The pair is pinned offline against
+ * `Config.dict`, so a field added to the schema without a control fails the
+ * suite instead of silently rendering an editable card that hides part of the
+ * namespace.
  *
  * The `enabled` hint phrases the flag as the SETTING (ADR-0005): a saved change
  * lands in NEW chats, never as a live toggle of the running session.
@@ -210,6 +211,11 @@ export const SETTINGS_CARD_FIELDS: readonly SettingsCardFieldSpec[] = [
     "accessRequestTimeoutMs",
     "settings.card.field.accessRequestTimeoutMs.label",
     "settings.card.field.accessRequestTimeoutMs.hint",
+  ),
+  numberFieldSpec(
+    "wakeCoalesceWindowMs",
+    "settings.card.field.wakeCoalesceWindowMs.label",
+    "settings.card.field.wakeCoalesceWindowMs.hint",
   ),
 ];
 
