@@ -24,6 +24,7 @@
 | [0020](0020-wrapper-shell-vehicle-own-frame-over-shipped-runtime-draft-nonhuman-approved.md) | The wrapper vehicle: our own application frame over the shipped dsh client runtime (ADR-0018's "we build the whole UI") | draft (non-human-approved); **vehicle superseded 2026-09-20 by 0021** — addon coexistence, floating dispatcher window; the root-frame election leaves the default posture |
 | [0021](0021-addon-coexistence-floating-dispatcher-window.md) | Addon coexistence: stock dsh stays the primary UI; dispatcher functions live in a separate floating window | accepted (human-ruled, 2026-09-20 in-session directive) — amends ADR-0018's vehicle clause; supersedes ADR-0020 as vehicle |
 | [0022](0022-floating-capsule-revived-by-human-ruling.md) | The collapsed launcher becomes an information-bearing floating capsule — revived by the human's 2026-09-22 ruling | accepted (human-ruled, 2026-09-22 in-session directive) — supersedes ADR-0021's capsule-retirement clause in part |
+| [0023](0023-file-driven-external-intake.md) | File-driven external work intake (inbox) | draft (nonhuman-approved) |
 
 Draft ADRs 0013–0015 (capsule epic 35, ticket 37) are agent-drafted and **pending human
 sign-off** (ticket 33's close-out pass). Numbers 0010–0012 were reserved to design-17 §9's
