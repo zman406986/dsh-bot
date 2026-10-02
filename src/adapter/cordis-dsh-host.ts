@@ -262,6 +262,18 @@ export interface CordisDshHost extends DshHost {
    */
   lastActivityAtMs(workerId: string): number | null;
   /**
+   * Ticket 110: the bounded per-worker activity ring, newest-first — up to
+   * `n` of the last firehose-observed phrases with their observation
+   * moments, from the same subscription as `recentActivity` (no new seam,
+   * no polling, nothing persisted). The breadcrumb is RETAINED through
+   * settle so the wake digest (ticket 110 phase 2) can show what the
+   * worker did before finishing — `recentActivity`/`lastActivityAtMs`
+   * still go null at settle, so the ticket-29 check-row honesty rule is
+   * unchanged. Empty when nothing has been observed; `n <= 0` yields an
+   * empty array. Cleared on dispose.
+   */
+  recentActivities(workerId: string, n: number): readonly WorkerActivityEntry[];
+  /**
    * Ticket 75: subscribe to firehose-observed tool calls on owned workers.
    * The `session/event` handler already matches every `tool/call` for an
    * owned session (the ticket-29 subscription); this notifies subscribers so
@@ -419,6 +431,64 @@ interface WorkerEntry {
   readonly agentSessionId: string;
 }
 
+/** Max phrases retained per worker in the activity ring (ticket 110). */
+export const WORKER_ACTIVITY_RING_CAPACITY = 5;
+
+/** One firehose-observed activity phrase with its observation moment. */
+export interface WorkerActivityEntry {
+  readonly phrase: string;
+  readonly atMs: number;
+}
+
+/**
+ * Ticket 110: bounded in-memory per-worker activity ring — the last
+ * {@link WORKER_ACTIVITY_RING_CAPACITY} observed phrases,
+ * insertion-ordered, oldest evicted. Plain adapter state: nothing
+ * persisted, no new seam. The existing single-entry accessors
+ * (`recentActivity`, `lastActivityAtMs`) read `latest` and are gated on
+ * settle (ticket 29 honesty: a settled worker has no LIVE activity), while
+ * the wake digest reads `recent` (newest-first) — retained through settle
+ * so the digest can show the final breadcrumb.
+ */
+export class WorkerActivityRing {
+  readonly #rings = new Map<string, WorkerActivityEntry[]>();
+
+  /** Append an observed phrase, evicting the oldest past the capacity. */
+  record(workerId: string, phrase: string, atMs: number): void {
+    const ring = this.#rings.get(workerId);
+    const entries = ring ?? [];
+    entries.push({ phrase, atMs });
+    if (entries.length > WORKER_ACTIVITY_RING_CAPACITY) {
+      entries.splice(0, entries.length - WORKER_ACTIVITY_RING_CAPACITY);
+    }
+    this.#rings.set(workerId, entries);
+  }
+
+  /** The newest entry — the view the single-entry accessors read. */
+  latest(workerId: string): WorkerActivityEntry | undefined {
+    const ring = this.#rings.get(workerId);
+    return ring?.[ring.length - 1];
+  }
+
+  /** Up to `n` entries, newest-first. `n <= 0` (or non-finite) → empty. */
+  recent(workerId: string, n: number): readonly WorkerActivityEntry[] {
+    if (!Number.isFinite(n) || n <= 0) return [];
+    const ring = this.#rings.get(workerId);
+    if (ring === undefined) return [];
+    return ring.slice(-n).reverse();
+  }
+
+  /** Drop one worker's ring (settle/abort cleanup). */
+  clear(workerId: string): void {
+    this.#rings.delete(workerId);
+  }
+
+  /** Drop every ring (dispose). */
+  clearAll(): void {
+    this.#rings.clear();
+  }
+}
+
 export function createCordisDshHost(
   ctx: AdapterContext,
   options?: CordisDshHostOptions,
@@ -443,12 +513,27 @@ export function createCordisDshHost(
   // Ticket 75: firehose-observed tool calls on owned workers, fanned out to
   // subscribers (the plugin wires the core's noteToolCall onto this).
   const toolCallCallbacks: Array<(workerId: string) => void> = [];
-  // Ticket 29: latest activity phrase per owned worker, projected from the
-  // host `session/event` firehose. Pure subscription — no polling, no timers.
-  // Ticket 61: the entry also carries its observation moment (host clock at
+  // Ticket 29: per-worker activity phrases, projected from the host
+  // `session/event` firehose. Pure subscription — no polling, no timers.
+  // Ticket 61: each entry carries its observation moment (host clock at
   // event arrival) so the liveness verdict is derivable over existing truth
   // — no new subscription, no new seam, no background machinery.
-  const workerActivity = new Map<string, { phrase: string; atMs: number }>();
+  // Ticket 110: the single-entry slot became a bounded ring (last 5
+  // phrases, oldest evicted) so the wake digest can show a multi-step
+  // breadcrumb; `recentActivity`/`lastActivityAtMs` still read the newest
+  // entry, so their semantics are unchanged. Plain in-memory state —
+  // nothing persisted; entries clear on dispose. Ticket 110 phase 2: the
+  // ring is no longer cleared at settle — the digest composes AFTER the
+  // settle, so the breadcrumb must survive it — and settle honesty is
+  // enforced instead by `settledWorkerIds`, which gates the live-activity
+  // accessors to null while `recentActivities` keeps the full breadcrumb.
+  const activityRing = new WorkerActivityRing();
+  // Ticket 29 honesty, ticket 110 phase 2 mechanism: workers whose
+  // `subagent/end` was observed. A settled worker has no live activity —
+  // the check row shows the terminal status — so the single-entry
+  // accessors read null for these ids even though the ring retains the
+  // breadcrumb for the wake digest.
+  const settledWorkerIds = new Set<string>();
   // Ticket 41: latest bounded settle-report excerpt per settled worker,
   // clamped once at observation. Same subscription discipline as
   // `workerActivity`: adapter-side projection of host-observed truth —
@@ -469,8 +554,12 @@ export function createCordisDshHost(
     const workerId = String(end.id);
     if (!workers.has(workerId)) return;
     // A settled worker has no live activity; the check row shows the
-    // terminal status instead (ticket 29 honesty rule).
-    workerActivity.delete(workerId);
+    // terminal status instead (ticket 29 honesty rule). Ticket 110 phase 2:
+    // the ring itself is retained — the wake digest composes after this
+    // event and reads the final breadcrumb via `recentActivities` — so
+    // settle honesty is enforced here by marking the worker settled, which
+    // gates `recentActivity`/`lastActivityAtMs` to null.
+    settledWorkerIds.add(workerId);
     const status = mapStopReason(end.stopReason);
     const event: SettledEvent = {
       workerId,
@@ -510,7 +599,7 @@ export function createCordisDshHost(
     }
     const phrase = describeToolActivity(event.data);
     if (phrase !== null) {
-      workerActivity.set(workerId, { phrase, atMs: Date.now() });
+      activityRing.record(workerId, phrase, Date.now());
     }
   });
 
@@ -556,7 +645,10 @@ export function createCordisDshHost(
     },
 
     recentActivity(workerId: string): string | null {
-      return workerActivity.get(workerId)?.phrase ?? null;
+      // Ticket 29: a settled worker has no live activity — null, never the
+      // stale last phrase (the ring keeps it only for the wake digest).
+      if (settledWorkerIds.has(workerId)) return null;
+      return activityRing.latest(workerId)?.phrase ?? null;
     },
 
     /**
@@ -567,7 +659,25 @@ export function createCordisDshHost(
      * `recentActivity` — no new seam, no polling.
      */
     lastActivityAtMs(workerId: string): number | null {
-      return workerActivity.get(workerId)?.atMs ?? null;
+      // Same settle gate as `recentActivity` — null once settled.
+      if (settledWorkerIds.has(workerId)) return null;
+      return activityRing.latest(workerId)?.atMs ?? null;
+    },
+
+    /**
+     * Ticket 110: the bounded per-worker activity ring, newest-first — up
+     * to `n` of the last firehose-observed phrases with their observation
+     * moments, from the same `session/event` subscription as
+     * `recentActivity` (no new seam, no polling, nothing persisted).
+     * Retained through settle so the wake digest can show the final
+     * breadcrumb (the single-entry accessors go null at settle); empty
+     * once nothing has been observed; `n <= 0` yields an empty array.
+     */
+    recentActivities(
+      workerId: string,
+      n: number,
+    ): readonly WorkerActivityEntry[] {
+      return activityRing.recent(workerId, n);
     },
 
     /**
@@ -762,7 +872,8 @@ export function createCordisDshHost(
       }
       spawnControllers.clear();
       workers.clear();
-      workerActivity.clear();
+      activityRing.clearAll();
+      settledWorkerIds.clear();
       workerResults.clear();
       settledCallbacks.length = 0;
       stepBoundaryCallbacks.length = 0;
