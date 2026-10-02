@@ -330,6 +330,17 @@ export function createMultitask(
    */
   const liveByStreamKey = new Map<string, string>();
   /**
+   * Ticket 109: stream keys with a spawn currently in flight, keyed by the
+   * same composite id as `liveByStreamKey` (ADR-0019 domain). The uniqueness
+   * check above is check-then-set with an `await host.spawnWorker` between
+   * check and registration, so two concurrent spawns with the same key could
+   * both pass the check. The reservation is taken synchronously at the point
+   * the check passes — before any await — and released in the spawn's
+   * `finally` (success, hold refusal, or host error). A concurrent duplicate
+   * reservation is refused with the existing `duplicate-stream-key` error.
+   */
+  const inFlightStreamKeys = new Set<string>();
+  /**
    * Workers that were live at crash time, keyed by workerId (ticket 59).
    *
    * They are not on the roster and we hold no interrupt handle for them, so
@@ -603,64 +614,85 @@ export function createMultitask(
           detail: `stream key "${request.streamKey}" already has a running worker (${existingId})`,
         };
       }
-      // Ticket 59 (register B-1): a stream key held by a worker that was live
-      // at crash time is NOT free. We hold no interrupt handle for it, so we
-      // cannot prove it stopped — and "cannot prove it stopped" must not
-      // silently become "assume it stopped". Refusing is the safe half; the
-      // surfacing half is the restart notice and `check_workers`.
-      // ADR-0019: the check is session-scoped — the uniqueness domain of a
-      // model-authored stream key is the dispatcher session.
-      const hold = findUnknownStateHold(request.parentSessionId, request.streamKey);
-      if (hold !== undefined) {
+      // Ticket 109: reserve the key synchronously, BEFORE any await. Between
+      // the check above and the registration below sits `await
+      // host.spawnWorker`; without the reservation two concurrent spawns on
+      // the same key could both pass the check (check-then-set window). A
+      // concurrent duplicate is refused with the existing duplicate-stream-key
+      // error, unchanged shape.
+      if (inFlightStreamKeys.has(streamKeyId)) {
         return {
           ok: false,
-          reason: "stream-key-held-by-unknown-state",
-          detail:
-            `stream key "${request.streamKey}" is still held by ${hold.workerId}, ` +
-            `whose state is unknown since the restart; resolve that worker (or use a new stream key) before re-dispatching onto this stream`,
+          reason: "duplicate-stream-key",
+          detail: `stream key "${request.streamKey}" already has a spawn in flight`,
         };
       }
-      const workerId = await host.spawnWorker(request.prompt, {
-        parentSessionId: request.parentSessionId,
-        streamKey: request.streamKey,
-        title: request.title,
-        ...(request.credentialNames !== undefined
-          ? { credentialNames: request.credentialNames }
-          : {}),
-      });
-      const record: WorkerRecord = {
-        workerId,
-        parentSessionId: request.parentSessionId,
-        streamKey: request.streamKey,
-        title: request.title,
-        status: "spawned",
-        startedAtMs: Date.now(),
-        toolCallCount: 0,
-        transcriptRef: null,
-        todoId: request.todoId ?? null,
-        // Fresh obligation: the settle wake is its first delivery chance, so
-        // no redrive has been spent yet (ticket 58).
-        redriveAttempts: 0,
-      };
-      workers.set(workerId, record);
-      liveByStreamKey.set(streamKeyId, workerId);
-      // Structural todo↔worker link at spawn (ADR-0007). Status stays pending
-      // until the worker starts (noteTurnStarted).
-      if (request.todoId !== undefined) {
-        todoLedger.linkWorker(
-          request.todoId,
+      inFlightStreamKeys.add(streamKeyId);
+      try {
+        // Ticket 59 (register B-1): a stream key held by a worker that was live
+        // at crash time is NOT free. We hold no interrupt handle for it, so we
+        // cannot prove it stopped — and "cannot prove it stopped" must not
+        // silently become "assume it stopped". Refusing is the safe half; the
+        // surfacing half is the restart notice and `check_workers`.
+        // ADR-0019: the check is session-scoped — the uniqueness domain of a
+        // model-authored stream key is the dispatcher session.
+        const hold = findUnknownStateHold(request.parentSessionId, request.streamKey);
+        if (hold !== undefined) {
+          return {
+            ok: false,
+            reason: "stream-key-held-by-unknown-state",
+            detail:
+              `stream key "${request.streamKey}" is still held by ${hold.workerId}, ` +
+              `whose state is unknown since the restart; resolve that worker (or use a new stream key) before re-dispatching onto this stream`,
+          };
+        }
+        const workerId = await host.spawnWorker(request.prompt, {
+          parentSessionId: request.parentSessionId,
+          streamKey: request.streamKey,
+          title: request.title,
+          ...(request.credentialNames !== undefined
+            ? { credentialNames: request.credentialNames }
+            : {}),
+        });
+        const record: WorkerRecord = {
           workerId,
-          request.streamKey,
-        );
+          parentSessionId: request.parentSessionId,
+          streamKey: request.streamKey,
+          title: request.title,
+          status: "spawned",
+          startedAtMs: Date.now(),
+          toolCallCount: 0,
+          transcriptRef: null,
+          todoId: request.todoId ?? null,
+          // Fresh obligation: the settle wake is its first delivery chance, so
+          // no redrive has been spent yet (ticket 58).
+          redriveAttempts: 0,
+        };
+        workers.set(workerId, record);
+        liveByStreamKey.set(streamKeyId, workerId);
+        // Structural todo↔worker link at spawn (ADR-0007). Status stays pending
+        // until the worker starts (noteTurnStarted).
+        if (request.todoId !== undefined) {
+          todoLedger.linkWorker(
+            request.todoId,
+            workerId,
+            request.streamKey,
+          );
+        }
+        // Obligation marker (ADR-0006): minimum-to-reconstruct, written at
+        // spawn through the host storage seam. Awaited so the marker exists
+        // before the spawn resolves.
+        if (durability !== undefined) {
+          await Promise.resolve(durability.writeWorkerMarker(toDurableMarker(record)));
+        }
+        notifyRosterChanged(request.parentSessionId);
+        return { ok: true, workerId };
+      } finally {
+        // Ticket 109: the reservation is a spawn-in-flight marker, not a
+        // lease — released on every terminal path (success, hold refusal,
+        // host error) so the key's state is exactly what the roster says.
+        inFlightStreamKeys.delete(streamKeyId);
       }
-      // Obligation marker (ADR-0006): minimum-to-reconstruct, written at
-      // spawn through the host storage seam. Awaited so the marker exists
-      // before the spawn resolves.
-      if (durability !== undefined) {
-        await Promise.resolve(durability.writeWorkerMarker(toDurableMarker(record)));
-      }
-      notifyRosterChanged(request.parentSessionId);
-      return { ok: true, workerId };
     },
 
     async abortWorker(workerId: string): Promise<StopResult> {
