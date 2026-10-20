@@ -57,6 +57,18 @@ schemastery version; the field is now `z.boolean().default(false)`, matching `en
 pairing test by design. Added `racoonsEnabled` to `SETTINGS_CARD_FIELDS` in schema order plus
 `settings.card.field.racoonsEnabled.{label,hint}` in both the English and Chinese faces.
 
+## Pre-existing failures, not caused by this branch
+
+`test/inbox-watcher.test.ts` fails 4 of its 15 cases with `assert.ok(report)` falsy. Proven
+pre-existing: the same 4 cases fail identically in a scratch worktree at the base commit `1f5ae26`,
+with no RACOONS code present (11 pass, 4 fail, same four names). Those tests also hang the process at
+teardown, which is why a full-suite run does not print a summary.
+
+This branch changes no inbox file. `git diff --name-only 1f5ae26..b687bb8` lists only the RACOONS
+adapter, the vendor tree, `plugin.ts` (additive config field and a guarded registration block), the
+settings card, both locale faces, the three new test files, and docs. The inbox code is untouched.
+Worth its own ticket in dsh-bot.
+
 ## Remaining gaps
 
 - **Durable ledger.** Blobs and ledger rows are in memory. Recall dies with the process. A follow-up
