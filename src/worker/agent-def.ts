@@ -1,3 +1,4 @@
+import { REPLY_TO_DISPATCHER_TOOL } from "../core/tools.js";
 import { buildWorkerSystemPrompt } from "./prompt.js";
 import {
   buildWorkerToolFilter,
@@ -5,31 +6,46 @@ import {
 } from "./tool-barrier.js";
 
 /**
+ * Tools that exist ONLY on a worker's own scoped surface (ticket 122 /
+ * ADR-0028), declared here so the composition seam and the barrier agree on
+ * one list without hard-coded names.
+ *
+ * These are worker-only, not dispatcher-only: they are registered on the
+ * child's scope (the inverse of how dispatcher tools register on the
+ * activated agent's scope), and the barrier must never deny them. A worker
+ * using one can reach exactly one address — its owning dispatcher — because
+ * the handler derives that address from the roster record.
+ */
+export const WORKER_LOCAL_TOOL_NAMES = [REPLY_TO_DISPATCHER_TOOL] as const;
+
+/**
  * Worker agent type: composition of (contract persona + tool barrier + leaf
- * delegation budget). Applied on every spawn by the adapter. Not a host
- * registry object.
+ * delegation budget). The persona and barrier are declared by the
+ * `multitask-worker` Agent Preset (`src/worker/preset.ts`); this definition
+ * is the offline seam that names the preset and carries its inputs.
+ * Not a host registry object.
  */
 export interface WorkerAgentDef {
   /**
-   * The worker **contract**, delivered in a system position.
-   *
-   * Ticket 55: the adapter passes this as the spawn request's `persona`, which
-   * the host renders into a system-prompt section. It is deliberately NOT
-   * concatenated into `request.prompt` — that would put the contract back in
-   * conversation history, where a compaction can drop it (register D-1).
+   * The worker **contract** text. The preset's contract row renders it into
+   * the `deployment:persona-prefix` system-prompt section, recomputed every
+   * turn, so it survives compaction and needs no steer restatement. It is
+   * deliberately NOT concatenated into `request.prompt` — that would put the
+   * contract back in conversation history, where a compaction can drop it
+   * (register D-1).
    */
   readonly persona: string;
   /**
    * Resolve the deny list against tools that actually exist as globals.
-   * Never invents names the host does not know.
+   * Never invents names the host does not know; `tools.restrict()` throws on
+   * unknown names.
    */
   resolveToolFilter(knownGlobalToolNames: ReadonlySet<string>): WorkerToolFilter;
   /**
    * How many delegation levels the worker may open BELOW itself — a budget
    * relative to the worker's own depth. This is NOT the value for the spawn
    * request's `maxDepth` slot (the host reads that slot as the child's
-   * ABSOLUTE ceiling; derive it with `workerSpawnMaxDepth`). Belt and
-   * suspenders: the tool barrier already denies the host `subagent` tool.
+   * ABSOLUTE ceiling; derive it with `workerSpawnMaxDepth`).
    */
   readonly maxDepth: number;
 }
@@ -44,8 +60,8 @@ export interface WorkerAgentDef {
  * when `childDepth > maxDepth`), so sending this 0 there refused every live
  * spawn with "subagent depth 1 exceeds maxDepth 0" (ticket 83, live pass
  * 2026-09-19). The request value is derived by `workerSpawnMaxDepth`.
- * Leaf-ness does not depend on this number: `resolveToolFilter` denies the
- * host `subagent` tool regardless.
+ * Leaf-ness does not depend on this number: the worker preset does not mount
+ * any delegation tool.
  */
 export const WORKER_MAX_DEPTH = 0;
 

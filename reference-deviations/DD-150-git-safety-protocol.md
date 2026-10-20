@@ -1,0 +1,30 @@
+# DD-150 — On-demand commit/PR protocol sections vs none
+- **Area:** prompt sections (A18)
+- **Type:** missing-feature (worker prompt content)
+- **Date:** 2026-09-23
+
+## What the reference does
+The reference ships a dedicated prompt module that renders two large, self-contained sections for git work on demand (and renders the same content as composer user rules when a flag is set). The first, a commit protocol, teaches: commit only when the user explicitly asks, and ask first if unclear; a named list of git safety rules — never touch git config, never run destructive or irreversible commands (force-push, hard reset) or skip hooks without an explicit request, strict preconditions for amending (you own the prior commit, it is unpushed, or a hook modified the files) with an absolute prohibition on amending failed or rejected commits or anything already pushed, and never force-push to main/master; gather context by running status, diff, and log in parallel; draft a short message centered on why the change was made rather than the mechanics, with a secrets-file check; then act in sequence (stage, commit, verify with status); pass the message via a heredoc for formatting; never use interactive flags; never create an empty commit; never push unprompted. The second, a PR section, teaches: use the GitHub CLI for all GitHub tasks; gather branch state in parallel (status, diff, upstream tracking, full divergence history); summarize all commits on the branch, not just the last; then act in sequence (branch if needed, push with upstream, create the PR with a heredoc body following a summary-plus-test-plan template); finish by returning the PR URL. An optional flag swaps in different create-command guidance.
+
+## What the current build does
+Nothing in `src/core/policy/prompts.ts` or anywhere in `src/adapter/` (or the rest of `src/`) teaches how to commit or open a PR. A case-insensitive search across all of `src/` for commit/PR prompt phrasing (commit, commit message, heredoc, pull request) returns zero matches. The build treats repo mutation as an invisible worker detail: workers receive shell and file tools and operate inside the user's repository, but no prompt text covers the act of committing, its safety rules, or PR creation.
+
+## The deviation
+The reference pairs its always-on git instruction family (covered separately in DD-149) with a second, on-demand procedural layer: a full walkthrough an agent follows when a human explicitly requests a commit or a PR. The build has neither layer; this file records the on-demand one. Unlike DD-149's rule bullets, most of this material is procedure — ordered tool steps, message drafting, heredoc mechanics, a vendor-CLI PR recipe — aimed at an interactive chat agent that a human drives commit-by-commit. The build's dispatcher has no such interactive surface: work arrives as delegated tasks, and commit/PR delivery is not a defined worker deliverable. The genuinely transferable remainder is the overlap with DD-149's safety core (never rewrite history, never skip hooks, never touch config, act only when asked) plus a few clauses DD-149 did not list (secrets-file check, no empty commits, no interactive flags, verify-after-write).
+
+## Verdict: ADAPT
+The safety-list themes are the transferable part, and they belong inside the git rules section DD-149 already recommends — fold the incremental clauses (secrets check, no empty commits, no interactive flags, post-commit verification) into that section's wording rather than creating a second prompt block, and dedupe against DD-149 so the two findings land as one coherent rule set. The step-by-step commit procedure and the gh PR walkthrough are tool-specific product procedure for an interactive harness surface the build does not have; do not copy them as they are. If the human ever rules that workers deliver commits/PRs on request, that is a PRD amendment question first (authority stack: PRD/ADR above prompt prose), and the walkthrough would be re-derived fresh — its shape is generic industry practice, but the text must not be copied (ADR-0018 B9).
+
+## Incorporation notes
+- **Where it would live:** merged into the DD-149 git rules section in `src/worker/prompt.ts` (composed via `src/core/policy/prompts.ts` if the rules differ per worker kind); no separate on-demand protocol section unless the build gains an interactive commit/PR surface.
+- **Constraints:** original wording only; scope to workers that actually get shell/file tools; the rules stay unconditional while any procedural guidance stays absent pending a PRD change; dedupe with DD-149's safety core — one section, one source of truth.
+- **License note:** ADR-0018 B9 — re-derive independently; no verbatim copying of reference prompt text under any circumstances.
+- **Effort/risk:** S — a handful of extra bullets folded into an already-recommended section; risk stays low precisely because the procedural/PR layer is deferred, not copied.
+- **Key reference anchors:**
+  - the reference tree's `source/packages/agent/prompts/user-info-git-prompt-sections.ts` — the commit-protocol section component (lines 11–74): ask-first gating, safety list (lines 23–38), parallel inspection and sequential act steps (lines 39–57), heredoc example and notes (lines 58–71).
+  - Same file — the PR-protocol section component (lines 76–124): gh-for-everything framing, parallel state gathering, sequential branch/push/create, PR body template, return-the-URL rule; alternate create-command flag (line 87).
+  - Same file — the composer-user-rules accessor (lines 130–139): the same sections also serve as composer user rules, keyed off the shell tool's injected name.
+
+## Evidence
+- Reference: `reference material-NOT LICENSE SAFE DONT COPY-grok bot/source/packages/agent/prompts/user-info-git-prompt-sections.ts` (lines 11–139)
+- Build: `src/core/policy/prompts.ts`, `src/adapter/` (no commit/PR prompt content anywhere; repo-wide case-insensitive search of `src/` for commit/commit message/heredoc/pull request phrasing returned zero matches)

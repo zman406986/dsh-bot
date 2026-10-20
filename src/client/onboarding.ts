@@ -24,14 +24,13 @@
  * | Re-entry suppression: seen OR owns ≥1 agent (`:18`) | Seen record in our settings namespace OR ≥1 dispatcher mirror key (`roster.<sessionId>`, tickets 76/79 keying) ⇒ suppressed |
  * | Probe failures fail open (`:18`) | A corrupt or unreadable suppression record ⇒ SHOW onboarding — never silently hide |
  *
- * Suppression design (A5: no second store): the seen record rides OUR plugin
- * settings namespace under {@link ONBOARDING_SETTINGS_KEY}, delivered by the
- * SAME `ctx.settingsScope` bind the roster watch and the settings card use
- * (one namespace, one channel — never a second bind). "≥1 dispatcher session"
- * is read from the shell store's per-session mirrors: a mirror that is not
- * `cleared` means a `roster.<sessionId>` key stands in the document, which is
- * ticket 76/79's durable marker that the session is (or was, this document
- * cycle) one of our dispatcher sessions.
+ * Suppression design (A5: no second store): "≥1 dispatcher session" is read
+ * from the shell store's per-session mirrors — a mirror that is not `cleared`
+ * means the session is (or was, this document cycle) one of our dispatcher
+ * sessions. The seen record had its own key in our settings namespace; dsh
+ * 0.2.1 accepts only the plugin's declared volatile fields, so that record
+ * has no channel and the flow falls back to the mirror input plus the
+ * completion state.
  *
  * FAIL-OPEN is the load-bearing rule (the reference's own, adapted): the
  * suppression flag EXISTS to hide this flow, so a corrupt or unreadable
@@ -43,36 +42,18 @@
  *
  * THE READ RACE (ticket 87, live pass 4): a fresh page binds the scope while
  * the shared describe mirror is still mid-read (`loading`, value `undefined`)
- * — the record is persisted and served, but NOT YET DELIVERED. A decision
- * taken in that window reads the fail-open default and renders the flow,
- * which then re-shows on a reload whose record stands (the observed
- * re-show), flipping to settled only when the document arrives. The store
- * therefore tracks `buffering`: the scope reporting a read IN FLIGHT holds
- * the pane at a calm `pending` view — never the flow, never a fake
- * suppression — and the decision re-evaluates reactively when the document
- * lands (settled) or the namespace reads as unreadable (fail-open show, as
- * always). A runtime that never reports in-flight (no settings channel at
- * all) never buffers: the flow shows, the original fail-open pin.
+ * — the record is persisted and served, but NOT YET DELIVERED. The store
+ * therefore tracks `buffering`: a read IN FLIGHT holds the pane at a calm
+ * `pending` view. That read no longer exists on 0.2.1, so a composition that
+ * never feeds the store never buffers; the pure state is retained for a
+ * future channel and remains pinned offline.
  *
  * Pure state machine + decisions: no React, no DOM, no Cordis. Offline tests
- * drive the suppression matrix, the record parsing, the beat walk, the pane
- * view model, and the seen-write hand-off (S8); the pane component lives in
- * `onboarding-pane.tsx` (build + typecheck territory), the composition
- * wiring in `index.ts`.
+ * drive the suppression matrix, the record parsing, the beat walk, and the
+ * pane view model (S8); the pane component lives in `onboarding-pane.tsx`
+ * (build + typecheck territory), the composition wiring in `index.ts`.
  */
-import type {
-  ClientSettingsScopeLike,
-  ClientSettingsScopeSnapshotLike,
-} from "./context.js";
 import type { ShellMirror } from "./shell-store.js";
-
-/**
- * The field under the plugin's settings namespace that carries the seen
- * record (A5: our namespace, no second store). Written by the composition
- * through the ONE bound scope; read through the SAME watch that feeds the
- * roster mirror and the settings card.
- */
-export const ONBOARDING_SETTINGS_KEY = "onboarding";
 
 /**
  * The well-formed seen record: `{ seen: true }` (plus optional bookkeeping
@@ -85,23 +66,6 @@ export function isOnboardingSeenRecord(value: unknown): boolean {
     return false;
   }
   return (value as { seen?: unknown }).seen === true;
-}
-
-/**
- * Extract the seen record from a namespace document (the settings scope's
- * schema-resolved `value`). A document that is not a record yields
- * `undefined` — the same "no readable record" input as an unreadable
- * namespace, which fails open (show onboarding).
- */
-export function onboardingSeenFromDocument(document: unknown): unknown {
-  if (
-    typeof document !== "object" ||
-    document === null ||
-    Array.isArray(document)
-  ) {
-    return undefined;
-  }
-  return (document as Record<string, unknown>)[ONBOARDING_SETTINGS_KEY];
 }
 
 /**
@@ -204,10 +168,10 @@ export interface OnboardingBox {
 }
 
 /**
- * The onboarding UI store: the suppression INPUT (the seen value pushed from
- * the settings watch), the beat walk, and the save outcome. The dispatcher
- * mirrors come from the shell store at decision time (the pane reads both
- * stores), so this store never copies them.
+ * The onboarding UI store: the suppression INPUT (a seen record fed by
+ * whatever channel owns it), the beat walk, and the save outcome. The
+ * dispatcher mirrors come from the shell store at decision time (the pane
+ * reads both stores), so this store never copies them.
  */
 export interface OnboardingStore {
   /** Stable getter for `useSyncExternalStore`. */
@@ -215,25 +179,24 @@ export interface OnboardingStore {
   /** Subscribe to box replacements; returns the unsubscribe disposer. */
   subscribe(listener: () => void): () => void;
   /**
-   * Feed the namespace document as the settings watch delivered it (or
-   * `undefined` when the namespace is unreadable — an explicit fail-open
-   * reset). Publishes only when the extracted seen value actually changes.
+   * Feed the seen record value as its owning channel delivered it (or
+   * `undefined` when it is unreadable — an explicit fail-open reset).
+   * Publishes only when the value actually changes.
    */
-  applyDocument(document: unknown): void;
+  applySeenValue(value: unknown): void;
   /**
-   * Feed ONE scope snapshot — status and value together (ticket 87): the
-   * composition's read path. `loading` (or a value-less `ready`, the shipped
-   * pre-acceptance state) sets `buffering` — the pane's read is in flight;
-   * a delivered document feeds it and clears `buffering`; an unavailable
-   * namespace is a SETTLED unreadable read: fail-open reset, no buffering.
+   * Feed one read result — status and seen record together. `loading`
+   * (or a value-less `ready`) sets `buffering` — the pane's read is in
+   * flight; a delivered value feeds it and clears `buffering`; an
+   * `unavailable` read is SETTLED unreadable: fail-open reset, no buffering.
    */
   applySnapshot(
-    status: ClientSettingsScopeSnapshotLike["status"],
-    document: unknown,
+    status: "loading" | "ready" | "unavailable",
+    value: unknown,
   ): void;
   /** Advance one beat; a no-op at (or past) the last beat. */
   advance(): void;
-  /** Finish the flow (Done or Skip): phase `"done"`. The composition writes the flag. */
+  /** Finish the flow (Done or Skip): phase `"done"`. */
   complete(): void;
   /** Record that the seen write did not land (honest notice, fail-open). */
   markSaveFailed(): void;
@@ -278,13 +241,12 @@ export function createOnboardingStore(): OnboardingStore {
         listeners.delete(listener);
       };
     },
-    applyDocument(document) {
-      const next = onboardingSeenFromDocument(document);
-      if (Object.is(next, seenValue)) return; // stable snapshots: no emit churn
-      seenValue = next;
+    applySeenValue(value: unknown) {
+      if (Object.is(value, seenValue)) return; // stable snapshots: no emit churn
+      seenValue = value;
       publish(true);
     },
-    applySnapshot(status, document) {
+    applySnapshot(status, value) {
       if (status === "unavailable") {
         // A SETTLED unreadable read: the explicit fail-open reset (show),
         // and the read is over — buffering ends either way.
@@ -295,8 +257,8 @@ export function createOnboardingStore(): OnboardingStore {
         publish(seenChanged || bufferingChanged);
         return;
       }
-      if (status === "loading" || document === undefined) {
-        // The document has not been accepted yet (the shipped controller's
+      if (status === "loading" || value === undefined) {
+        // The value has not been delivered yet (a value-less `ready` is the
         // pre-acceptance state): the read is IN FLIGHT — buffer the pane.
         // Inputs stay untouched: nothing was delivered.
         if (!buffering) {
@@ -305,12 +267,11 @@ export function createOnboardingStore(): OnboardingStore {
         }
         return;
       }
-      // A delivered document: feed it and re-evaluate (the reactive half of
+      // A delivered value: feed it and re-evaluate (the reactive half of
       // ticket 87 — the arrival itself closes or opens the flow), and the
       // read is over.
-      const next = onboardingSeenFromDocument(document);
-      const seenChanged = !Object.is(next, seenValue);
-      seenValue = next;
+      const seenChanged = !Object.is(value, seenValue);
+      seenValue = value;
       const bufferingChanged = buffering;
       buffering = false;
       publish(seenChanged || bufferingChanged);
@@ -405,30 +366,4 @@ export function describeOnboardingPane(
     stepTotal: ONBOARDING_BEATS.length,
     activeDot: index,
   };
-}
-
-/**
- * The seen-write hand-off (the flow's ONLY write): best-effort
- * `set({@link ONBOARDING_SETTINGS_KEY}, {seen: true})` through the ONE bound
- * namespace scope (A5 — the same bind the roster watch and the settings card
- * own; never a second channel). A resolved write stays silent — the watch
- * re-delivers the document and the suppression decision closes the flow (no
- * fake success surface, the capsule's discipline). A missing scope, a
- * missing write path, or a rejected write hands `onFailed`: the honest
- * save-failed notice; the flow simply shows again next launch — fail-open,
- * so nothing strands either way.
- */
-export function writeOnboardingSeenRecord(
-  scope: Pick<ClientSettingsScopeLike, "set"> | null | undefined,
-  onFailed: () => void,
-): void {
-  if (scope === null || scope === undefined) {
-    onFailed();
-    return;
-  }
-  if (typeof scope.set !== "function") {
-    onFailed();
-    return;
-  }
-  scope.set(ONBOARDING_SETTINGS_KEY, { seen: true }).catch(() => onFailed());
 }

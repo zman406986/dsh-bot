@@ -108,6 +108,19 @@ describe("session policy assembler", () => {
       assert.ok(policy.includes(needle), `policy missing: ${needle}`);
     }
   });
+
+  it("todo completion = first visible acknowledgement, never worker exit (ADR-0018)", () => {
+    const policy = assembleSessionPolicy(true);
+    const reminder = buildStandingRulesBlock();
+    assert.ok(policy.includes("first visible acknowledgement"));
+    assert.ok(policy.includes("Worker exit alone completes nothing"));
+    assert.ok(reminder.includes("first visible acknowledgement"));
+    assert.ok(reminder.includes("never on worker exit"));
+    for (const text of [policy, reminder]) {
+      assert.ok(!text.includes("user actually has the result"));
+      assert.ok(!text.includes("user has the result"));
+    }
+  });
 });
 
 describe("per-turn reminder assembler", () => {

@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { blocksToText, textBlock, textBlocks } from "../src/adapter/content-blocks.js";
-import { WAKE_CUE, wakeUserMessage } from "../src/adapter/wake-copy.js";
+import {
+  WAKE_CUE,
+  WAKE_SOURCE_KIND,
+  wakeUserMessage,
+} from "../src/adapter/wake-copy.js";
 
 describe("content blocks", () => {
   it("textBlock builds a text block", () => {
@@ -38,11 +42,14 @@ describe("content blocks", () => {
 });
 
 describe("wake copy", () => {
-  it("wakeUserMessage builds a plugin-sourced user message", () => {
+  it("wakeUserMessage builds a producer-owned user message (format v4)", () => {
     const msg = wakeUserMessage();
     assert.equal(msg.role, "user");
-    assert.equal(msg.source.kind, "plugin");
-    assert.equal(msg.source.plugin, "multitask-dispatcher");
+    // Format v4 rejects the retired shared `plugin` kind; the producer-owned
+    // kind is the one the v3→v4 migration assigns to this package.
+    assert.equal(msg.source.kind, "plugin:multitask-dispatcher");
+    assert.equal(msg.source.kind, WAKE_SOURCE_KIND);
+    assert.equal("plugin" in msg.source, false);
     assert.equal(msg.content.length, 1);
     assert.equal(msg.content[0]?.type, "text");
     assert.equal((msg.content[0] as { text: string }).text, WAKE_CUE);

@@ -14,6 +14,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { Config, apply, inject, name } from "../src/plugin.js";
+import { volatileConfig } from "./support/plugin-config.js";
 import {
   DISPATCHER_RESOLVE_COMMAND,
   DISPATCHER_START_COMMAND,
@@ -153,8 +154,8 @@ function createStubCtx(): AdapterContext & {
       void command.handler(inv);
     },
     subagents: {
-      async startContinuable() {
-        return { childId: "child-stub" };
+      async startActivation() {
+        return { childId: "child-stub", dispose: async () => {} };
       },
       interrupt() {},
       async sendMessage() {
@@ -225,7 +226,7 @@ describe("plugin scaffold", () => {
   it("apply registers through ctx.effect and the disposer is callable", () => {
     const ctx = createStubCtx();
 
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     // Activation command + lifecycle cleanup (+ tools after activation).
     assert.ok(ctx.disposers.length >= 1);
     assert.doesNotThrow(() => {
@@ -236,13 +237,13 @@ describe("plugin scaffold", () => {
   it("apply is a no-op when disabled", () => {
     const ctx = createStubCtx();
 
-    apply(ctx, { enabled: false });
+    apply(ctx, volatileConfig({ enabled: false }));
     assert.equal(ctx.disposers.length, 0);
   });
 
   it("dormant apply wires passive listeners without session-start capture", () => {
     const ctx = createStubCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     // Ticket 19: the agent/session-start capture is deleted.
     assert.equal(ctx.listeners.has("agent/session-start"), false);
     assert.ok(ctx.listeners.get("agent/status"));
@@ -252,7 +253,7 @@ describe("plugin scaffold", () => {
 
   it("dormant apply registers the host commands, no tools", () => {
     const ctx = createStubCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     assert.deepEqual(ctx.registeredCommands.map((c) => c.name), [
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
@@ -265,7 +266,7 @@ describe("plugin scaffold", () => {
 
   it("command registration survives apply (cordis effect contract, ticket 44)", () => {
     const ctx = createStubCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     // The contract-faithful fake runs `execute` at apply exactly like live
     // cordis: a plugin that handed the register DISPOSER to `ctx.effect`
     // would invoke it right here and silently unregister the command — the
@@ -286,7 +287,7 @@ describe("plugin scaffold", () => {
 
   it("command activation registers the tool surface; dispose reverses it", async () => {
     const ctx = createStubCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
 
     const agent = createAgent("session-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
@@ -318,7 +319,7 @@ describe("plugin scaffold", () => {
 
   it("tool executions route to the registering session (ADR-0019: gate retired)", async () => {
     const ctx = createStubCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
 
     const agent = createAgent("session-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
@@ -347,7 +348,7 @@ describe("plugin scaffold", () => {
 
   it("dispose-all (HMR) unregisters the command, tools, and listeners", async () => {
     const ctx = createStubCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
 
     const agent = createAgent("session-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
@@ -367,7 +368,7 @@ describe("plugin scaffold", () => {
 
   it("a re-apply after dispose-all finds every name free (ticket 91 mirror-image pin)", async () => {
     const ctx = createStubCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     const agent = createAgent("session-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await new Promise((resolve) => setImmediate(resolve));
@@ -380,7 +381,7 @@ describe("plugin scaffold", () => {
     // HMR re-load: the fresh apply must re-register the same dispatcher command
     // names and the tool surface WITHOUT hitting the host's duplicate rule —
     // teardown released every name (src/plugin.ts:664-687).
-    assert.doesNotThrow(() => apply(ctx, { enabled: true }));
+    assert.doesNotThrow(() => apply(ctx, volatileConfig({ enabled: true })));
     assert.deepEqual(ctx.registeredCommands.map((c) => c.name), [
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
@@ -397,7 +398,7 @@ describe("plugin scaffold", () => {
 
   it("a firehose tool/call advances the count check_workers shows (ticket 75)", async () => {
     const ctx = createStubCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
 
     const agent = createAgent("session-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
@@ -453,7 +454,7 @@ describe("plugin scaffold", () => {
     });
 
     assert.throws(
-      () => apply(ctx, { enabled: true }),
+      () => apply(ctx, volatileConfig({ enabled: true })),
       new RegExp(
         `command "${DISPATCHER_START_COMMAND}" is already registered`,
       ),
@@ -462,7 +463,7 @@ describe("plugin scaffold", () => {
 
   it("activation throws the host duplicate-tool error when a dispatcher tool name is taken", () => {
     const ctx = createStubCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     // A foreign plugin already owns `spawn_worker` in this host.
     ctx.tools.register({
       name: "spawn_worker",

@@ -10,12 +10,12 @@
  * `状态不可用` chip, the right pane hosted no roster panel, and
  * `data-presence` never populated (tickets 27/28/69-L2 dead on the surface).
  *
- * This hub is the missing reader, and it is the same shape as the approval
- * relay feed (`approval-feed.ts:100-132`) for the same reason: ONE settings
- * bind in `applyClientModule` (a second bind would be a second channel, which
- * the ticket-47 rule forbids), fanned out to the per-mount shell stores, with
- * a last-truth replay so a mount created after a publish does not wait for a
- * change that may never come.
+ * This hub is the reader, and it is the same shape as the approval relay feed
+ * (`approval-feed.ts:100-132`): one accepted channel value, fanned out to the
+ * per-mount shell stores, with a last-truth replay so a mount created after a
+ * publish does not wait for a change that may never come. It has no live
+ * channel on dsh 0.2.1 — the client settings-scope service the read rode is
+ * gone — and offline tests feed it the real projection directly.
  *
  * What it reads — and what it deliberately does NOT:
  * - ONLY the per-session family `roster.<sessionId>`
@@ -63,12 +63,11 @@ export function sessionMirrorsFromChannelValue(
 }
 
 /**
- * The one-channel fan-out hub for the shell stores. `applyChannelValue` is
- * fed from the single settings-scope read in `applyClientModule`; each wrapper
- * mount attaches its own `DispatcherShellStore` and gets the current mirrors
- * immediately (replay), then every later publish. The disposer detaches
- * exactly that store (unsubscribes on unload — the sessions-feed-binding
- * pattern).
+ * The one-channel fan-out hub for the shell stores. `applyChannelValue` takes
+ * one accepted channel value; each wrapper mount attaches its own
+ * `DispatcherShellStore` and gets the current mirrors immediately (replay),
+ * then every later publish. The disposer detaches exactly that store
+ * (unsubscribes on unload — the sessions-feed-binding pattern).
  */
 export interface ShellMirrorFeed {
   /**

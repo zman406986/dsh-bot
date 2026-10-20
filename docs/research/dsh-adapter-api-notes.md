@@ -1,13 +1,13 @@
 # Research: dsh host API surface for the adapter (ticket 09) and permission/secret relay (ticket 13)
 
-- Question: What exact host APIs does the dsh adapter need to implement `DshHost` (spawn / interrupt / settle / wake), plus the permission/secret seams for ticket 13, flag/session-start patterns for ticket 12, and peer-messaging prep for ticket 14?
+- Question: What exact host APIs does the dsh adapter need to implement `DshHost` (spawn / interrupt / settle / wake), plus the permission/secret host APIs for ticket 13, flag/session-start patterns for ticket 12, and peer-messaging preparation for ticket 14?
 - Scope: local dsh **0.1.5-rc.1** install under `C:\Users\TZ\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh\node_modules\@deepseek-ai\*` (MIT; free to imitate). Existing research notes read only. Forbidden reference tree never opened.
 - Method: read shipped `.d.ts` / README / package types for `dsh-subagent`, `dsh-jobs`, `dsh-agent`, `dsh-session`, `dsh-tools`, `dsh-user-approval`, `dsh-credentials`, `dsh-permission-presets`, `dsh-tool-todo`, `dsh-tool-subagent-control`, `dsh-storage`; cross-checked the in-repo `DshHost` interface and PRD §9 sketch; official jobs page for the jobs catalog wording.
 - Date: 2026-09-16
 
 ## Verdict
 
-Every `DshHost` method maps onto a first-party dsh seam with a precise typed call. The natural worker primitive is **continuable subagents** (`ctx.subagents.startContinuable` / `sendMessage` / `interrupt`), not one-shot `start`, because PRD steer (S3) needs a durable child that can be steered mid-run without restart. Completion wake is available two ways: the native **settlement notice** that dsh delivers into the parent agent's turn when a continuable child settles, or an explicit `jobs.onJobDone` + `Agent.followup` pairing. Approval/credentials/presets already ship as services — ticket 13 is glue over them, not new machinery. Gaps remain around (a) capturing the live parent `Agent` object for authority, (b) mapping our workerId ↔ `SessionId`, (c) whether workers inherit approval=`never` (dsh pins that at delegation), and (d) no first-class peer-messaging bus beyond parent/child adjacency.
+Every `DshHost` method maps onto a first-party dsh host API with a precise typed call. The natural worker primitive is **continuable subagents** (`ctx.subagents.startContinuable` / `sendMessage` / `interrupt`), not one-shot `start`, because PRD steer (S3) needs a durable child that can be steered mid-run without restart. Completion wake is available two ways: the native **settlement notice** that dsh delivers into the parent agent's turn when a continuable child settles, or an explicit `jobs.onJobDone` + `Agent.followup` pairing. Approval/credentials/presets already ship as services — ticket 13 is glue over them, not new machinery. Gaps remain around (a) capturing the live parent `Agent` object for authority, (b) mapping our workerId ↔ `SessionId`, (c) whether workers inherit approval=`never` (dsh pins that at delegation), and (d) no first-class peer-messaging bus beyond parent/child adjacency.
 
 ## 1. Current `DshHost` contract (what the adapter must implement)
 
@@ -121,7 +121,7 @@ interrupt(
 
 Fire-and-return: cancel signal is issued before return; unclaimed inbox work, the Activation, and published descendants are preserved; claimed work is not requeued. Absent/unknown ids are accepted no-ops. Throws `SubagentError` `UNAUTHORIZED` when the authority does not own the live target.
 
-Remote face: `interruptByParent(childSessionId, parentSessionId, mode: 'continuable')` → `SubagentInterruptReceipt { accepted: true }`.
+Remote-side call: `interruptByParent(childSessionId, parentSessionId, mode: 'continuable')` → `SubagentInterruptReceipt { accepted: true }`.
 
 Jobs kill (if we ever wrap a worker as a job):
 
@@ -252,7 +252,7 @@ Session events (audit, log-only): `approval/asked` / `approval/decided`.
 2. Not use dsh's approval for workers at all — define our own structured ask tool on the worker and relay it through the dispatcher (closer to the gaps-note recommendation); or
 3. Keep workers at `never` and pre-approve everything they need via scoped credential injection + tight `toolFilter`.
 
-This is the biggest design fork ticket 13 will hit. dsh's seams support (1) and (2).
+This is the biggest design fork ticket 13 will hit. dsh's host APIs support (1) and (2).
 
 ### Credentials — `ctx.credentials` (`@deepseek-ai/dsh-credentials`)
 
@@ -274,7 +274,7 @@ abstract class CredentialProvider extends Service {
 
 type CredentialRecord = ApiKeyRecord | GrantRecord
 // ApiKeyRecord: { kind: 'api-key'; key?: string; env?: Record<string,string> }
-// GrantRecord:  { kind: 'grant'; payload: unknown }   // owner-defined JSON, opaque to the seam
+// GrantRecord:  { kind: 'grant'; payload: unknown }   // owner-defined JSON, opaque to the host API
 ```
 
 Resolution is **per operation** — do not cache across operations. Template plugin (`dsh-web-search-exa`) pattern: `ctx.get('credentials')` → `credentials.resolve(credentialRef(apiKeyEnv))`, fall back to launch environment.

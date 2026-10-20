@@ -21,18 +21,27 @@ export const PEER_WAKE_CUE =
 export const PLUGIN_NAME = "multitask-dispatcher";
 
 /**
+ * Producer-owned message source kind.
+ *
+ * Session format v4 rejects the retired shared `kind: "plugin"` wrapper and
+ * requires a non-empty producer-owned kind (`dsh-session-format-v3-to-v4`:
+ * `"format v4 message requires a producer-owned source kind"`). The migration
+ * maps a released plugin wrapper to `plugin:<package name>`, so this value is
+ * exactly what our old messages become after migration.
+ */
+export const WAKE_SOURCE_KIND = `plugin:${PLUGIN_NAME}`;
+
+/**
  * Structural UserMessage for `Agent.followup`.
  * Mirrors the installed `dsh-llm` shape without importing host packages.
- * Source uses `kind: "plugin"` without a ContextFormed discriminator
- * (omitting `form` is valid — undeclared context is the documented default).
+ * Omitting `form` is valid — undeclared context is the documented default.
  */
 export interface WakeUserMessage {
   readonly id: string;
   readonly role: "user";
   readonly content: ContentBlock[];
   readonly source: {
-    readonly kind: "plugin";
-    readonly plugin: string;
+    readonly kind: string;
   };
 }
 
@@ -46,8 +55,7 @@ export function wakeUserMessage(text: string = WAKE_CUE): WakeUserMessage {
     role: "user",
     content: textBlocks(text),
     source: {
-      kind: "plugin",
-      plugin: PLUGIN_NAME,
+      kind: WAKE_SOURCE_KIND,
     },
   };
 }

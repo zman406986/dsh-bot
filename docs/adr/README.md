@@ -4,7 +4,7 @@
 |---|---|---|
 | [0001](0001-typescript-in-process-multitask-core.md) | TypeScript in-process multitask core (dsh/Cordis plugin) | accepted |
 | [0002](0002-peer-agents-in-scope.md) | Peer agents in scope for this project | accepted |
-| [0003](0003-dispatcher-only-spawning.md) | Dispatcher-only spawning (flat team topology) | accepted |
+| [0003](0003-dispatcher-only-spawning.md) | Dispatcher-only spawning (flat team topology) | accepted; **the flat-topology spawning clause superseded 2026-10-18 by 0025** (human-ruled) for the dispatcher→dispatcher edge only (mitosis) — the worker-leaf, single-parent, and no-worker-to-worker rules are retained |
 | [0004](0004-reference-as-feature-inventory.md) | Reference is a feature inventory, not a build list | accepted |
 | [0005](0005-feature-flag-session-scoped-toggle.md) | Feature flag is session-scoped, not a live toggle | accepted; **superseded by 0018** — no flag, always-on |
 | [0006](0006-worker-record-durability-split.md) | WorkerRecord durable (minimum-to-reconstruct); SteerTicket in-memory | accepted |
@@ -19,12 +19,18 @@
 | [0015](0015-browser-test-infrastructure-playwright-draft-nonhuman-approved.md) | Real-browser verification is Playwright against a dsh --profile web --patch launcher boot; execution consolidates in ticket 33's browser pass | draft (non-human-approved) |
 | [0016](0016-dispatcher-front-desk-mode-gated-activation-dedicated-surface.md) | The dispatcher is the front desk: activation moves to the mode boundary, and the dispatcher gets a dedicated surface | **RETRACTED 2026-09-18** — signed under a fabricated premise; superseded by 0018 |
 | [0017](0017-core-loop-follows-reference-deviations-need-human-approval-draft-nonhuman-approved.md) | The core loop follows the reference; every deviation needs written human approval | draft (non-human-approved) |
-| [0018](0018-imitate-reference-in-entirety-exception-list.md) | Imitate the reference in its entirety, except an enumerated exception list | **accepted (human-ruled, 2026-09-18) — the master rule**; vehicle clause amended 2026-09-20 by 0021 — addon coexistence, U-G amended for dispatcher sessions only |
+| [0018](0018-imitate-reference-in-entirety-exception-list.md) | Imitate the reference in its entirety, except an enumerated exception list | **accepted (human-ruled, 2026-09-18) — the master rule**; vehicle clause amended 2026-09-20 by 0021 — addon coexistence, U-G amended for dispatcher sessions only; **U-G amended further 2026-10-18 by 0025** for the dispatcher→dispatcher edge only; **C14's room exclusion superseded 2026-10-18 by 0026** for this product only — C14's other exclusions and C13 stand |
 | [0019](0019-per-dispatcher-scoped-tools-draft-nonhuman-approved.md) | Per-dispatcher tool scoping: each dispatcher's tools register in its own agent scope; the process-global singleton retires | draft (non-human-approved) |
 | [0020](0020-wrapper-shell-vehicle-own-frame-over-shipped-runtime-draft-nonhuman-approved.md) | The wrapper vehicle: our own application frame over the shipped dsh client runtime (ADR-0018's "we build the whole UI") | draft (non-human-approved); **vehicle superseded 2026-09-20 by 0021** — addon coexistence, floating dispatcher window; the root-frame election leaves the default posture |
-| [0021](0021-addon-coexistence-floating-dispatcher-window.md) | Addon coexistence: stock dsh stays the primary UI; dispatcher functions live in a separate floating window | accepted (human-ruled, 2026-09-20 in-session directive) — amends ADR-0018's vehicle clause; supersedes ADR-0020 as vehicle |
-| [0022](0022-floating-capsule-revived-by-human-ruling.md) | The collapsed launcher becomes an information-bearing floating capsule — revived by the human's 2026-09-22 ruling | accepted (human-ruled, 2026-09-22 in-session directive) — supersedes ADR-0021's capsule-retirement clause in part |
+| [0021](0021-addon-coexistence-floating-dispatcher-window.md) | Addon coexistence: stock dsh stays the primary UI; dispatcher functions live in a separate floating window | accepted (human-ruled, 2026-09-20 in-session directive) — amends ADR-0018's vehicle clause; supersedes ADR-0020 as vehicle; **decisions 2 and 4 superseded 2026-10-18 by 0024** — floating window withdrawn, native-dsh posture restored; decision 1 stands and is strengthened |
+| [0022](0022-floating-capsule-revived-by-human-ruling.md) | The collapsed launcher becomes an information-bearing floating capsule — revived by the human's 2026-09-22 ruling | accepted (human-ruled, 2026-09-22 in-session directive) — supersedes ADR-0021's capsule-retirement clause in part; **superseded in full 2026-10-18 by 0024** |
 | [0023](0023-file-driven-external-intake.md) | File-driven external work intake (inbox) | accepted (human-ruled, 2026-10-02 in-session directive) |
+| [0024](0024-native-dsh-posture-restored-by-human-ruling.md) | The dispatcher UI returns to the native-dsh posture — floating window, launcher, and capsule withdrawn by the human's 2026-10-18 ruling | accepted (human-ruled, 2026-10-18 in-session directive) — supersedes ADR-0021 decisions 2 and 4 and ADR-0022 in full; ADR-0021 decision 1 (stock dsh is never displaced) stands and is strengthened; **2026-10-18 rider appended** — one additive sidebar session-kind glyph (slot id sidebar.session.row.leading), decisions 2–4 unchanged; **rider addendum appended 2026-10-18** — three session kinds stated (dispatcher / worker / normal), slot confirmed as already occupied by the host's schedule plugin, the session-kind-at-render-time question left unresolved |
+| [0025](0025-chief-of-staff-dispatcher-mitosis.md) | Chief-of-Staff dispatcher with mitosis: a dispatcher hands off problem and outcome, and may summon another dispatcher | agent-drafted 2026-10-18 from the owner's decision 1; **owner-reviewed and corrected 2026-10-19** — records what we adopt first, not a ban on anything else. Supersedes ADR-0003's flat-topology spawning clause for the dispatcher→dispatcher edge only and amends ADR-0018 exception U-G for that edge only; ADR-0003's worker-leaf, single-parent, and no-worker-to-worker rules stay in force. §Starting bounds are first-implementation values (host `maxDepth` default 1, 8-live-child root pool, no cap of our own), not an owner ruling |
+| [0026](0026-optional-chatroom-broadcasting.md) | Optional chatroom broadcasting: a dispatcher may address a named room instead of a single agent | agent-drafted 2026-10-18 from the owner's decision 2; **owner-reviewed and corrected 2026-10-19** — records what we adopt first, not a ban on anything else. Supersedes ADR-0018 exception C14's room exclusion for this product only; the 1:1 peer path is preserved as-is; C13 and C14's other exclusions bind. §Starting bound set is a first-implementation choice (2–8 members, session-id identity, admin-first order, `members + 4` rounds capped at 8, 2 messages per member per round, `[PASS]`, total cap 40, 15 s grace, 60-line log read by per-member cursor) |
+| [0027](0027-peer-awareness-pushed-at-prompt-tail.md) | Peer awareness is pushed into the prompt at the tail: an agent does not have to call a tool to learn who exists | agent-drafted 2026-10-18 from the owner's decision 3; **owner-reviewed and corrected 2026-10-19** — records what we adopt first, not a ban on anything else. No ADR is superseded; C13 binds because this is a session-level projection, not a saved roster. §Starting identity and dispatch are first-implementation choices (session id, the subagent descriptor's label, `projectionValues`); dispatcher identity = `agentPreset === 'multitask-dispatcher'` conditional on verifying that preset exists and lands on live sessions |
+| [0028](0028-respond-to-coordinator-worker-reply-channel.md) | A worker→dispatcher mid-task reply channel, distinct from the completion report | agent-drafted 2026-10-18 from the owner's decision 4; **owner-reviewed and corrected 2026-10-19** — records what we adopt first, not a ban on anything else. No ADR is superseded; ADR-0003's worker-leaf and no-worker-to-worker rules bind. §Starting delivery lane is a first-implementation choice — the reply rides the existing `peer` wake lane, queues during a user-owned turn, and flushes at turn end; a separate lane remains open |
+| [0029](0029-deterministic-microcompact-boundary-marker.md) | Compaction starts with deterministic microcompact, and the compaction boundary is the success marker resume reads | agent-drafted 2026-10-18 from the owner's decision 6; **owner-reviewed and corrected 2026-10-19** — records what we adopt first, not a ban on anything else. No prior compaction ADR exists; ADR-0018 U-H and ADR-0006 bind. §Starting window source is a first-implementation choice (session request context's contextWindow measured by the token meter's measure(session) from an agent pre-step listener); the contextPressure projection's contextWindow is not the denominator; ratio and keep-count stay ticket-level; full compaction and a steward model call remain open options |
 
 Draft ADRs 0013–0015 (capsule epic 35, ticket 37) are agent-drafted and **pending human
 sign-off** (ticket 33's close-out pass). Numbers 0010–0012 were reserved to design-17 §9's
@@ -100,3 +106,63 @@ stays retired…"). ADR-0021's decisions 2/3/4 stand: the capsule stays the laun
 additive shell.overlay entry), the floating window stays the whole shell, add/delete
 unchanged. Implementation ticket 107; accepted-ADR bodies untouched (dated note on the 0021
 Status line, same convention as above).
+
+**2026-10-18 — native-dsh posture note (ADR-0024):** the human ruled the dispatcher UI
+returns to the state at commit `e773ef8` — stock dsh is the primary UI, our client module
+renders nothing into dsh's layout, and there is no floating window, launcher, or capsule.
+ADR-0021's decisions 2 and 4 are superseded; ADR-0022 is superseded in full. ADR-0021's
+decision 1 (stock dsh is never displaced) stands and is strengthened, and decision 3's
+add/delete permission stands as a retained functional capability. Functional work from
+tickets 101/108/113 and all core/adapter/worker changes is preserved — the override reaches
+UI chrome only. Implementation ticket 114; accepted-ADR bodies untouched (dated notes on the
+0021/0022 Status lines and the index rows, same convention as above).
+
+**2026-10-18 — session-kind indicators rider (ADR-0024):** the human ruled that small
+glyphs should separate dispatcher sessions from subagent sessions from normal sessions
+in the stock UI. Recorded as a dated rider section inside ADR-0024 (not a body rewrite):
+exactly ONE additional additive slot registration, the sidebar session-row leading slot
+(slot id: sidebar.session.row.leading), a small
+glyph only — no replacement of stock layout, no floating surface, no removal of stock
+elements. Two verified limits are recorded as known gaps, not design choices: worker/
+subagent sessions are hidden from the stock sidebar and cannot be marked, and the leading
+cell renders only on idle, non-archived, non-blank rows. The glyph's visual distinction is
+TBD. Implementation is ticket 114's, pending the client 0.2.1 port.
+
+**2026-10-18 — indicators rider addendum (ADR-0024):** the ruling was later stated with
+three kinds explicitly — dispatcher, worker, and normal sessions. Appended as a second dated
+rider section inside ADR-0024: the slot is confirmed and already occupied by the host's own
+schedule plugin (`dsh-client-ui-schedule/lib/client.js:7528`), so the one-additive-registration
+claim is backed by the installed tree; the worker-session limit (hidden from the stock
+sidebar) stands. **Unresolved:** what identifies a session's kind at render time — the slot
+receives only a session id. Accepted-ADR body untouched.
+
+**2026-10-18 — dispatcher role, rooms, discovery, worker reply, and compaction (ADR-0025–0029):**
+five decisions from the 2026-10-18 study
+(`docs/research/dispatcher-peer-memory-indicators-design-2026-10-18.md` §"Owner decisions"),
+each adopted by the owner and each **drafted into an ADR by an agent** — the human gave the
+direction, not the text. **Owner review 2026-10-19** found the drafts had hardened "adopt X"
+into "do not do Y": unnecessary prohibitions were softened, and each ADR now states what is
+adopted first while the alternatives stay open. **0025** — Chief-of-Staff dispatcher role plus
+mitosis: a dispatcher may summon another dispatcher, which carries the full dispatcher tool
+surface and policy and is a peer of its creator; supersedes ADR-0003's flat-topology spawning
+clause for the dispatcher→dispatcher edge only and amends ADR-0018 U-G for that edge only;
+ADR-0003's worker-leaf, single-parent, and no-worker-to-worker rules bind. **0026** — optional
+chatroom broadcasting: the 1:1 peer path is preserved and a dispatcher may address a named
+room; supersedes ADR-0018 C14's room exclusion for this product only; C13 and C14's other
+exclusions bind. **0027** — peer awareness is pushed into the prompt at the tail, with liveness
+and current activity (working / waiting / approval / idle plus current tool and target); an
+agent does not need a tool call to learn who exists. **0028** — a worker→dispatcher mid-task
+reply channel distinct from the completion report; parent→child stays the steer path;
+`src/worker/prompt.ts` must document it. **0029** — compaction starts with deterministic
+microcompact and the compaction boundary is the success marker resume reads; full compaction
+and a steward model call remain open options. Bounds, ratios, caps, membership, termination
+policy, and window source are first-implementation values in the ADRs and remain ticket-owned.
+Accepted-ADR bodies untouched (dated notes on the 0003/0018 Status lines and the index rows,
+same convention as above).
+
+**2026-10-18 — ADR-0012 wording note:** the human ruled that "restart replays durability,
+never work" records the **chosen product shape**, not a permanent prohibition. The shipped
+behavior is unchanged (no re-run, no re-dispatch, honest unknown-state), but resuming
+interrupted work after a restart is a legitimate future option if a ticket states the
+duplicate-side-effect risk it accepts and how that risk is bounded. The draft ADR's Decision
+and Consequences sections were loosened in place, and its Status line carries the ruling date.

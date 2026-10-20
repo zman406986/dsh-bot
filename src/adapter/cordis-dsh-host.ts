@@ -15,6 +15,7 @@ import {
   workerSpawnMaxDepth,
   type WorkerAgentDef,
 } from "../worker/agent-def.js";
+import { applyWorkerComposition } from "../worker/preset.js";
 import { blocksToText, textBlocks, type ContentBlock } from "./content-blocks.js";
 import type { StorageDomainLike } from "./durable-marker.js";
 import { wakeUserMessage } from "./wake-copy.js";
@@ -41,49 +42,57 @@ export interface AgentLike {
    * `agent.ctx` — every agent loop mints one; `tools.register` addressed
    * through it registers in THIS agent's scope only, so a second dispatcher
    * never sees the first's tools and worker children never see any of them).
-   * Verified against installed @deepseek-ai/* 0.1.5-rc.2
-   * (docs/research/dsh-tool-scoping-seam.md; dsh-tools/lib/index.js:2781 —
-   * `layers.effect(this.ctx, …)` picks the layer from the calling ctx's
-   * scope). Optional so stub agents stay minimal; when absent the adapter
-   * falls back to the plugin-level global registration — the shipped
-   * single-dispatcher shape, with no per-agent visibility fence.
+   * `systemPrompt.section` likewise contributes to this agent's prompt only,
+   * which is what makes a scoped `deployment:persona-prefix` shadow the
+   * deployment persona for one child. Optional so stub agents stay minimal.
    */
   readonly ctx?: {
     readonly tools?: ToolsLike;
+    readonly systemPrompt?: SystemPromptLike;
   };
 }
 
-export interface ContinuableStartLike {
-  readonly childId: unknown;
-  readonly messageId?: unknown;
+/** Scoped system-prompt surface used to shadow a child's persona section. */
+export interface SystemPromptLike {
+  section(section: {
+    readonly name: string;
+    readonly order: number;
+    readonly text: string;
+    readonly interpolate?: boolean;
+  }): () => void;
+  getSectionOrder(name: string): number;
 }
 
-export interface ContinuableStartSpecLike {
+export interface ActivationLike {
+  readonly childId: unknown;
+  readonly messageId?: unknown;
+  readonly result?: Promise<unknown>;
+  /** Stop and release this exact activation; never a later cold resume. */
+  dispose(): Promise<void>;
+}
+
+export interface ActivationSpecLike {
   readonly provider: string;
   readonly label: string;
+  readonly childId?: unknown;
   readonly request: {
     readonly prompt: ContentBlock[];
     readonly parent: AgentLike;
-    readonly signal: AbortSignal;
     /**
      * Ticket 83: the CHILD'S ABSOLUTE delegation-depth ceiling. The host's
-     * `resolveChildDepth` (dsh-subagent/lib/index.js:432-437) refuses the
-     * spawn when `parentDepth + 1 > maxDepth` — it is NOT the worker's own
-     * budget. Derive with `workerSpawnMaxDepth`; never send `WORKER_MAX_DEPTH`
-     * (0) here raw.
+     * `resolveChildDepth` refuses the spawn when `parentDepth + 1 > maxDepth`
+     * — it is NOT the worker's own budget. Derive with
+     * `workerSpawnMaxDepth`; never send `WORKER_MAX_DEPTH` (0) here raw.
      */
     readonly maxDepth?: number;
-    readonly toolFilter?: unknown;
-    /**
-     * Ticket 55 (register D-1): the child's worker contract, rendered by the
-     * host into the `deployment:persona-prefix` **system-prompt section** —
-     * recomputed every turn, so it survives compaction and is restated after
-     * every steer. Do not put contract text in `prompt` instead; that channel
-     * is the child's first user turn.
-     */
-    readonly persona?: string;
   };
+  /**
+   * Cancellation before publication only. Once the activation is live, stop
+   * it through `activation.dispose()` — aborting this signal does nothing.
+   */
   readonly signal: AbortSignal;
+  /** `parent` supplies the completion notice to the model; we keep it. */
+  readonly delivery: "parent" | "caller";
 }
 
 export interface JobSnapshotLike {
@@ -93,9 +102,8 @@ export interface JobSnapshotLike {
   readonly status: string;
   readonly startedAt: number;
   readonly finishedAt?: number;
-  readonly ownerSession?: unknown;
+  readonly owner?: unknown;
   readonly detail?: string;
-  readonly reported?: boolean;
 }
 
 /**
@@ -184,7 +192,7 @@ export interface AdapterContext {
    */
   approval?: HostApprovalServiceLike;
   subagents: {
-    startContinuable(spec: ContinuableStartSpecLike): Promise<ContinuableStartLike>;
+    startActivation(spec: ActivationSpecLike): Promise<ActivationLike>;
     interrupt(targetSessionId: unknown, authority: unknown): void;
     sendMessage(
       sender: AgentLike,
@@ -197,7 +205,8 @@ export interface AdapterContext {
     get(id: unknown): AgentLike | undefined;
   };
   jobs: {
-    list(caller?: unknown): readonly JobSnapshotLike[];
+    /** Omitted caller lists unowned jobs only; pass the reading session. */
+    list(callerSessionId?: unknown): readonly JobSnapshotLike[];
   };
   storageDomain: StorageDomainLike;
   /** Host event bus. Payload arity varies per event (e.g. session/event is two-arg). */
@@ -215,8 +224,13 @@ export interface CordisDshHostOptions {
    * drainWake + assembleWakeTurn land the notices in model context.
    */
   composeWakeText?: (sessionId: string) => string | null;
+  /**
+   * Build the worker-local tool definitions for one child (ticket 122). The
+   * plugin supplies this so the adapter stays core-agnostic; the returned
+   * definitions are registered on the child's own scope at `agent/created`.
+   */
+  workerLocalTools?: (workerSessionId: unknown) => readonly unknown[];
 }
-
 /**
  * Live `DshHost` over Cordis dsh services.
  * Core stays pure; this is the only place that knows subagents/agents/jobs.
@@ -240,7 +254,7 @@ export interface CordisDshHost extends DshHost {
    */
   parentAgentOf(sessionId: string): AgentLike | undefined;
   /** Live job snapshots for the check surface. Process-local; not durable. */
-  listLiveJobs(): readonly JobSnapshotLike[];
+  listLiveJobs(callerSessionId?: string): readonly JobSnapshotLike[];
   /** Durable markers (ADR-0006). */
   readonly markers: DurabilityPort | undefined;
   /** Map agent session id → workerId for owned workers. */
@@ -496,6 +510,16 @@ export function createCordisDshHost(
   const workerAgentDef = options?.workerAgentDef;
   const markers = options?.markers;
   const composeWakeText = options?.composeWakeText;
+  const workerLocalTools = options?.workerLocalTools;
+
+  /**
+   * The child's mid-task reply tool (ticket 122). Null when the plugin did not
+   * supply a builder, so composition simply registers nothing extra.
+   */
+  function buildWorkerLocalTools(workerSessionId: unknown): readonly unknown[] {
+    if (workerLocalTools === undefined) return [];
+    return workerLocalTools(workerSessionId);
+  }
 
   /**
    * ADR-0019: live dispatcher parents, keyed by dispatcher session id —
@@ -507,6 +531,20 @@ export function createCordisDshHost(
   const parents = new Map<string, AgentLike>();
   const workers = new Map<string, WorkerEntry>();
   const spawnControllers = new Map<string, AbortController>();
+  /**
+   * Live activations keyed by worker id. `startActivation`'s signal owns
+   * pre-publication cancellation only; a published worker is stopped by
+   * disposing this exact activation.
+   */
+  const workerActivations = new Map<string, ActivationLike>();
+  /**
+   * Spawns in flight per dispatcher session. `agent/created` is the only seam
+   * that hands us a child's own scoped context BEFORE its first turn, and it
+   * fires inside `startActivation`; this counter is what identifies the child
+   * that call created (a dispatcher can also delegate through the host's own
+   * `subagent` tool, whose child must not receive the worker composition).
+   */
+  const pendingSpawns = new Map<string, number>();
   const settledCallbacks: Array<(event: SettledEvent) => void> = [];
   const stepBoundaryCallbacks: Array<(workerId: string) => void | Promise<void>> = [];
   const accessRequestCallbacks: Array<(event: AccessRequestEvent) => void> = [];
@@ -545,8 +583,7 @@ export function createCordisDshHost(
     return workers.has(agentSessionId) ? agentSessionId : undefined;
   }
 
-  const offSubagentEnd = ctx.on("subagent/end", (info: never) => {
-    const end = info as {
+  const offSubagentEnd = ctx.on("subagent/end", (info: never) => {    const end = info as {
       id: unknown;
       stopReason: string;
       lastAssistantMessage?: ContentBlock[];
@@ -603,6 +640,39 @@ export function createCordisDshHost(
     }
   });
 
+  /**
+   * Worker composition for a child we are about to publish.
+   *
+   * `agent/created` is the last moment a child's own scope can take
+   * registrations before its first turn: the loop holds queued input until
+   * every serial listener returns. Registering here — rather than through a
+   * named Agent Preset — keeps the composition identical on every boot route
+   * and needs no preset registry.
+   */
+  const offAgentCreated = ctx.on("agent/created", (payload: never) => {
+    if (workerAgentDef === undefined) return;
+    const record = payload as {
+      agent?: {
+        session?: { header?: { parentSession?: unknown }; id?: unknown };
+        ctx?: unknown;
+      };
+    };
+    const child = record.agent;
+    if (child === undefined) return;
+    const parentSessionId = String(child.session?.header?.parentSession ?? "");
+    if (parentSessionId === "") return;
+    if ((pendingSpawns.get(parentSessionId) ?? 0) === 0) return;
+    if (typeof child.ctx !== "object" || child.ctx === null) return;
+    applyWorkerComposition(
+      child.ctx as Parameters<typeof applyWorkerComposition>[0],
+      workerAgentDef,
+      child,
+      // The mid-task reply channel (ticket 122). Registered on the child's own
+      // scope, so the dispatcher's surface never lists it.
+      buildWorkerLocalTools(child.session?.id),
+    );
+  });
+
   const host: CordisDshHost = {
     bindParent(agent: AgentLike, sessionId: string): void {
       parents.set(sessionId, agent);
@@ -628,9 +698,9 @@ export function createCordisDshHost(
       return markers;
     },
 
-    listLiveJobs(): readonly JobSnapshotLike[] {
+    listLiveJobs(callerSessionId?: string): readonly JobSnapshotLike[] {
       try {
-        return ctx.jobs.list() ?? [];
+        return ctx.jobs.list(callerSessionId) ?? [];
       } catch {
         return [];
       }
@@ -736,29 +806,22 @@ export function createCordisDshHost(
       // Blank context is free with the in-process spawn provider.
       //
       // Ticket 55 (register D-1/D-2) — two channels, deliberately:
-      //   - the worker CONTRACT goes in `persona`, so the host places it in a
-      //     system position. A system section is recomputed every turn, so the
-      //     contract cannot be compacted away and needs no per-steer restatement.
+      //   - the worker CONTRACT and tool barrier are registered on the
+      //     child's own scope at `agent/created` (see `offAgentCreated`). The
+      //     contract lands in a system-prompt section recomputed every turn,
+      //     so it cannot be compacted away and needs no per-steer restatement.
       //   - the TASK stays in `prompt`, i.e. the child's first user turn. That
       //     is what "blank conversation" means, and it matches the reference:
       //     blank conversation, not blank system prompt.
-      const persona = workerAgentDef?.persona;
-      // Re-resolve against live global names every spawn (no cache across HMR).
-      const toolFilter =
-        workerAgentDef === undefined
-          ? undefined
-          : workerAgentDef.resolveToolFilter(listGlobalToolNames(ctx));
       // Ticket 83 (live pass 2026-09-19): `request.maxDepth` is the child's
       // ABSOLUTE delegation-depth ceiling, NOT the worker's leaf budget. The
-      // host's `resolveChildDepth` (dsh-subagent/lib/index.js:432-437)
-      // computes `childDepth = delegationDepthOf(parent) + 1` and throws
-      // `SubagentDepthError` when `childDepth > maxDepth`, so shipping the
-      // leaf budget 0 in this slot refused every live spawn ("subagent depth
-      // 1 exceeds maxDepth 0"). Derive the ceiling from the parent's real
-      // depth (the seam exposes the same persisted header the host floors
-      // with — `delegationDepthOf`, :144-147) + one hop + the worker's own
-      // budget. The `?? 0` fallback assumes the bound dispatcher is
-      // top-level, which holds today because activation is isTopLevel-gated
+      // host's `resolveChildDepth` computes `childDepth =
+      // delegationDepthOf(parent) + 1` and throws `SubagentDepthError` when
+      // `childDepth > maxDepth`, so shipping the leaf budget 0 in this slot
+      // refused every live spawn ("subagent depth 1 exceeds maxDepth 0").
+      // Derive the ceiling from the parent's real depth + one hop + the
+      // worker's own budget. The `?? 0` fallback assumes the bound dispatcher
+      // is top-level, which holds today because activation is isTopLevel-gated
       // (parent-agent.ts; the gate also fails open on an unreadable header);
       // multi-level nesting is deferred by ADR-0003 and would need a revisit
       // if a deeper parent is ever bound here.
@@ -767,33 +830,40 @@ export function createCordisDshHost(
         parentDelegationDepth,
         workerAgentDef?.maxDepth ?? WORKER_MAX_DEPTH,
       );
-      const request: ContinuableStartSpecLike["request"] = {
+      const request: ActivationSpecLike["request"] = {
         prompt: textBlocks(prompt),
         parent,
-        signal: controller.signal,
         // Child's absolute ceiling: parent depth + 1 hop + leaf budget.
         maxDepth,
       };
-      if (persona !== undefined && persona.length > 0) {
-        (request as { persona?: string }).persona = persona;
+      // Mark the in-flight spawn BEFORE it starts: `agent/created` fires
+      // inside `startActivation`, and that listener is what composes the child.
+      pendingSpawns.set(
+        opts.parentSessionId,
+        (pendingSpawns.get(opts.parentSessionId) ?? 0) + 1,
+      );
+      let activation: ActivationLike;
+      try {
+        activation = await ctx.subagents.startActivation({
+          provider: SPAWN_PROVIDER,
+          label: opts.title,
+          request,
+          signal: controller.signal,
+          delivery: "parent",
+        });
+      } finally {
+        const remaining = (pendingSpawns.get(opts.parentSessionId) ?? 1) - 1;
+        if (remaining <= 0) pendingSpawns.delete(opts.parentSessionId);
+        else pendingSpawns.set(opts.parentSessionId, remaining);
       }
-      // Host rejects empty filters and unknown names — omit when deny is empty.
-      if (toolFilter !== undefined && toolFilter.deny.length > 0) {
-        (request as { toolFilter?: unknown }).toolFilter = { deny: toolFilter.deny };
-      }
-      const started = await ctx.subagents.startContinuable({
-        provider: SPAWN_PROVIDER,
-        label: opts.title,
-        request,
-        signal: controller.signal,
-      });
       // workerId === child SessionId. Brand erased at the boundary.
-      const workerId = String(started.childId);
+      const workerId = String(activation.childId);
       workers.set(workerId, {
         parentSessionId: opts.parentSessionId,
         agentSessionId: workerId,
       });
       spawnControllers.set(workerId, controller);
+      workerActivations.set(workerId, activation);
       return workerId;
     },
 
@@ -867,10 +937,17 @@ export function createCordisDshHost(
     dispose(): void {
       offSubagentEnd();
       offSessionEvent();
+      offAgentCreated();
+      pendingSpawns.clear();
+      // Abort covers spawns still pre-publication; a published worker ignores
+      // its start signal, so it is released through its activation instead.
       for (const controller of spawnControllers.values()) {
         controller.abort();
       }
       spawnControllers.clear();
+      const activations = [...workerActivations.values()];
+      workerActivations.clear();
+      void Promise.allSettled(activations.map((a) => a.dispose()));
       workers.clear();
       activityRing.clearAll();
       settledWorkerIds.clear();

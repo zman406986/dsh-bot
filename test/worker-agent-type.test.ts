@@ -126,6 +126,7 @@ describe("worker prompt assembly", () => {
       "## Autonomy",
       "## Limits",
       "## Asking for access",
+      "## Mid-task reply",
       "## Todo ledger",
       "## Work style",
       "## Final answer",
@@ -228,8 +229,10 @@ describe("worker prompt assembly", () => {
       "Autonomy names the ask as the one exception",
     );
     assert.ok(
-      prompt.includes("Your only channels back are your final answer and"),
-      "Limits no longer claims the final answer is the only channel back",
+      prompt.includes(
+        "Your only channels back are your final answer, the mid-task reply described below, and, when a gated action needs one-time access, the access ask described below.",
+      ),
+      "Limits names all three channels back (final answer, mid-task reply, access ask)",
     );
   });
 

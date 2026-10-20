@@ -6,6 +6,9 @@
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "inject": [
@@ -23,16 +26,23 @@
       "types": "./lib/index.d.ts",
       "import": "./lib/index.js"
     },
+    "./worker-preset": {
+      "types": "./lib/worker/preset.d.ts",
+      "import": "./lib/worker/preset.js"
+    },
     "./client": "./client/index.js"
   },
   "files": [
     "lib",
     "client",
+    "cordis.patch.yml",
     "README.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "build:client": "node --import tsx scripts/build-client.ts",
+    "check:client": "node --import tsx scripts/build-client.ts --check",
+    "e2e": "node dev/e2e-mock.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "test": "tsx --tsconfig tsconfig.client.json --test test/**/*.test.ts",
     "lint:docs": "node tools/doc-lint.mjs && node tools/issue-index.mjs --check && node tools/adr-index.mjs --check",

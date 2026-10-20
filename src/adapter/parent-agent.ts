@@ -2,10 +2,11 @@ import type { Multitask } from "../core/multitask.js";
 import {
   assembleSessionPolicy,
   assembleTurnReminder,
+  buildPeerRosterSnapshot,
 } from "../core/policy/assembler.js";
 import { textBlocks } from "./content-blocks.js";
 import type { AdapterContext, AgentLike, CordisDshHost } from "./cordis-dsh-host.js";
-import { PLUGIN_NAME, wakeUserMessage } from "./wake-copy.js";
+import { WAKE_SOURCE_KIND, wakeUserMessage } from "./wake-copy.js";
 
 /**
  * Top-level dispatcher: no parent lineage, delegation depth 0.
@@ -25,8 +26,7 @@ export interface PluginContextMessage {
   readonly role: "user";
   readonly content: ReturnType<typeof textBlocks>;
   readonly source: {
-    readonly kind: "plugin";
-    readonly plugin: string;
+    readonly kind: string;
   };
 }
 
@@ -39,8 +39,9 @@ function pluginContextMessage(text: string): PluginContextMessage {
     role: "user",
     content: textBlocks(text),
     source: {
-      kind: "plugin",
-      plugin: PLUGIN_NAME,
+      // Format v4 rejects the retired `kind: "plugin"` wrapper; this is the
+      // producer-owned kind the v3→v4 migration assigns to this plugin.
+      kind: WAKE_SOURCE_KIND,
     },
   };
 }
@@ -230,6 +231,27 @@ export function bindDispatcherLifecycle(
     onDeactivated?.(sessionId);
   }
 
+  /**
+   * Live peer rows for the prompt tail (ticket 121). Eligible peers are the
+   * OTHER activated dispatchers: workers are leaves and already reachable
+   * through the ledger and `check_workers`, and a session never lists itself.
+   *
+   * No activity phrase here: the host's activity ring is keyed by WORKER id,
+   * and a dispatcher peer has none — passing a session id would read a
+   * different agent's ring. Liveness is the honest signal for peers.
+   */
+  function peerRosterFor(selfSessionId: string) {
+    const candidates = [...sessions.keys()]
+      .filter((sessionId: string) => sessionId !== selfSessionId)
+      .map((sessionId: string) => ({
+        sessionId,
+        busy: multitask.wakeBus.isBusy(sessionId),
+        pendingApproval: multitask.listPendingAccess(sessionId).length > 0,
+        queuedWake: multitask.wakeBus.peek(sessionId) !== undefined,
+      }));
+    return buildPeerRosterSnapshot(selfSessionId, candidates);
+  }
+
   disposers.push(
     ctx.on("agent/disposed", (payload: never) => {
       const { agent } = payload as { agent: AgentLike };
@@ -257,11 +279,17 @@ export function bindDispatcherLifecycle(
       if (boundAgent !== undefined) {
         if (status === "running") {
           multitask.wakeBus.noteTurnStarted(agentSessionId);
-          // Per-turn reminder: re-inject ledger + standing rules (T11).
+          // Per-turn reminder: re-inject ledger + standing rules (T11), then
+          // the peer roster as the TAIL section (ticket 121). Tail placement is
+          // load-bearing: everything above it stays byte-stable so the cached
+          // prompt prefix survives.
           if (policyEnabled) {
             tryInject(
               boundAgent,
-              assembleTurnReminder(multitask.listTodos(agentSessionId)),
+              assembleTurnReminder(
+                multitask.listTodos(agentSessionId),
+                peerRosterFor(agentSessionId),
+              ),
             );
           }
         }

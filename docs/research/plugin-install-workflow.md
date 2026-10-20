@@ -1,15 +1,15 @@
 # Research: settled dev-time install workflow for the dispatcher plugin
 
 - Question: How should a locally developed dsh plugin be installed into the dedicated multitask profile — transient overlay vs persistent `dsh plugin add file:`?
-- Scope: local dsh 0.1.5-rc.1 on this machine; `multitask` profile seeded from the `web` template. Host tree only (MIT). Forbidden reference tree not opened.
+- Scope: local dsh 0.1.5-rc.1 on this machine; a `multitask` profile created from the `web` template. Host tree only (MIT). Forbidden reference tree not opened.
 - Method: created the `multitask` profile with `dsh --profile multitask --from-default-profile web --dump-config`, built `dsh-multitask-dispatcher` (`main: lib/index.js`), installed it into the profile via `dsh plugin`, and verified the stock `web` profile is unchanged.
 - Date: 2026-09-16
 
 ## Verdict
 
-Both routes work. **Use the persistent route** (`dsh plugin --profile multitask add file:...` + an `insert` row in that profile's `cordis.patch.yml`) for day-to-day development of the multitask profile. Keep the `--patch` overlay for one-off experiments that must not touch the profile's package tree.
+Both routes work. **Use the persistent route** (`dsh plugin --profile multitask add file:...` plus an `insert` row in that profile's `cordis.patch.yml`) for day-to-day development of the multitask profile. Keep the `--patch` overlay for one-off experiments that must not touch the profile's package tree.
 
-## Finding 1 — Profile seeding
+## Finding 1 — Creating the profile
 
 `dsh --profile multitask --from-default-profile web --dump-config` creates `$DSH_HOME/profiles/multitask/` with:
 
@@ -40,7 +40,7 @@ Insert row (goes in `cordis.patch.yml`, not `cordis.yml`):
         enabled: true
 ```
 
-## Finding 3 — Transient overlay
+## Finding 3 — Temporary overlay
 
 A standalone YAML patch applied only for one boot:
 
@@ -50,12 +50,12 @@ dsh --profile multitask --patch .\dev\cordis.dev.patch.yml
 
 The overlay is the same top-level array of patch entries. Nothing is written into the profile's package tree. Useful for trying an unbuilt or differently-built tree; not the default workflow.
 
-## Finding 4 — Stock profile isolation
+## Finding 4 — The stock profile stays unchanged
 
-The plugin is installed only under the `multitask` profile. `~/.dsh/profiles/web/cordis.patch.yml` is untouched (still only the Exa search insert). Verifying stock isolation is: dump `web` config and confirm no `multitask-dispatcher` row.
+The plugin is installed only under the `multitask` profile. `~/.dsh/profiles/web/cordis.patch.yml` is untouched (still only the Exa search insert). To check that the stock profile is isolated: dump the `web` config and confirm it has no `multitask-dispatcher` row.
 
 ## Consequences
 
-1. Ticket 01's install-workflow open item is closed: **persistent** for the multitask profile, **overlay** for transient experiments.
+1. Ticket 01's install-workflow open item is closed: **persistent** for the multitask profile, **overlay** for temporary experiments.
 2. `docs/research/dsh-local-install.md` "Open / unclear" item about the exact `dsh plugin add file:` shape is answered.
-3. Later tickets that change the plugin's `inject` list must rebuild (`npm run build`) before the profile picks up the new `lib/` — HMR reloads the module, not the TypeScript sources.
+3. Later tickets that change the plugin's `inject` list must rebuild (`npm run build`) before the profile picks up the new `lib/` — hot reload reloads the built module, not the TypeScript sources.

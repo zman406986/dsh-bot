@@ -36,10 +36,112 @@ export interface DurableWorkerMarker {
 }
 
 /**
+ * Ticket 124 / ADR-0029: the compaction boundary — the single marker resume
+ * reads to know whether a microcompact pass landed.
+ *
+ * One row per dispatcher session (key = session id), so the newest row is that
+ * session's whole boundary state. It lives in the SAME `multitask_dispatcher`
+ * storage domain as the worker markers (ADR-0006: dsh's own store, no second
+ * database, no local search index — ADR-0018 U-H).
+ *
+ * Semantics (ADR-0012: the marker replays, the work does not):
+ * - The row is written ONCE, AFTER every listed replacement landed. That is
+ *   the "one rollback unit" the ticket requires: either the complete boundary
+ *   (and the record of what it describes) is present, or no boundary is
+ *   recorded at all. There is deliberately no `planned`/`aborted` half-state
+ *   and no second marker.
+ * - A crash mid-pass therefore leaves no marker. The surface is still
+ *   consistent — every landed `compaction/prune` + replacement pair is
+ *   complete and self-priced — and the next pass re-evaluates from the
+ *   current surface, skipping nodes already cleared. Nothing is replayed.
+ * - Resume reads the newest row (keyed by session id) and knows the compaction
+ *   boundary is at {@link boundarySeq}; it never infers a boundary from
+ *   transcript shape.
+ *
+ * The marker carries no transcript text: the cleared content is still in the
+ * session's append-only log, which is dsh's store, not ours.
+ */
+export interface CompactionBoundary {
+  /** Dispatcher session this boundary belongs to (the table key). */
+  readonly sessionId: string;
+  /** Monotonic per-session pass counter; the newest row wins. */
+  readonly passSeq: number;
+  /**
+   * Always `applied`: only a completed pass is ever recorded (one rollback
+   * unit — no partial layout). Kept as a named field so a future layer can
+   * extend the vocabulary explicitly instead of guessing from shape.
+   */
+  readonly status: "applied";
+  /** Which layer wrote it. Only `microcompact` exists today. */
+  readonly layer: "microcompact";
+  /** What asked for the pass. Only `ratio` exists today. */
+  readonly trigger: "ratio";
+  /** `usedTokens / windowTokens` at decision time. */
+  readonly ratio: number;
+  /** Newest tool results that were protected. */
+  readonly keepNewest: number;
+  /** Measured request pressure at decision time. */
+  readonly usedTokens: number;
+  /** Advertised route capacity at decision time (`request/context`). */
+  readonly windowTokens: number;
+  /** Threshold that fired (`floor(windowTokens * ratio)`). */
+  readonly thresholdTokens: number;
+  /** Current-surface seqs that were replaced, oldest first. */
+  readonly clearedSeqs: readonly number[];
+  /**
+   * Seqs of the replacement nodes, index-aligned with `clearedSeqs`. Never
+   * empty: the row is only written after they all landed.
+   */
+  readonly replacementSeqs: readonly number[];
+  /**
+   * The session log seq of the LAST replacement — the resume cut. Everything
+   * at or before it belongs to the logged compaction; resume continues after
+   * it.
+   */
+  readonly boundarySeq: number;
+  /** How many tool results the pass cleared. */
+  readonly clearedCount: number;
+  /** Characters removed across the pass (audit). */
+  readonly clearedChars: number;
+  /** UTF-8 bytes removed across the pass (audit). */
+  readonly clearedBytes: number;
+  /** Heuristic tokens the pass freed. */
+  readonly freedTokens: number;
+  /** Epoch ms the row was written. */
+  readonly updatedAtMs: number;
+}
+
+/**
+ * Where the boundary is read and written. Implemented by the adapter over the
+ * same storage domain as {@link DurabilityPort}; tests use
+ * {@link createInMemoryDurability}.
+ */
+export interface CompactionBoundaryStore {
+  /** Upsert the row for `boundary.sessionId`. Resolve once durable. */
+  writeCompactionBoundary(boundary: CompactionBoundary): void | Promise<void>;
+  /**
+   * The newest row for one session, or undefined when the session never
+   * compacted. "Newest" is `passSeq`; the store keys by session id, so there is
+   * at most one row per session and this is also the only row.
+   */
+  readCompactionBoundary(
+    sessionId: string,
+  ):
+    | CompactionBoundary
+    | undefined
+    | Promise<CompactionBoundary | undefined>;
+}
+
+/**
  * Host-backed durable store for worker markers.
  * The dsh adapter implements this over `ctx.storageDomain` (ticket 09);
  * tests use {@link createInMemoryDurability} and discard the core between
  * simulated restarts. Core must not invent its own transcript database.
+ *
+ * Ticket 124 keeps {@link CompactionBoundaryStore} OUT of this interface: the
+ * marker port is the core's narrowed contract for roster rebuild, and the
+ * compaction boundary is the adapter's concern. A store that also carries
+ * boundaries implements both (the adapter's `StorageDomainDurability` does).
  */
 export interface DurabilityPort {
   /** Write (upsert) one marker. Resolve only once the write is durable. */
@@ -114,15 +216,23 @@ export function toDurableMarker(
  * Tests hold this across a simulated restart and pass only this store
  * into the rebuilt core (ADR-0006: rebuild from persisted state only).
  */
-export interface InMemoryDurability extends DurabilityPort {
+export interface InMemoryDurability
+  extends DurabilityPort,
+    CompactionBoundaryStore {
   /** Direct map for assertions. Keyed by workerId. */
   readonly markers: Map<string, DurableWorkerMarker>;
+  /** Ticket 124: compaction boundaries, keyed by session id. */
+  readonly boundaries: Map<string, CompactionBoundary>;
 }
 
 export function createInMemoryDurability(): InMemoryDurability {
   const markers = new Map<string, DurableWorkerMarker>();
+  // Ticket 124: the boundary lives beside the markers in the SAME store — one
+  // domain, two tables, exactly like the adapter's storage domain.
+  const boundaries = new Map<string, CompactionBoundary>();
   return {
     markers,
+    boundaries,
     writeWorkerMarker(marker: DurableWorkerMarker): void {
       markers.set(marker.workerId, { ...marker });
     },
@@ -135,6 +245,14 @@ export function createInMemoryDurability(): InMemoryDurability {
     },
     deleteWorkerMarker(workerId: string): void {
       markers.delete(workerId);
+    },
+    writeCompactionBoundary(boundary: CompactionBoundary): void {
+      boundaries.set(boundary.sessionId, { ...boundary });
+    },
+    readCompactionBoundary(
+      sessionId: string,
+    ): CompactionBoundary | undefined {
+      return boundaries.get(sessionId);
     },
   };
 }

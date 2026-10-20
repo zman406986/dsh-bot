@@ -42,7 +42,6 @@ import {
   type RosterSnapshot,
 } from "../src/core/roster-snapshot.js";
 import {
-  createSettingsRosterChannel,
   rosterSessionKey,
   sessionOfRosterKey,
 } from "../src/adapter/roster-channel.js";
@@ -52,6 +51,7 @@ import {
   type AgentLike,
 } from "../src/adapter/index.js";
 import { apply as pluginApply } from "../src/plugin.js";
+import { volatileConfig } from "./support/plugin-config.js";
 
 function makeCore(
   observer?: (sessionId: string) => void,
@@ -857,140 +857,10 @@ describe("roster snapshot — parse and staleness (v3 wire contract)", () => {
   });
 });
 
-describe("roster snapshot — settings-namespace channel (adapter)", () => {
-  function fakeScope() {
-    const updates: unknown[] = [];
-    let failing = false;
-    return {
-      updates,
-      scope: {
-        update(value: unknown) {
-          if (failing) throw new Error("settings provider exploded");
-          updates.push(value);
-        },
-        setFailing(value: boolean) {
-          failing = value;
-        },
-      },
-    };
-  }
-
-  it("skips writes until a scope attaches, then catch-up-writes the last snapshot", () => {
-    const channel = createSettingsRosterChannel();
-    const snapshot = projectRosterSnapshot("s-1", [], 1);
-    channel.publish(snapshot);
-    assert.equal(channel.stats.skipped, 1);
-    assert.equal(channel.stats.writes, 0);
-    assert.equal(channel.lastSnapshot, snapshot);
-
-    const { updates, scope } = fakeScope();
-    channel.attach(scope);
-    assert.equal(channel.stats.attached, true);
-    // Catch-up: the scope appeared after transitions were projected.
-    assert.equal(updates.length, 1);
-    assert.deepEqual(updates[0], {
-      [ROSTER_SETTINGS_KEY]: snapshot,
-      [`roster.s-1`]: snapshot,
-    });
-  });
-
-  it("writes each publish under the roster key and counts failures without throwing", () => {
-    const channel = createSettingsRosterChannel();
-    const { updates, scope } = fakeScope();
-    channel.attach(scope);
-
-    const one = projectRosterSnapshot("s-1", [], 1);
-    const two = projectRosterSnapshot("s-1", [], 2);
-    channel.publish(one);
-    channel.publish(two);
-    assert.deepEqual(updates, [
-      { [ROSTER_SETTINGS_KEY]: one, "roster.s-1": one },
-      { [ROSTER_SETTINGS_KEY]: two, "roster.s-1": two },
-    ]);
-
-    scope.setFailing(true);
-    const three = projectRosterSnapshot("s-1", [], 3);
-    assert.doesNotThrow(() => channel.publish(three));
-    assert.equal(channel.stats.failures, 1);
-    // The retained snapshot stays the latest even when the write failed.
-    assert.equal(channel.lastSnapshot, three);
-  });
-
-  it("contains an ASYNC write rejection without an unhandled rejection (ticket 93)", async () => {
-    // The host scope's `update(patch)` returns Promise<void>
-    // (dsh-settings lib/types/index.d.ts:105-108): validation and persist
-    // failures arrive as REJECTIONS, not sync throws
-    // (dsh-settings lib/index.js:443-455 throws only for
-    // not-registered/disposed/read-only/non-plain-object). A telemetry
-    // write that rejects must be counted, contained, and never crash the
-    // host as an unhandled rejection.
-    const channel = createSettingsRosterChannel();
-    const writes: unknown[] = [];
-    let rejectNext = false;
-    channel.attach({
-      update(value: unknown) {
-        writes.push(value);
-        return rejectNext
-          ? Promise.reject(new Error("settings persist failed"))
-          : Promise.resolve();
-      },
-    });
-
-    const ok = projectRosterSnapshot("s-1", [], 1);
-    channel.publish(ok);
-    assert.equal(channel.stats.writes, 1);
-    assert.equal(channel.stats.asyncFailures, 0);
-
-    rejectNext = true;
-    const bad = projectRosterSnapshot("s-1", [], 2);
-    assert.doesNotThrow(() => channel.publish(bad));
-    assert.equal(channel.stats.writes, 2);
-    // The rejection is observed on the next microtask turn; an unhandled
-    // rejection would fail the node test runner here.
-    for (let i = 0; i < 3; i += 1) await Promise.resolve();
-    assert.equal(channel.stats.asyncFailures, 1);
-    assert.equal(channel.stats.failures, 0);
-    assert.equal(channel.lastSnapshot, bad);
-  });
-
-  it("the scope comes from register, so an installSection-style void return cannot attach (ticket 93)", () => {
-    // The live `installSection` returns void (dsh-settings
-    // lib/index.js:327-343; types :228), which is what starved this channel
-    // until ticket 93. This pin models the OLD failure shape: a provider
-    // whose convenience install discards the scope leaves the channel
-    // unattached (skipped), while the register-returned scope attaches.
-    const channel = createSettingsRosterChannel();
-    const { updates, scope } = fakeScope();
-    const snapshot = projectRosterSnapshot("s-1", [], 1);
-    channel.publish(snapshot);
-    assert.equal(channel.stats.attached, false);
-    assert.equal(channel.stats.skipped, 1);
-    assert.deepEqual(updates, []);
-
-    channel.attach(scope);
-    assert.equal(channel.stats.attached, true);
-    // Catch-up: the document now carries BOTH mirror families.
-    assert.deepEqual(updates, [
-      { [ROSTER_SETTINGS_KEY]: snapshot, "roster.s-1": snapshot },
-    ]);
-    assert.equal(channel.stats.skipped, 1);
-    assert.equal(channel.stats.writes, 1);
-  });
-});
-
-describe("roster snapshot — per-session mirror keys (ticket 79, ADR-0019 keying)", () => {
-  function fakeScope() {
-    const updates: Array<Record<string, unknown>> = [];
-    return {
-      updates,
-      scope: {
-        update(value: unknown) {
-          updates.push(value as Record<string, unknown>);
-        },
-      },
-    };
-  }
-
+describe("roster snapshot — mirror key grammar (0.2.1: no settings channel)", () => {
+  // 0.2.1 rejects undeclared settings keys and has no scope-registration API,
+  // so the write channel is gone. The client read-sides still parse the key
+  // family, so the grammar stays and is pinned here.
   it("names session mirror keys unambiguously (dots in ids stay parseable)", () => {
     assert.equal(rosterSessionKey("s-abc"), "roster.s-abc");
     // The legacy whole-snapshot key is NOT a session key.
@@ -1000,53 +870,10 @@ describe("roster snapshot — per-session mirror keys (ticket 79, ADR-0019 keyin
     assert.equal(rosterSessionKey("s.a.b"), "roster.s.a.b");
   });
 
-  it("writes the per-session mirror alongside the legacy key on every publish", () => {
-    const channel = createSettingsRosterChannel();
-    const { updates, scope } = fakeScope();
-    channel.attach(scope);
-
-    const a = projectRosterSnapshot("s-a", [], 1);
-    const b = projectRosterSnapshot("s-b", [], 2);
-    channel.publish(a);
-    channel.publish(b);
-    // Each publish carries BOTH families: the legacy key (the shipped
-    // single-dispatcher panel's read-side, last-write-wins) and the named
-    // session's mirror (the wrapper sidebar's read-side).
-    assert.deepEqual(updates, [
-      { [ROSTER_SETTINGS_KEY]: a, "roster.s-a": a },
-      { [ROSTER_SETTINGS_KEY]: b, "roster.s-b": b },
-    ]);
-  });
-
-  it("clearSession writes null under the session's mirror key only", () => {
-    const channel = createSettingsRosterChannel();
-    const { updates, scope } = fakeScope();
-    channel.attach(scope);
-    channel.publish(projectRosterSnapshot("s-a", [], 1));
-    channel.publish(projectRosterSnapshot("s-b", [], 2));
-    updates.length = 0;
-
-    channel.clearSession("s-a");
-    assert.deepEqual(updates, [{ "roster.s-a": null }]);
-    // A junk id is refused rather than written.
-    updates.length = 0;
-    channel.clearSession("");
-    assert.deepEqual(updates, []);
-  });
-
-  it("clearAllSessions clears every mirror this process published", () => {
-    const channel = createSettingsRosterChannel();
-    const { updates, scope } = fakeScope();
-    channel.attach(scope);
-    // Nothing published yet: nothing to clear.
-    channel.clearAllSessions();
-    assert.deepEqual(updates, []);
-
-    channel.publish(projectRosterSnapshot("s-a", [], 1));
-    channel.publish(projectRosterSnapshot("s-b", [], 2));
-    updates.length = 0;
-    channel.clearAllSessions();
-    assert.deepEqual(updates, [{ "roster.s-a": null }, { "roster.s-b": null }]);
+  it("only the dotted prefix is a session mirror", () => {
+    assert.equal(sessionOfRosterKey("rosterx"), null);
+    assert.equal(sessionOfRosterKey(""), null);
+    assert.equal(sessionOfRosterKey("roster."), "");
   });
 });
 
@@ -1064,39 +891,6 @@ function createSettingsAwareCtx() {
     string,
     { execute: (args: unknown, exec?: unknown) => Promise<unknown> }
   >();
-  const updates: unknown[] = [];
-  const claimedNamespaces = new Set<string>();
-  // Settings-provider fake: the shipped scope contract (ticket 93).
-  // - `register(ns, schema, options?)` RETURNS the owner scope
-  //   (dsh-settings lib/index.js:281-315; the scope built at `:298-314`).
-  // - `installSection(...)` returns VOID — it registers through `register`
-  //   and discards the scope (dsh-settings lib/index.js:327-343; the shipped
-  //   type is `installSection(…): void`, lib/types/index.d.ts:228).
-  // - a second claim of one namespace fails loud (shipped rule,
-  //   dsh-settings lib/index.js:283).
-  const claim = (
-    ns: string,
-  ): { update(value: unknown): Promise<void> } => {
-    if (claimedNamespaces.has(ns)) {
-      throw new Error(`settings namespace "${ns}" is already registered`);
-    }
-    claimedNamespaces.add(ns);
-    return {
-      // The host scope's `update` is ASYNC (dsh-settings
-      // lib/types/index.d.ts:105-108).
-      async update(value: unknown) {
-        updates.push(value);
-      },
-    };
-  };
-  const settingsProvider = {
-    register(ns: string) {
-      return claim(ns);
-    },
-    installSection(_owner: unknown, ns: string) {
-      claim(ns);
-    },
-  };
   let nextChild = 1;
 
   const fire = (name: string, payload: unknown) => {
@@ -1118,11 +912,6 @@ function createSettingsAwareCtx() {
         Symbol.iterator in result
       ) {
         for (const step of result as Iterable<unknown>) void step;
-      }
-    },
-    inject(services: readonly string[], callback: (child: unknown) => void) {
-      if (services.includes("settings")) {
-        callback({ settings: settingsProvider });
       }
     },
     on(name: string, cb: (payload: never) => void) {
@@ -1166,9 +955,13 @@ function createSettingsAwareCtx() {
       },
     },
     subagents: {
-      async startContinuable() {
+      async startActivation() {
         const childId = `child-${nextChild++}`;
-        return { childId, messageId: `msg-${childId}` };
+        return {
+          childId,
+          messageId: `msg-${childId}`,
+          dispose: async () => {},
+        };
       },
       interrupt() {},
       async sendMessage() {
@@ -1199,10 +992,7 @@ function createSettingsAwareCtx() {
       },
     },
     fire,
-    updates,
-    settingsInstallSection: (ns: string) =>
-      settingsProvider.installSection({}, ns),
-    settingsRegister: (ns: string) => settingsProvider.register(ns),
+    listeners,
     tool: (name: string) => tools.get(name),
     runCommand(commandId: string, agent?: AgentLike): unknown {
       const command = commands.get(commandId);
@@ -1217,9 +1007,7 @@ function createSettingsAwareCtx() {
     fire(name: string, payload: unknown): void;
     tool(name: string): { execute: (args: unknown, exec?: unknown) => Promise<unknown> } | undefined;
     runCommand(commandId: string, agent?: AgentLike): unknown;
-    readonly updates: unknown[];
-    settingsInstallSection(ns: string): void;
-    settingsRegister(ns: string): { update(value: unknown): Promise<void> };
+    readonly listeners: Map<string, unknown[]>;
   };
 }
 
@@ -1233,11 +1021,13 @@ function topLevelAgent(id: string): AgentLike {
   };
 }
 
-describe("roster snapshot — plugin publishes through the settings namespace", () => {
+describe("roster snapshot — no settings-document publish (0.2.1)", () => {
   /**
-   * Ticket 31: the on-activation publish rides the async durability
-   * rebuild (`rebuildFromDurability` BEFORE the first publish), so tests
-   * drain the queued chain before asserting on published snapshots.
+   * 0.2.1 rejects undeclared settings keys, so the plugin no longer mirrors
+   * snapshots into its settings document. The projection itself is still the
+   * one roster view (pinned above); these cases pin the removed path's
+   * replacement contract: activating and spawning touch no settings scope,
+   * and the dispatcher commands still work without one.
    */
   async function flushActivation(): Promise<void> {
     for (let i = 0; i < 5; i += 1) {
@@ -1245,10 +1035,9 @@ describe("roster snapshot — plugin publishes through the settings namespace", 
     }
   }
 
-  it("activation publishes an empty snapshot; spawn and settle update it", async () => {
+  it("activation and spawn succeed on a host with no settings service at all", async () => {
     const ctx = createSettingsAwareCtx();
-    const { updates } = ctx;
-    pluginApply(ctx, { enabled: true });
+    pluginApply(ctx, volatileConfig({ enabled: true }));
 
     const result = ctx.runCommand(
       DISPATCHER_START_COMMAND,
@@ -1257,15 +1046,6 @@ describe("roster snapshot — plugin publishes through the settings namespace", 
     assert.equal(result.kind, "success");
     await flushActivation();
 
-    // On-activation publish (after the rebuild): fresh (empty) roster
-    // without any transition.
-    assert.equal(updates.length, 1);
-    const first = (updates[0] as Record<string, unknown>)[
-      ROSTER_SETTINGS_KEY
-    ] as { dispatcherSessionId: string; workers: unknown[] };
-    assert.equal(first.dispatcherSessionId, "s-1");
-    assert.equal(first.workers.length, 0);
-
     const spawn = ctx.tool("spawn_worker");
     assert.ok(spawn);
     const spawned = (await spawn.execute(
@@ -1273,123 +1053,37 @@ describe("roster snapshot — plugin publishes through the settings namespace", 
       { agent: { session: { id: "s-1" } } },
     )) as { ok: boolean; worker_id: string };
     assert.equal(spawned.ok, true);
-
-    // Spawn is a roster-affecting transition → second publish.
-    assert.equal(updates.length, 2);
-    const second = (updates[1] as Record<string, unknown>)[
-      ROSTER_SETTINGS_KEY
-    ] as { workers: Array<{ workerId: string; status: string; title: string }> };
-    assert.equal(second.workers.length, 1);
-    assert.equal(second.workers[0]?.workerId, spawned.worker_id);
-    assert.equal(second.workers[0]?.status, "spawned");
-    assert.equal(second.workers[0]?.title, "Parser worker");
-
-    // Host settle → accepted transition → third publish with the new status.
-    // Ticket 41: the v3 envelope always carries `recentResult`. This worker
-    // has no ledger link, so it projects delivered — it owes nothing and
-    // the excerpt is rightly withheld. The positive path (seat text →
-    // published excerpt) is covered by the projection suite above and the
-    // adapter seat suite in adapter-cordis-dsh-host.test.ts.
-    ctx.fire("subagent/end", {
-      id: spawned.worker_id,
-      stopReason: "completed",
-      lastAssistantMessage: [],
-    });
-    assert.equal(updates.length, 3);
-    const third = (updates[2] as Record<string, unknown>)[
-      ROSTER_SETTINGS_KEY
-    ] as {
-      schemaVersion: number;
-      workers: Array<{ status: string }>;
-      recentResult: unknown;
-    };
-    assert.equal(third.schemaVersion, ROSTER_SNAPSHOT_SCHEMA_VERSION);
-    assert.equal(third.workers[0]?.status, "completed");
-    assert.equal(third.recentResult, null);
+    assert.equal(typeof spawned.worker_id, "string");
   });
 
-  it("a parked access ask republishes the roster with the blocked reason (names only)", async () => {
+  it("dormant boot registers no publish path: no listener fans a snapshot out", () => {
     const ctx = createSettingsAwareCtx();
-    const { updates } = ctx;
-    pluginApply(ctx, { enabled: true });
-    const result = ctx.runCommand(
-      DISPATCHER_START_COMMAND,
-      topLevelAgent("s-1"),
-    ) as { kind: string };
-    assert.equal(result.kind, "success");
-
-    const spawn = ctx.tool("spawn_worker");
-    assert.ok(spawn);
-    const spawned = (await spawn.execute(
-      { stream_key: "k", title: "Parser worker", prompt: "P" },
-      { agent: { session: { id: "s-1" } } },
-    )) as { ok: boolean; worker_id: string };
-    assert.equal(spawned.ok, true);
-    const afterSpawn = updates.length;
-
-    // The worker asks for access: the relay parks a ticket (core observer)
-    // and the plugin republishes the snapshot carrying the blocked marker.
-    // FINDING 4 (ticket 69): the tool call parks until the ask settles, so
-    // fire it and resolve below once the marker is asserted.
-    const access = ctx.tool("request_access");
-    assert.ok(access);
-    const settled = access
-      .execute(
-        { class: "tool", target: "edit_file", reason: "need to edit files" },
-        { agent: { session: { id: spawned.worker_id } } },
-      )
-      .then((value) => {
-        assert.equal((value as { ok: boolean }).ok, true);
-      }) as Promise<void>;
-    await flushActivation();
-
-    assert.equal(updates.length, afterSpawn + 1);
-    const latest = (updates.at(-1) as Record<string, unknown>)[
-      ROSTER_SETTINGS_KEY
-    ] as {
-      workers: Array<{
-        status: string;
-        blocked: { class: string; target: string } | null;
-      }>;
-    };
-    assert.deepEqual(latest.workers[0]?.blocked, {
-      class: "tool",
-      target: "edit_file",
-    });
-    // Names only — the free-text reason never rides the roster wire.
-    assert.deepEqual(Object.keys(latest.workers[0]?.blocked ?? {}).sort(), [
-      "class",
-      "target",
-    ]);
-
-    // Test hygiene: the parked tool call settles when the ask leaves the
-    // relay — fire the worker's settle (the B-4 event that used to EAT the
-    // ask; here the ask is still parked, so the settle clears it and the
-    // tool call resolves instead of outliving the test).
-    ctx.fire("subagent/end", {
-      id: spawned.worker_id,
-      stopReason: "completed",
-      lastAssistantMessage: [{ type: "text", text: "done" }],
-    });
-    await settled;
+    pluginApply(ctx, volatileConfig({ enabled: true }));
+    // The plugin subscribes to the host firehose and status events only.
+    // `onRosterChanged` (the publish trigger) is no longer wired at all, so
+    // no settings watch or document-updated listener exists to fan a
+    // snapshot anywhere.
+    assert.equal(
+      (ctx as unknown as { listeners: Map<string, unknown[]> }).listeners.has(
+        "settings/document-updated",
+      ),
+      false,
+    );
+    assert.equal(
+      (ctx as unknown as { listeners: Map<string, unknown[]> }).listeners.has(
+        "settings/change",
+      ),
+      false,
+    );
   });
 
-  it("non-activated sessions never publish: transitions gate on the dispatcher session", () => {
+  it("flag OFF registers nothing at all", () => {
     const ctx = createSettingsAwareCtx();
-    const { updates } = ctx;
-    pluginApply(ctx, { enabled: true });
-    // Dormant boot: no activation, so even the settings attach publishes nothing.
-    assert.equal(updates.length, 0);
-    // A worker transition cannot exist without a bound parent — nothing fires.
-    assert.equal(updates.length, 0);
-  });
-
-  it("flag OFF keeps the channel inert: section installs, nothing publishes", () => {
-    const ctx = createSettingsAwareCtx();
-    const { updates } = ctx;
-    pluginApply(ctx, { enabled: false });
-    assert.equal(updates.length, 0);
-    assert.throws(() => ctx.runCommand(DISPATCHER_START_COMMAND), /command not registered/);
+    pluginApply(ctx, volatileConfig({ enabled: false }));
+    assert.throws(
+      () => ctx.runCommand(DISPATCHER_START_COMMAND),
+      /command not registered/,
+    );
   });
 });
 
@@ -1402,7 +1096,7 @@ describe("roster snapshot — host duplicate-registration rule (ticket 91)", () 
     });
 
     assert.throws(
-      () => pluginApply(ctx, { enabled: true }),
+      () => pluginApply(ctx, volatileConfig({ enabled: true })),
       new RegExp(
         `command "${DISPATCHER_START_COMMAND}" is already registered`,
       ),
@@ -1417,31 +1111,6 @@ describe("roster snapshot — host duplicate-registration rule (ticket 91)", () 
     assert.throws(
       () => ctx.tools.register(tool),
       /tool "deliver_result" is already registered/,
-    );
-  });
-
-  it("the settings fake throws on a duplicate namespace claim (dsh-settings:283)", () => {
-    const ctx = createSettingsAwareCtx();
-    // The product's claim path is `register` (ticket 93 — the host's
-    // scope-returning API); a second claim of the same namespace throws the
-    // shipped message.
-    ctx.settingsRegister("multitask-dispatcher");
-
-    assert.throws(
-      () => ctx.settingsRegister("multitask-dispatcher"),
-      /settings namespace "multitask-dispatcher" is already registered/,
-    );
-  });
-
-  it("the settings fake models installSection as void (ticket 93)", () => {
-    const ctx = createSettingsAwareCtx();
-    // Host shape (dsh-settings lib/index.js:327-343; types :228): the
-    // convenience install returns NOTHING — a product that reads its return
-    // value gets `undefined` here exactly as live.
-    assert.equal(ctx.settingsInstallSection("multitask-dispatcher"), undefined);
-    assert.throws(
-      () => ctx.settingsRegister("multitask-dispatcher"),
-      /settings namespace "multitask-dispatcher" is already registered/,
     );
   });
 });

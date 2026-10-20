@@ -1,6 +1,6 @@
 # Addon coexistence: stock dsh stays the primary UI; dispatcher functions live in a separate floating window
 
-**Status:** accepted (human-ruled, 2026-09-20 in-session directive) — amends ADR-0018's vehicle clause; supersedes ADR-0020 as vehicle; **capsule-retirement clause partially superseded 2026-09-22 by 0022** (human-ruled) — the collapsed launcher becomes an information-bearing floating capsule; the launch seam, the whole-shell floating window, and decisions 2/3/4 otherwise stand
+**Status:** accepted (human-ruled, 2026-09-20 in-session directive) — amends ADR-0018's vehicle clause; supersedes ADR-0020 as vehicle; **capsule-retirement clause partially superseded 2026-09-22 by 0022** (human-ruled) — the collapsed launcher becomes an information-bearing floating capsule; the launch seam, the whole-shell floating window, and decisions 2/3/4 otherwise stand; **decisions 2 and 4 superseded 2026-10-18 by 0024** (human-ruled) — the floating window and its re-host are withdrawn and the dispatcher UI returns to the native-dsh posture; decision 1 stands and is strengthened, and decision 3's add/delete permission stands as a retained functional capability
 
 **Numbering:** 0021, the first free number at filing (2026-09-20; highest in use was 0020 — 0010–0012 reserved to design-17 §9's plan and consumed 2026-09-19; 0013–0015 capsule drafts; 0016 retracted; 0017–0018 filed; 0019–0020 the newest precedents). Filed by the records pass for the 2026-09-20 in-session human ruling; implementation is ticketed separately as tickets 99–101 per repo rule.
 

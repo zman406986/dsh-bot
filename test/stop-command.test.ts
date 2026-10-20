@@ -21,6 +21,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { apply as pluginApply } from "../src/plugin.js";
+import { volatileConfig } from "./support/plugin-config.js";
 import {
   DISPATCHER_RESOLVE_COMMAND,
   DISPATCHER_START_COMMAND,
@@ -37,8 +38,6 @@ import {
   type CommandResultLike,
   type ToolsLike,
 } from "../src/adapter/index.js";
-import { rosterSessionKey } from "../src/adapter/roster-channel.js";
-import { ROSTER_SETTINGS_KEY } from "../src/core/roster-snapshot.js";
 
 /** Drain the async rebuild chain queued by activation (ticket 31 idiom). */
 async function flush(): Promise<void> {
@@ -103,9 +102,8 @@ function createAgent(id: string): TestAgent {
 
 /**
  * Host fake (the restart-honesty idiom): commands + tools registries, the
- * listener bus, a storage stub, and the ticket-93 settings-provider shape
- * whose `update` documents are recorded so the roster mirror writes —
- * including the deactivation clear — are observable.
+ * listener bus, and a storage stub. No settings face: 0.2.1 derives the form
+ * from the plugin's own Config, so the plugin never touches `ctx.settings`.
  */
 function createStopCtx() {
   const listeners = new Map<string, Array<(payload: never) => void>>();
@@ -114,20 +112,6 @@ function createStopCtx() {
     string,
     { execute: (args: unknown, exec?: unknown) => Promise<unknown> }
   >();
-  const updates: unknown[] = [];
-  const claimedNamespaces = new Set<string>();
-  const claim = (ns: string): { update(value: unknown): Promise<void> } => {
-    if (claimedNamespaces.has(ns)) {
-      throw new Error(`settings namespace "${ns}" is already registered`);
-    }
-    claimedNamespaces.add(ns);
-    return {
-      async update(value: unknown) {
-        updates.push(value);
-      },
-    };
-  };
-
   const fire = (name: string, payload: unknown) => {
     for (const cb of [...(listeners.get(name) ?? [])]) {
       cb(payload as never);
@@ -143,20 +127,6 @@ function createStopCtx() {
         Symbol.iterator in result
       ) {
         for (const step of result as Iterable<unknown>) void step;
-      }
-    },
-    inject(services: readonly string[], callback: (child: unknown) => void) {
-      if (services.includes("settings")) {
-        callback({
-          settings: {
-            register(ns: string) {
-              return claim(ns);
-            },
-            installSection() {
-              // Host shape (ticket 93): returns void.
-            },
-          },
-        });
       }
     },
     on(name: string, cb: (payload: never) => void) {
@@ -198,8 +168,8 @@ function createStopCtx() {
       },
     },
     subagents: {
-      async startContinuable() {
-        return { childId: "child-1", messageId: "msg-1" };
+      async startActivation() {
+        return { childId: "child-1", messageId: "msg-1", dispose: async () => {} };
       },
       interrupt() {},
       async sendMessage() {
@@ -231,7 +201,6 @@ function createStopCtx() {
     },
     // Test surface.
     fire,
-    updates,
     commandNames: () => [...commands.keys()],
     toolNames: () => [...tools.keys()],
     command: (name: string) => commands.get(name),
@@ -248,7 +217,6 @@ function createStopCtx() {
   };
   return ctx as unknown as AdapterContext & {
     fire(name: string, payload: unknown): void;
-    readonly updates: unknown[];
     commandNames(): string[];
     toolNames(): string[];
     command(name: string): CommandDefinitionLike | undefined;
@@ -265,35 +233,10 @@ function createStopCtx() {
  * fakes is judged with it zeroed (JSON round-trip also drops undefined
  * fields, keeping deepEqual deterministic).
  */
-function normalize(updates: readonly unknown[]): unknown[] {
-  return updates.map((update) =>
-    JSON.parse(
-      JSON.stringify(update, (_key, value) =>
-        _key === "publishedAtMs" ? 0 : value,
-      ),
-    ),
-  );
-}
-
-/** Last value written under a session's roster mirror key. */
-function mirrorValue(
-  updates: readonly unknown[],
-  sessionId: string,
-): unknown {
-  const key = rosterSessionKey(sessionId);
-  let value: unknown;
-  for (const update of updates as Array<Record<string, unknown>>) {
-    if (update !== null && typeof update === "object" && key in update) {
-      value = update[key];
-    }
-  }
-  return value;
-}
-
 describe("dispatcher-stop — registration (ticket 101)", () => {
   it("registers alongside the other dispatcher commands, dormant, no input hint", () => {
     const ctx = createStopCtx();
-    pluginApply(ctx, { enabled: true });
+    pluginApply(ctx, volatileConfig({ enabled: true }));
 
     assert.deepEqual(ctx.commandNames(), [
       DISPATCHER_START_COMMAND,
@@ -311,9 +254,9 @@ describe("dispatcher-stop — registration (ticket 101)", () => {
 });
 
 describe("dispatcher-stop — deactivates through the dispose path", () => {
-  it("deactivates the invoking chat: tools unbound, mirror cleared, re-activation works", async () => {
+  it("deactivates the invoking chat: tools unbound, re-activation works", async () => {
     const ctx = createStopCtx();
-    pluginApply(ctx, { enabled: true });
+    pluginApply(ctx, volatileConfig({ enabled: true }));
     const agent = createScopedAgent("s-1");
 
     const started = ctx.runCommand({
@@ -323,7 +266,6 @@ describe("dispatcher-stop — deactivates through the dispose path", () => {
     assert.deepEqual(started, { kind: "success", text: DISPATCHER_START_SUCCESS });
     await flush();
     assert.equal(agent.ctx?.tools.registeredNames().length, 6);
-    assert.ok(ctx.updates.length >= 1, "the roster snapshot was mirrored");
 
     const stopped = ctx.runCommand({
       commandId: DISPATCHER_STOP_COMMAND,
@@ -335,14 +277,6 @@ describe("dispatcher-stop — deactivates through the dispose path", () => {
     // is unregistered and the global request_access reference is released.
     assert.deepEqual(agent.ctx?.tools.registeredNames(), []);
     assert.deepEqual(ctx.toolNames(), []);
-    // The roster mirror for THIS session is cleared (null — the documented
-    // "no dispatcher here anymore" value), so the client read-side drops the
-    // dispatcher flag instead of rendering a deactivated session as live.
-    assert.equal(
-      mirrorValue(ctx.updates, "s-1"),
-      null,
-      "roster.s-1 mirror is cleared on stop",
-    );
 
     // Deactivation is reversible (ADR-0021 decision 3): the chat itself was
     // never disposed, and an explicit start re-activates it.
@@ -353,19 +287,14 @@ describe("dispatcher-stop — deactivates through the dispose path", () => {
     assert.deepEqual(again, { kind: "success", text: DISPATCHER_START_SUCCESS });
     await flush();
     assert.equal(agent.ctx?.tools.registeredNames().length, 6);
-    assert.ok(
-      mirrorValue(ctx.updates, "s-1") !== null,
-      "the mirror carries a live snapshot again",
-    );
   });
 
   it("a command-path stop is observably identical to a host agent/disposed", async () => {
     // Two identical fakes; the ONLY difference is how the session ends —
     // the command here, the host dispose event there. Every observable
-    // (mirrored documents, scoped surface, global surface, commands) must
-    // match: one deactivation path, not two.
+    // (scoped surface, global surface) must match: one deactivation path.
     const viaCommand = createStopCtx();
-    pluginApply(viaCommand, { enabled: true });
+    pluginApply(viaCommand, volatileConfig({ enabled: true }));
     const commandAgent = createScopedAgent("s-1");
     viaCommand.runCommand({
       commandId: DISPATCHER_START_COMMAND,
@@ -380,7 +309,7 @@ describe("dispatcher-stop — deactivates through the dispose path", () => {
     await flush();
 
     const viaDispose = createStopCtx();
-    pluginApply(viaDispose, { enabled: true });
+    pluginApply(viaDispose, volatileConfig({ enabled: true }));
     const disposedAgent = createScopedAgent("s-1");
     viaDispose.runCommand({
       commandId: DISPATCHER_START_COMMAND,
@@ -390,11 +319,6 @@ describe("dispatcher-stop — deactivates through the dispose path", () => {
     viaDispose.fire("agent/disposed", { agent: disposedAgent });
     await flush();
 
-    assert.deepEqual(
-      normalize(viaCommand.updates),
-      normalize(viaDispose.updates),
-      "identical mirror write sequences",
-    );
     assert.deepEqual(
       commandAgent.ctx?.tools.registeredNames(),
       disposedAgent.ctx?.tools.registeredNames(),
@@ -406,7 +330,7 @@ describe("dispatcher-stop — deactivates through the dispose path", () => {
 describe("dispatcher-stop — honest refusals", () => {
   it("stopping a chat that is not an activated dispatcher is an honest no-op", async () => {
     const ctx = createStopCtx();
-    pluginApply(ctx, { enabled: true });
+    pluginApply(ctx, volatileConfig({ enabled: true }));
     const agent = createAgent("plain-chat");
 
     const result = ctx.runCommand({
@@ -417,13 +341,12 @@ describe("dispatcher-stop — honest refusals", () => {
       kind: "error",
       text: DISPATCHER_STOP_NOT_DISPATCHER,
     });
-    assert.deepEqual(ctx.updates, [], "nothing was written");
     assert.deepEqual(ctx.toolNames(), [], "no tool surface appeared");
   });
 
   it("a second stop is refused with the same honest no-op (idempotent-honest)", async () => {
     const ctx = createStopCtx();
-    pluginApply(ctx, { enabled: true });
+    pluginApply(ctx, volatileConfig({ enabled: true }));
     const agent = createScopedAgent("s-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await flush();
@@ -433,7 +356,6 @@ describe("dispatcher-stop — honest refusals", () => {
       agent,
     });
     assert.equal(first.kind, "success");
-    const writesAfterFirst = ctx.updates.length;
 
     const second = ctx.runCommand({
       commandId: DISPATCHER_STOP_COMMAND,
@@ -443,17 +365,12 @@ describe("dispatcher-stop — honest refusals", () => {
       kind: "error",
       text: DISPATCHER_STOP_NOT_DISPATCHER,
     });
-    assert.equal(
-      ctx.updates.length,
-      writesAfterFirst,
-      "the refusal writes nothing",
-    );
     assert.deepEqual(ctx.toolNames(), []);
   });
 
   it("an invocation without a resolvable agent is refused, never guessed", () => {
     const ctx = createStopCtx();
-    pluginApply(ctx, { enabled: true });
+    pluginApply(ctx, volatileConfig({ enabled: true }));
     const result = ctx.runCommand({ commandId: DISPATCHER_STOP_COMMAND });
     assert.deepEqual(result, {
       kind: "error",
@@ -463,7 +380,7 @@ describe("dispatcher-stop — honest refusals", () => {
 
   it("per-session keying: stopping one dispatcher never touches a sibling (ADR-0019)", async () => {
     const ctx = createStopCtx();
-    pluginApply(ctx, { enabled: true });
+    pluginApply(ctx, volatileConfig({ enabled: true }));
     const first = createScopedAgent("s-1");
     const second = createScopedAgent("s-2");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent: first });
@@ -487,45 +404,31 @@ describe("dispatcher-stop — honest refusals", () => {
       ["request_access"],
       "the global access tool lives until the LAST dispatcher ends",
     );
-    assert.equal(mirrorValue(ctx.updates, "s-1"), null);
-    assert.notEqual(
-      mirrorValue(ctx.updates, "s-2"),
-      null,
-      "the sibling's mirror still carries its live snapshot",
-    );
-    for (const update of ctx.updates as Array<Record<string, unknown>>) {
-      assert.notEqual(
-        update[rosterSessionKey("s-2")],
-        null,
-        "no clear was ever written for the sibling",
-      );
-    }
+    // The sibling is still an activated dispatcher: its own bind is intact
+    // and it can still be stopped independently.
+    const siblingStop = ctx.runCommand({
+      commandId: DISPATCHER_STOP_COMMAND,
+      agent: second,
+    });
+    assert.equal(siblingStop.kind, "success");
   });
 });
 
-describe("dispatcher-stop — the mirror clear is surgical", () => {
-  it("the clear writes only the per-session mirror key, never the legacy panel key", async () => {
+describe("dispatcher-stop — no settings document is touched (0.2.1)", () => {
+  it("stop writes nothing the settings service would have to reject", async () => {
+    // 0.2.1 rejects undeclared settings keys, so the roster mirror is gone.
+    // What must hold instead: the deactivation path never reaches for a
+    // settings scope at all — the fake has none, and stop still succeeds.
     const ctx = createStopCtx();
-    pluginApply(ctx, { enabled: true });
+    pluginApply(ctx, volatileConfig({ enabled: true }));
     const agent = createScopedAgent("s-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await flush();
-    ctx.runCommand({ commandId: DISPATCHER_STOP_COMMAND, agent });
-
-    const clearWrites = (ctx.updates as Array<Record<string, unknown>>).filter(
-      (update) => rosterSessionKey("s-1") in update && update[rosterSessionKey("s-1")] === null,
-    );
-    assert.equal(clearWrites.length, 1);
-    const clear = clearWrites[0] ?? {};
-    assert.deepEqual(
-      Object.keys(clear),
-      [rosterSessionKey("s-1")],
-      "the clear is a single-key document: the legacy roster key is not clobbered",
-    );
-    assert.equal(
-      clear[ROSTER_SETTINGS_KEY],
-      undefined,
-      "the legacy panel key never receives null",
-    );
+    const stopped = ctx.runCommand({
+      commandId: DISPATCHER_STOP_COMMAND,
+      agent,
+    });
+    assert.deepEqual(stopped, { kind: "success", text: DISPATCHER_STOP_SUCCESS });
+    assert.deepEqual(agent.ctx?.tools.registeredNames(), []);
   });
 });

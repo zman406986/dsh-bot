@@ -26,6 +26,7 @@ import {
   writeInboxFailed,
   writeInboxReply,
   type InboxQueueEntry,
+  type InboxWatcherHandle,
 } from "../src/adapter/inbox-watcher.js";
 
 /** Manual scheduler: timers are recorded, never real. */
@@ -47,12 +48,6 @@ function createManualSchedule() {
       armed.splice(0, armed.length);
     },
   };
-}
-
-async function flush(times = 6): Promise<void> {
-  for (let i = 0; i < times; i += 1) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
 }
 
 async function createInboxDir(): Promise<string> {
@@ -329,20 +324,23 @@ describe("inbox watcher — startInboxWatcher (ticket 113, ADR-0023)", () => {
   it("scanOnce claims queued jobs in order, hands them to onJob, and skips claimed ones next pass", async () => {
     const root = await createInboxDir();
     const schedule = createManualSchedule();
+    let watcher: InboxWatcherHandle | null = null;
     try {
-      await writeQueue(root, [
-        { jobId: "j-1", text: "first" },
-        { jobId: "j-2", text: "second" },
-      ]);
       const claimed: string[] = [];
-      const watcher = startInboxWatcher({
+      watcher = startInboxWatcher({
         root,
         rescanIntervalMs: 5000,
         onJob: (entry) => claimed.push(entry.jobId),
         onError: () => assert.fail("no errors expected"),
         schedule: schedule.schedule,
       });
-      await flush(); // mkdir + watch arm + initial sweep (which awaits scanOnce)
+      // `ready` settles after the initial sweep — which sees an empty inbox —
+      // so the direct scans below are the only passes that can claim.
+      await watcher.ready;
+      await writeQueue(root, [
+        { jobId: "j-1", text: "first" },
+        { jobId: "j-2", text: "second" },
+      ]);
       let report = await watcher.scanOnce();
       assert.ok(report);
       assert.deepEqual(claimed, ["j-1", "j-2"]);
@@ -360,6 +358,7 @@ describe("inbox watcher — startInboxWatcher (ticket 113, ADR-0023)", () => {
       assert.equal(await watcher.scanOnce(), null, "scan after stop is a no-op");
       watcher.stop(); // idempotent
     } finally {
+      watcher?.stop();
       schedule.stop();
       await rm(root, { recursive: true, force: true });
     }
@@ -368,6 +367,7 @@ describe("inbox watcher — startInboxWatcher (ticket 113, ADR-0023)", () => {
   it("surfaces malformed lines through onError and keeps intake alive", async () => {
     const root = await createInboxDir();
     const schedule = createManualSchedule();
+    let watcher: InboxWatcherHandle | null = null;
     try {
       await writeFile(
         join(root, "queue.jsonl"),
@@ -375,19 +375,23 @@ describe("inbox watcher — startInboxWatcher (ticket 113, ADR-0023)", () => {
         "utf8",
       );
       const errors: string[] = [];
-      const watcher = startInboxWatcher({
+      watcher = startInboxWatcher({
         root,
         rescanIntervalMs: 5000,
         onJob: () => assert.fail("nothing claimable"),
         onError: (error, context) => errors.push(context),
         schedule: schedule.schedule,
       });
-      await flush();
+      // The startup sweep itself must survive the malformed line: `ready`
+      // settles only after it ran, and it still arms the rescan fallback.
+      await watcher.ready;
+      assert.ok(errors.includes("scan"), "the startup sweep surfaces it");
+      assert.equal(schedule.pending() > 0, true, "the rescan interval re-arms");
+
       const report = await watcher.scanOnce();
       assert.ok(report);
       assert.equal(report.malformed, 1);
       assert.ok(errors.includes("scan"), "the malformed batch is surfaced");
-      assert.equal(schedule.pending() > 0, true, "the rescan interval re-arms");
 
       // The watcher survives: a good line is still claimed afterwards.
       await writeFile(
@@ -398,9 +402,8 @@ describe("inbox watcher — startInboxWatcher (ticket 113, ADR-0023)", () => {
       const next = await watcher.scanOnce();
       assert.ok(next);
       assert.equal(next.claimed.length, 1);
-
-      watcher.stop();
     } finally {
+      watcher?.stop();
       schedule.stop();
       await rm(root, { recursive: true, force: true });
     }
@@ -409,14 +412,10 @@ describe("inbox watcher — startInboxWatcher (ticket 113, ADR-0023)", () => {
   it("respects the per-pass claim limit; the backlog survives for the next pass", async () => {
     const root = await createInboxDir();
     const schedule = createManualSchedule();
+    let watcher: InboxWatcherHandle | null = null;
     try {
-      await writeQueue(root, [
-        { jobId: "j-1", text: "1" },
-        { jobId: "j-2", text: "2" },
-        { jobId: "j-3", text: "3" },
-      ]);
       const claimed: string[] = [];
-      const watcher = startInboxWatcher({
+      watcher = startInboxWatcher({
         root,
         rescanIntervalMs: 5000,
         limit: 2,
@@ -424,15 +423,20 @@ describe("inbox watcher — startInboxWatcher (ticket 113, ADR-0023)", () => {
         onError: () => assert.fail("no errors expected"),
         schedule: schedule.schedule,
       });
-      await flush();
+      await watcher.ready;
+      await writeQueue(root, [
+        { jobId: "j-1", text: "1" },
+        { jobId: "j-2", text: "2" },
+        { jobId: "j-3", text: "3" },
+      ]);
       const first = await watcher.scanOnce();
       assert.ok(first);
       assert.deepEqual(claimed, ["j-1", "j-2"]);
       const second = await watcher.scanOnce();
       assert.ok(second);
       assert.deepEqual(claimed, ["j-1", "j-2", "j-3"]);
-      watcher.stop();
     } finally {
+      watcher?.stop();
       schedule.stop();
       await rm(root, { recursive: true, force: true });
     }
@@ -441,14 +445,11 @@ describe("inbox watcher — startInboxWatcher (ticket 113, ADR-0023)", () => {
   it("an onJob observer that throws never breaks the scan loop", async () => {
     const root = await createInboxDir();
     const schedule = createManualSchedule();
+    let watcher: InboxWatcherHandle | null = null;
     try {
-      await writeQueue(root, [
-        { jobId: "j-1", text: "1" },
-        { jobId: "j-2", text: "2" },
-      ]);
       const errors: string[] = [];
       const claimed: string[] = [];
-      const watcher = startInboxWatcher({
+      watcher = startInboxWatcher({
         root,
         rescanIntervalMs: 5000,
         onJob: (entry) => {
@@ -458,13 +459,54 @@ describe("inbox watcher — startInboxWatcher (ticket 113, ADR-0023)", () => {
         onError: (_error, context) => errors.push(context),
         schedule: schedule.schedule,
       });
-      await flush();
+      await watcher.ready;
+      await writeQueue(root, [
+        { jobId: "j-1", text: "1" },
+        { jobId: "j-2", text: "2" },
+      ]);
       const report = await watcher.scanOnce();
       assert.ok(report);
       assert.deepEqual(claimed, ["j-1", "j-2"], "both jobs still claimed");
       assert.equal(errors.filter((c) => c.startsWith("onJob")).length, 2);
-      watcher.stop();
     } finally {
+      watcher?.stop();
+      schedule.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("the startup sweep claims jobs queued before start; ready settles after it", async () => {
+    const root = await createInboxDir();
+    const schedule = createManualSchedule();
+    let watcher: InboxWatcherHandle | null = null;
+    try {
+      await writeQueue(root, [
+        { jobId: "j-boot", text: "queued before boot" },
+      ]);
+      const claimed: string[] = [];
+      watcher = startInboxWatcher({
+        root,
+        rescanIntervalMs: 5000,
+        onJob: (entry) => claimed.push(entry.jobId),
+        onError: () => assert.fail("no errors expected"),
+        schedule: schedule.schedule,
+      });
+      await watcher.ready;
+      assert.deepEqual(
+        claimed,
+        ["j-boot"],
+        "ready means the initial sweep already claimed boot-queued jobs",
+      );
+      assert.ok(
+        schedule.pending() > 0,
+        "the rescan fallback is armed (a watch debounce may also be pending)",
+      );
+      const report = await watcher.scanOnce();
+      assert.ok(report);
+      assert.equal(report.claimed.length, 0);
+      assert.equal(report.skipped, 1);
+    } finally {
+      watcher?.stop();
       schedule.stop();
       await rm(root, { recursive: true, force: true });
     }
@@ -472,21 +514,22 @@ describe("inbox watcher — startInboxWatcher (ticket 113, ADR-0023)", () => {
 
   it("the real fs.watch event path claims a freshly written job (real timers)", async () => {
     const root = await createInboxDir();
+    let watcher: InboxWatcherHandle | null = null;
     try {
       const claimed: string[] = [];
-      const watcher = startInboxWatcher({
+      watcher = startInboxWatcher({
         root,
         rescanIntervalMs: 1000,
         onJob: (entry) => claimed.push(entry.jobId),
         onError: () => {},
       });
+      await watcher.ready;
       // The job arrives AFTER the watcher is live — exactly the live shape.
-      await flush();
       await writeQueue(root, [{ jobId: "j-live", text: "arrive later" }]);
       const ok = await pollUntil(() => claimed.includes("j-live"), 5_000);
       assert.equal(ok, true, "the watcher claims the job within the deadline");
-      watcher.stop();
     } finally {
+      watcher?.stop();
       await rm(root, { recursive: true, force: true });
     }
   });

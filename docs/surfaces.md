@@ -1,6 +1,6 @@
 # Dispatcher surfaces — the designed absences
 
-**Status:** shipped with ticket 32 (design-17 §4.8–4.9, §7, §8). Reference:
+**Status:** shipped with ticket 32 (design-17 §4.8–4.9, §7, §8); **surface inventory corrected 2026-10-18 for the native-dsh posture (ADR-0024, ticket 114):** stock dsh is the primary UI and the only UI — our client module registers nothing into dsh's layout except the one session-kind glyph licensed by ADR-0024's 2026-10-18 rider (ruled, not yet implemented), and the floating window, launcher, and capsule are withdrawn. The designed absences below still stand; the surface inventory at the end records what ships and what stays in the tree unmounted. Reference:
 `.scratch/clone-always-on/design-17-always-on-dispatcher.md` (sections
 §4.6–4.9 and the conflict table §5). All text here is original clean-room
 copy; the contaminated reference tree was not consulted.
@@ -8,31 +8,34 @@ copy; the contaminated reference tree was not consulted.
 This note records the surfaces the dispatcher deliberately does **not**
 build, and why. Each absence is a decision, not a gap left open by
 accident. Rationale is drawn from the PRD, the ADRs, and the verified dsh
-0.1.5-rc.1 seams (`docs/research/dsh-plugin-ui-patterns.md`) — never from
+0.1.5-rc.1 extension points (`docs/research/dsh-plugin-ui-patterns.md`) — never from
 the reference implementation.
 
 The rule the whole list follows: **presence is a projection of existing
-core state, pulled from surfaces that exist** (design-17 §5 conflict 8). A
-surface that would need new core state, a new host seam, or a second source
+core state, read from surfaces that exist** (design-17 §5 conflict 8). A
+surface that would need new core state, a new host extension point, or a second source
 of truth is out — no matter how closely it would imitate the reference's
 feel.
 
 ## No push notifications
 
-dsh 0.1.5-rc.1 has **no notification or toast seam**. Attention therefore
-routes only through pull surfaces:
+dsh 0.1.5-rc.1 has **no notification or toast extension point**. Attention therefore
+routes only through surfaces the user has to look at:
 
 1. the Workers panel's **Needs you** section (`roster-store.ts`
-   `rosterSectionFor`), which a user sees when they look;
+   `rosterSectionFor`) when a panel is mounted — since ADR-0024 (2026-10-18)
+   the panel is retained, not-composed machinery, so in the default posture
+   this route is dormant;
 2. the dispatcher's conversational narration — wake turns land as ordinary
-   chat messages whenever the user is in the chat;
+   chat messages whenever the user is in the chat (the only live route in the
+   native-dsh posture);
 3. the activation success copy, which sets that expectation up front
    (`activation.presence-hint`).
 
 No surface promises or simulates push: there are no "notify me" controls,
 no fake toasts, no bell/badge affordances, and no polling loop pretending to
-be a subscription. The panel's stale→unavailable degrade is the honest
-"presence feed is down" state; there is no banner seam to build on.
+be a subscription. The panel moving from stale to unavailable is the accurate
+"presence feed is down" state; there is no banner extension point to build on.
 
 **This is the largest fidelity gap against the reference's *feel*, and it is
 the host's, not ours.** See design-17 §4.8.
@@ -40,7 +43,7 @@ the host's, not ours.** See design-17 §4.8.
 ## No todo board
 
 `ADR-0007` keeps the todo ledger **dispatcher-private**. The user-visible
-proxies are the panel, presence, and in-chat narration — the dispatcher
+proxies are the panel (when mounted), presence, and in-chat narration — the dispatcher
 reconciles the ledger and *speaks* the result (PRD S6). There is no task
 list, no column board, and no per-todo card.
 
@@ -78,13 +81,17 @@ design-17 §4.6/conflict 1).
 to the terminal `aborted` state with "(Stopped before completion. No
 report.)" — no result revival (PRD S3, design-17 §4.6).
 
-The absence is tested structurally (`test/restart-honesty.test.ts`, the
+This section concerns worker/turn stopping. `/dispatcher-stop` (ticket 101) is a
+**session-binding verb** typed in the stock chat — it deactivates the dispatcher
+binding in that session, not a worker — and is not a control on a surface.
+
+The absence is tested structurally (`test/restart-honesty.test.ts`, the test file that checks restart reporting and the
 no-stop guard) so a future edit cannot silently reintroduce a button.
 
 ## No worker console
 
 Worker transcripts are **never streamed to the user**. Progress is ambient
-(panel rows + derived activity line) and results arrive as ordinary
+(panel rows when a panel is mounted, plus the derived activity line) and results arrive as ordinary
 dispatcher messages on wake turns. This matches the PRD's "machinery is
 invisible" rule (§6.1) and S1/S5: workers are leaves that never address the
 user, and the dispatcher is the only voice.
@@ -96,60 +103,57 @@ drill-down from a panel row into a worker's chat — rows are not chats.
 ## No timeline cards
 
 Adding a **new chat node type is impossible**: `conversation.chat.node` is a
-closed keyed domain owned by the shipped set, and the seam research records
+closed keyed domain owned by the shipped set, and the extension-point research records
 it as a hard limit. There is no timeline-card surface, and no fake node type
 is registered to imitate one.
 
-Housekeeping notices (access denials, expired approvals, restart honesty)
-ride **inside wake turns as text** — the shipped pattern. See
+Housekeeping notices (access denials, expired approvals, restart notices)
+arrive **inside wake turns as text** — the pattern the shipped product uses. See
 `src/adapter/restart-notice.ts` for the one-time restart notice.
 
-## The capsule (epic 35, tickets 38–42)
+## The floating window, launcher, and capsule — withdrawn (ADR-0024, 2026-10-18)
 
-The dispatcher's one additive `shell.overlay` entry (ADR-0013): a collapsed
-chip that expands into the panel card. Everything on it is a projection of
-existing core state through the settings-mirror channel — the same one
-channel feeding both the roster store and the footer store: the plugin's
-settings namespace, read through the shipped `ctx.settingsScope` service
-(`bind({namespace})` → `getSnapshot()`/`subscribe()`; ticket 46 — *not*
-`ctx.inject(["settings"])`, which is the host-side seam and never resolves in
-the browser). Its states:
+Epic 35's capsule (tickets 38–42), ticket 100's floating window, and ticket 107's
+information-bearing launcher capsule are **not surfaces of the product any more**. The
+human's 2026-10-18 ruling (ADR-0024) returns the UI to the `e773ef8` native-dsh posture:
+stock dsh is the primary UI and the only UI, our client module renders nothing into dsh's
+layout, and there is no floating window, launcher chip, capsule, drag, resize, maximize, or
+right-click-close chrome.
 
-- **Dormant** (`waiting` — feed alive, nothing published): the chip's grey
-  dot; the expanded panel IS the activation pitch, with the single
-  "Start dispatcher in this chat" affordance. Roster sections hidden.
-- **Activated** (fresh snapshot): blue dot, worker count, wake badge
-  (settled-undelivered); the expanded card shows the activation row
-  (conversational stop INTENT — never a kill control), the three roster
-  sections, the deliverables line, and the footer.
-- **Unavailable** (stale / `invalid` / `channel-missing`): red dot; the
-  expanded card shows only the honest degraded copy and NO affordance —
-  nothing actionable pretends a broken channel can carry an activation.
-- **Deliverables line**: hidden entirely at count 0; count-only when a
-  landed row carries no honest excerpt (post-restart restore); the excerpt
-  itself is bounded wire truth, expandable.
+The record of what those surfaces were and why they are gone:
 
-**Footer provenance and its recorded v1 gaps** (seam verdicts in
-`docs/research/dsh-capsule-seams.md`): the footer renders the persisted
-feature-flag state from the plugin's own settings namespace, phrased as the
-SETTING (ADR-0005 freezes the running chat's flag; a change lands in new
-chats), plus a copy-only Settings hint. Deliberately absent, per the
-honesty rules — these are decisions, not oversights:
+- **ADR-0013** chose the additive `shell.overlay` seam for the capsule. Its seam research
+  remains valid evidence, but nothing registers it in the default posture.
+- **ADR-0021** decisions 2 and 4 put the dispatcher functions in a floating window launched
+  from one additive `shell.overlay` entry. Superseded by ADR-0024.
+- **ADR-0022** revived the collapsed launcher as an information-bearing capsule with counts.
+  Superseded in full by ADR-0024.
+- The capsule's footer copy (flag provenance plus a Settings hint) and the presence-counter
+  model are **withdrawn with the surface**. They are historical record, not live contracts.
 
-- **No Settings deep-link** — no open/navigation seam exists (verdict 4),
-  so the hint names the path and nothing navigates.
-- **No profile segment** — no client-visible profile identity exists
-  (verdict 5); `$host.home` is not a profile name and is never relabeled
-  into one.
-- **No tool-view link** — the five dispatcher tool-call views stay keyed in
-  `tool.call.toolview` (ticket 24) where the calls happen; the seam research
-  found no navigation path, so the capsule links to, embeds, and navigates
-  nothing.
+`src/client/floating-window.tsx`, `src/client/floating-window-store.ts`, and the launcher
+registration in `src/client/overlay.ts` are ticket 114's to delete; until that deletion lands
+they are dead code, not composed surfaces. The shell machinery below stays in the tree as
+retained, unmounted machinery.
 
-Nothing on the capsule is editable inline. The no-stop guard's final form
-(`test/restart-honesty.test.ts`) structurally covers every capsule view
-model; the composition close-out (`test/client-capsule-composition.test.ts`)
-assembles dormant and activated end-to-end offline.
+## Retained but not composed (native-dsh posture)
+
+These remain in the tree and are not registered into dsh's layout. They are the raw material
+for a future surface registered at the one composition point, `src/client/index.ts`.
+
+| Machinery | Files | State |
+|---|---|---|
+| Shell page mount (store + feeds + pane/seat wiring) | `src/client/shell-mount.ts` | Retained, unmounted (as at `e773ef8`) |
+| Dispatcher shell element tree | `src/client/shell.tsx`, `src/client/shell-store.ts` | Retained, unmounted |
+| Roster panel | `src/client/panel.tsx`, `src/client/roster-store.ts` | Retained, unmounted |
+| Conversation pane / onboarding / approval pane | `src/client/conversation.tsx`, `src/client/conversation-store.ts`, `src/client/conversation-feed.ts`, `src/client/onboarding-pane.tsx`, `src/client/approval-pane.tsx` | Retained, unmounted |
+| Add/delete/stop dispatcher-session wiring (ticket 101) | `src/client/actions.ts`, `src/client/shell-store.ts`, `src/client/shell.tsx` | Retained functional wiring, unreachable without a mount |
+| Keyed `main` page and `root` election contracts | `src/client/shell-mount.ts` | Retained, reversible at one registration site |
+
+The single composition point is `src/client/index.ts`'s `apply`: it registers the locale
+namespace, the keyed `tool.call.toolview` entries, and the keyed `settings.plugin.item`
+card — the `e773ef8` shape, plus the one session-kind glyph licensed by ADR-0024's
+2026-10-18 rider. A future surface is registered there and nowhere else.
 
 ## The settings card (`Settings → 插件配置`, ticket 47)
 
@@ -159,19 +163,19 @@ namespaces the Host serves, and the cards registered into the keyed
 `renderSlot("settings.plugin.item", {}, { entryKey: ns })` per served namespace.
 The Host has always served our namespace; what was missing was the browser-side
 claim, so the section never appeared. `src/client/settings-card-store.ts` +
-`src/client/settings-card.tsx` are that claim: one keyed entry whose `key` is
-the plugin's settings namespace — the whole pairing contract, since the tab
+`src/client/settings-card.tsx` do that registration: one keyed entry whose `key` is
+the plugin's settings namespace — that is the entire pairing rule, since the tab
 pairs namespace with card by key and never learns what the namespace means.
 
 Deliberate properties, each a decision:
 
-- **One channel.** Reads and writes ride the SAME `ctx.settingsScope` bind the
+- **One channel.** Reads and writes use the SAME `ctx.settingsScope` bind the
   roster watch holds (`bind({namespace})` → `getSnapshot()`/`subscribe()`, and
   `set`/`unset` for writes). A second bind would be a second revision view of
   one document.
 - **Nothing renders while the namespace is not served.** `unavailable`, or a
-  section the Host has not accepted, yields an empty card — the shipped idiom
-  (`PluginCard` returns `null`) rather than a disabled control nobody can act
+  section the Host has not accepted, yields an empty card — the pattern the shipped
+  cards use (`PluginCard` returns `null`) rather than a disabled control nobody can act
   on.
 - **The rendered text is the draft.** A control stages; Save is the single
   point where a draft becomes a document mutation, and a draft a field does not
@@ -185,14 +189,15 @@ Deliberate properties, each a decision:
 - **The flag is phrased as the SETTING.** The `enabled` control's hint states the
   ADR-0005 rule: a saved change applies to new chats, and the running chat keeps
   the flag it started with.
-- **No deep-link, still.** The capsule footer's copy-only Settings hint was
-  written before this card existed and stays copy-only; no navigation seam has
-  appeared, and none is invented here. The hint is now *accurate*, which is all
-  this ticket owed it.
+- **No deep-link, still.** No way to navigate to a settings section exists, and
+  none is invented here. The card names nothing that navigates.
 
-## Theming: the surfaces ride the host's design tokens
+## Theming: the surfaces use the host's design tokens
 
-The capsule and panel take **every colour from the host's shared semantic token
+In the native-dsh posture (ADR-0024) the only surfaces that own colours are the
+**settings card** and the **retained shell components** (unmounted); the ruled
+session-kind glyph takes the host's label tokens when it lands. They take
+**every colour from the host's shared semantic token
 layer** (`--dsw-alias-*`), so they follow the shell's light/dark setting instead
 of painting a private palette. The ticket-47 settings card does the same, in the
 shipped card's own vocabulary (`bg-layer-3` → `bg-layer-2` when open, the
@@ -211,42 +216,46 @@ The mapping is semantic, and two near-misses are pinned shut: the accent is
 white dot on dark and a black dot on light); and `--dsw-font-*` is the
 conversation-content scale, so control type stays in px. Text hierarchy stays
 opacity-based and no token gets a hex fallback, so the private palette cannot
-creep back. `test/client-theme-tokens.test.ts` holds the contract.
+come back. `test/client-theme-tokens.test.ts` holds the contract.
 
 ## Send journal is host-owned
 
 The composer's optimistic send / offline queue / reconnect-flush behavior
 belongs to the **host composer**. We do not rebuild, wrap, or simulate it.
-The conversational steer path inherits it for free; the `/dispatcher-steer`
+The conversational steer path gets it for free; the `/dispatcher-steer`
 command path returns one-shot success/error copy and does not pretend to
 have journal phases (design-17 §4.4, conflict 9).
 
-There is no plugin-side journal around `/dispatcher-steer`, and no queue
-introspection seam.
+There is no plugin-side journal around `/dispatcher-steer`, and no way for the plugin to inspect the host queue.
 
-## What the activated experience *does* ship
+## What ships live, and what is retained unmounted
 
-For contrast, the surfaces that exist (design-17 §3.2, §4):
+The live surface list in the native-dsh posture (ADR-0024, 2026-10-18). Only stock dsh's own
+slots carry our content.
 
-| Surface | Implementation |
-|---|---|
-| Workers panel (`shell.overlay`, app-wide) | `src/client/panel.tsx`, sections from `src/client/roster-store.ts` |
-| Capsule chip + expandable card (ADR-0013) | `src/client/capsule.tsx`, view models from `src/client/capsule-store.ts` |
-| Capsule footer (flag provenance + Settings hint) | `src/client/capsule.tsx` + `describeCapsuleFooter` |
-| Settings card (`Settings → 插件配置`) | `src/client/settings-card.tsx` + `src/client/settings-card-store.ts` |
-| Roster wire contract (snapshot v2) | `src/core/roster-snapshot.ts` |
-| Activation command + presence hint | `src/adapter/activation-command.ts` |
-| Steer command | `src/adapter/steer-command.ts` |
-| Five tool call views | `src/client/toolviews.ts` |
-| Access prompts (Allow / Always allow this session / Deny) | `src/adapter/access-prompt.ts` |
-| Restart honesty notice | `src/adapter/restart-notice.ts` |
-| Locale dictionary (en + zh, identical key sets) | `src/client/overlay.ts` |
+| Surface | Implementation | State |
+|---|---|---|
+| Session-kind glyph in the sidebar row | `src/client/index.ts` (registration, not yet written) | **Ruled, not implemented** — additive `sidebar.session.row.leading` entry, a small glyph for dispatcher-owned sessions. Two limits: worker/subagent sessions are hidden by stock dsh and never become rows, so they cannot be marked (only dispatcher vs normal is achievable); and the leading cell renders only on idle, non-archived, non-blank rows — running rows show stock's status dot instead. 16px cell: glyph only, no text. Dispatcher-vs-peer-dispatcher distinction TBD. Pending the client 0.2.1 port (ADR-0024 rider, 2026-10-18) |
+| Settings card (`Settings → 插件配置`) | `src/client/settings-card.tsx` + `src/client/settings-card-store.ts` | **Live** — keyed `settings.plugin.item`, the one UI surface we register |
+| Five tool call views | `src/client/toolviews.ts` | **Live** — keyed `tool.call.toolview` entries where dispatcher tool calls happen |
+| Locale dictionary (en + zh, identical key sets) | `src/client/overlay.ts` | **Live** — namespace registration, not layout |
+| Roster wire contract (snapshot v2) | `src/core/roster-snapshot.ts` | **Live** — the adapter-side wire contract |
+| Activation command + presence hint | `src/adapter/activation-command.ts` | **Live** — `/dispatcher-start` in the stock chat |
+| Stop command | `src/adapter/stop-command.ts` | **Live** — `/dispatcher-stop` in the stock chat (ticket 101) |
+| Steer command | `src/adapter/steer-command.ts` | **Live** — `/dispatcher-steer` in the stock chat |
+| Access prompts (Allow / Always allow this session / Deny) | `src/adapter/access-prompt.ts` | **Live** — host approval surfaces |
+| Restart notice | `src/adapter/restart-notice.ts` | **Live** — in-chat text |
+| Workers panel | `src/client/panel.tsx`, sections from `src/client/roster-store.ts` | Retained, unmounted |
+| Dispatcher shell (roster panel, conversation pane, add/delete seats) | `src/client/shell.tsx`, `src/client/shell-store.ts` | Retained, unmounted |
+| Shell page mount + `main`/`root` contracts | `src/client/shell-mount.ts` | Retained, unmounted |
+| Floating window / launcher / capsule | `src/client/floating-window.tsx`, `src/client/floating-window-store.ts`, launcher registration in `src/client/overlay.ts` | **Withdrawn** — ticket 114 deletes them |
 
 Dormant boot registers nothing beyond the two commands and the passive
 host plumbing; the roster, prompts, and tools exist only after an explicit
-`/dispatcher-start` (ADR-0009). Client-side, the capsule chip is present
-pre-activation as the dormant face (chip + activation pitch) — it spawns
-nothing and runs nothing; it is presence copy over an empty feed. The
-matrix is asserted in `test/composition-polish.test.ts`,
-`test/activation-lifecycle.test.ts`, and
-`test/client-capsule-composition.test.ts`.
+`/dispatcher-start` (ADR-0009). Client-side, the default composition registers
+the locale namespace, the keyed toolviews, and the keyed settings card, plus the
+one session-kind glyph licensed by ADR-0024's 2026-10-18 rider — and nothing
+else into dsh's layout: there is no chip, no window, and no presence copy
+before activation. The matrix is asserted in `test/composition-polish.test.ts`
+and `test/activation-lifecycle.test.ts`; the native-dsh posture pins are
+ticket 114's to add.

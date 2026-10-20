@@ -2,7 +2,7 @@
 
 - Question: Does the shipped dsh multitask-dispatcher tree contain any reconstruction identifiers, codenames, file basenames, or borrowed prompt/tool copy — or any vendored reconstruction file?
 - Scope: shipped product tree only — `src/`, `test/`, compiled `lib/`, `package.json`, `package-lock.json`, `tsconfig.json`, `README.md`. Explicitly **not** audited as product: the nested reference tree (`reference material-NOT LICENSE SAFE DONT COPY-grok bot/`, own `.git`, never committed into), `.scratch/` design drafts, `docs/research/` evidence notes (which may cite reference paths by design), `docs/diagrams/` (architecture diagrams of the reference runtime), and root policy docs (`AGENTS.md`, `PRD-dsh-multitask-dispatcher.md`, `CONTEXT.md`) that **name** forbidden terms as prohibition.
-- Method: one-time late gate (PRD §12 Legal QA / §13 M4 / §17 / S7). `rg` case-insensitive over the shipped tree; word-boundary and reconstruction-basename variants; manual review of every prompt/policy/tool-description asset; glossary trace against CONTEXT.md + PRD §16. Reference tree was **not opened** for this audit.
+- Method: one-time check run late in the project (PRD §12 Legal QA / §13 M4 / §17 / S7). `rg` case-insensitive over the shipped tree; word-boundary and reconstruction-basename variants; manual review of every prompt/policy/tool-description asset; glossary trace against CONTEXT.md + PRD §16. Reference tree was **not opened** for this audit.
 - Date: 2026-09-16
 
 ## Verdict
@@ -54,7 +54,7 @@ Also: `npm run build` + `npm run typecheck` + `npm test` after the fix (see belo
 - **Rebuild:** `npm run build` so compiled `lib/adapter/wake-copy.js` / `.d.ts` match.
 - **Re-run:** post-fix `rg -i "sand"` over `src/` and `lib/` no longer hits product files. Remaining `sand` hits are (a) the intentional test `FORBIDDEN_VOCAB` fixtures, (b) AGENTS.md policy text naming the prohibition, (c) the English word **sandbox** in `src/core/access-types.ts` ("a host the sandbox would not allow") — a generic technical term for host network isolation, not the codename; CONTEXT.md/PRD also use "sandbox" in the legitimate dsh sense.
 
-### Non-findings (recorded so the next reader does not re-litigate)
+### Non-findings (recorded so the next reader does not re-open the question)
 
 - **Test `FORBIDDEN_VOCAB` arrays** (`sand`, `executor`, `MessageSubagent`, `SAND_MULTITASK_`): deliberate negative-test fixtures. They prove generated copy stays clean. Keep them.
 - **AGENTS.md / PRD / CONTEXT.md**: policy and design docs that name forbidden terms in order to ban them. Not shipped product.

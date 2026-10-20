@@ -13,11 +13,11 @@
  *   `ctx.locale.bind(ns)` returns the `t` seat for a namespace (Finding 6);
  * - `ctx.effect(execute, label?)` runs `execute` immediately and collects the
  *   returned function as the unload disposer (vendored cordis `effect`);
- * - `ctx.settingsScope.bind({namespace})` returns that namespace's scope with
- *   `getSnapshot()`/`subscribe()` — the roster data path (ticket 46 corrected
- *   this from the host-side `settings`/`watch` shape; see the block below).
- *   The same scope's `set(field, value)`/`unset(field)` are the settings card's
- *   write path (ticket 47) — one bind, one channel, two honest readers.
+ * - one plugin entry's configuration comes from the `plugins.row.config` slot
+ *   owner props: `form.state` is the accepted snapshot and
+ *   `form.mutate(ops, revision)` is the one atomic write path
+ *   (`dsh-client-ui-plugin-manager` `slot-contract.d.ts:202-208`). The
+ *   settings card reads and writes through that handed-in form only.
  */
 
 import type { LocaleDictionary, SlotRegistrationOptions } from "./overlay.js";
@@ -27,7 +27,7 @@ import type { ConversationSourceLike } from "./conversation-store.js";
 
 /** Any slot entry this module registers: list entries (id/order), keyed
  * entries such as the `tool.call.toolview` toolviews (key) and the
- * `settings.plugin.item` settings card (key), keyed `main` pages (key), and
+ * `plugins.row.config` settings card (key), keyed `main` pages (key), and
  * single-slot entries such as the cutover's `root` frame (no id/key — the
  * single cell elects one occupant; the entry carries an EXPLICIT shadowing
  * priority — ticket 85: an absent priority defaults to 0, collides with the
@@ -84,106 +84,93 @@ export interface LocaleServiceLike {
 }
 
 /**
- * Client-side settings scope (ticket 21 data path; contract corrected by
- * ticket 46 against the installed 0.1.5-rc.1 tree).
+ * One plugin entry's accepted configuration snapshot, as the
+ * `plugins.row.config` slot owner supplies it
+ * (`ConfigFormSnapshot<T>`, `dsh-client-ui-settings`
+ * `lib/types/client/config-form-types.d.ts:6-29`).
  *
- * The browser's settings base plugin (`@deepseek-ai/dsh-client-ui-settings`)
- * provides **`ctx.settingsScope`** — a `SettingsScopeBinder`
- * (`lib/types/client/index.d.ts:2-3`;
- * `declare module '@deepseek-ai/cordis' { interface Context { settingsScope } }`
- * at `settings-scope.d.ts:88-92`). There is NO client service named
- * `settings`; that name is the *host* seam (`ctx.inject(["settings"], …)` +
- * `installSection`, `src/adapter/settings-section.ts`). Ticket 46: the client
- * half had copied the host name, so `ctx.inject(["settings"], …)` waited on a
- * service that never resolves and its body never ran.
- *
- * Per-namespace access is a bind, not a watch: `bind(spec)` returns a scope
- * bound to the CALLER's fiber (`settings-scope.d.ts:130-139`) exposing
- * `getSnapshot()` + `subscribe(listener)` — there is no `watch(namespace, cb)`
- * anywhere in the contract (`settings-contract.d.ts:50-58`). Reads never touch
- * the wire here: the scope is a selector over the settings domain's one shared
- * describe mirror.
+ * The status carries the read state, `revision` fences the next write, and a
+ * field's PRESENCE in `user` is what marks it overridden — an override equal
+ * to the composition default is still an override, and comparing values could
+ * not see it (`:19-24`).
  */
-export interface ClientSettingsScopeSnapshotLike {
-  /**
-   * `loading` until the first accepted section, `ready` while one stands, and
-   * `unavailable` when the namespace is not exposed to this client or the
-   * connection keeps preferences process-local
-   * (`settings-contract.d.ts:6-12`).
-   */
+export interface ConfigFormSnapshotLike {
+  /** `loading` until the first accepted section, `ready` while one stands, and `unavailable` when the entry is not served. */
   readonly status: "loading" | "ready" | "unavailable";
   /** Last accepted schema-resolved section; undefined before the first acceptance. */
   readonly value?: unknown;
-  /**
-   * Composition layer the Host resolved `value` over, when the owning plugin
-   * declared one — what a cleared field reverts to (`settings-contract.d.ts:16-20`).
-   */
+  /** Composition layer the Host resolved `value` over — what a cleared field reverts to. */
   readonly base?: unknown;
-  /**
-   * Raw user layer as stored, when one exists. A field's PRESENCE here is what
-   * marks it overridden — an override whose value equals the composition
-   * default is still an override, and comparing values could not see it
-   * (`settings-contract.d.ts:20-25`). The settings card reads it (ticket 47).
-   */
+  /** Raw user layer as stored; a field's PRESENCE here marks it overridden. */
   readonly user?: unknown;
-  /** Namespace revision fencing the next write; undefined before the first Host view. */
+  /** Entry revision fencing the next write; undefined before the first Host view. */
   readonly revision?: number;
-  /**
-   * Whether the Host document accepts writes; memory mode never does
-   * (`settings-contract.d.ts:30`). Absent on a minimal scope, and absence is
-   * NOT permission — the card treats a missing flag as read-only.
-   */
+  /** Whether the Host document accepts writes (`:26-27`). */
   readonly writable?: boolean;
-  /** `host` syncs with the Host document; `memory` keeps a browser process-local. */
-  readonly mode?: "host" | "memory";
 }
 
-/** One namespace's bound settings scope (`SettingsScopeBinder.bind` result). */
-export interface ClientSettingsScopeLike {
+/**
+ * One ordered field operation a `mutate` call submits
+ * (`SettingsPathOpView`, `@deepseek-ai/dsh-settings` `types.d.ts:47-54`).
+ * `path` starts at the field name; the card writes top-level fields only.
+ */
+export type SettingsPathOpLike =
+  | { readonly op: "set"; readonly path: readonly string[]; readonly value: unknown }
+  | { readonly op: "unset"; readonly path: readonly string[] };
+
+/**
+ * The form face the `plugins.row.config` owner props hand in
+ * (`ConfigForm<T>['mutate']`, `config-form-types.d.ts:42-52`).
+ *
+ * `mutate` queues ONE atomic namespace mutation: all operations share one
+ * revision fence and one recovery read, and it resolves `true` only for Host
+ * acceptance — a refusal or a skipped write resolves `false` (transport
+ * failures reject).
+ */
+export interface ConfigPageFormLike {
+  /** Accepted Host values, refreshed by the page owner. */
+  readonly state: ConfigFormSnapshotLike;
+  /** Submit all field edits together with the revision the editor read. */
+  mutate(
+    ops: readonly SettingsPathOpLike[],
+    expectedRevision?: number,
+  ): Promise<boolean>;
+}
+
+/**
+ * The `plugins.row.config` slot's owner props
+ * (`PluginConfigViewProps`, `dsh-client-ui-plugin-manager`
+ * `lib/types/client/slot-contract.d.ts:21-28`): `summary` renders the row's
+ * one-liner, `page` renders the form with its save control.
+ */
+export interface PluginConfigViewPropsLike {
+  readonly view: "summary" | "page";
+  /** Present only on a row the Host serves a settings namespace for (`:26-27`). */
+  readonly form?: ConfigPageFormLike | undefined;
+}
+
+/**
+ * One entry's shared form over the settings domain's describe mirror
+ * (`ConfigForm<T>`, `config-form-types.d.ts:33-71`), narrowed to the reads
+ * and the one atomic write this module may need. The settings page itself
+ * takes its form from the slot props; this face is what the declared
+ * `configForms` service provides for a page that must resolve its entry id.
+ */
+export interface ConfigFormLike {
   /** The current sync snapshot (stable reference until the next change). */
-  getSnapshot(): ClientSettingsScopeSnapshotLike;
-  /** Observe snapshot replacements; returns the disposer removing this listener. */
-  subscribe(listener: () => void): () => void;
-  /**
-   * Queue one field write, fenced by the namespace's latest known revision
-   * (`settings-contract.d.ts:74-85`). Optional here so a scope-less or
-   * write-less runtime degrades the settings card to read-only instead of
-   * throwing; the shipped scope always provides it.
-   */
-  set?(field: string, value: unknown): Promise<void>;
-  /**
-   * Queue one field clear, so the field re-inherits the composition layer
-   * (`settings-contract.d.ts:86-93`). Optional for the same reason as `set`.
-   */
-  unset?(field: string): Promise<void>;
+  getSnapshot(): ConfigFormSnapshotLike;
+  /** Queue one atomic namespace mutation; `true` means Host acceptance. */
+  mutate(
+    ops: readonly SettingsPathOpLike[],
+    expectedRevision?: number,
+  ): Promise<boolean>;
 }
 
-/** The `ctx.settingsScope` binder face this module uses. */
-export interface ClientSettingsScopeBinderLike {
-  /** Bind one namespace scope on the caller's plugin lifecycle. */
-  bind(spec: { readonly namespace: string }): ClientSettingsScopeLike;
+/** The `ctx.configForms` service face (`ConfigForms`, `config-form.d.ts:104-152`). */
+export interface ConfigFormsLike {
+  /** The shared form for one Host plugin entry id (`:137`). */
+  get(entryId: string): ConfigFormLike;
 }
-
-/**
- * Services handed to an `inject` callback child context. Inside the callback
- * the requested faces are DECLARED on the child, so property reads resolve
- * instead of throwing the host's `cannot get property "X" without inject`
- * (ticket 84). The callback may return a disposer — the host collects it as
- * the wrapper fiber's teardown (run on service unload/replacement).
- */
-export interface ClientInjectedServices {
-  settingsScope?: ClientSettingsScopeBinderLike;
-}
-
-/**
- * Cordis-level `inject` used to wait for the optional settings service.
- * Optional on the context: a client runtime without it leaves the roster
- * channel missing and the panel degrades to unavailable copy.
- */
-export type ClientInjectFn = (
-  services: readonly string[],
-  callback: (child: ClientInjectedServices) => void,
-) => unknown;
 
 /** Cordis effect seat shared by host and client fibers. */
 export interface ClientEffectContext {
@@ -339,21 +326,18 @@ export interface ClientRemoteLike {
  * service property the module's Cordis inject list does not declare
  * (`cannot get property "X" without inject`), wherever the read happens —
  * eager or inside a lazy closure. `slots`, `locale`, `sessions`, `remote`,
- * and `conversation` are therefore DECLARED in `src/client/index.ts`'s
- * `inject` export; they stay optional in this STRUCTURAL type only, so
- * offline fakes can omit them and the honest-degrade branches stay
- * exercisable. `settingsScope` is the one genuinely OPTIONAL face, reached
- * through the runtime `ctx.inject([...])` idiom, never a bare read on this
- * context. (The launcher-era `layout` face — the `ClientLayoutLike`
- * structural type and the `ctx.inject(["layout"])` watch that delivered it,
- * tickets 78/84 — was DELETED with the launcher, ticket 89, 2026-09-19:
- * nothing in the live composition ever read it post-cutover.)
+ * `conversation`, and `configForms` are therefore DECLARED in
+ * `src/client/index.ts`'s `inject` export; they stay optional in this
+ * STRUCTURAL type only, so offline fakes can omit them and the honest-degrade
+ * branches stay exercisable. (The launcher-era `layout` face and the
+ * `settingsScope` bind both left with the native-dsh posture; the settings
+ * card now takes its form from the `plugins.row.config` owner props.)
  */
 export interface ClientContext extends ClientEffectContext {
   slots: SlotsServiceLike;
   locale: LocaleServiceLike;
-  inject?: ClientInjectFn;
   remote?: ClientRemoteLike;
   sessions?: ClientSessionsLike;
   conversation?: ClientConversationLike;
+  configForms?: ConfigFormsLike;
 }

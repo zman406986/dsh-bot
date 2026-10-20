@@ -1,6 +1,6 @@
 # Research: how the reference summons and kills agents — and where those controls live
 
-- Question: Ticket 102's open question — in the reference tree, is there a floating/detached window or overlay panel, and where do "add a session" and "delete/kill a session" controls live relative to it? Specifically: (a) does a floating chrome exist and what rides it, (b) where do add and delete controls live and what decides their visibility, (c) is the destructive control made less prominent than the additive one, (d) is agent/session management a window-chrome affordance or a list affordance?
+- Question: Ticket 102's open question — in the reference tree, is there a floating/detached window or overlay panel, and where do "add a session" and "delete/kill a session" controls live relative to it? Specifically: (a) does a floating window frame exist and what controls are placed on it, (b) where do add and delete controls live and what decides their visibility, (c) is the destructive control made less prominent than the additive one, (d) is agent/session management a window-chrome affordance or a list affordance?
 - Scope: reference tree only (`reference material-NOT LICENSE SAFE DONT COPY-grok bot/`). Behavior and structure described in plain language; **no source bodies, prompts, or protocol artifacts were copied**. Reference identifiers and short UI strings appear only as evidentiary citations of where a behavior lives (path + symbol), never as implementation text; every finding is anchored to a file path and line.
 - Caveat on the source: the tree is an unofficial, source-oriented **reconstruction** of a shipped desktop app (Product: Grok Bot, Version 0.18.0, per its `PROVENANCE.md`). The shipped renderer was optimized bundles, not authored source; the `frontend/` tree is a partial evidence-backed reconstruction. Treat every statement below as "what this reconstruction encodes", not as the vendor's verified binary behavior.
 - Tree revision read: nested `.git` HEAD `a9f633e09d49a85829b8236331b9e21f7e612634` (2026-08-23), tree version `0.18.0-reconstructed.1`.
@@ -19,7 +19,7 @@ So the reference's answer to ticket 102's question is: it does not solve session
 
 ---
 
-## (a) Is there a floating/detached window or overlay panel? What rides its chrome?
+## (a) Is there a floating/detached window or overlay panel? What controls does its chrome carry?
 
 **No detached session window, and no always-on-top window that serves as a session surface. The one always-on-top product window in the tree is a WebAuthn security-key prompt.**
 
@@ -78,7 +78,7 @@ What decides visibility, in code terms:
 
 ## (c) Is the destructive control deliberately less prominent than the additive one?
 
-**Yes — three independent signals point the same way, and all are additive-safe.**
+**Yes — three independent signals point the same way, and all of them keep the destructive action harder to reach.**
 
 1. **Placement asymmetry.** Add is a permanently visible icon button in the header (`sidebar.tsx:135`). Delete requires discovering a right-click context menu on a row (`AgentRowActions.tsx:55-64`) and is the **final item** in that menu by construction (`agent-row-actions-model.ts:53` — delete is the last spread in the array literal).
 2. **Sentiment asymmetry.** The two always-visible delete buttons that do exist carry `sentiment="danger"` (`sidebar.tsx:170`; `AgentDeleteConfirmation.tsx:100`), resolving to a danger background in the kit (`frontend/src/recovered/ui/sand-kit-primitives.css:61`, `--cursor-danger`). The add button is the neutral/primary icon button — no danger sentiment (`sidebar.tsx:135`).
@@ -94,12 +94,12 @@ The library-level primitives support, but do not themselves enforce, this: `Sand
 
 **No. Every session-management control the tree evidences is a list affordance; window chrome carries only OS window controls.**
 
-- Window chrome: minimize / maximize / close only (`window-chrome/view.tsx:48-54`). No agent affordance rides the chrome.
+- Window chrome: minimize / maximize / close only (`window-chrome/view.tsx:48-54`). No agent control is placed on the chrome.
 - List header: the new-chat plus button (`sidebar.tsx:135`), and the collaboration actions Broadcast / Org-chart-network (`sidebar.tsx:129-132`).
 - List row: rename (double-click, `sidebar.tsx:262-265`), agent actions context menu (pin/unread/duplicate/copy id/hide/delete, `AgentRowActions.tsx:73-101`), multi-select via modifier-click (`sidebar.tsx:250-261`).
 - List footer (still the sidebar column, not chrome): the Hidden Bots button, `ProductionRenderer.tsx:3451` — rendered only when hidden agents exist alongside visible ones; the Plugins pill (`:3453`); the account menu (`:3454`).
 - The only management action reachable from a *global* surface is the command palette (`mod+k`): `ProductionRenderer.tsx:3321-3322` registers a command to open the Hidden Bots overlay, and the global shortcut registry includes a new-agent action (`global-keyboard-shortcuts.ts:47`). The palette also cannot delete — no delete command was found in `command-palette-root-commands.ts` (its rows are Members / Channels / Chat Settings / computer update, `:34-76`).
-- Note the One Exception That Proves The Rule: the `Hidden Bots` **unhide** control is rendered inline on each row of the Hidden Bots *overlay* (`hidden-chats/overlay/view.tsx:127`), i.e. inside a modal content surface, not in chrome. So even the "bring a session back" affordance is content, not chrome.
+- Note the single exception to that pattern: the `Hidden Bots` **unhide** control is rendered inline on each row of the Hidden Bots *overlay* (`hidden-chats/overlay/view.tsx:127`), i.e. inside a modal content surface, not in chrome. So even the "bring a session back" affordance is content, not chrome.
 
 **Verdict (d): no — agent/session management is entirely a list affordance (header + row context menu + selection header), everywhere it is evidenced. Window chrome carries nothing but window controls.**
 

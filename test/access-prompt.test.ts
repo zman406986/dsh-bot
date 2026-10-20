@@ -18,6 +18,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { apply } from "../src/plugin.js";
+import { volatileConfig } from "./support/plugin-config.js";
 import {
   ACCESS_PROMPT_ALLOW,
   ACCESS_PROMPT_ALWAYS_ALLOW,
@@ -767,9 +768,13 @@ function createFullCtx(seam: UserQuestionsLike | undefined) {
       },
     },
     subagents: {
-      async startContinuable() {
+      async startActivation() {
         const childId = `child-${nextChild++}`;
-        return { childId, messageId: `msg-${childId}` };
+        return {
+          childId,
+          messageId: `msg-${childId}`,
+          dispose: async () => {},
+        };
       },
       interrupt() {},
       async sendMessage(
@@ -886,7 +891,7 @@ describe("plugin apply — access prompts over the host seam", () => {
   it("activated session: pending ask emits one prompt with exact copy", async () => {
     const seam = createFakeUserQuestions();
     const ctx = createFullCtx(seam);
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     const { workerId } = await activateAndSpawn(ctx);
 
     const settled = requestAccess(ctx, workerId);
@@ -927,7 +932,7 @@ describe("plugin apply — access prompts over the host seam", () => {
   it("Allow answer routes through the unchanged relay to the worker", async () => {
     const seam = createFakeUserQuestions();
     const ctx = createFullCtx(seam);
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     const { workerId } = await activateAndSpawn(ctx);
     const settled = requestAccess(ctx, workerId);
 
@@ -946,7 +951,7 @@ describe("plugin apply — access prompts over the host seam", () => {
   it("Deny answer delivers the honest deny wrapper", async () => {
     const seam = createFakeUserQuestions();
     const ctx = createFullCtx(seam);
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     const { workerId } = await activateAndSpawn(ctx);
     const settled = requestAccess(ctx, workerId);
 
@@ -965,7 +970,7 @@ describe("plugin apply — access prompts over the host seam", () => {
   it("no answer: the relay timeout still denies; a late answer is a no-op", async () => {
     const seam = createFakeUserQuestions();
     const ctx = createFullCtx(seam);
-    apply(ctx, { enabled: true, accessRequestTimeoutMs: 25 });
+    apply(ctx, volatileConfig({ enabled: true, accessRequestTimeoutMs: 25 }));
     const { workerId } = await activateAndSpawn(ctx);
     const settled = requestAccess(ctx, workerId);
     assert.equal(ctx.sentMessages.length, 0);
@@ -989,7 +994,7 @@ describe("plugin apply — access prompts over the host seam", () => {
   it("Always allow records a session row: the next matching ask auto-answers unprompted", async () => {
     const seam = createFakeUserQuestions();
     const ctx = createFullCtx(seam);
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     const { workerId } = await activateAndSpawn(ctx);
     const settled = requestAccess(ctx, workerId);
     assert.equal(seam.asks.length, 1);
@@ -1018,7 +1023,7 @@ describe("plugin apply — access prompts over the host seam", () => {
   it("wildcard fence: a `gh-api*` ask offers Allow/Deny only and records no session row", async () => {
     const seam = createFakeUserQuestions();
     const ctx = createFullCtx(seam);
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     const { workerId } = await activateAndSpawn(ctx);
 
     const settled = requestAccess(ctx, workerId, {
@@ -1068,7 +1073,7 @@ describe("plugin apply — access prompts over the host seam", () => {
   it("session always-allow rows clear on deactivation: a new session prompts again", async () => {
     const seam = createFakeUserQuestions();
     const ctx = createFullCtx(seam);
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     const { workerId, agent } = await activateAndSpawn(ctx);
     const settled = requestAccess(ctx, workerId);
     const ask = seam.asks[0];
@@ -1108,7 +1113,7 @@ describe("plugin apply — access prompts over the host seam", () => {
   it("a late answer after the timeout surfaces honest expired copy, resolving nothing", async () => {
     const seam = createFakeUserQuestions();
     const ctx = createFullCtx(seam);
-    apply(ctx, { enabled: true, accessRequestTimeoutMs: 25 });
+    apply(ctx, volatileConfig({ enabled: true, accessRequestTimeoutMs: 25 }));
     const { workerId } = await activateAndSpawn(ctx);
     const settled = requestAccess(ctx, workerId);
     assert.equal(ctx.sentMessages.length, 0);
@@ -1132,7 +1137,7 @@ describe("plugin apply — access prompts over the host seam", () => {
   it("an allowed credential ask reports the stored-secret reassurance", async () => {
     const seam = createFakeUserQuestions();
     const ctx = createFullCtx(seam);
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     const { workerId } = await activateAndSpawn(ctx);
     const settled = requestAccess(ctx, workerId, {
       class: "credential",
@@ -1162,7 +1167,7 @@ describe("plugin apply — access prompts over the host seam", () => {
   it("dedupe: a prompted ask is not also rendered conversationally", async () => {
     const seam = createFakeUserQuestions();
     const ctx = createFullCtx(seam);
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     const { workerId } = await activateAndSpawn(ctx);
     const settled = requestAccess(ctx, workerId);
     await tick();
@@ -1182,7 +1187,7 @@ describe("plugin apply — access prompts over the host seam", () => {
 
   it("seam failure degrades safely: conversational fallback, timeout still denies", async () => {
     const ctx = createFullCtx(createFailingUserQuestions());
-    apply(ctx, { enabled: true, accessRequestTimeoutMs: 25 });
+    apply(ctx, volatileConfig({ enabled: true, accessRequestTimeoutMs: 25 }));
     const { workerId } = await activateAndSpawn(ctx);
     const settled = requestAccess(ctx, workerId);
     await tick();
@@ -1203,7 +1208,7 @@ describe("plugin apply — access prompts over the host seam", () => {
 
   it("no seam configured: conversational relay stays the ask surface", async () => {
     const ctx = createFullCtx(undefined);
-    apply(ctx, { enabled: true, accessRequestTimeoutMs: 25 });
+    apply(ctx, volatileConfig({ enabled: true, accessRequestTimeoutMs: 25 }));
     const { workerId } = await activateAndSpawn(ctx);
     const settled = requestAccess(ctx, workerId);
     await tick();
@@ -1222,7 +1227,7 @@ describe("plugin apply — access prompts over the host seam", () => {
   it("deactivation abandons the outstanding prompt; the ticket clears on settle", async () => {
     const seam = createFakeUserQuestions();
     const ctx = createFullCtx(seam);
-    apply(ctx, { enabled: true, accessRequestTimeoutMs: 40 });
+    apply(ctx, volatileConfig({ enabled: true, accessRequestTimeoutMs: 40 }));
     const { workerId, agent } = await activateAndSpawn(ctx);
     const settled = requestAccess(ctx, workerId);
     assert.equal(seam.asks.length, 1);
@@ -1247,7 +1252,7 @@ describe("plugin apply — access prompts over the host seam", () => {
   it("re-activation re-presents a still-pending ask as a fresh prompt", async () => {
     const seam = createFakeUserQuestions();
     const ctx = createFullCtx(seam);
-    apply(ctx, { enabled: true, accessRequestTimeoutMs: 5_000 });
+    apply(ctx, volatileConfig({ enabled: true, accessRequestTimeoutMs: 5_000 }));
     const { workerId, agent } = await activateAndSpawn(ctx);
     const settled = requestAccess(ctx, workerId);
     assert.equal(seam.asks.length, 1);
@@ -1281,7 +1286,7 @@ describe("plugin apply — access prompts over the host seam", () => {
   it("dormant plugin: no request_access tool, no prompts possible", () => {
     const seam = createFakeUserQuestions();
     const ctx = createFullCtx(seam);
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     // Deferred to activation (ticket 19): the dormant tool surface is stock.
     const tool = ctx.tool("request_access");
     assert.equal(tool, undefined);
@@ -1346,7 +1351,7 @@ describe("access prompt — host duplicate-registration rule (ticket 91)", () =>
     });
 
     assert.throws(
-      () => apply(ctx, { enabled: true }),
+      () => apply(ctx, volatileConfig({ enabled: true })),
       new RegExp(
         `command "${DISPATCHER_START_COMMAND}" is already registered`,
       ),

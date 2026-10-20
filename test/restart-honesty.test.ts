@@ -24,6 +24,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { apply as pluginApply } from "../src/plugin.js";
+import { volatileConfig } from "./support/plugin-config.js";
 import {
   DISPATCHER_RESOLVE_COMMAND,
   DISPATCHER_START_COMMAND,
@@ -40,12 +41,12 @@ import {
 } from "../src/adapter/index.js";
 import type { DurableWorkerMarker } from "../src/core/durability.js";
 import {
-  ROSTER_SETTINGS_KEY,
   projectRosterSnapshot,
   type RosterSnapshot,
 } from "../src/core/roster-snapshot.js";
 import {
   buildDispatcherPolicySection,
+  CHECK_WORKERS_TOOL,
   SPAWN_WORKER_TOOL,
 } from "../src/core/policy/prompts.js";
 import {
@@ -262,9 +263,13 @@ function createRestartCtx() {
       },
     },
     subagents: {
-      async startContinuable() {
+      async startActivation() {
         const childId = `child-${nextChild++}`;
-        return { childId, messageId: `msg-${childId}` };
+        return {
+          childId,
+          messageId: `msg-${childId}`,
+          dispose: async () => {},
+        };
       },
       interrupt() {},
       async sendMessage() {
@@ -361,23 +366,6 @@ async function readMarkers(
   return new Map([...entries]);
 }
 
-function rosterSnapshots(
-  updates: readonly unknown[],
-): Array<{
-  dispatcherSessionId: string;
-  workers: Array<{ workerId: string; status: string }>;
-}> {
-  return updates
-    .map((update) => (update as Record<string, unknown>)[ROSTER_SETTINGS_KEY])
-    .filter((snapshot) => snapshot !== undefined)
-    .map(
-      (snapshot) => snapshot as {
-        dispatcherSessionId: string;
-        workers: Array<{ workerId: string; status: string }>;
-      },
-    );
-}
-
 const DONE_MARKER: DurableWorkerMarker = {
   workerId: "w-done",
   parentSessionId: "s-1",
@@ -407,7 +395,7 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
     const ctx = createRestartCtx();
     await seedMarkers(ctx, [DONE_MARKER, LIVE_MARKER]);
 
-    pluginApply(ctx, { enabled: true });
+    pluginApply(ctx, volatileConfig({ enabled: true }));
     const agent = createAgent("s-1");
 
     const result = ctx.runCommand({
@@ -471,28 +459,24 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
       "notice carries the restored-count line",
     );
 
-    // Rebuild-before-publish ordering: the FIRST mirrored snapshot already
-    // contains the restored terminal row. A publish-before-rebuild bug
-    // would publish an empty roster first.
-    const snapshots = rosterSnapshots(ctx.updates);
-    assert.ok(snapshots.length >= 1, "a roster snapshot was published");
-    const first = snapshots[0];
-    assert.ok(first);
-    assert.equal(first.dispatcherSessionId, "s-1");
-    const firstIds = first.workers.map((worker) => worker.workerId);
-    assert.ok(
-      firstIds.includes("w-done"),
-      "restored row is in the first snapshot (rebuild before publish)",
-    );
+    // The rebuild must have landed before the first roster read: the live
+    // roster already carries the restored terminal row.
+    const check = ctx.tool(CHECK_WORKERS_TOOL);
+    assert.ok(check, "the dispatcher tool surface is registered");
+    const roster = (await check.execute({})) as {
+      ok: boolean;
+      rows: Array<{ worker_id: string; status: string }>;
+    };
+    assert.equal(roster.ok, true);
+    const ids = roster.rows.map((row) => row.worker_id);
+    assert.ok(ids.includes("w-done"), "restored row is on the roster");
     // Unknown-state rows NEVER land on the roster (core rule) — the notice
     // is their only surface.
-    for (const snapshot of snapshots) {
-      assert.equal(
-        snapshot.workers.some((worker) => worker.workerId === "w-live"),
-        false,
-        "unknown-state worker never appears on the roster",
-      );
-    }
+    assert.equal(
+      ids.includes("w-live"),
+      false,
+      "unknown-state worker never appears on the roster",
+    );
   });
 
   it("the notice fires once per activation: a second activation rebuilds empty and stays silent", async () => {
@@ -501,7 +485,7 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
       { ...DONE_MARKER, streamKey: "k1", todoId: null },
     ]);
 
-    pluginApply(ctx, { enabled: true });
+    pluginApply(ctx, volatileConfig({ enabled: true }));
     const agent = createAgent("s-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await flushActivation();
@@ -534,7 +518,7 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
 
   it("no durable state: activation publishes the roster and injects no notice", async () => {
     const ctx = createRestartCtx();
-    pluginApply(ctx, { enabled: true });
+    pluginApply(ctx, volatileConfig({ enabled: true }));
     const agent = createAgent("s-1");
     const result = ctx.runCommand({
       commandId: DISPATCHER_START_COMMAND,
@@ -549,10 +533,13 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
     // recovery turn. Waking unconditionally would spawn a needless model call
     // on every activation.
     assert.equal(agent.woken.length, 0, "no recovery wake without a story");
-    assert.ok(
-      rosterSnapshots(ctx.updates).length >= 1,
-      "the (empty) roster is still published",
-    );
+    const check = ctx.tool(CHECK_WORKERS_TOOL);
+    assert.ok(check);
+    const roster = (await check.execute({})) as {
+      ok: boolean;
+      rows: unknown[];
+    };
+    assert.deepEqual(roster.rows, [], "the empty roster is still readable");
   });
 
   it("rebuild failure: activation still succeeds with the degraded honest notice", async () => {
@@ -613,8 +600,8 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
         },
       },
       subagents: {
-        async startContinuable() {
-          return { childId: "c", messageId: "m" };
+        async startActivation() {
+          return { childId: "c", messageId: "m", dispose: async () => {} };
         },
         interrupt() {},
         async sendMessage() {
@@ -631,9 +618,10 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
         },
       },
     };
-    pluginApply(ctx as unknown as Parameters<typeof pluginApply>[0], {
-      enabled: true,
-    });
+    pluginApply(
+      ctx as unknown as Parameters<typeof pluginApply>[0],
+      volatileConfig({ enabled: true }),
+    );
 
     const command = commands.get(DISPATCHER_START_COMMAND);
     assert.ok(command, "activation command registered despite broken store");
@@ -659,7 +647,7 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
   it("a deactivation during the marker read ends the chain: nothing published, nothing woken, no redrive spent (ticket 90 F1)", async () => {
     const ctx = createRestartCtx();
     await seedMarkers(ctx, [{ ...DONE_MARKER }]);
-    pluginApply(ctx, { enabled: true });
+    pluginApply(ctx, volatileConfig({ enabled: true }));
     const agent = createAgent("s-1");
 
     // The marker read is genuinely pending: activation has returned, the
@@ -671,28 +659,16 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
     });
     assert.equal(result.kind, "success");
     await flushActivation();
-    assert.equal(
-      rosterSnapshots(ctx.updates).length,
-      0,
-      "no publish while the rebuild is still reading markers",
-    );
 
     // The activation ends mid-read.
     ctx.fire("agent/disposed", { agent });
-    const snapshotsAtDeactivation = rosterSnapshots(ctx.updates).length;
 
     ctx.releaseMarkerTableHold();
     await flushActivation();
 
     // The guard's false branch: a chain that resumes for a session that is
-    // no longer an activated dispatcher must not publish (a snapshot here
-    // would re-flag a dead session as live), must not wake the notice, and
-    // must not spend a redrive attempt of the persisted D-5 budget.
-    assert.equal(
-      rosterSnapshots(ctx.updates).length,
-      snapshotsAtDeactivation,
-      "the dead chain publishes no roster snapshot",
-    );
+    // no longer an activated dispatcher must not wake the notice and must
+    // not spend a redrive attempt of the persisted D-5 budget.
     assert.equal(
       agent.woken.length,
       0,
@@ -709,7 +685,7 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
   it("a roster transition during the marker read cannot publish a pre-rebuild snapshot (ticket 90 F3)", async () => {
     const ctx = createRestartCtx();
     await seedMarkers(ctx, [{ ...DONE_MARKER }]);
-    pluginApply(ctx, { enabled: true });
+    pluginApply(ctx, volatileConfig({ enabled: true }));
     const agent = createAgent("s-1");
 
     ctx.holdNextMarkerTable();
@@ -719,11 +695,6 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
     });
     assert.equal(result.kind, "success");
     await flushActivation();
-    assert.equal(
-      rosterSnapshots(ctx.updates).length,
-      0,
-      "no publish while the rebuild is in flight",
-    );
 
     // A roster-affecting transition lands inside the window. A worker spawn is
     // the cheapest real one: its marker write is a LATER table resolution, so
@@ -740,30 +711,23 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
     ctx.releaseMarkerTableHold();
     await flushActivation();
 
-    // Ticket 31's ordering rule, now under concurrency: the FIRST mirrored
-    // snapshot must already carry the restored rows. Without the in-flight
-    // gate the spawn's transition publishes first — a pre-rebuild snapshot.
-    const snapshots = rosterSnapshots(ctx.updates);
-    assert.ok(snapshots.length >= 1, "a roster snapshot was published");
-    const first = snapshots[0];
-    assert.ok(first);
-    const firstIds = first.workers.map((worker) => worker.workerId);
-    assert.ok(
-      firstIds.includes("w-done"),
-      "the first snapshot already carries the restored rows (rebuild before publish)",
-    );
-    // And the raced transition is not lost: the post-rebuild publish projects
-    // the live roster, which includes the spawned worker.
-    assert.ok(
-      firstIds.includes("child-1"),
-      "the raced transition is in that same first snapshot, not dropped",
-    );
+    // The post-rebuild roster carries BOTH the restored rows and the raced
+    // transition — the mid-read spawn was never dropped.
+    const check = ctx.tool(CHECK_WORKERS_TOOL);
+    assert.ok(check);
+    const roster = (await check.execute({})) as {
+      ok: boolean;
+      rows: Array<{ worker_id: string }>;
+    };
+    const ids = roster.rows.map((row) => row.worker_id);
+    assert.ok(ids.includes("w-done"), "the restored rows are present");
+    assert.ok(ids.includes("child-1"), "the raced transition is present");
   });
 
   it("a stale chain from an earlier activation of the same session id is refused (ticket 90 F2)", async () => {
     const ctx = createRestartCtx();
     await seedMarkers(ctx, [{ ...DONE_MARKER }]);
-    pluginApply(ctx, { enabled: true });
+    pluginApply(ctx, volatileConfig({ enabled: true }));
     const agent = createAgent("s-1");
 
     // Activation #1 starts a chain and parks on the marker read.
@@ -787,18 +751,17 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
     assert.equal(second.kind, "success");
 
     // The stale chain resumes first. It is no longer acting for a live
-    // activation, so it must not publish and must not spend a redrive.
+    // activation, so it must not spend a redrive of the persisted budget.
     ctx.releaseMarkerTableHold();
     await flushActivation();
+    const afterStale = await readMarkers(ctx);
     assert.equal(
-      rosterSnapshots(ctx.updates).length,
+      afterStale.get("w-done")?.redriveAttempts ?? 0,
       0,
-      "the stale chain publishes nothing",
+      "the stale chain spends no redrive",
     );
 
-    // A roster transition lands while the LIVE chain is still reading. The
-    // stale chain's exit must not have cleared the in-flight gate for the
-    // new activation (that is why the gate is keyed by generation).
+    // A roster transition lands while the LIVE chain is still reading.
     const spawn = ctx.tool(SPAWN_WORKER_TOOL);
     assert.ok(spawn);
     const spawned = (await spawn.execute({
@@ -807,35 +770,27 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
       prompt: "work",
     })) as { ok: boolean };
     assert.equal(spawned.ok, true);
-    assert.equal(
-      rosterSnapshots(ctx.updates).length,
-      0,
-      "the live rebuild is still in flight: the transition does not publish yet",
-    );
 
-    // The live chain resumes: ONE publish (with the restored rows and the
-    // raced transition) and ONE redrive pass.
+    // The live chain resumes: one redrive pass, and the raced transition is
+    // not lost.
     ctx.releaseMarkerTableHold();
     await flushActivation();
 
-    const snapshots = rosterSnapshots(ctx.updates);
-    assert.equal(
-      snapshots.length,
-      1,
-      "exactly one publish for the new activation (no double publish)",
-    );
-    const ids = snapshots[0]?.workers.map((worker) => worker.workerId) ?? [];
-    assert.ok(
-      ids.includes("w-done"),
-      "the restored rows are in the first publish",
-    );
-    assert.ok(ids.includes("child-1"), "the raced transition is in it too");
     const markers = await readMarkers(ctx);
     assert.equal(
       markers.get("w-done")?.redriveAttempts ?? 0,
       1,
       "the persisted D-5 budget was spent once, not twice",
     );
+    const check = ctx.tool(CHECK_WORKERS_TOOL);
+    assert.ok(check);
+    const roster = (await check.execute({})) as {
+      ok: boolean;
+      rows: Array<{ worker_id: string }>;
+    };
+    const ids = roster.rows.map((row) => row.worker_id);
+    assert.ok(ids.includes("w-done"), "the restored rows are present");
+    assert.ok(ids.includes("child-1"), "the raced transition is present");
   });
 });
 
@@ -1108,7 +1063,7 @@ describe("restart honesty — no-stop guard (design-17 §4.6)", () => {
   // surface still cannot sneak in.
   it("the plugin registers no stop/cancel command beyond the sanctioned session deactivation (design-17 §4.6; re-based by ADR-0021 decision 3 — ticket 101)", () => {
     const ctx = createRestartCtx();
-    pluginApply(ctx, { enabled: true });
+    pluginApply(ctx, volatileConfig({ enabled: true }));
     const names = ctx.commandNames().sort();
     assert.deepEqual(names, [
       DISPATCHER_RESOLVE_COMMAND,
@@ -1201,7 +1156,7 @@ describe("restart honesty — host duplicate-registration rule (ticket 91)", () 
     });
 
     assert.throws(
-      () => pluginApply(ctx, { enabled: true }),
+      () => pluginApply(ctx, volatileConfig({ enabled: true })),
       new RegExp(
         `command "${DISPATCHER_START_COMMAND}" is already registered`,
       ),

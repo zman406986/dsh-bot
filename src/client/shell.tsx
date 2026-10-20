@@ -43,18 +43,8 @@
  * C13 holds). The affordance shows the id verbatim and copies it through
  * the host clipboard seam; nothing else about peer traffic surfaces here.
  *
- * Presentation only: the shell never spawns, steers, stops a worker, or
- * sends — every intent stays with the host seats / verified transports.
- * Since ticket 101 (ADR-0021 decision 3) the sidebar additionally carries
- * the session-lifecycle seats (add = `/dispatcher-start` in a chosen
- * session, delete after confirmation = `/dispatcher-stop`): the shell only
- * gates and routes the click; the composition owns the transports, and the
- * worker/turn no-stop posture is untouched (the U-G amendment is for
- * dispatcher sessions ONLY). Ticket 106 extends the dispatcher row's
- * lifecycle affordances with a right-click context menu whose one item
- * ("Close dispatcher", two-press armed, the same `shellDeletePress`
- * discipline) rides the close seat — the same `/dispatcher-stop`, the same
- * ONE transport, no optimistic flip. Pane decisions
+ * Presentation only: the shell never spawns, steers, stops, or sends — every
+ * intent stays with the later slices' verified transports. Pane decisions
  * come from the pure `describeShellPanes`; this component only maps them to
  * seats. Rendering is covered by build + typecheck (S8: no DOM harness); the
  * store and pane logic are asserted purely in tests.
@@ -66,22 +56,16 @@
  * hierarchy is opacity-based, there is no animation at all, and no text
  * colour is set (the shell inherits the host's theme colour).
  */
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useSyncExternalStore } from "react";
 import type { ComponentType, JSX } from "react";
 import type { TranslateFn } from "./overlay.js";
 import { formatTemplate, rosterBlockedKey } from "./roster-store.js";
 import {
-  describeAddPicker,
   describeRowPreview,
   describeShellPanes,
   describeShellSidebar,
-  SHELL_DELETE_CONFIRM_MS,
-  SHELL_DELETE_IDLE,
-  shellDeletePress,
   type DispatcherShellStore,
-  type ShellDeleteArmState,
   type ShellRowView,
-  type ShellState,
   type ShellWaitingMarker,
 } from "./shell-store.js";
 
@@ -118,66 +102,15 @@ export const SHELL_CSS = `
 .multitask-dispatcher-shell__chip--waiting{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 6px;border-radius:8px;border:1px solid currentColor;color:var(--dsw-alias-state-warn-primary)}
 .multitask-dispatcher-shell__row-preview{display:none;opacity:.6;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .multitask-dispatcher-shell__row:hover .multitask-dispatcher-shell__row-preview,.multitask-dispatcher-shell__row:focus-visible .multitask-dispatcher-shell__row-preview{display:block}
-.multitask-dispatcher-shell__row-actions{display:flex;align-self:flex-start;gap:10px}
-.multitask-dispatcher-shell__row-copy{display:none}
-.multitask-dispatcher-shell__list li:hover .multitask-dispatcher-shell__row-copy,.multitask-dispatcher-shell__row-actions:focus-within .multitask-dispatcher-shell__row-copy{display:inline}
-.multitask-dispatcher-shell__row-actions button{border:none;padding:0;background:transparent;color:inherit;font:inherit;font-size:11px;opacity:.55;cursor:pointer;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.multitask-dispatcher-shell__row-actions button:hover{opacity:.9;text-decoration:underline}
-.multitask-dispatcher-shell__row-actions button[data-armed="true"]{opacity:1;color:var(--dsw-alias-state-warn-primary)}
-.multitask-dispatcher-shell__row-menu{position:fixed;z-index:1001;min-width:180px;padding:4px;background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l3);border-radius:8px}
-.multitask-dispatcher-shell__row-menu-item{display:block;width:100%;border:none;border-radius:6px;padding:5px 8px;background:transparent;color:inherit;font:inherit;font-size:12px;opacity:.85;cursor:pointer;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.multitask-dispatcher-shell__row-menu-item:hover{background:color-mix(in srgb,var(--dsw-alias-bg-layer-3) 75%,transparent);opacity:1}
-.multitask-dispatcher-shell__row-menu-item[data-armed="true"]{opacity:1;color:var(--dsw-alias-state-warn-primary)}
-.multitask-dispatcher-shell__add{position:sticky;bottom:0;z-index:1;margin-top:auto;padding:6px 6px 2px;border-top:1px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-3)}
-.multitask-dispatcher-shell__add-toggle{width:100%;border:none;padding:4px 2px;background:transparent;color:inherit;font:inherit;font-size:12px;opacity:.7;cursor:pointer;text-align:left}
-.multitask-dispatcher-shell__add-toggle:hover{opacity:1;text-decoration:underline}
-.multitask-dispatcher-shell__add-list{list-style:none;margin:4px 0 0;padding:0;display:flex;flex-direction:column;gap:2px}
-.multitask-dispatcher-shell__add-option{width:100%;border:1px solid transparent;border-radius:8px;padding:5px 8px;background:transparent;color:inherit;font:inherit;font-size:12px;opacity:.85;cursor:pointer;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.multitask-dispatcher-shell__add-option:hover{background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 75%,transparent);border-color:var(--dsw-alias-border-l3);opacity:1}
-.multitask-dispatcher-shell__add-empty{font-size:11px;opacity:.6;padding:4px 2px}
+.multitask-dispatcher-shell__row-copy{display:none;align-self:flex-start;margin:2px 8px 0;padding:0;border:none;background:transparent;color:inherit;font:inherit;font-size:11px;opacity:.55;cursor:pointer;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.multitask-dispatcher-shell__row-copy:hover{opacity:.9;text-decoration:underline}
+.multitask-dispatcher-shell__list li:hover .multitask-dispatcher-shell__row-copy,.multitask-dispatcher-shell__row-copy:focus-visible{display:block}
 .multitask-dispatcher-shell__main{display:flex;flex-direction:column;min-width:0;min-height:0}
 .multitask-dispatcher-shell__main-header{padding:10px 14px;border-bottom:1px solid var(--dsw-alias-border-l3);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .multitask-dispatcher-shell__conversation-pending{padding:14px;opacity:.6}
 .multitask-dispatcher-shell__noselection{margin:auto;opacity:.6;padding:14px}
 .multitask-dispatcher-shell__right{min-height:0;overflow-y:auto;border-left:1px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-3);padding:10px}
 `;
-
-/**
- * Ticket 106 — the row context menu's estimated rendered box. The menu is
- * one item tall; the estimate exists only so the pure position clamp below
- * can keep the menu on-screen near a viewport edge. Presentation geometry,
- * not data: it lives here, not in the store.
- */
-export const SHELL_ROW_MENU_BOX = { width: 190, height: 38 } as const;
-
-/**
- * Pure position clamp for the fixed-position row menu (ticket 106): the
- * cursor point pulled inside the viewport so the menu never opens past an
- * edge. Clock-free and DOM-free so offline tests drive it directly.
- */
-export function clampRowMenuPosition(
-  clientX: number,
-  clientY: number,
-  viewportWidth: number,
-  viewportHeight: number,
-): { readonly left: number; readonly top: number } {
-  const maxLeft = Math.max(0, viewportWidth - SHELL_ROW_MENU_BOX.width);
-  const maxTop = Math.max(0, viewportHeight - SHELL_ROW_MENU_BOX.height);
-  return {
-    left: Math.min(Math.max(0, clientX), maxLeft),
-    top: Math.min(Math.max(0, clientY), maxTop),
-  };
-}
-
-/**
- * The open row context menu (ticket 106): which dispatcher row it acts on,
- * and where the cursor was — the shell's own UI state, not store state.
- */
-export interface ShellRowMenuState {
-  readonly sessionId: string;
-  readonly clientX: number;
-  readonly clientY: number;
-}
 
 /**
  * The session's aggregate dot state (pure; ticket 79). Same role vocabulary
@@ -273,37 +206,6 @@ export interface ShellHosts {
    * — no fake success is ever shown).
    */
   readonly copyToClipboard?: (text: string) => void | Promise<void>;
-  /**
-   * Ticket 101 (ADR-0021 decision 3): the ADD seat — called with a session
-   * id chosen from the add picker (a feed-delivered session the mirrors do
-   * not flag as a dispatcher). The composition executes `/dispatcher-start`
-   * in that session through the composer's own command transaction. ABSENT,
-   * the picker is not rendered (an offline/stub shell shows no dead control).
-   */
-  readonly onAddDispatcherSession?: (sessionId: string) => void;
-  /**
-   * Ticket 101 (ADR-0021 decision 3): the DELETE seat — called with a
-   * dispatcher session id ONLY after the row's two-step confirmation
-   * (armed-window) completed. The composition executes `/dispatcher-stop` in
-   * that session: the binding deactivates through the host dispose path
-   * (tools unbound, mirror cleared); the dsh chat itself is NEVER disposed.
-   * ABSENT, no delete affordance renders.
-   */
-  readonly onDeleteDispatcherSession?: (sessionId: string) => void;
-  /**
-   * Ticket 106: the CLOSE seat — the right-click context menu's one action,
-   * called with a dispatcher session id ONLY after the menu's two-press
-   * armed-window confirmation completed. Identical semantics to the delete
-   * seat above: the composition executes `/dispatcher-stop` in that session
-   * through the ONE command transport — the binding deactivates, the host's
-   * mirror clear arrives, and the row re-renders as a normal session (no
-   * optimistic flip, ADR-0010). ABSENT, right-click opens no menu anywhere
-   * (an offline/stub shell shows no dead control, same rule as delete).
-   * The key's "close" wording is deliberate: it names the session-lifecycle
-   * verb the human asked for while staying clear of the pinned banned-verb
-   * scan (no stop/cancel/kill-style host key).
-   */
-  readonly onCloseDispatcherSession?: (sessionId: string) => void;
 }
 
 /** Best-effort default clipboard writer (host browser provides the seam). */
@@ -322,53 +224,18 @@ function defaultCopyToClipboard(text: string): void {
  * affordance OUTSIDE the row button (a button inside a button is invalid
  * HTML) — hover/focus-revealed, showing the id verbatim; clicking copies
  * it through the host seam.
- * Ticket 101 (ADR-0021 decision 3): dispatcher rows with a delete seat also
- * render the DELETE affordance in the same hover-revealed actions row —
- * two-step confirmation (armed window, `shellDeletePress`), never a
- * single-click fire; the armed label reverts when the window expires. The
- * seat itself is the composition's command transaction; the row only gates.
- * Ticket 106: dispatcher rows with a close seat also answer RIGHT-CLICK —
- * the row reports the cursor position up to the shell, which opens the
- * in-window context menu (one level, in this component tree, no portal).
- * Normal sessions ignore right-click entirely.
  */
 function ShellRow(props: {
   t: TranslateFn;
   row: ShellRowView;
   onSelect: (sessionId: string) => void;
   onCopyId: (sessionId: string) => void;
-  onDelete?: ((sessionId: string) => void) | undefined;
-  onRowContextMenu?:
-    | ((sessionId: string, clientX: number, clientY: number) => void)
-    | undefined;
 }): JSX.Element {
-  const { t, row, onSelect, onCopyId, onDelete, onRowContextMenu } = props;
-  const [arm, setArm] = useState<ShellDeleteArmState>(SHELL_DELETE_IDLE);
-  const armedHere = arm.armedSessionId === row.sessionId;
-  // Visual honesty: the armed ("confirm") label never outlives the window
-  // that would confirm it — a timer reverts the row to its idle label. (The
-  // press decision itself re-checks the window against the clock, so a
-  // lapsed timer can never confirm.)
-  useEffect(() => {
-    if (!armedHere) return;
-    const remaining = arm.armedAtMs + SHELL_DELETE_CONFIRM_MS - Date.now();
-    if (remaining <= 0) {
-      setArm(SHELL_DELETE_IDLE);
-      return;
-    }
-    const timer = setTimeout(() => setArm(SHELL_DELETE_IDLE), remaining);
-    return () => clearTimeout(timer);
-  }, [armedHere, arm.armedAtMs]);
+  const { t, row, onSelect, onCopyId } = props;
   const presence = row.presence;
   const presenceAvailable = row.presenceAvailable;
   const dot = describePresenceDot(row);
   const preview = describeRowPreview(row, presenceAvailable);
-  const onDeleteClick = () => {
-    const sessionId = row.sessionId;
-    const press = shellDeletePress(arm, sessionId, Date.now());
-    setArm(press.state);
-    if (press.action === "confirm") onDelete?.(sessionId);
-  };
   return (
     <li>
       <button
@@ -379,18 +246,6 @@ function ShellRow(props: {
         data-selected={row.selected ? "true" : "false"}
         data-presence={dot}
         onClick={() => onSelect(row.sessionId)}
-        onContextMenu={
-          onRowContextMenu !== undefined && row.dispatcher
-            ? (event) => {
-                // Dispatcher rows only (ticket 106): right-click opens the
-                // close menu; the native menu is suppressed for this row.
-                // Normal sessions ignore right-click — no preventDefault,
-                // no menu.
-                event.preventDefault();
-                onRowContextMenu(row.sessionId, event.clientX, event.clientY);
-              }
-            : undefined
-        }
       >
         <span className={`${SHELL_CLASS}__row-head`}>
           <span
@@ -449,93 +304,18 @@ function ShellRow(props: {
         ) : null}
       </button>
       {row.dispatcher ? (
-        <span className={`${SHELL_CLASS}__row-actions`}>
-          <button
-            type="button"
-            className={`${SHELL_CLASS}__row-copy`}
-            data-copy-id={row.sessionId}
-            aria-label={t("shell.row.copy-id")}
-            title={row.sessionId}
-            onClick={() => onCopyId(row.sessionId)}
-          >
-            {row.sessionId}
-          </button>
-          {onDelete !== undefined ? (
-            <button
-              type="button"
-              className={`${SHELL_CLASS}__row-delete`}
-              data-delete-id={row.sessionId}
-              data-armed={armedHere ? "true" : "false"}
-              aria-label={
-                armedHere ? t("shell.row.delete-confirm") : t("shell.row.delete")
-              }
-              title={t("shell.row.delete-title")}
-              onClick={onDeleteClick}
-            >
-              {armedHere ? t("shell.row.delete-confirm") : t("shell.row.delete")}
-            </button>
-          ) : null}
-        </span>
+        <button
+          type="button"
+          className={`${SHELL_CLASS}__row-copy`}
+          data-copy-id={row.sessionId}
+          aria-label={t("shell.row.copy-id")}
+          title={row.sessionId}
+          onClick={() => onCopyId(row.sessionId)}
+        >
+          {row.sessionId}
+        </button>
       ) : null}
     </li>
-  );
-}
-
-/**
- * The sidebar's ADD section (ticket 101, ADR-0021 decision 3): a toggle
- * revealing the picker of activatable sessions — feed-delivered rows the
- * mirrors do not flag as dispatchers ({@link describeAddPicker}). Empty
- * picker = the honest guidance (create the chat in dsh first); there is no
- * client-side "create chat" seam and none is simulated. Its own component
- * (own hook fiber, the ticket-88 discipline) because it holds the open/closed
- * state.
- */
-function AddDispatcherSection(props: {
-  t: TranslateFn;
-  state: ShellState;
-  onAdd: (sessionId: string) => void;
-}): JSX.Element {
-  const { t, state, onAdd } = props;
-  const [open, setOpen] = useState(false);
-  const picker = describeAddPicker(state);
-  return (
-    <div className={`${SHELL_CLASS}__add`}>
-      <button
-        type="button"
-        className={`${SHELL_CLASS}__add-toggle`}
-        data-add-toggle={open ? "open" : "closed"}
-        aria-expanded={open ? "true" : "false"}
-        onClick={() => setOpen(!open)}
-      >
-        {t("shell.add.label")}
-      </button>
-      {open ? (
-        picker.kind === "ready" ? (
-          <ul className={`${SHELL_CLASS}__add-list`}>
-            {picker.candidates.map((row) => (
-              <li key={row.sessionId}>
-                <button
-                  type="button"
-                  className={`${SHELL_CLASS}__add-option`}
-                  data-add-id={row.sessionId}
-                  title={row.sessionId}
-                  onClick={() => {
-                    setOpen(false);
-                    onAdd(row.sessionId);
-                  }}
-                >
-                  {row.title}
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <div className={`${SHELL_CLASS}__add-empty`} data-add-empty="true">
-            {t("shell.add.empty")}
-          </div>
-        )
-      ) : null}
-    </div>
   );
 }
 
@@ -553,97 +333,6 @@ export function createDispatcherShell(
     const box = useSyncExternalStore(store.subscribe, store.getBox);
     const sidebar = describeShellSidebar(box.state, Date.now());
     const panes = describeShellPanes(box.state);
-
-    // Ticket 106 — the row context menu: the shell's own UI state (which
-    // dispatcher row, where the cursor was) plus an arm slot for its one
-    // item. The menu exists only while a close seat exists; the row gates
-    // on `row.dispatcher`, and the derivation below keeps it honest.
-    const [menu, setMenu] = useState<ShellRowMenuState | null>(null);
-    const [menuArm, setMenuArm] = useState<ShellDeleteArmState>(
-      SHELL_DELETE_IDLE,
-    );
-    const menuRef = useRef<HTMLDivElement | null>(null);
-
-    const menuVisible = (() => {
-      if (menu === null || sidebar.kind !== "ready") return false;
-      const row = sidebar.rows.find(
-        (candidate) => candidate.sessionId === menu.sessionId,
-      );
-      return row !== undefined && row.dispatcher;
-    })();
-
-    // Hygiene (1): the menu never outlives its row's dispatcher state. A
-    // mirror clear (the host recorded the deactivation) or a feed removal
-    // re-renders the row as a normal session and the menu is gone — no
-    // stale menu acting on a former dispatcher (ADR-0010 honesty at the
-    // affordance level; no liveness is guessed here).
-    useEffect(() => {
-      if (menu !== null && !menuVisible) setMenu(null);
-    }, [menu, menuVisible]);
-
-    // Hygiene (2): outside pointer-down, Escape, and any scroll dismiss the
-    // menu. (An outside RIGHT-click also dismisses: a real right-click's
-    // pointer-down arrives before its contextmenu.) Listeners are attached
-    // only while the menu is open; a pointer-down INSIDE the menu (the item
-    // itself) never dismisses.
-    useEffect(() => {
-      if (menu === null) return;
-      const dismiss = (event: Event): void => {
-        if (menuRef.current?.contains(event.target as Node | null)) return;
-        setMenu(null);
-      };
-      const onKey = (event: KeyboardEvent): void => {
-        if (event.key === "Escape") setMenu(null);
-      };
-      const onScroll = (): void => setMenu(null);
-      document.addEventListener("pointerdown", dismiss, true);
-      document.addEventListener("keydown", onKey);
-      document.addEventListener("scroll", onScroll, true);
-      return () => {
-        document.removeEventListener("pointerdown", dismiss, true);
-        document.removeEventListener("keydown", onKey);
-        document.removeEventListener("scroll", onScroll, true);
-      };
-    }, [menu]);
-
-    // The armed ("Confirm close") label never outlives the window that
-    // would confirm it — the same revert-timer discipline as the row's
-    // delete affordance. (The press decision below re-checks the clock
-    // regardless, so a lapsed timer can never confirm.)
-    const menuArmedHere =
-      menu !== null && menuArm.armedSessionId === menu.sessionId;
-    useEffect(() => {
-      if (!menuArmedHere) return;
-      const remaining = menuArm.armedAtMs + SHELL_DELETE_CONFIRM_MS - Date.now();
-      if (remaining <= 0) {
-        setMenuArm(SHELL_DELETE_IDLE);
-        return;
-      }
-      const timer = setTimeout(() => setMenuArm(SHELL_DELETE_IDLE), remaining);
-      return () => clearTimeout(timer);
-    }, [menuArmedHere, menuArm.armedAtMs]);
-
-    const openRowMenu = (
-      sessionId: string,
-      clientX: number,
-      clientY: number,
-    ): void => {
-      setMenuArm(SHELL_DELETE_IDLE); // a fresh menu is never born pre-armed
-      setMenu({ sessionId, clientX, clientY });
-    };
-    const menuClosePress = (): void => {
-      if (menu === null) return;
-      const sessionId = menu.sessionId;
-      // The SAME two-press reducer as the row's delete affordance: first
-      // press arms, second press inside the window confirms. Reused, not
-      // duplicated — one arming discipline, a menu-owned state slot.
-      const press = shellDeletePress(menuArm, sessionId, Date.now());
-      setMenuArm(press.state);
-      if (press.action === "confirm") {
-        setMenu(null);
-        hosts.onCloseDispatcherSession?.(sessionId);
-      }
-    };
 
     const selectedTitle = (() => {
       if (panes.main.kind !== "conversation") return null;
@@ -680,23 +369,10 @@ export function createDispatcherShell(
                       sessionId,
                     );
                   }}
-                  onDelete={hosts.onDeleteDispatcherSession}
-                  onRowContextMenu={
-                    hosts.onCloseDispatcherSession !== undefined
-                      ? openRowMenu
-                      : undefined
-                  }
                 />
               ))}
             </ul>
           )}
-          {hosts.onAddDispatcherSession !== undefined ? (
-            <AddDispatcherSection
-              t={t}
-              state={box.state}
-              onAdd={hosts.onAddDispatcherSession}
-            />
-          ) : null}
         </aside>
         <section className={`${SHELL_CLASS}__main`}>
           {panes.main.kind === "no-selection" ? (
@@ -737,38 +413,6 @@ export function createDispatcherShell(
             <hosts.rosterPanel sessionId={panes.right.sessionId} />
           ) : null}
         </aside>
-        {menu !== null && menuVisible ? (
-          // Ticket 106: the in-window context menu — part of THIS tree (no
-          // body portal; `position:fixed` only lifts it over the layout).
-          // One item, two-press armed (shellDeletePress), token-only face.
-          <div
-            className={`${SHELL_CLASS}__row-menu`}
-            data-row-menu={menu.sessionId}
-            ref={menuRef}
-            style={clampRowMenuPosition(
-              menu.clientX,
-              menu.clientY,
-              window.innerWidth,
-              window.innerHeight,
-            )}
-          >
-            <button
-              type="button"
-              className={`${SHELL_CLASS}__row-menu-item`}
-              data-row-menu-close={menu.sessionId}
-              data-armed={menuArmedHere ? "true" : "false"}
-              aria-label={
-                menuArmedHere ? t("shell.row.close-confirm") : t("shell.row.close")
-              }
-              title={t("shell.row.close-title")}
-              onClick={menuClosePress}
-            >
-              {menuArmedHere
-                ? t("shell.row.close-confirm")
-                : t("shell.row.close")}
-            </button>
-          </div>
-        ) : null}
       </div>
     );
   };

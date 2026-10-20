@@ -1,0 +1,27 @@
+# DD-120 — Secrets provisioning pipeline (env injection / vault bridge) vs none
+- **Area:** auth / account / secrets (A14)
+- **Type:** missing-feature (host/sandbox scope; deliberate choice on the build side)
+- **Date:** 2026-09-23
+
+## What the reference does
+The reference maintains a dedicated pipeline that pushes secrets into its remote machine. A secrets applier (the reference tree's `source/host/extensions/secrets/secrets-service.ts`) takes a desired set of environment-variable entries, validates them, persists the desired state to a local store with restrictive file mode via an atomic rename, and drives an apply loop that tracks generations and pushes the environment into the remote machine, retrying under a retry policy until the applied generation catches up with the desired one; it also reloads persisted state at startup and exposes an applied/status view. Alongside it, a 1Password provisioning bridge and CLI runtime (the reference tree's `source/electron-main/onepassword/onepassword-provisioning-bridge.ts`, `onepassword-cli-runtime.ts`, `onepassword-op-executor.ts`) provision a vault-managed source: a pinned CLI version is downloaded and verified (signed-archive entries, codesign verification with a strict designated-requirement check, version bound to a fixed managed version), with account/vault enumeration and service-account token intake feeding the provisioning sink. (Per the survey's own rules, no secret values or token contents are described here — mechanism names only.)
+
+## What the current build does
+The build has no secrets-provisioning pipeline at all — no vault bridge, no environment injection into any remote machine. When a worker needs a credential, the request surfaces to the human as a "secret-ask" approval card that shows only the credential's name, never a value (`src/client/approval-cards.ts`; the secret card kind is a frozen variant of the access-ask card, chosen when the ask body is a credential ask). Approval is a decision that is steered back into the flow as a decision, and the value path itself is owned by the host dsh, not by the dispatcher client surface.
+
+## The deviation
+The reference treats secret provisioning as host infrastructure: validate → persist restrictively → track generations → retry-push into the remote machine, optionally fed from a verified 1Password vault source. The build deliberately omits this entire layer: there is nothing to inject into because the dispatcher does not operate a remote sandbox, and the credential path is instead a human-in-the-loop decision (secret-ask card) with the value handled host-side by dsh. The reference's delivery machinery (applier, vault bridge) has no counterpart, and by design none is wanted.
+
+## Verdict: DO-NOT-INCORPORATE
+Provisioning secrets into a remote machine is remote-infrastructure scope, squarely within the excluded non-goals under ADR-0018 (C15: no remote/cloud jobs), and the applier's whole purpose is pushing into that machine. On the build side the value path is already host-owned by design — the secret-ask card in `src/client/approval-cards.ts` is a deliberate human-approval surface, not a gap. Nothing in the reference mechanism is needed to make the build's approach work; at most, the *idea* that credential asks name the credential rather than carry the value is already present. If product scope ever changes, this becomes an ASK-HUMAN, but today the deviation is the intended shape.
+
+## Incorporation notes
+- **Where it would live:** Nothing to incorporate. If that decision ever changed, a provisioning applier would belong host-side next to the dispatcher's worker lifecycle (never in `src/client/`), with the secret-ask card remaining the only client-visible surface.
+- **Constraints:** ADR-0018 C15 (no remote/cloud jobs) excludes the target of the reference's apply loop; the build's value path must stay host-owned — client surfaces show names only; keep the 1Password bridge out entirely absent a human ruling.
+- **License note:** ADR-0018 B9 — re-derive independently; no verbatim copying from the reference tree.
+- **Effort/risk:** M — if ever ruled in scope, the applier pattern (validate, restrictively-modeled atomic persist, generation tracking, retry) is straightforward to re-derive, but the vault bridge and the remote-machine apply target would need a product ruling first; risk is scope creep into excluded non-goals.
+- **Key reference anchors:** the reference tree's `source/host/extensions/secrets/secrets-service.ts` (the secrets applier for the remote machine: validate / 0600 atomic-rename persist / generation tracking / retry apply loop); the reference tree's `source/electron-main/onepassword/onepassword-provisioning-bridge.ts`, `onepassword-cli-runtime.ts`, `onepassword-op-executor.ts` (pinned-version download with signed-archive + codesign verification; account/vault enumeration; service-account token intake to a provisioning sink). Build anchor: `src/client/approval-cards.ts` (secret-ask card kind; name-only credential asks).
+
+## Evidence
+- Reference: the reference tree's `source/host/extensions/secrets/secrets-service.ts`; the reference tree's `source/electron-main/onepassword/onepassword-provisioning-bridge.ts`; the reference tree's `source/electron-main/onepassword/onepassword-cli-runtime.ts` (the earlier survey cited these under `source/host/extensions/secrets/` — the actual home is `source/electron-main/onepassword/`)
+- Build: `src/client/approval-cards.ts` (secret-ask kind at lines 54-55; credential-ask mapping at line 136)

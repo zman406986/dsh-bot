@@ -44,6 +44,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { apply as pluginApply, INBOX_JOBS_HEADING } from "../src/plugin.js";
+import { volatileConfig } from "./support/plugin-config.js";
 import {
   DISPATCHER_START_COMMAND,
   INBOX_TABLE_NAME,
@@ -339,8 +340,8 @@ function createInboxCtx(shared: ReturnType<typeof createSharedTables>): InboxCtx
       },
     },
     subagents: {
-      async startContinuable() {
-        return { childId: "child-1", messageId: "msg-child-1" };
+      async startActivation() {
+        return { childId: "child-1", messageId: "msg-child-1", dispose: async () => {} };
       },
       interrupt() {},
       async sendMessage() {
@@ -432,11 +433,11 @@ describe("inbox end to end — the off switch (ticket 113, ADR-0023)", () => {
       // never even created (the watcher mkdirs its root at start).
       const offStore = createSharedTables();
       const offCtx = createInboxCtx(offStore);
-      pluginApply(offCtx as never, {
-        enabled: true,
-        inboxEnabled: false,
-        inboxDir: root,
-      });
+      pluginApply(offCtx as never, volatileConfig({
+          enabled: true,
+          inboxEnabled: false,
+          inboxDir: root,
+  }));
       const offAgent = createAgent("s-1");
       offCtx.bindAgent(offAgent);
       offCtx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent: offAgent });
@@ -454,11 +455,11 @@ describe("inbox end to end — the off switch (ticket 113, ADR-0023)", () => {
       // nothing starts (and nothing crashes).
       const emptyStore = createSharedTables();
       const emptyCtx = createInboxCtx(emptyStore);
-      pluginApply(emptyCtx as never, {
-        enabled: true,
-        inboxEnabled: true,
-        inboxDir: "",
-      });
+      pluginApply(emptyCtx as never, volatileConfig({
+          enabled: true,
+          inboxEnabled: true,
+          inboxDir: "",
+  }));
       const emptyAgent = createAgent("s-1");
       emptyCtx.bindAgent(emptyAgent);
       emptyCtx.runCommand({
@@ -486,12 +487,12 @@ describe("inbox end to end — the full pipeline (ticket 113, ADR-0023)", () => 
     const shared = createSharedTables();
     const ctx = createInboxCtx(shared);
     try {
-      pluginApply(ctx as never, {
-        enabled: true,
-        inboxEnabled: true,
-        inboxDir: root,
-        inboxRescanIntervalMs: 1000,
-      });
+      pluginApply(ctx as never, volatileConfig({
+          enabled: true,
+          inboxEnabled: true,
+          inboxDir: root,
+          inboxRescanIntervalMs: 1000,
+  }));
       const agent = createAgent("s-1");
       ctx.bindAgent(agent);
       const started = ctx.runCommand({
@@ -562,12 +563,12 @@ describe("inbox end to end — the full pipeline (ticket 113, ADR-0023)", () => 
     {
       const ctx = createInboxCtx(shared);
       try {
-        pluginApply(ctx as never, {
-          enabled: true,
-          inboxEnabled: true,
-          inboxDir: root,
-          inboxRescanIntervalMs: 1000,
-        });
+        pluginApply(ctx as never, volatileConfig({
+            enabled: true,
+            inboxEnabled: true,
+            inboxDir: root,
+            inboxRescanIntervalMs: 1000,
+  }));
         const agent = createAgent("s-1");
       ctx.bindAgent(agent);
         ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
@@ -593,12 +594,12 @@ describe("inbox end to end — the full pipeline (ticket 113, ADR-0023)", () => 
     {
       const ctx = createInboxCtx(shared);
       try {
-        pluginApply(ctx as never, {
-          enabled: true,
-          inboxEnabled: true,
-          inboxDir: root,
-          inboxRescanIntervalMs: 1000,
-        });
+        pluginApply(ctx as never, volatileConfig({
+            enabled: true,
+            inboxEnabled: true,
+            inboxDir: root,
+            inboxRescanIntervalMs: 1000,
+  }));
         const agent = createAgent("s-1");
       ctx.bindAgent(agent);
         ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
@@ -646,12 +647,12 @@ describe("inbox end to end — the full pipeline (ticket 113, ADR-0023)", () => 
       warnings.push(args);
     };
     try {
-      pluginApply(ctx as never, {
-        enabled: true,
-        inboxEnabled: true,
-        inboxDir: root,
-        inboxRescanIntervalMs: 1000,
-      });
+      pluginApply(ctx as never, volatileConfig({
+          enabled: true,
+          inboxEnabled: true,
+          inboxDir: root,
+          inboxRescanIntervalMs: 1000,
+  }));
       const agent = createAgent("s-1");
       ctx.bindAgent(agent);
       ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
@@ -689,12 +690,12 @@ describe("inbox end to end — the full pipeline (ticket 113, ADR-0023)", () => 
     const shared = createSharedTables();
     const ctx = createInboxCtx(shared);
     try {
-      pluginApply(ctx as never, {
-        enabled: true,
-        inboxEnabled: true,
-        inboxDir: root,
-        inboxRescanIntervalMs: 1000,
-      });
+      pluginApply(ctx as never, volatileConfig({
+          enabled: true,
+          inboxEnabled: true,
+          inboxDir: root,
+          inboxRescanIntervalMs: 1000,
+  }));
       const agent = createAgent("s-1");
       ctx.bindAgent(agent);
       ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
@@ -748,12 +749,12 @@ describe("inbox end to end — no dispatcher at claim (ticket 113 N1a)", () => {
     const shared = createSharedTables();
     const ctx = createInboxCtx(shared);
     try {
-      pluginApply(ctx as never, {
-        enabled: true,
-        inboxEnabled: true,
-        inboxDir: root,
-        inboxRescanIntervalMs: 1000,
-      });
+      pluginApply(ctx as never, volatileConfig({
+          enabled: true,
+          inboxEnabled: true,
+          inboxDir: root,
+          inboxRescanIntervalMs: 1000,
+  }));
       // Bound for wake routing, but never activated: ZERO live dispatcher
       // sessions while the watcher claims the job.
       const agent = createAgent("s-1");
@@ -832,12 +833,12 @@ describe("inbox end to end — several dispatchers route to the earliest activat
     const shared = createSharedTables();
     const ctx = createInboxCtx(shared);
     try {
-      pluginApply(ctx as never, {
-        enabled: true,
-        inboxEnabled: true,
-        inboxDir: root,
-        inboxRescanIntervalMs: 1000,
-      });
+      pluginApply(ctx as never, volatileConfig({
+          enabled: true,
+          inboxEnabled: true,
+          inboxDir: root,
+          inboxRescanIntervalMs: 1000,
+  }));
       const first = createScopedAgent("s-1");
       const second = createScopedAgent("s-2");
       ctx.bindAgent(first);
@@ -950,12 +951,12 @@ describe("inbox end to end — boot rescan adopts disk truth (ticket 113 N2)", (
         ]),
       );
 
-      pluginApply(ctx as never, {
-        enabled: true,
-        inboxEnabled: true,
-        inboxDir: root,
-        inboxRescanIntervalMs: 1000,
-      });
+      pluginApply(ctx as never, volatileConfig({
+          enabled: true,
+          inboxEnabled: true,
+          inboxDir: root,
+          inboxRescanIntervalMs: 1000,
+  }));
       const agent = createAgent("s-1");
       ctx.bindAgent(agent);
       const started = ctx.runCommand({
@@ -1018,12 +1019,12 @@ describe("inbox end to end — the reply writer is not gated on current intake c
     {
       const ctx = createInboxCtx(shared);
       try {
-        pluginApply(ctx as never, {
-          enabled: true,
-          inboxEnabled: true,
-          inboxDir: root,
-          inboxRescanIntervalMs: 1000,
-        });
+        pluginApply(ctx as never, volatileConfig({
+            enabled: true,
+            inboxEnabled: true,
+            inboxDir: root,
+            inboxRescanIntervalMs: 1000,
+  }));
         const agent = createAgent("s-1");
         ctx.bindAgent(agent);
         const started = ctx.runCommand({
@@ -1080,11 +1081,11 @@ describe("inbox end to end — the reply writer is not gated on current intake c
     {
       const ctx = createInboxCtx(shared);
       try {
-        pluginApply(ctx as never, {
-          enabled: true,
-          inboxEnabled: false,
-          inboxDir: "",
-        });
+        pluginApply(ctx as never, volatileConfig({
+            enabled: true,
+            inboxEnabled: false,
+            inboxDir: "",
+  }));
         const agent = createAgent("s-1");
         ctx.bindAgent(agent);
         const started = ctx.runCommand({

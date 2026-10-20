@@ -2,23 +2,25 @@
  * Ticket 68 — onboarding first-run flow (ADR-0018 in-scope area).
  *
  * Offline only (S8): the suppression matrix, the seen-record parsing (the
- * fail-open pin), the beat walk, the pane view model, the seen-write
- * hand-off, and the composition wiring over fakes — the established
- * client-suite style. Component rendering stays covered by build success +
- * typecheck (the shell's own discipline); the live first-run visual pass is
- * the 45/33 lane and is deliberately NOT claimed here.
+ * fail-open pin), the beat walk, the pane view model, and the composition
+ * wiring over fakes — the established client-suite style. Component rendering
+ * stays covered by build success + typecheck (the shell's own discipline);
+ * the live first-run visual pass is the 45/33 lane and is deliberately NOT
+ * claimed here.
+ *
+ * The settings-backed seen record left with dsh 0.2.1: only the plugin's
+ * declared volatile fields are accepted, so an undeclared `onboarding` key
+ * would be rejected. The store keeps a generic seen-value channel and the
+ * record parser; nothing feeds it by default.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   ONBOARDING_BEATS,
-  ONBOARDING_SETTINGS_KEY,
   createOnboardingStore,
   describeOnboardingPane,
   isOnboardingSeenRecord,
   isOnboardingSuppressed,
-  onboardingSeenFromDocument,
-  writeOnboardingSeenRecord,
   type OnboardingBox,
 } from "../src/client/onboarding.js";
 import {
@@ -42,11 +44,7 @@ import {
 } from "../src/client/shell-store.js";
 import { createRosterStore } from "../src/client/roster-store.js";
 import { createSettingsCardStore } from "../src/client/settings-card-store.js";
-import type {
-  ClientContext,
-  ClientSettingsScopeLike,
-  ClientSettingsScopeSnapshotLike,
-} from "../src/client/context.js";
+import type { ClientContext } from "../src/client/context.js";
 import type { RosterSnapshot } from "../src/core/roster-snapshot.js";
 
 /** One recorded slot entry in a fake's per-slot cell (ticket 86). */
@@ -244,20 +242,6 @@ describe("onboarding seen record — parse + fail-open (ticket 68, AC 2)", () =>
       );
     }
   });
-
-  it("extracts the record from the namespace document; unreadable documents yield undefined", () => {
-    assert.deepEqual(onboardingSeenFromDocument({ [ONBOARDING_SETTINGS_KEY]: { seen: true } }), {
-      seen: true,
-    });
-    assert.equal(onboardingSeenFromDocument({ enabled: true }), undefined);
-    assert.equal(onboardingSeenFromDocument(undefined), undefined);
-    assert.equal(onboardingSeenFromDocument("garbage"), undefined);
-    assert.equal(onboardingSeenFromDocument([1, 2]), undefined);
-  });
-
-  it("the key rides OUR settings namespace (A5) and stays stable", () => {
-    assert.equal(ONBOARDING_SETTINGS_KEY, "onboarding");
-  });
 });
 
 describe("onboarding suppression decision (ticket 68, AC 2)", () => {
@@ -314,25 +298,25 @@ describe("onboarding store — seen-flag lifecycle + beat walk (ticket 68)", () 
     });
   });
 
-  it("applyDocument feeds the seen input from the namespace document (round trip)", () => {
+  it("applySeenValue feeds the seen input (round trip)", () => {
     const store = createOnboardingStore();
     const versions: number[] = [];
     store.subscribe(() => versions.push(store.getBox().version));
-    store.applyDocument({ enabled: true, [ONBOARDING_SETTINGS_KEY]: { seen: true } });
+    store.applySeenValue({ seen: true });
     assert.deepEqual(store.getBox().seenValue, { seen: true });
-    store.applyDocument({ [ONBOARDING_SETTINGS_KEY]: "corrupt" });
+    store.applySeenValue("corrupt");
     assert.equal(store.getBox().seenValue, "corrupt"); // fail-open input
-    store.applyDocument(undefined);
+    store.applySeenValue(undefined);
     assert.equal(store.getBox().seenValue, undefined);
     assert.equal(versions.length, 3);
   });
 
-  it("a re-delivered identical document does not emit (stable snapshots, no churn)", () => {
+  it("a re-delivered identical value does not emit (stable snapshots, no churn)", () => {
     const store = createOnboardingStore();
-    const doc = { [ONBOARDING_SETTINGS_KEY]: { seen: true } };
-    store.applyDocument(doc);
+    const seen = { seen: true };
+    store.applySeenValue(seen);
     const version = store.getBox().version;
-    store.applyDocument(doc);
+    store.applySeenValue(seen);
     assert.equal(store.getBox().version, version);
   });
 
@@ -456,29 +440,28 @@ describe("onboarding settle gating — the racy seen read (ticket 87)", () => {
     assert.equal(versions.length, 1);
   });
 
-  it("THE LOSING ORDER (live reload #1): the document arrives AFTER the first decision — pending → settled, never beats", () => {
+  it("THE LOSING ORDER (live reload #1): the value arrives AFTER the first decision — pending → settled, never beats", () => {
     const store = createOnboardingStore();
-    // The shipped controller's state at bind time while the describe read our
-    // own bind started is on the wire: `loading`, value undefined. Deciding
-    // here reads the fail-open default and re-shows the flow on a reload
-    // whose record stands — the pass-4 symptom.
+    // The read starts with no value delivered yet. Deciding here reads the
+    // fail-open default and re-shows the flow on a reload whose record stands
+    // — the pass-4 symptom.
     store.applySnapshot("loading", undefined);
     assert.equal(describeOnboardingPane(store.getBox(), NO_MIRRORS).kind, "pending");
-    // The document lands (the persisted seen record served back):
-    store.applySnapshot("ready", {
-      enabled: true,
-      [ONBOARDING_SETTINGS_KEY]: { seen: true },
-    });
+    // The value lands (the persisted seen record served back):
+    store.applySnapshot("ready", { seen: true });
     assert.equal(store.getBox().buffering, false);
     assert.deepEqual(store.getBox().seenValue, { seen: true });
     assert.equal(describeOnboardingPane(store.getBox(), NO_MIRRORS).kind, "settled");
   });
 
-  it("a fresh profile (the document lands WITHOUT a seen record) shows the flow — only after the read settles", () => {
+  it("a fresh profile (the read lands WITHOUT a seen record) shows the flow — only after the read settles", () => {
     const store = createOnboardingStore();
     store.applySnapshot("loading", undefined);
     assert.equal(describeOnboardingPane(store.getBox(), NO_MIRRORS).kind, "pending");
-    store.applySnapshot("ready", { enabled: true, accessRequestTimeoutMs: 30_000 });
+    store.applySnapshot("ready", undefined);
+    // A value-less `ready` stays pre-acceptance: nothing was delivered.
+    assert.equal(store.getBox().buffering, true);
+    store.applySnapshot("ready", "not-seen");
     assert.equal(store.getBox().buffering, false);
     assert.equal(
       describeOnboardingPane(store.getBox(), NO_MIRRORS).kind,
@@ -496,20 +479,26 @@ describe("onboarding settle gating — the racy seen read (ticket 87)", () => {
     assert.equal(
       describeOnboardingPane(store.getBox(), NO_MIRRORS).kind,
       "beats",
-      "an unreadable namespace must SHOW the flow — buffering may not strand it",
+      "an unreadable record must SHOW the flow — buffering may not strand it",
     );
   });
 
-  it("INVERSE HAZARD: a stale seen=true document is corrected by a later document without it — the flow re-opens", () => {
+  it("INVERSE HAZARD: a stale seen=true value is corrected by a later value without it — the flow re-opens", () => {
     const store = createOnboardingStore();
-    store.applySnapshot("ready", { [ONBOARDING_SETTINGS_KEY]: { seen: true } });
+    store.applySnapshot("ready", { seen: true });
     assert.equal(describeOnboardingPane(store.getBox(), NO_MIRRORS).kind, "settled");
-    store.applySnapshot("ready", { enabled: true });
+    store.applySeenValue(undefined);
     assert.equal(store.getBox().seenValue, undefined);
     assert.equal(
       describeOnboardingPane(store.getBox(), NO_MIRRORS).kind,
       "beats",
       "a transient stale record must not suppress wrongly",
+    );
+    // A non-record value also fails open.
+    store.applySnapshot("ready", "fresh");
+    assert.equal(
+      describeOnboardingPane(store.getBox(), NO_MIRRORS).kind,
+      "beats",
     );
   });
 
@@ -526,7 +515,7 @@ describe("onboarding settle gating — the racy seen read (ticket 87)", () => {
       kinds.push(describeOnboardingPane(store.getBox(), NO_MIRRORS).kind);
     });
     store.applySnapshot("loading", undefined);
-    store.applySnapshot("ready", { [ONBOARDING_SETTINGS_KEY]: { seen: true } });
+    store.applySnapshot("ready", { seen: true });
     assert.deepEqual(kinds, ["pending", "settled"]);
   });
 
@@ -535,58 +524,6 @@ describe("onboarding settle gating — the racy seen read (ticket 87)", () => {
     store.applySnapshot("loading", undefined);
     const mirrors = new Map([["s-1", mirror("snapshot")]]);
     assert.equal(describeOnboardingPane(store.getBox(), mirrors).kind, "settled");
-  });
-});
-
-describe("onboarding seen-write hand-off (ticket 68)", () => {
-  const settle = () => new Promise((resolve) => setImmediate(resolve));
-
-  it("writes the seen record under the namespace key through the ONE bound scope", async () => {
-    const setCalls: Array<{ field: string; value: unknown }> = [];
-    let failed = false;
-    writeOnboardingSeenRecord(
-      {
-        set: (field, value) => {
-          setCalls.push({ field, value });
-          return Promise.resolve();
-        },
-      },
-      () => {
-        failed = true;
-      },
-    );
-    await settle();
-    assert.deepEqual(setCalls, [{ field: ONBOARDING_SETTINGS_KEY, value: { seen: true } }]);
-    assert.equal(failed, false, "a resolved write stays silent — no fake success surface");
-  });
-
-  it("no scope, or a scope without a write path, reports the honest failure (fail-open)", async () => {
-    let failures = 0;
-    writeOnboardingSeenRecord(null, () => {
-      failures += 1;
-    });
-    writeOnboardingSeenRecord(undefined, () => {
-      failures += 1;
-    });
-    writeOnboardingSeenRecord({}, () => {
-      failures += 1;
-    });
-    await settle();
-    assert.equal(failures, 3);
-  });
-
-  it("a rejected write reports the failure instead of a fake save", async () => {
-    let failed = false;
-    writeOnboardingSeenRecord(
-      {
-        set: () => Promise.reject(new Error("host refused the field")),
-      },
-      () => {
-        failed = true;
-      },
-    );
-    await settle();
-    assert.equal(failed, true);
   });
 });
 
@@ -632,49 +569,8 @@ describe("onboarding CSS contract (ticket 68, ticket 49's discipline)", () => {
 });
 
 describe("onboarding shell seat + composition wiring (ticket 68)", () => {
-  /** Scope fake mirroring the shipped bind face (getSnapshot/subscribe/set). */
-  function createScopeFake(
-    initial: ClientSettingsScopeSnapshotLike,
-    options: { rejectSet?: boolean } = {},
-  ) {
-    let snapshot = initial;
-    const listeners = new Set<() => void>();
-    const setCalls: Array<{ field: string; value: unknown }> = [];
-    const scope: ClientSettingsScopeLike & { setCalls: typeof setCalls } = {
-      getSnapshot: () => snapshot,
-      subscribe(listener) {
-        listeners.add(listener);
-        return () => {
-          listeners.delete(listener);
-        };
-      },
-      set(field, value) {
-        setCalls.push({ field, value });
-        if (options.rejectSet === true) return Promise.reject(new Error("refused"));
-        snapshot = {
-          ...snapshot,
-          value: {
-            ...((snapshot.value ?? {}) as Record<string, unknown>),
-            [field]: value,
-          },
-        };
-        for (const listener of [...listeners]) listener();
-        return Promise.resolve();
-      },
-      setCalls,
-    };
-    return {
-      scope,
-      setCalls,
-      emit(next: ClientSettingsScopeSnapshotLike) {
-        snapshot = next;
-        for (const listener of [...listeners]) listener();
-      },
-    };
-  }
-
   /**
-   * Fake ctx: the mount fake plus the settingsScope inject (scaffold idiom).
+   * Fake ctx: the mount fake over the declared service faces.
    *
    * Ticket 86 (2026-09-19): the slots fake carries the shipped SlotCore
    * register rule (one cell per slot name, `(priority ?? 0)` default, per-kind
@@ -683,7 +579,7 @@ describe("onboarding shell seat + composition wiring (ticket 68)", () => {
    * citation (`dsh-web-frontend/dist/assets/index-BKQ_L1z6.js`, minified
    * SlotCore.register).
    */
-  function createOnboardingCtx(scope: ClientSettingsScopeLike | undefined) {
+  function createOnboardingCtx() {
     const locales = new Map<string, unknown>();
     const cells = new Map<string, FakeSlotEntry[]>();
     const injects: Array<{
@@ -734,7 +630,6 @@ describe("onboarding shell seat + composition wiring (ticket 68)", () => {
           };
         },
       },
-      injectRequests: [] as string[][],
       injects,
       cells,
       runFiberTeardown() {
@@ -746,13 +641,7 @@ describe("onboarding shell seat + composition wiring (ticket 68)", () => {
         }
       },
     };
-    const ctx = base as typeof base & ClientContext;
-    ctx.inject = (services: readonly string[], callback) => {
-      (ctx.injectRequests as string[][]).push([...services]);
-      if (scope === undefined || !services.includes("settingsScope")) return;
-      callback({ settingsScope: { bind: () => scope } });
-    };
-    return ctx;
+    return base as typeof base & ClientContext;
   }
 
   function applyWith(ctx: ClientContext, onboarding = createOnboardingStore()) {
@@ -766,90 +655,35 @@ describe("onboarding shell seat + composition wiring (ticket 68)", () => {
   }
 
   it("mountShellPage hosts the seat only when the wiring is provided", () => {
-    const bare = mountShellPage(createOnboardingCtx(undefined));
+    const bare = mountShellPage(createOnboardingCtx());
     assert.equal(bare.hosts.onboarding, undefined);
 
-    const wired = mountShellPage(createOnboardingCtx(undefined), {
+    const wired = mountShellPage(createOnboardingCtx(), {
       store: createOnboardingStore(),
       onSeen: () => {},
     });
     assert.equal(typeof wired.hosts.onboarding, "function"); // never invoked offline
   });
 
-  it("applyClientModule feeds the onboarding store from the SAME settings bind (A5)", () => {
-    const seen = { seen: true };
-    const fake = createScopeFake({
-      status: "ready",
-      value: { enabled: true, [ONBOARDING_SETTINGS_KEY]: seen },
-    });
-    const ctx = createOnboardingCtx(fake.scope);
-    const onboarding = applyWith(ctx);
-    // One runtime-inject request remains: the settings watch (wrapper-only,
-    // never a bare read). The launcher's `layout` watch retired with the
-    // ticket-78 cutover.
-    assert.deepEqual(ctx.injectRequests, [["settingsScope"]]);
-    assert.deepEqual(onboarding.getBox().seenValue, seen);
-
-    // A live replacement re-feeds the input; the suppression decision flips.
-    fake.emit({ status: "ready", value: { enabled: true } });
+  it("the composition feeds NO seen input: the settings-backed record has no channel on 0.2.1", () => {
+    const onboarding = applyWith(createOnboardingCtx());
     assert.equal(onboarding.getBox().seenValue, undefined);
-  });
-
-  it("an unavailable namespace resets the seen input — fail-open, never stranded", () => {
-    const fake = createScopeFake({
-      status: "ready",
-      value: { [ONBOARDING_SETTINGS_KEY]: { seen: true } },
-    });
-    const onboarding = applyWith(createOnboardingCtx(fake.scope));
-    assert.deepEqual(onboarding.getBox().seenValue, { seen: true });
-    fake.emit({ status: "unavailable" });
-    assert.equal(onboarding.getBox().seenValue, undefined);
+    assert.equal(onboarding.getBox().buffering, false);
     assert.equal(
       describeOnboardingPane(onboarding.getBox(), new Map()).kind,
       "beats",
-      "an unreadable record must SHOW the flow",
+      "with no record channel the fail-open default shows the flow",
     );
   });
 
-  it("a runtime without the settingsScope degrades — the flow shows, nothing crashes", () => {
-    const onboarding = applyWith(createOnboardingCtx(undefined));
-    assert.equal(onboarding.getBox().seenValue, undefined);
-    assert.equal(describeOnboardingPane(onboarding.getBox(), new Map()).kind, "beats");
-  });
-
-  it("TICKET 87 wiring: a loading bind buffers the pane; the served document settles it (the reload-#1 order)", () => {
-    // The shipped controller's bind-time snapshot while the describe read our
-    // bind starts is on the wire — the pass-4 reload state, persisted record
-    // and all.
-    const fake = createScopeFake({ status: "loading" });
-    const onboarding = applyWith(createOnboardingCtx(fake.scope));
-    assert.equal(onboarding.getBox().buffering, true);
-    assert.equal(
-      describeOnboardingPane(onboarding.getBox(), new Map()).kind,
-      "pending",
-      "the flow must not render from the fail-open default mid-read",
-    );
-    // The served document arrives through the SAME watch: the decision
-    // re-evaluates reactively — suppressed, never through a beats render.
-    fake.emit({
-      status: "ready",
-      value: { enabled: true, [ONBOARDING_SETTINGS_KEY]: { seen: true } },
-    });
-    assert.equal(onboarding.getBox().buffering, false);
-    assert.deepEqual(onboarding.getBox().seenValue, { seen: true });
-    assert.equal(describeOnboardingPane(onboarding.getBox(), new Map()).kind, "settled");
-  });
-
-  it("the seen write rides the wired scope; a rejection marks the honest failure", async () => {
-    const rejecting = createScopeFake({ status: "ready", value: {} }, { rejectSet: true });
-    const onboarding = applyWith(createOnboardingCtx(rejecting.scope));
-    // The same hand-off the composition captured for the pane's Done/Skip.
-    writeOnboardingSeenRecord(rejecting.scope, () => onboarding.markSaveFailed());
-    await new Promise((resolve) => setImmediate(resolve));
+  it("the seen write has no channel: marking the failure is the honest outcome", () => {
+    const onboarding = applyWith(createOnboardingCtx());
+    // A surface that returns must feed a real transport; until then the flow
+    // simply shows again next launch (fail-open).
+    onboarding.complete();
+    assert.equal(onboarding.getBox().phase, "done");
+    onboarding.markSaveFailed();
     assert.equal(onboarding.getBox().saveFailed, true);
-    assert.deepEqual(rejecting.setCalls, [
-      { field: ONBOARDING_SETTINGS_KEY, value: { seen: true } },
-    ]);
   });
 
   it("the shell component factory accepts the onboarding seat (wiring smoke)", () => {
@@ -861,13 +695,12 @@ describe("onboarding shell seat + composition wiring (ticket 68)", () => {
     assert.equal(typeof component, "function");
   });
 
-  it("a full apply() over a scope-less runtime degrades without crashing (and registers no layout page)", () => {
-    const ctx = createOnboardingCtx(undefined);
+  it("a full apply() registers only the additive entries and nothing in dsh's layout", () => {
+    const ctx = createOnboardingCtx();
     assert.doesNotThrow(() => apply(ctx));
-    // Ticket 99 (ADR-0021): no `main` page is registered at all — the
-    // default posture's only injects are the additive toolview and
-    // settings-card waits, and over a scope-less runtime the watch degrades
-    // honestly (pinned above). Nothing of ours lands in dsh's layout.
+    // The default composition's three declaration waits: toolviews, the
+    // settings page, and the worker session-kind glyph (ticket 123).
+    assert.equal(ctx.injects.length, 4);
     const main = ctx.injects.find((record) => record.parent === "main");
     assert.equal(main, undefined, "no `main` page in the default posture");
   });

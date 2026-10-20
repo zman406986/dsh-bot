@@ -1,21 +1,20 @@
 /**
- * The `Settings → 插件配置` card component (ticket 47).
+ * The dispatcher's configuration page (ticket 47; 0.2.1 row slot).
  *
- * One plugin card inside the shipped configurable-plugins tab: a header naming
- * the plugin and what its settings govern, disclosing its controls in place,
- * with the save that writes them. The tab renders us inside a `<ul>`, so the
- * card is an `<li>` — the same shape the shipped cards render
- * (`dsh-client-ui-settings-plugins/lib/client.js:201-275`).
+ * One plugin row's configuration in the Plugins page: the row keyed
+ * `<package name>#<row id>` gains a configure control that opens this page,
+ * and the page hands the entry the Host-owned snapshot and its atomic write
+ * verb as owner props (`PluginConfigViewProps`, `slot-contract.d.ts:165-169`).
  *
  * Presentation + staging only: nothing here writes as a control settles. A
  * control reports what the user typed to the store; the card's Save is the one
- * point where a draft becomes a document mutation (the shipped form contract,
- * `card-form.d.ts`). The component owns exactly one local state — whether the
- * card is open — because which card a user has open is a reading gesture.
+ * point where a draft becomes a document mutation (the shipped form contract).
+ * The component owns exactly one local state — whether the card is open —
+ * because which card a user has open is a reading gesture.
  *
- * Availability is the store's verdict, not this component's: while the
- * namespace is not served the card renders NOTHING (the shipped `PluginCard`
- * behaviour), so a deployment that does not compose the plugin leaves no trace.
+ * Availability is the store's verdict, not this component's: while no form is
+ * handed in the card renders NOTHING, so a deployment that does not serve the
+ * entry leaves no trace.
  *
  * Theming (ticket 49's contract): every colour is a host design token
  * (`--dsw-alias-*`, ordinary custom properties on `body`),
@@ -53,6 +52,7 @@ import {
   type SettingsCardFieldBox,
   type SettingsCardStore,
 } from "./settings-card-store.js";
+import type { PluginConfigViewPropsLike } from "./context.js";
 import type { TranslateFn } from "./overlay.js";
 
 /** Class prefix — ours, namespaced, no shipped kit classes. */
@@ -224,25 +224,37 @@ function FieldControl(props: {
 }
 
 /**
- * Create the settings card component bound to a translate seat and the card
- * store (factory injection, the same pattern as the capsule). Renders nothing
- * while the store reports the namespace unavailable — no error surface, no
- * disabled control.
+ * Create the settings page bound to a translate seat and the card store
+ * (factory injection, the same pattern as the toolviews). The slot owner
+ * hands in `view` and, on a served row, `form`; the card attaches that form
+ * and renders nothing while none is handed in.
+ *
+ * The attach effect keys on the snapshot reference: the page derives `state`
+ * from `ConfigForm.getSnapshot()`, which is stable until the mirror changes,
+ * so the effect runs once per real refresh and cannot feed its own publish.
  */
 export function createPluginSettingsCard(
   t: TranslateFn,
   store: SettingsCardStore,
-): () => JSX.Element | null {
-  return () => {
+): (props: PluginConfigViewPropsLike) => JSX.Element | null {
+  return (props) => {
     const box = useSyncExternalStore(store.subscribe, store.getBox);
     const [open, setOpen] = useState(false);
     const { view } = box;
+    const form = props.form;
 
+    useEffect(() => {
+      store.attach(form);
+    }, [store, form?.state]);
+
+    if (props.view === "summary") {
+      return <>{t(SETTINGS_CARD_DESCRIPTION_KEY)}</>;
+    }
     if (!view.available) return null;
 
     const disabled = !view.writable || box.saving;
     return (
-      <li className={CARD_CLASS} data-open={open ? "true" : "false"}>
+      <section className={CARD_CLASS} data-open={open ? "true" : "false"}>
         <style>{SETTINGS_CARD_CSS}</style>
         <button
           type="button"
@@ -308,7 +320,7 @@ export function createPluginSettingsCard(
             </div>
           </div>
         ) : null}
-      </li>
+      </section>
     );
   };
 }

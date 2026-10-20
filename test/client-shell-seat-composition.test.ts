@@ -518,11 +518,10 @@ describe("shell seat composition survives selection (ticket 88)", () => {
       "an in-flight read must buffer, not render the flow",
     );
 
-    // The served document arrives through the SAME watch: the suppression
-    // decision re-evaluates reactively — settled, never through a beats
-    // render.
+    // The served record arrives: the suppression decision re-evaluates
+    // reactively — settled, never through a beats render.
     await act(async () => {
-      onboarding.applySnapshot("ready", { onboarding: { seen: true } });
+      onboarding.applySnapshot("ready", { seen: true });
     });
     assert.equal(
       query("[data-onboarding]")?.getAttribute("data-onboarding"),

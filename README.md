@@ -1,10 +1,10 @@
 # dsh-multitask-dispatcher
 
-Always-on multitask dispatcher plugin for DeepSeek Harness (`dsh`). A primary chat agent that stays responsive by delegating non-trivial work to blank background workers.
+Always-on multitask dispatcher plugin for DeepSeek Harness (`dsh`). A primary chat agent that stays responsive by delegating non-trivial work to background workers that start with empty context.
 
 ## Status
 
-Implemented and offline-tested: the dispatcher plugin (`src/core` multitask surface behind the `DshHost` seam, `src/adapter` Cordis/dsh glue, `src/worker` blank-context workers) and its web client surface (`client/`, the wrapper shell with roster, approval cards, and composer send). `npm test` runs the suite with no network and no LLM; the project's decision history is recorded in the repo's local `Issue-tracker/`. Remaining work is tracked in `Issue-tracker/open/`.
+Implemented and offline-tested: the dispatcher plugin (`src/core` multitask surface behind the `DshHost` boundary, `src/adapter` Cordis/dsh glue, `src/worker` workers that start with empty context) and its web client surface (`client/`, the wrapper shell with the worker list, approval cards, and composer send). `npm test` runs the suite with no network and no LLM; the project's decision history is recorded in the repo's local `Issue-tracker/`. Remaining work is tracked in `Issue-tracker/open/`.
 
 ## Develop
 
@@ -59,4 +59,4 @@ Where `dev/cordis.web.patch.yml` holds the same insert row.
 | `src/core/fake-host.ts` | Hand-written fake for tests (no mocking framework) |
 | `src/core/multitask.ts` | Public core surface (`createMultitask`) |
 | `src/core/types.ts` | Worker / settle / spawn types |
-| `test/host-seam.test.ts` | Seam tests: no network, no LLM, no live dsh |
+| `test/host-seam.test.ts` | Boundary tests: no network, no LLM, no live dsh |

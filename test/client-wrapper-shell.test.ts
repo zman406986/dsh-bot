@@ -75,19 +75,6 @@ function snapshot(
   };
 }
 
-/**
- * The declarations of one rule, for presentation pins (the
- * `client-theme-tokens` idiom): source text, not computed style — the only
- * way to pin the ABSENCE of a reveal selector, which computed style hides.
- */
-function ruleFor(css: string, selector: string): string {
-  const at = css.indexOf(selector + "{");
-  assert.notEqual(at, -1, `selector ${selector} is gone`);
-  const open = css.indexOf("{", at);
-  const end = css.indexOf("}", open);
-  return css.slice(open + 1, end);
-}
-
 describe("wrapper shell store — feed transitions (ticket 77)", () => {
   it("upserts new sessions in insertion order and updates known rows in place", () => {
     const store = createDispatcherShellStore();
@@ -334,43 +321,6 @@ describe("wrapper shell CSS contract (ticket 77, ticket 49's discipline)", () =>
 
   it("the shell frame stylesheet opens with the frame class", () => {
     assert.match(SHELL_CSS.trim(), new RegExp(`^\\.${SHELL_CLASS}\\{`));
-  });
-
-  it("the kill affordance is visible at rest — no hover/focus gate on the row actions", () => {
-    // Ticket 102: the delete button shipped inside a `display:none` span
-    // revealed only on hover, so the live report was "no way to kill a
-    // dispatcher from the floating window" — present, rendered, invisible.
-    assert.match(
-      ruleFor(SHELL_CSS, ".multitask-dispatcher-shell__row-actions"),
-      /display:flex/,
-      "the row actions are hidden at rest again",
-    );
-    assert.doesNotMatch(
-      ruleFor(SHELL_CSS, ".multitask-dispatcher-shell__row-actions"),
-      /display:none/,
-      "the row actions are hidden at rest again",
-    );
-    // Only source text can pin the gate's ABSENCE: a re-added `li:hover`
-    // reveal would still compute `flex` from the base rule.
-    assert.doesNotMatch(
-      SHELL_CSS,
-      /li:hover \.multitask-dispatcher-shell__row-actions/,
-      "the delete affordance is hover-gated again",
-    );
-  });
-
-  it("the add entry is pinned to the bottom of the sidebar (never below the fold)", () => {
-    // Ticket 102: `margin-top:auto` at the foot of an `overflow-y:auto`
-    // sidebar meant a long roster scrolled the add section out of the
-    // fixed-height window.
-    const rule = ruleFor(SHELL_CSS, ".multitask-dispatcher-shell__add");
-    assert.match(rule, /position:sticky/, "the add entry scrolls away again");
-    assert.match(rule, /bottom:0/, "the add entry is not pinned to the foot");
-    assert.match(
-      rule,
-      /background:var\(--dsw-alias-bg-layer-3\)/,
-      "the pinned add entry lost the sidebar's own surface token",
-    );
   });
 });
 

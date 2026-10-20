@@ -37,6 +37,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { readFileSync } from "node:fs";
 import { apply as pluginApply } from "../src/plugin.js";
+import { volatileConfig } from "./support/plugin-config.js";
 import {
   ACTIVATION_PRESENCE_HINT,
   DISPATCHER_RESOLVE_COMMAND,
@@ -52,8 +53,6 @@ import {
 } from "../src/adapter/index.js";
 import type { DurableWorkerMarker } from "../src/core/durability.js";
 import {
-  ROSTER_SETTINGS_KEY,
-  ROSTER_STALE_WINDOW_MS,
 } from "../src/core/roster-snapshot.js";
 import { ACCESS_CLASSES } from "../src/core/access-types.js";
 import {
@@ -162,43 +161,6 @@ function createCompositionCtx() {
         for (const step of result as Iterable<unknown>) void step;
       }
     },
-    inject(services: readonly string[], callback: (child: unknown) => void) {
-      if (services.includes("settings")) {
-        callback({
-          settings: {
-            // Settings-provider fake: the shipped scope contract
-            // (ticket 93). `register(ns, schema, options?)` RETURNS the owner
-            // scope (dsh-settings lib/index.js:281-315) while
-            // `installSection(...)` returns VOID (`:327-343`;
-            // types :228); a second claim of one namespace fails loud
-            // (shipped rule, dsh-settings lib/index.js:283).
-            register(ns: string) {
-              if (claimedNamespaces.has(ns)) {
-                throw new Error(
-                  `settings namespace "${ns}" is already registered`,
-                );
-              }
-              claimedNamespaces.add(ns);
-              return {
-                // The host scope's `update` is ASYNC (dsh-settings
-                // lib/types/index.d.ts:105-108).
-                async update(value: unknown) {
-                  updates.push(value);
-                },
-              };
-            },
-            installSection(_owner: unknown, ns: string) {
-              if (claimedNamespaces.has(ns)) {
-                throw new Error(
-                  `settings namespace "${ns}" is already registered`,
-                );
-              }
-              claimedNamespaces.add(ns);
-            },
-          },
-        });
-      }
-    },
     on(name: string, cb: (payload: never) => void) {
       const list = listeners.get(name) ?? [];
       list.push(cb);
@@ -256,9 +218,13 @@ function createCompositionCtx() {
       },
     },
     subagents: {
-      async startContinuable() {
+      async startActivation() {
         const childId = `child-${nextChild++}`;
-        return { childId, messageId: `msg-${childId}` };
+        return {
+          childId,
+          messageId: `msg-${childId}`,
+          dispose: async () => {},
+        };
       },
       interrupt() {},
       async sendMessage() {
@@ -282,6 +248,7 @@ function createCompositionCtx() {
     asks,
     commandNames: () => [...commands.keys()],
     toolNames: () => [...tools.keys()],
+    tool: (name: string) => tools.get(name),
     listenerCount: () => {
       let total = 0;
       for (const list of listeners.values()) total += list.length;
@@ -328,14 +295,6 @@ type SnapshotLike = {
     kind: string;
   }>;
 };
-
-/** Every roster snapshot mirrored through the settings scope, in order. */
-function rosterSnapshots(updates: readonly unknown[]): SnapshotLike[] {
-  return updates
-    .map((update) => (update as Record<string, unknown>)[ROSTER_SETTINGS_KEY])
-    .filter((snapshot) => snapshot !== undefined)
-    .map((snapshot) => snapshot as SnapshotLike);
-}
 
 const RESTORED_MARKER: DurableWorkerMarker = {
   workerId: "w-restored",
@@ -387,7 +346,7 @@ describe("composition polish — activation copy (design-17 §7)", () => {
 
   it("the command result carries the enlarged success copy on a real activation", async () => {
     const ctx = createCompositionCtx();
-    pluginApply(ctx, { enabled: true });
+    pluginApply(ctx, volatileConfig({ enabled: true }));
     const agent = createAgent("s-1");
     const result = ctx.runCommand({
       commandId: DISPATCHER_START_COMMAND,
@@ -447,7 +406,7 @@ describe("composition polish — activation copy (design-17 §7)", () => {
 describe("composition polish — dormant registration matrix (design-17 §3.2/§8)", () => {
   it("dormant boot registers nothing visible beyond the two commands (tickets 27–31 add nothing)", async () => {
     const ctx = createCompositionCtx();
-    pluginApply(ctx, { enabled: true });
+    pluginApply(ctx, volatileConfig({ enabled: true }));
 
     // Stock dsh: the first top-level session is not repurposed.
     const agent = createAgent("s-1");
@@ -464,9 +423,9 @@ describe("composition polish — dormant registration matrix (design-17 §3.2/§
     ]);
     assert.deepEqual(ctx.toolNames(), []);
 
-    // Ticket 27/28 (roster v2 + sections) and ticket 31 (rebuild) publish
-    // NOTHING while dormant — the panel has no snapshot to show.
-    assert.deepEqual(rosterSnapshots(ctx.updates), []);
+    // 0.2.1 removed the settings mirror entirely; dormant boot registers no
+    // publish path at all, so nothing can reach a client surface.
+    assert.deepEqual(ctx.updates, []);
     // Ticket 23/30 (access prompts) stay inert without an activation.
     assert.deepEqual(ctx.asks, []);
     // Ticket 31: no restart notice is injected before an activation exists.
@@ -474,26 +433,28 @@ describe("composition polish — dormant registration matrix (design-17 §3.2/§
       agent.injected.filter((m) => textOf(m).includes("## Restart")).length,
       0,
     );
-    // Listener baseline: the passive plumbing is exactly four listeners
-    // (2 lifecycle + 2 host), unchanged by tickets 27–31.
-    assert.equal(ctx.listenerCount(), 4);
+    // Listener baseline: the passive plumbing is exactly five listeners
+    // (2 lifecycle + 3 host: `subagent/end`, `session/event`, `agent/created`
+    // — the last is the worker-composition seam and must stay passive while
+    // no spawn is in flight).
+    assert.equal(ctx.listenerCount(), 5);
   });
 
   it("an unrelated settings write while dormant does not surface a roster", async () => {
     const ctx = createCompositionCtx();
-    pluginApply(ctx, { enabled: true });
+    pluginApply(ctx, volatileConfig({ enabled: true }));
     ctx.fire("agent/status", {
       agent: { session: { id: "someone-else" } },
       status: "running",
     });
     await flushActivation();
-    assert.deepEqual(rosterSnapshots(ctx.updates), []);
+    assert.deepEqual(ctx.updates, []);
     assert.deepEqual(ctx.toolNames(), []);
   });
 
-  it("activation is what raises the surface: tools appear, a snapshot is mirrored", async () => {
+  it("activation is what raises the surface: tools appear, nothing is mirrored", async () => {
     const ctx = createCompositionCtx();
-    pluginApply(ctx, { enabled: true });
+    pluginApply(ctx, volatileConfig({ enabled: true }));
     const agent = createAgent("s-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await flushActivation();
@@ -507,56 +468,46 @@ describe("composition polish — dormant registration matrix (design-17 §3.2/§
       "steer_worker",
       "stop_worker",
     ]);
-    const snapshots = rosterSnapshots(ctx.updates);
-    assert.ok(snapshots.length >= 1, "activation mirrors a roster snapshot");
-    assert.equal(snapshots[0]?.dispatcherSessionId, "s-1");
+    // The roster view now comes from the core through check_workers; no
+    // settings document is written.
+    assert.deepEqual(ctx.updates, [], "no settings mirror exists to write to");
+    const check = ctx.tool("check_workers");
+    assert.ok(check);
+    const roster = (await check.execute({})) as {
+      ok: boolean;
+      rows: Array<{ worker_id: string }>;
+    };
+    assert.deepEqual(roster.rows, [], "the empty roster reads back");
   });
 });
 
 describe("composition polish — deactivation honesty (design-17 §3.2)", () => {
-  it("session end ages the panel path to unavailable; re-activation rebuilds a fresh roster", async () => {
+  it("session end unbinds the surface; re-activation rebuilds a fresh roster", async () => {
     const ctx = createCompositionCtx();
     await seedMarkers(ctx, [RESTORED_MARKER]);
-    pluginApply(ctx, { enabled: true });
+    pluginApply(ctx, volatileConfig({ enabled: true }));
     const agent = createAgent("s-1");
 
-    // First activation: the durable rebuild lands BEFORE the first publish,
-    // so the mirrored snapshot already carries the restored terminal row.
+    // First activation: the durable rebuild lands before the roster is read,
+    // so the restored terminal row is already there.
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await flushActivation();
-    const first = rosterSnapshots(ctx.updates).at(-1);
-    assert.ok(first, "first activation published a snapshot");
-    const firstView = describeRosterPanel(
-      { kind: "snapshot", snapshot: first as never },
-      first.publishedAtMs,
-    );
-    assert.equal(firstView.kind, "rows", "fresh snapshot renders rows");
+    const check = ctx.tool("check_workers");
+    assert.ok(check, "activation raised the tool surface");
+    const first = (await check.execute({})) as {
+      ok: boolean;
+      rows: Array<{ worker_id: string }>;
+    };
     assert.ok(
-      first.workers.some((worker) => worker.workerId === "w-restored"),
-      "restored row is in the first snapshot",
+      first.rows.some((row) => row.worker_id === "w-restored"),
+      "restored row is on the roster after the rebuild",
     );
 
-    // Session end: the dispatcher unbinds and publishing stops. The client
-    // pull path keeps the last snapshot only until the stale window passes —
-    // exactly-at-window is still fresh, one ms beyond is unavailable.
+    // Session end: the dispatcher unbinds and its tool surface disappears.
     ctx.fire("agent/disposed", { agent });
     assert.deepEqual(ctx.toolNames(), [], "the activated tool surface is gone");
-    const atWindow = describeRosterPanel(
-      { kind: "snapshot", snapshot: first as never },
-      first.publishedAtMs + ROSTER_STALE_WINDOW_MS,
-    );
-    assert.equal(atWindow.kind, "rows", "still fresh exactly at the window");
-    const aged = describeRosterPanel(
-      { kind: "snapshot", snapshot: first as never },
-      first.publishedAtMs + ROSTER_STALE_WINDOW_MS + 1,
-    );
-    assert.deepEqual(aged, { kind: "unavailable" });
-    assert.equal(rosterViewCopyKey(aged), "roster.unavailable");
-    const publishesBeforeReactivation = rosterSnapshots(ctx.updates).length;
 
-    // Re-activation: the deliberate second consent republishes a NEW snapshot
-    // (fresh clock) carrying the rebuilt roster — the user comes back to a
-    // live panel, not a permanently unavailable one.
+    // Re-activation raises a new surface over the same core state.
     const again = ctx.runCommand({
       commandId: DISPATCHER_START_COMMAND,
       agent,
@@ -566,25 +517,16 @@ describe("composition polish — deactivation honesty (design-17 §3.2)", () => 
       text: DISPATCHER_START_SUCCESS,
     });
     await flushActivation();
-    const snapshots = rosterSnapshots(ctx.updates);
+    const checkAgain = ctx.tool("check_workers");
+    assert.ok(checkAgain, "re-activation raises the surface again");
+    const second = (await checkAgain.execute({})) as {
+      ok: boolean;
+      rows: Array<{ worker_id: string }>;
+    };
     assert.ok(
-      snapshots.length > publishesBeforeReactivation,
-      "re-activation publishes a fresh snapshot",
+      second.rows.some((row) => row.worker_id === "w-restored"),
+      "the rebuilt roster is readable again",
     );
-    const second = snapshots.at(-1);
-    assert.ok(second);
-    assert.equal(second.dispatcherSessionId, "s-1");
-    assert.ok(
-      second.workers.some((worker) => worker.workerId === "w-restored"),
-      "the rebuilt roster is back on the panel",
-    );
-    const secondView = describeRosterPanel(
-      { kind: "snapshot", snapshot: second as never },
-      second.publishedAtMs,
-    );
-    assert.equal(secondView.kind, "rows", "the panel is live again");
-    // A fresh clock is what re-arms the stale window.
-    assert.ok(second.publishedAtMs >= first.publishedAtMs);
   });
 });
 
@@ -708,7 +650,7 @@ describe("composition polish — host duplicate-registration rule (ticket 91)", 
     });
 
     assert.throws(
-      () => pluginApply(ctx, { enabled: true }),
+      () => pluginApply(ctx, volatileConfig({ enabled: true })),
       new RegExp(
         `command "${DISPATCHER_START_COMMAND}" is already registered`,
       ),

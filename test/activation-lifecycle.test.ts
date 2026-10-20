@@ -15,6 +15,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { apply } from "../src/plugin.js";
+import { volatileConfig } from "./support/plugin-config.js";
 import {
   DISPATCHER_START_ALREADY_HERE,
   DISPATCHER_RESOLVE_COMMAND,
@@ -198,9 +199,13 @@ function createFullCtx() {
       },
     },
     subagents: {
-      async startContinuable() {
+      async startActivation() {
         const childId = `child-${nextChild++}`;
-        return { childId, messageId: `msg-${childId}` };
+        return {
+          childId,
+          messageId: `msg-${childId}`,
+          dispose: async () => {},
+        };
       },
       interrupt() {},
       async sendMessage() {
@@ -264,7 +269,7 @@ function textOf(message: unknown): string {
 describe("activation lifecycle — flag matrix (design-16 §3.7)", () => {
   it("flag OFF is fully inert: no command, no tools, no listeners", () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: false });
+    apply(ctx, volatileConfig({ enabled: false }));
 
     assert.deepEqual(ctx.commandNames(), []);
     assert.deepEqual(ctx.toolNames(), []);
@@ -276,7 +281,7 @@ describe("activation lifecycle — flag matrix (design-16 §3.7)", () => {
 
   it("flag ON boots dormant: no capture, one command, no tools", () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
 
     // Stock dsh boot: the first top-level session is NOT repurposed.
     const agent = createAgent("s-1");
@@ -301,9 +306,9 @@ describe("activation lifecycle — flag matrix (design-16 §3.7)", () => {
   // the host commands with the passive listeners and no tool surface. The
   // negative assertions pin the absence, so a future ticket cannot quietly
   // register a dormant-visible surface.
-  it("tickets 27–31 add no dormant-visible registration: no tools, no listeners beyond the passive four", () => {
+  it("tickets 27–31 add no dormant-visible registration: no tools, no listeners beyond the passive five", () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
 
     assert.deepEqual(ctx.commandNames().sort(), [
       DISPATCHER_RESOLVE_COMMAND,
@@ -312,9 +317,10 @@ describe("activation lifecycle — flag matrix (design-16 §3.7)", () => {
       DISPATCHER_STOP_COMMAND,
     ]);
     assert.deepEqual(ctx.toolNames(), []);
-    // Two lifecycle listeners (agent/disposed, agent/status) + two host
-    // listeners (subagent/end, session/event) — unchanged by 27–31.
-    assert.equal(ctx.listenerCount(), 4);
+    // Two lifecycle listeners (agent/disposed, agent/status) + three host
+    // listeners (subagent/end, session/event, agent/created — the worker
+    // composition seam, passive until a spawn is in flight).
+    assert.equal(ctx.listenerCount(), 5);
     // No dispatcher tool claims a dormant key: a stock caller sees stock.
     for (const name of [
       "spawn_worker",
@@ -333,7 +339,7 @@ describe("activation lifecycle — flag matrix (design-16 §3.7)", () => {
 describe("activation lifecycle — command behavior", () => {
   it("activation binds the parent once, injects policy once, registers tools", () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     const agent = createAgent("s-1");
 
     const result = ctx.runCommand({
@@ -358,7 +364,7 @@ describe("activation lifecycle — command behavior", () => {
 
   it("second activation in the same chat succeeds with already-active copy", () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     const agent = createAgent("s-1");
 
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
@@ -378,7 +384,7 @@ describe("activation lifecycle — command behavior", () => {
 
   it("a second chat activates as its own dispatcher (ADR-0019: no single slot)", () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     // Ticket 91: the LIVE shape — every agent loop mints `agent.ctx`
     // (dsh-agent-loop/lib/index.js:761-762 `this.ctx = this.scope.ctx`;
     // dsh-agent runtime-types.d.ts:149 makes `ctx` required), so each chat's
@@ -415,7 +421,7 @@ describe("activation lifecycle — command behavior", () => {
 
   it("the context-less fallback is single-session: a second chat hits the host duplicate error (ticket 91)", () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     // Context-less agents take the plugin-level global fallback
     // (src/plugin.ts:480-486). That shape holds ONE tool surface, so a second
     // dispatcher session collides on the same names. Live hosts cannot reach
@@ -439,7 +445,7 @@ describe("activation lifecycle — command behavior", () => {
 
   it("activation in a child chat is refused with not-top-level copy", () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     const child = createAgent("child-1", { topLevel: false });
 
     const result = ctx.runCommand({
@@ -457,7 +463,7 @@ describe("activation lifecycle — command behavior", () => {
 
   it("an invocation without a resolvable agent is refused, never guessed", () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
 
     const result = ctx.runCommand({
       commandId: DISPATCHER_START_COMMAND,
@@ -472,7 +478,7 @@ describe("activation lifecycle — command behavior", () => {
 
   it("the commands are namespaced and advertise their descriptions", () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     assert.deepEqual(ctx.commandNames(), [
       "dispatcher-start",
       "dispatcher-steer",
@@ -489,7 +495,7 @@ describe("activation lifecycle — command behavior", () => {
 describe("activation lifecycle — deactivation and HMR", () => {
   it("agent/disposed unbinds; a later command re-activates fresh", () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     const agent = createAgent("s-1");
 
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
@@ -513,7 +519,7 @@ describe("activation lifecycle — deactivation and HMR", () => {
 
   it("dispose-all (HMR simulation) leaves no lingering binding or surface", () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     const agent = createAgent("s-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     assert.equal(ctx.toolNames().length, 7);
@@ -540,7 +546,7 @@ describe("activation lifecycle — deactivation and HMR", () => {
 describe("activation lifecycle — dispatcher tool surface (ADR-0019)", () => {
   it("activation registers the six tools in the agent's SCOPED surface; request_access stays global", () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     const agent = createScopedAgent("s-1");
 
     const result = ctx.runCommand({
@@ -567,7 +573,7 @@ describe("activation lifecycle — dispatcher tool surface (ADR-0019)", () => {
 
   it("a scoped dispatcher's tools never appear in a sibling chat's surface", () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     const first = createScopedAgent("s-1");
     const second = createScopedAgent("s-2");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent: first });
@@ -581,7 +587,7 @@ describe("activation lifecycle — dispatcher tool surface (ADR-0019)", () => {
 
   it("disposing one session unregisters its scoped set, not the sibling's", () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     const first = createScopedAgent("s-1");
     const second = createScopedAgent("s-2");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent: first });
@@ -599,7 +605,7 @@ describe("activation lifecycle — dispatcher tool surface (ADR-0019)", () => {
 
   it("the retired execute-time gate no longer refuses other chats (fallback surface)", async () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     const agent = createAgent("s-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
 
@@ -624,7 +630,7 @@ describe("activation lifecycle — dispatcher tool surface (ADR-0019)", () => {
 
   it("an unresolvable exec still reaches the core", async () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     const agent = createAgent("s-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
 
@@ -637,7 +643,7 @@ describe("activation lifecycle — dispatcher tool surface (ADR-0019)", () => {
 
   it("workers spawned through the surface are host children of the activated chat", async () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     const agent = createAgent("s-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
 

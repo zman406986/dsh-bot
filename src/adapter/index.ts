@@ -69,6 +69,7 @@ export {
   MARKER_DOMAIN_NAME,
   MARKER_TABLE_NAME,
   INBOX_TABLE_NAME,
+  COMPACTION_BOUNDARY_TABLE_NAME,
   type DomainLike,
   type InboxCheckpointStore,
   type InboxJobCheckpoint,
@@ -77,6 +78,19 @@ export {
   type StorageDomainDurability,
   type StorageDomainLike,
 } from "./durable-marker.js";
+export {
+  MICROCOMPACT_EVENT,
+  registerMicrocompact,
+  runMicrocompactPass,
+  type BoundaryStoreLike,
+  type MicrocompactAgentLike,
+  type MicrocompactContextLike,
+  type MicrocompactOptions,
+  type MicrocompactPassOutcome,
+  type MicrocompactSessionLike,
+  type MicrocompactSkipReason,
+  type TokenMeterLike,
+} from "./microcompact.js";
 export {
   atomicWriteFile,
   claimInboxJob,
@@ -100,14 +114,14 @@ export {
   normalizeSettleReport,
   normalizeWorkerReport,
   SPAWN_PROVIDER,
+  type ActivationLike,
+  type ActivationSpecLike,
   type AdapterContext,
   type AgentLike,
   type CommandDefinitionLike,
   type CommandInvocationLike,
   type CommandResultLike,
   type CommandsLike,
-  type ContinuableStartLike,
-  type ContinuableStartSpecLike,
   type CordisDshHost,
   type CordisDshHostOptions,
   type JobSnapshotLike,
@@ -122,18 +136,37 @@ export {
   type BindDispatcherLifecycleResult,
 } from "./parent-agent.js";
 export {
-  installMultitaskSettingsSection,
-  SETTINGS_NAMESPACE,
-  type SettingsAwareContext,
-  type SettingsInjectContext,
-  type SettingsOwnerScopeLike,
-  type SettingsProviderLike,
-  type SettingsSectionInstallOptions,
-} from "./settings-section.js";
+  applySessionKindProjection,
+  DISPATCHER_SESSION_KIND,
+  INITIAL_SESSION_KIND_STATE,
+  parseDispatcherSessionKind,
+  parseSessionKindProjectionState,
+  registerSessionKindProjection,
+  SESSION_KIND_PROJECTION_DEFINITION,
+  SESSION_KIND_PROJECTION_KEY,
+  SESSION_KIND_PROJECTION_STATE_VERSION,
+  viewSessionKind,
+  type DispatcherSessionKind,
+  type SessionKindProjectionState,
+  type SessionProjectionChildLike,
+  type SessionProjectionDefinitionLike,
+  type SessionProjectionEventLike,
+  type SessionProjectionHostLike,
+  type SessionProjectionSchemaLike,
+  type SessionProjectionsRegistryLike,
+} from "./session-kind-projection.js";
+export { SETTINGS_NAMESPACE } from "./settings-section.js";
 export {
-  createSettingsRosterChannel,
-  type RosterChannelStats,
-  type SettingsRosterChannel,
+  applyWorkerComposition,
+  globalToolNames,
+  WORKER_PERSONA_SECTION,
+  WORKER_PERSONA_SECTION_ORDER,
+  type WorkerCompositionContext,
+} from "../worker/preset.js";
+export {
+  rosterSessionKey,
+  ROSTER_SESSION_KEY_PREFIX,
+  sessionOfRosterKey,
 } from "./roster-channel.js";
 export {
   assembleRestartNotice,

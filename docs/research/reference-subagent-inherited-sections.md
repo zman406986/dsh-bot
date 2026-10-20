@@ -1,4 +1,4 @@
-# Research: does the reference's subagent runner inherit the shared prompt sections? (R-1 close-out, ticket 62)
+# Research: does the reference's subagent runner inherit the shared prompt sections? (closing register item R-1, ticket 62)
 
 - Question: When the reference spawns a subagent runner, does its system prompt go through the same section assembler as the main runner — do the memory and user-identity sections reach it, whose agent profile does it carry, and exactly which sections are dropped or swapped for it? (Settles register item R-1, see `dsh-core-loop-deviations.md` Part C reframing and `reference-agent-prompt-inventory.md` Appendix B.)
 - Scope: observation pass over the reference tree only (`source/` of the reconstruction at the repo root). Structure and control flow in our own words; **no prompt prose, identifiers, or string literals reproduced** — provenance is file names + line numbers only. This session read no product code (`src/`, `test/`, `lib/`, `client/`, product `package.json` all unopened).
@@ -9,7 +9,7 @@
 
 ## Answer
 
-**Yes — shared sections reach the subagent runner.** The assembler renders the user-identity and memory sections for subagent runners with **no subagent-specific gate**; the child runner is wired with the same memory/user-memory/project-memory stores as the parent; and the profile section a child carries is the **parent agent's** profile, freshly rendered (children never take the frozen profile snapshot). The subagent prompt differs from the main prompt only by a bounded drop/swap list (below) plus role text. R-1's premise — "we cannot give it a truly minimal system prompt" — is true of the reference too, so R-1 is recommended `not-a-deviation`.
+**Yes — shared sections reach the subagent runner.** The assembler renders the user-identity and memory sections for subagent runners with **no subagent-specific gate**; the child runner is wired with the same memory/user-memory/project-memory stores as the parent; and the profile section a child carries is the **parent agent's** profile, rendered fresh (children never take the frozen profile snapshot). The subagent prompt differs from the main prompt only by a bounded list of sections it drops or swaps (below) plus its role text. R-1's premise — "we cannot give it a truly minimal system prompt" — is true of the reference too, so R-1 is recommended `not-a-deviation`.
 
 ---
 
@@ -17,7 +17,7 @@
 
 - **(a) directly evidenced** — the module and line are recovered source; behavior readable directly.
 - **(b) inferred** — follows from (a) evidence plus structure, with the final live call not itself recovered (see the bundled-engine caveat).
-- **(c) unobservable in this reconstruction** — no recovered artifact could show it.
+- **(c) unobservable in this reconstruction** — no recovered artifact could show it. ("The reconstruction" is the third-party rebuilt copy of the app kept in the reference tree.)
 
 **One global caveat, stated once:** the per-turn engine that finally produces each runner's prompt stream is a bundled port that the reconstruction explicitly says was **not recovered as standalone source** (`source/host/runner/runner-production-bridge.ts:51-59`). Everything below is (a) at the recovered modules; the single (b) link is that the child's live prompt is produced by *this* assembler fed with the wired deps. Supporting that link: the reconstruction has exactly one prompt assembler and one runner class for both runner kinds (`source/host/runner/system-prompt-assembly.ts:119`; `source/host/runner/sand-agent-runner.ts:354` — the subagent flag is a constructor boolean on the shared class); the dedicated standalone subagent role-text constructor (`source/host/runner/system-prompt.ts:66`) has **zero recovered call sites** (repo-wide grep, definition only); and the tree's own provenance rule says recovered source may express only artifact-anchored behavior, not invented wiring (`PROVENANCE.md:31-37`). What would settle it to (a): capturing a live subagent's rendered system prompt at runtime, or recovering the bundled constructor.
 
@@ -61,11 +61,11 @@ Known-before (per Appendix B / the ticket): the agent directory, and the no-user
 | 3 | Multitask section | `system-prompt-assembly.ts:259` |
 | 4 | Appended cloud-disabled section | `system-prompt-assembly.ts:260` |
 | 5 | Connector multi-account section | `system-prompt-assembly.ts:261` |
-| 6 | MCP custom-instructions host tail | `source/host/runner/prompt-collector-glue.ts:163-166` (also `:173-176`: custom instructions resolve to empty for subagents) |
-| 7 | MCP discovery-status host tail | `prompt-collector-glue.ts:168-171` |
+| 6 | MCP custom-instructions section appended by the host | `source/host/runner/prompt-collector-glue.ts:163-166` (also `:173-176`: custom instructions resolve to empty for subagents) |
+| 7 | MCP discovery-status section appended by the host | `prompt-collector-glue.ts:168-171` |
 | 8 | Box-desktop delegation section (the main-agent "delegate GUI work" copy) | `prompt-collector-glue.ts:262` (null for plain subagent runners) |
 
-**Dropped or swapped only for the two box-scoped subagent kinds (computer-use / browser-use; kind test at `sand-agent-runner.ts:588-622`) — (a):**
+**Dropped or swapped only for the two subagent kinds tied to a remote box (computer-use / browser-use; kind test at `sand-agent-runner.ts:588-622`) — (a):**
 
 | # | Section | Evidence |
 |---|---|---|
@@ -77,7 +77,7 @@ Known-before (per Appendix B / the ticket): the agent directory, and the no-user
 
 **Lifecycle (not a section, affects freshness):** profile-snapshot preparation declines for subagent runners (`system-prompt-assembly.ts:130`) — the child's profile section is always freshly rendered.
 
-**Explicitly NOT dropped — the positive list — (a):** base prompt, spotlight section (with the send flag off), agent profile section (parent's), **user identity**, **memory**, automations, workflows, channels, generic remote-box section, and the remaining host tails. A subagent runner differs from the main runner by a bounded drop/swap set, not by a separate minimal composer. (For contrast, the shared-room runner is the case with a real early return — `system-prompt-assembly.ts:256` — emitting only base, spotlight, and profile; the subagent has no such early return.)
+**Explicitly NOT dropped — the list of what is kept — (a):** base prompt, spotlight section (with the send flag off), agent profile section (parent's), **user identity**, **memory**, automations, workflows, channels, generic remote-box section, and the remaining sections the host appends. A subagent runner differs from the main runner by a bounded set of dropped or swapped sections, not by a separate minimal composer. (For contrast, the shared-room runner is the case with a real early return — `system-prompt-assembly.ts:256` — emitting only base, spotlight, and profile; the subagent has no such early return.)
 
 **Residual (c):** whether the unrecovered bundled engine applies any additional subagent-only mutation at the final prompt-stream step is unobservable. What would settle it: runtime capture of a dispatched subagent's rendered system prompt, or recovery of the bundled constructor.
 
@@ -85,7 +85,7 @@ Known-before (per Appendix B / the ticket): the agent directory, and the no-user
 
 ## R-1 verdict (recommended; disposition is the human's/lead's to set)
 
-Both sections the ticket flagged — **user identity** (`system-prompt-assembly.ts:258`, no subagent guard) and **memory** (`:263`, no subagent guard; freeze flag only) — render for subagent runners, and the child additionally carries the **parent's profile** (`:254` via the parent-session provider, `host-runner-composition.ts:2587`). The reference's subagent therefore does **not** get a blank or minimal system prompt: role text is layered on top of the same shared, inherited sections the main runner gets, with the no-user-channel contract enforced by a flag (`:253`) plus a bounded drop list. That is structurally the same shape as our persona-channel-on-an-inherited-preset arrangement, so **R-1 is recommended `not-a-deviation`** — the worker inheriting a composed preset is fidelity to the reference, not a gap needing `approved-by-necessity` acknowledgment. The refutation outcome the ticket warned about did not materialize: nothing suggests the memory/identity sections are skipped for subagents.
+Both sections the ticket flagged — **user identity** (`system-prompt-assembly.ts:258`, no subagent guard) and **memory** (`:263`, no subagent guard; freeze flag only) — render for subagent runners, and the child additionally carries the **parent's profile** (`:254` via the parent-session provider, `host-runner-composition.ts:2587`). The reference's subagent therefore does **not** get a blank or minimal system prompt: role text is layered on top of the same shared, inherited sections the main runner gets, with the no-user-channel contract enforced by a flag (`:253`) plus a bounded drop list. That is structurally the same shape as our own arrangement, where the persona text is a prefix on an inherited preset, so **R-1 is recommended `not-a-deviation`** — the worker inheriting a composed preset matches the reference, not a gap needing `approved-by-necessity` acknowledgment. The refutation outcome the ticket warned about did not materialize: nothing suggests the memory/identity sections are skipped for subagents.
 
 ---
 
@@ -96,9 +96,9 @@ High on all four answers at the recovered-module level; the only uncertainty is 
 ## Implications for the product
 
 1. **R-1 closes as `not-a-deviation`** (pending the human's/lead's register edit — the researcher does not set dispositions). The persona-on-inherited-preset design matches the reference's structure.
-2. **Ticket 55's direction is confirmed**: putting the worker contract in a system-prompt position layered over shared sections mirrors the reference; the "shadow of a shared composer" reading in the deviations note was right.
+2. **Ticket 55's direction is confirmed**: putting the worker contract in a system-prompt position layered over shared sections mirrors the reference; the "only a piece of a shared composer" reading in the deviations note was right.
 3. **A fidelity nuance worth noting, not acting on:** in the reference, the shared sections a child inherits include the *parent's* profile and the *user's* identity and *memory* — i.e., the reference's "blank context" is even thinner than "blank conversation": the child also inherits persona and memory context from the parent side. If dsh ever wants *stricter* worker isolation than the reference, that would be a deliberate protective deviation (new register item), not a fidelity fix.
-4. The drop/swap list (section 4) is a useful checklist if we ever want subagent-vs-dispatcher prompt differentiation beyond role text — the reference's approach is exactly: keep shared sections, drop dispatcher-only capabilities (multitask, directory, connector management, delegation copy), flip the channel flag.
+4. The list of dropped and swapped sections (section 4) is a useful checklist if we ever want subagent-vs-dispatcher prompt differences beyond the role text — the reference's approach is exactly: keep shared sections, drop dispatcher-only capabilities (multitask, directory, connector management, delegation copy), flip the channel flag.
 
 ## Open follow-ups
 

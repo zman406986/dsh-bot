@@ -8,9 +8,10 @@ import {
   normalizeSettleReport,
   normalizeWorkerReport,
   SPAWN_PROVIDER,
+  type ActivationLike,
+  type ActivationSpecLike,
   type AdapterContext,
   type AgentLike,
-  type ContinuableStartSpecLike,
 } from "../src/adapter/cordis-dsh-host.js";
 import { bindDispatcherLifecycle, isTopLevel } from "../src/adapter/parent-agent.js";
 import { createMultitask } from "../src/core/multitask.js";
@@ -21,6 +22,7 @@ import {
 import { CHECK_ACTIVITY_CHARS, RECENT_RESULT_EXCERPT_CHARS } from "../src/core/report-clamp.js";
 import type { SettledEvent } from "../src/core/types.js";
 import { createWorkerAgentDef } from "../src/worker/agent-def.js";
+import { WORKER_PERSONA_SECTION } from "../src/worker/preset.js";
 import { EMPTY_WORKER_REPORT_PLACEHOLDER } from "../src/worker/report.js";
 
 interface RecordedCall {
@@ -40,27 +42,65 @@ function createAgent(id: string, topLevel = true): AgentLike {
 }
 
 function createStubCtx() {
-  const startContinuableCalls: RecordedCall[] = [];
+  const startActivationCalls: RecordedCall[] = [];
+  const disposedWorkerIds: string[] = [];
   const interruptCalls: RecordedCall[] = [];
   const sendMessageCalls: RecordedCall[] = [];
   const followupCalls: unknown[] = [];
   const listeners = new Map<string, Array<(payload: never) => void>>();
+  const jobListCalls: unknown[] = [];
+  const composedChildren: Array<{
+    childId: string;
+    sections: string[];
+    restrictions: Array<{ deny?: readonly string[]; allow?: readonly string[] }>;
+    schemasScopes: unknown[];
+  }> = [];
   let nextChild = 1;
+
+  // 0.2.1 host shape: `tools.schemas()` with no scope reports the
+  // context-global layer ONLY; the surface an agent inherits (its preset's
+  // model-facing tools) is read by passing that agent as the scope. The
+  // barrier's deny intersection must use the scoped read, so the fake keeps
+  // the two views distinct the same way.
+  const contextGlobalTools = [{ name: "request_access" }, { name: "working_directory" }];
+  const agentPlaneTools = [
+    { name: "present" },
+    { name: "send_message" },
+    { name: "todo_write" },
+    { name: "spawn_worker" },
+    { name: "check_workers" },
+    { name: "steer_worker" },
+    { name: "stop_worker" },
+    { name: "deliver_result" },
+    { name: "send_peer" },
+    { name: "read" },
+  ];
 
   const agents = new Map<string, AgentLike>();
 
   const ctx: AdapterContext & {
     fire(name: string, ...payloads: unknown[]): void;
-    startContinuableCalls: RecordedCall[];
+    startActivationCalls: RecordedCall[];
+    disposedWorkerIds: string[];
     interruptCalls: RecordedCall[];
     sendMessageCalls: RecordedCall[];
     followupCalls: unknown[];
+    jobListCalls: unknown[];
+    composedChildren: Array<{
+      childId: string;
+      sections: string[];
+      restrictions: Array<{ deny?: readonly string[]; allow?: readonly string[] }>;
+      schemasScopes: unknown[];
+    }>;
     bindAgent(agent: AgentLike): void;
   } = {
-    startContinuableCalls,
+    startActivationCalls,
+    disposedWorkerIds,
     interruptCalls,
     sendMessageCalls,
     followupCalls,
+    jobListCalls,
+    composedChildren,
     fire(name: string, ...payloads: unknown[]) {
       for (const cb of listeners.get(name) ?? []) {
         (cb as (...args: unknown[]) => void)(...payloads);
@@ -81,10 +121,67 @@ function createStubCtx() {
       };
     },
     subagents: {
-      async startContinuable(spec: ContinuableStartSpecLike) {
-        startContinuableCalls.push(spec as unknown as RecordedCall);
+      async startActivation(spec: ActivationSpecLike): Promise<ActivationLike> {
+        startActivationCalls.push(spec as unknown as RecordedCall);
         const childId = `child-${nextChild++}`;
-        return { childId, messageId: `msg-${childId}` };
+        // The host creates the child inside this call and announces it on
+        // `agent/created` before its first turn; the adapter's composition
+        // must land there.
+        const composed = {
+          childId,
+          sections: [] as string[],
+          restrictions: [] as Array<{
+            deny?: readonly string[];
+            allow?: readonly string[];
+          }>,
+          schemasScopes: [] as unknown[],
+        };
+        composedChildren.push(composed);
+        const childCtx = {
+          systemPrompt: {
+            section(section: { name: string }) {
+              composed.sections.push(section.name);
+              return () => {};
+            },
+            getSectionOrder() {
+              return 0;
+            },
+          },
+          tools: {
+            schemas(scope?: unknown) {
+              if (scope === undefined) return contextGlobalTools;
+              composed.schemasScopes.push(scope);
+              return [...contextGlobalTools, ...agentPlaneTools];
+            },
+            restrict(filter: {
+              deny?: readonly string[];
+              allow?: readonly string[];
+            }) {
+              composed.restrictions.push(filter);
+              return () => {};
+            },
+          },
+        };
+        ctx.fire("agent/created", {
+          agent: {
+            session: {
+              id: childId,
+              header: {
+                parentSession: String(spec.request.parent.session.id),
+                delegationDepth: 1,
+              },
+            },
+            ctx: childCtx,
+          },
+          source: "startup",
+        });
+        return {
+          childId,
+          messageId: `msg-${childId}`,
+          dispose: async () => {
+            disposedWorkerIds.push(childId);
+          },
+        };
       },
       interrupt(targetSessionId: unknown, authority: unknown) {
         interruptCalls.push({ targetSessionId, authority });
@@ -113,7 +210,8 @@ function createStubCtx() {
       },
     },
     jobs: {
-      list() {
+      list(callerSessionId?: unknown) {
+        jobListCalls.push(callerSessionId);
         return [];
       },
     },
@@ -203,7 +301,7 @@ describe("ticket 83 regression: spawn maxDepth is the child's ABSOLUTE ceiling",
 
     await host.spawnWorker("ok?", { parentSessionId: "disp-1", streamKey: "s", title: "t" });
 
-    const spec = ctx.startContinuableCalls[0] as unknown as ContinuableStartSpecLike;
+    const spec = ctx.startActivationCalls[0] as unknown as ActivationSpecLike;
     assert.equal(spec.request.maxDepth, 1);
     // The host must ACCEPT the child (before the fix this threw
     // "subagent depth 1 exceeds maxDepth 0" live).
@@ -217,7 +315,7 @@ describe("ticket 83 regression: spawn maxDepth is the child's ABSOLUTE ceiling",
 
     await host.spawnWorker("ok?", { parentSessionId: "disp-1", streamKey: "s", title: "t" });
 
-    const spec = ctx.startContinuableCalls[0] as unknown as ContinuableStartSpecLike;
+    const spec = ctx.startActivationCalls[0] as unknown as ActivationSpecLike;
     const ceiling = spec.request.maxDepth as number;
     assert.throws(
       () => hostResolveChildDepth(ceiling, ceiling),
@@ -239,7 +337,7 @@ describe("ticket 83 regression: spawn maxDepth is the child's ABSOLUTE ceiling",
 
     await host.spawnWorker("x", { parentSessionId: "disp-deep", streamKey: "s", title: "t" });
 
-    const spec = ctx.startContinuableCalls[0] as unknown as ContinuableStartSpecLike;
+    const spec = ctx.startActivationCalls[0] as unknown as ActivationSpecLike;
     // 2 (parent) + 1 (hop) + 0 (leaf budget) — a depth-3 child is accepted.
     assert.equal(spec.request.maxDepth, 3);
     assert.equal(hostResolveChildDepth(2, spec.request.maxDepth as number), 3);
@@ -256,14 +354,14 @@ describe("ticket 83 regression: spawn maxDepth is the child's ABSOLUTE ceiling",
 
     await host.spawnWorker("x", { parentSessionId: "disp-opaque", streamKey: "s", title: "t" });
 
-    const spec = ctx.startContinuableCalls[0] as unknown as ContinuableStartSpecLike;
+    const spec = ctx.startActivationCalls[0] as unknown as ActivationSpecLike;
     assert.equal(spec.request.maxDepth, 1);
     assert.equal(hostResolveChildDepth(0, spec.request.maxDepth as number), 1);
   });
 });
 
 describe("CordisDshHost spawn / interrupt / send", () => {
-  it("spawn calls startContinuable with provider spawn and returns workerId string", async () => {
+  it("spawn calls startActivation with provider spawn, parent delivery, and returns workerId string", async () => {
     const ctx = createStubCtx();
     const host = createCordisDshHost(ctx);
     const parent = createAgent("disp-1");
@@ -278,37 +376,32 @@ describe("CordisDshHost spawn / interrupt / send", () => {
     assert.equal(workerId, "child-1");
     assert.equal(host.owns("child-1"), true);
     assert.equal(host.workerIdOf("child-1"), "child-1");
-    assert.equal(ctx.startContinuableCalls.length, 1);
-    const spec = ctx.startContinuableCalls[0] as unknown as ContinuableStartSpecLike;
+    assert.equal(ctx.startActivationCalls.length, 1);
+    const spec = ctx.startActivationCalls[0] as unknown as ActivationSpecLike;
     assert.equal(spec.provider, SPAWN_PROVIDER);
     assert.equal(spec.label, "Thing");
+    // 0.2.1: the completion notice reaches the model through `parent`.
+    assert.equal(spec.delivery, "parent");
     assert.equal(spec.request.prompt.length, 1);
     assert.equal(spec.request.prompt[0]?.type, "text");
     assert.equal((spec.request.prompt[0] as { text: string }).text, "Do the thing.");
-    // Ticket 55: with no worker def there is no contract, so no persona.
+    // The signal is pre-publication only and lives on the spec, never in request.
+    assert.ok(spec.signal instanceof AbortSignal);
+    assert.equal("signal" in spec.request, false);
+    // 0.2.1 removed per-spawn persona/toolFilter; with no worker def no preset
+    // is selected either.
     assert.equal("persona" in spec.request, false);
+    assert.equal("toolFilter" in spec.request, false);
+    assert.equal("agentPreset" in spec.request, false);
     // Ticket 83: the slot is the CHILD'S ABSOLUTE depth ceiling — for a
     // depth-0 dispatcher parent, 1 (the host computes childDepth = 0 + 1 and
     // needs childDepth <= maxDepth). Sending the leaf budget 0 refused every
     // live spawn.
     assert.equal(spec.request.maxDepth, 1);
-    // T09 without a def omits toolFilter.
-    assert.equal("toolFilter" in spec.request && spec.request.toolFilter, false);
   });
 
-  it("spawn with WorkerAgentDef assembles system prompt and injects toolFilter", async () => {
+  it("spawn with WorkerAgentDef composes the child at agent/created; the contract never rides the task prompt", async () => {
     const ctx = createStubCtx();
-    (ctx as { tools?: { schemas(): Array<{ name: string }> } }).tools = {
-      schemas() {
-        return [
-          { name: "bash" },
-          { name: "present" },
-          { name: "todo_write" },
-          { name: "subagent" },
-          { name: "web_search" },
-        ];
-      },
-    };
     const host = createCordisDshHost(ctx, { workerAgentDef: createWorkerAgentDef() });
     const parent = createAgent("disp-1");
     host.bindParent(parent, "disp-1");
@@ -320,18 +413,16 @@ describe("CordisDshHost spawn / interrupt / send", () => {
     });
 
     assert.equal(workerId, "child-1");
-    const spec = ctx.startContinuableCalls[0] as unknown as ContinuableStartSpecLike;
+    const spec = ctx.startActivationCalls[0] as unknown as ActivationSpecLike;
 
-    // Ticket 55 (register D-1): the contract travels in the `persona` field,
-    // which the host renders into a system-prompt section — recomputed every
-    // turn, so it survives compaction and needs no per-steer restatement (D-2).
-    assert.equal(typeof spec.request.persona, "string");
-    const persona = spec.request.persona as string;
-    assert.ok(persona.includes("## Role"), "contract reaches the system position");
-    assert.ok(persona.includes("## Final answer"));
+    // 0.2.1: persona and toolFilter are not request fields at all, and no
+    // named preset is selected — composition is per child.
+    assert.equal("persona" in spec.request, false);
+    assert.equal("toolFilter" in spec.request, false);
+    assert.equal("agentPreset" in spec.request, false);
 
-    // ...and the task is the child's first user turn, ALONE. Putting the
-    // contract back into this channel is the regression this pins.
+    // The task is the child's first user turn, ALONE. Putting the contract
+    // back into this channel is the regression this pins.
     assert.equal(spec.request.prompt.length, 1);
     const brief = (spec.request.prompt[0] as { text: string }).text;
     assert.equal(brief, "Do the thing.");
@@ -341,32 +432,50 @@ describe("CordisDshHost spawn / interrupt / send", () => {
     // Ticket 83: depth-0 parent → absolute ceiling 1 (child of a depth-0
     // session is depth 1; `maxDepth: 0` was the live-refused leaf budget).
     assert.equal(spec.request.maxDepth, 1);
-    const filter = spec.request.toolFilter as { deny: readonly string[] };
-    assert.ok(filter);
-    assert.deepEqual(
-      [...filter.deny].sort(),
-      ["present", "subagent", "todo_write"],
+
+    // The contract and barrier landed on the CHILD's own scope at
+    // `agent/created`, before its first turn.
+    const composed = ctx.composedChildren[0];
+    assert.ok(composed);
+    assert.deepEqual(composed.sections, [WORKER_PERSONA_SECTION]);
+    // The deny intersection reads the CHILD'S surface (`schemas(child)`), not
+    // the context-global layer: on 0.2.1 an unscoped read sees only the
+    // bookkeeping tools, which silently denied nothing at all.
+    assert.equal(composed.schemasScopes.length, 1);
+    assert.equal(
+      (composed.schemasScopes[0] as { session: { id: string } }).session.id,
+      workerId,
     );
+    assert.deepEqual(composed.restrictions, [
+      {
+        deny: [
+          "present",
+          "send_message",
+          "todo_write",
+          "spawn_worker",
+          "check_workers",
+          "steer_worker",
+          "stop_worker",
+          "deliver_result",
+          "send_peer",
+        ],
+      },
+    ]);
   });
 
-  it("spawn omits toolFilter when intersection is empty (host rejects empty filters)", async () => {
+  it("spawn owns the activation and disposes it on host dispose", async () => {
     const ctx = createStubCtx();
-    (ctx as { tools?: { schemas(): Array<{ name: string }> } }).tools = {
-      schemas() {
-        return [{ name: "bash" }, { name: "read" }];
-      },
-    };
-    const host = createCordisDshHost(ctx, { workerAgentDef: createWorkerAgentDef() });
-    const parent = createAgent("disp-1");
-    host.bindParent(parent, "disp-1");
+    const host = createCordisDshHost(ctx);
+    host.bindParent(createAgent("disp-1"), "disp-1");
 
     await host.spawnWorker("x", {
       parentSessionId: "disp-1",
       streamKey: "s1",
       title: "t",
     });
-    const spec = ctx.startContinuableCalls[0] as unknown as ContinuableStartSpecLike;
-    assert.equal("toolFilter" in spec.request, false);
+    assert.deepEqual(ctx.disposedWorkerIds, []);
+    host.dispose();
+    assert.deepEqual(ctx.disposedWorkerIds, ["child-1"]);
   });
 
   it("listGlobalToolNames is empty when tools service is absent", () => {
@@ -639,6 +748,15 @@ describe("listLiveJobs", () => {
     const ctx = createStubCtx();
     const host = createCordisDshHost(ctx);
     assert.deepEqual(host.listLiveJobs(), []);
+    // 0.2.1 `list(caller?)` — omitting the caller sees only unowned jobs.
+    assert.deepEqual(ctx.jobListCalls, [undefined]);
+  });
+
+  it("forwards the caller session id so owned jobs are included", () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    assert.deepEqual(host.listLiveJobs("disp-1"), []);
+    assert.deepEqual(ctx.jobListCalls, ["disp-1"]);
   });
 });
 

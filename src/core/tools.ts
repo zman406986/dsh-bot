@@ -23,6 +23,14 @@ import {
   TOOL_DESCRIPTIONS,
 } from "./policy/prompts.js";
 import {
+  isWorkerReplyStatus,
+  workerReplySenderLabel,
+  type PeerEnvelope,
+  type PeerSendAck,
+  type WorkerReplyOrigin,
+  type WorkerReplyStatus,
+} from "./peer-types.js";
+import {
   formatCheckSummary,
   formatPeerSendAck,
   formatPeerSendRefusal,
@@ -242,6 +250,318 @@ export const SEND_PEER_TEXT_MAX_CHARS = 8000;
  * tool-borne peer message carries this constant opaquely.
  */
 export const PEER_DIRECT_CONVERSATION_ID = "direct";
+
+/**
+ * Ticket 122 / ADR-0028: the worker's mid-task reply verb.
+ *
+ * It is deliberately NOT part of `createDispatcherTools()` — the dispatcher
+ * never sees it. Workers inherit it from the global layer (the same
+ * registration shape `request_access` uses), and the handler refuses every
+ * caller that is not a worker in core truth. The address is never an
+ * argument: the parent dispatcher id comes from the worker's own roster
+ * record, so the channel is structurally single-parent and no
+ * worker→worker or worker→other-dispatcher path exists.
+ */
+export const REPLY_TO_DISPATCHER_TOOL = "reply_to_dispatcher";
+
+/**
+ * Inline ceiling on one mid-task reply. 8,000 characters, the same bound
+ * the peer lane already enforces (`SEND_PEER_TEXT_MAX_CHARS`) and the
+ * reference's peer-text clamp. Reusing it keeps one documented number for
+ * every peer-borne text: a reply cannot arrive through the peer envelope
+ * larger than an ordinary peer message, and the bound is an order of
+ * magnitude below ZCode's 65,536-character context-message cap, which is
+ * not a per-message peer bound. An over-max reply refuses before accept.
+ */
+export const WORKER_REPLY_TEXT_MAX_CHARS = SEND_PEER_TEXT_MAX_CHARS;
+
+/** Declared status words (closed set; see `WorkerReplyStatus`). */
+export const WORKER_REPLY_STATUSES: readonly WorkerReplyStatus[] = [
+  "progress",
+  "blocked",
+  "note",
+];
+
+/**
+ * Rate bound: 8 accepted replies per worker per rolling 60 s — the same
+ * agent-message budget ticket 116 settles for peer traffic. Refusals do not
+ * count. The inbox cap (64 undelivered) is the second, independent bound.
+ */
+export const WORKER_REPLY_RATE_LIMIT = 8;
+export const WORKER_REPLY_RATE_WINDOW_MS = 60_000;
+
+/** Model-facing description (new copy). */
+export const REPLY_TO_DISPATCHER_TOOL_DESCRIPTION = [
+  "Report something to the dispatcher that spawned you without ending your turn.",
+  "Use it when the parent should know about a finding, a changed assumption, or a blocker before you finish.",
+  "It reaches only your parent dispatcher — never the user and never another worker.",
+  "It does not finish the task: keep working, and still end with your final answer.",
+  "text is capped at 8000 characters; status is one of progress, blocked, note.",
+].join(" ");
+
+/** One worker-side tool: name, description, parameters, handler. */
+export interface WorkerToolDef {
+  readonly name: string;
+  readonly description: string;
+  readonly parameters: ToolParameterNode;
+  readonly execute: (
+    args: Record<string, unknown>,
+    exec?: unknown,
+  ) => Promise<unknown>;
+}
+
+/** Result shape returned to the worker model. */
+export interface WorkerReplyToolResult {
+  readonly ok: boolean;
+  readonly summary: string;
+  readonly message_id?: string;
+  readonly status?: WorkerReplyStatus;
+}
+
+export interface WorkerReplyToolDeps {
+  /**
+   * Core truth for the worker record: the handler derives the parent
+   * dispatcher session id from here, never from a tool argument. `getWorker`
+   * is also the worker-only gate — a caller with no roster record is refused.
+   */
+  readonly multitask: Pick<Multitask, "getWorker" | "sendPeer">;
+  /**
+   * Resolve the calling worker id from the tool exec context. The adapter
+   * wires this from the exec's session id + `host.owns` (the request_access
+   * shape); returning null means "not a worker this plugin owns".
+   */
+  readonly resolveWorkerId: (exec: unknown) => string | null;
+  /** Injectable id factory + clock for tests. */
+  readonly newMessageId?: () => string;
+  readonly now?: () => number;
+}
+
+/**
+ * Build the worker-facing `reply_to_dispatcher` tool.
+ *
+ * Side-effect contract: it only accepts a peer envelope. It never calls the
+ * worker FSM, the todo ledger, or a completion path — so a reply cannot
+ * settle the worker, complete a todo, or produce a completion-kind wake.
+ */
+export function createWorkerReplyTool(
+  deps: WorkerReplyToolDeps,
+): WorkerToolDef {
+  const now = deps.now ?? (() => Date.now());
+  const newMessageId =
+    deps.newMessageId ?? (() => `worker-reply-${crypto.randomUUID()}`);
+  /** workerId → accepted-at timestamps inside the rolling window. */
+  const acceptedAt = new Map<string, number[]>();
+
+  function refuse(summary: string): WorkerReplyToolResult {
+    return { ok: false, summary };
+  }
+
+  return {
+    name: REPLY_TO_DISPATCHER_TOOL,
+    description: REPLY_TO_DISPATCHER_TOOL_DESCRIPTION,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        text: {
+          type: "string",
+          required: true,
+          description:
+            "The update itself. Short and concrete: what changed, what you found, or what blocks you.",
+        },
+        status: {
+          type: "string",
+          required: false,
+          enum: [...WORKER_REPLY_STATUSES],
+          description:
+            "Optional status word: progress, blocked, or note. It is metadata, not a completion signal.",
+        },
+      },
+    },
+
+    async execute(
+      args: Record<string, unknown>,
+      exec?: unknown,
+    ): Promise<WorkerReplyToolResult> {
+      const workerId = deps.resolveWorkerId(exec);
+      if (workerId === null) {
+        return refuse(
+          "reply_to_dispatcher is only available to workers; no reply was sent.",
+        );
+      }
+      const record = deps.multitask.getWorker(workerId);
+      if (record === undefined) {
+        return refuse(
+          "reply_to_dispatcher is only available to workers; no reply was sent.",
+        );
+      }
+
+      const textRaw = args.text;
+      if (typeof textRaw !== "string") {
+        return refuse("text is required and must be a non-empty string.");
+      }
+      const text = textRaw.trim();
+      if (text.length === 0) {
+        return refuse("text is required and must be a non-empty string.");
+      }
+      if (text.length > WORKER_REPLY_TEXT_MAX_CHARS) {
+        return refuse(
+          `text is ${text.length} characters; a mid-task reply is capped at ` +
+            `${WORKER_REPLY_TEXT_MAX_CHARS} — shorten it and try again.`,
+        );
+      }
+
+      const statusRaw = args.status;
+      let status: WorkerReplyStatus | undefined;
+      if (statusRaw !== undefined && statusRaw !== null) {
+        if (!isWorkerReplyStatus(statusRaw)) {
+          return refuse(
+            `status must be one of ${WORKER_REPLY_STATUSES.join(", ")} when provided.`,
+          );
+        }
+        status = statusRaw;
+      }
+
+      const at = now();
+      const recent = (acceptedAt.get(workerId) ?? []).filter(
+        (accepted) => at - accepted < WORKER_REPLY_RATE_WINDOW_MS,
+      );
+      if (recent.length >= WORKER_REPLY_RATE_LIMIT) {
+        acceptedAt.set(workerId, recent);
+        return refuse(
+          `rate limit reached: at most ${WORKER_REPLY_RATE_LIMIT} replies per ` +
+            `${WORKER_REPLY_RATE_WINDOW_MS / 1000} seconds. Nothing was sent; ` +
+            `batch your next update.`,
+        );
+      }
+
+      const origin: WorkerReplyOrigin = {
+        kind: "worker-reply",
+        workerId,
+        ...(status !== undefined ? { status } : {}),
+      };
+      const envelope: PeerEnvelope = {
+        messageId: newMessageId(),
+        fromAgentId: workerId,
+        fromName: workerReplySenderLabel(record.title, status),
+        to: { kind: "agent", agentId: record.parentSessionId },
+        conversationId: PEER_DIRECT_CONVERSATION_ID,
+        text,
+        // A mid-task report must never preempt the dispatcher's user turn.
+        // `enqueuePeer` queues non-priority notices during a user turn.
+        priority: false,
+        createdAtMs: at,
+        origin,
+      };
+
+      const ack: PeerSendAck = deps.multitask.sendPeer(
+        record.parentSessionId,
+        envelope,
+      );
+      if (!ack.ok) {
+        return refuse(
+          `the reply was not delivered (${ack.reason}): ${ack.detail}`,
+        );
+      }
+
+      recent.push(at);
+      acceptedAt.set(workerId, recent);
+      return {
+        ok: true,
+        message_id: ack.messageId,
+        ...(status !== undefined ? { status } : {}),
+        summary:
+          "Reply sent to your dispatcher. Keep working — this did not end your turn; " +
+          "your final answer is still required.",
+      };
+    },
+  };
+}
+
+/**
+ * Structural registration shape for a worker-local tool (mirrors the host's
+ * `ToolDefinition`, same idiom as `toRegisterableTool` in the adapter). Kept
+ * here so the worker composition can register the tool on the CHILD's scoped
+ * surface without importing the adapter's dispatcher registration path.
+ */
+export interface RegisterableWorkerTool {
+  readonly name: string;
+  readonly description: string;
+  readonly parameters: unknown;
+  readonly output: {
+    readonly schema: unknown;
+    readonly render: (
+      args: unknown,
+      value: unknown,
+    ) => Array<{ readonly type: string; readonly text?: string }>;
+  };
+  readonly execute: (args: unknown, exec?: unknown) => Promise<unknown>;
+}
+
+/** Wrap a worker tool definition into the registry-ready shape. */
+export function toRegisterableWorkerTool(
+  def: WorkerToolDef,
+): RegisterableWorkerTool {
+  return {
+    name: def.name,
+    description: def.description,
+    // Ticket 45 rule applies to every registered tool: serialize the
+    // authored tree so per-field `required` becomes the parent's array.
+    parameters: toToolParametersSchema(def.parameters),
+    output: {
+      schema: { type: "object" },
+      render: (_args, value) => {
+        const record = value as { summary?: unknown } | null | undefined;
+        return [
+          {
+            type: "text",
+            text:
+              record != null && typeof record.summary === "string"
+                ? record.summary
+                : "",
+          },
+        ];
+      },
+    },
+    execute(args: unknown, exec?: unknown): Promise<unknown> {
+      const record =
+        args !== null && typeof args === "object"
+          ? (args as Record<string, unknown>)
+          : {};
+      return def.execute(record, exec);
+    },
+  };
+}
+
+/** Scoped surface a worker-local tool registers on (the host's `agent.ctx.tools`). */
+export interface WorkerToolSurface {
+  register(definition: unknown): () => void;
+}
+
+/**
+ * Build the worker-local tool definitions for ONE child, ready to register on
+ * its scoped surface (ticket 122 / ADR-0028). The caller supplies the
+ * registries; this module stays free of host types.
+ */
+export function createWorkerLocalToolDefs(
+  deps: WorkerReplyToolDeps,
+): readonly RegisterableWorkerTool[] {
+  return [toRegisterableWorkerTool(createWorkerReplyTool(deps))];
+}
+
+/**
+ * Register the worker-only tool set on ONE child's scoped surface
+ * (ticket 122 / ADR-0028). This is the inverse of the dispatcher
+ * registration: dispatcher tools land on the activated dispatcher agent's
+ * scope, worker tools land on the child's scope, and neither surface lists
+ * the other's tools. Returns the exact disposers.
+ */
+export function registerWorkerLocalTools(
+  surface: WorkerToolSurface,
+  deps: WorkerReplyToolDeps,
+): Array<() => void> {
+  return [surface.register(toRegisterableWorkerTool(createWorkerReplyTool(deps)))];
+}
 
 /**
  * Create the six dispatcher tool definitions bound to a Multitask core.

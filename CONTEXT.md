@@ -5,7 +5,7 @@ Design context for the always-on dispatcher built on dsh (DeepSeek Harness): a m
 ## Language
 
 **Multitask core**:
-The TypeScript component that owns the dispatcher's policy state — FSM, worker registry, steer queue, todo reconciler, wake bus, peer inbox + priority lane, and policy assembly — and runs in-process as a dsh/Cordis plugin.
+The TypeScript component that owns the dispatcher's policy state — the finite state machine (FSM), worker registry, queue of pending steer messages, todo reconciler, wake bus, peer inbox plus priority queue, and policy assembly — and runs in-process as a dsh/Cordis plugin.
 _Avoid_: orchestrator, engine
 
 **Peer agent**:
@@ -16,8 +16,32 @@ _Avoid_: bot, teammate
 An agent the dispatcher spawns and steers; a leaf — it never spawns other agents.
 _Avoid_: subagent, background agent
 
+**Chief of Staff**:
+The dispatcher's role: decide whether the work needs a team or one worker, then hand off the problem and the wanted outcome, not the method.
+_Avoid_: orchestrator, manager
+
+**Mitosis**:
+A dispatcher summoning another dispatcher; the summoned one has the full dispatcher tools and policy and is a peer of its creator, not a rank below it (ADR-0025).
+_Avoid_: child agent, sub-dispatcher
+
+**Chatroom**:
+An optional named group a dispatcher can address instead of one agent; 1:1 messaging stays the default (ADR-0026).
+_Avoid_: group chat, broadcast channel
+
+**Mid-task reply**:
+A worker's message to its own dispatcher sent before the worker finishes, separate from its final answer; also called RespondToCoordinator (ADR-0028).
+_Avoid_: partial result, progress ping
+
+**Compaction boundary**:
+The one stored marker that records where compacted history ends; resume reads it and nothing else to decide where to continue (ADR-0029).
+_Avoid_: checkpoint, summary marker
+
+**Microcompact**:
+Dropping old tool results once context use crosses a set share of the usable window, keeping the newest few; no model call (ADR-0029).
+_Avoid_: summarization, pruning
+
 **Imitation boundary**:
-_Amended 2026-09-19 (ADR-0018, master rule):_ the reference is imitated **in its entirety** — behavior, product experience, and face — except ADR-0018's enumerated exception list, which is exhaustive and the fidelity bar. The S1–S9 scope filter below survives only for Phase-2/non-core choices not overridden by the ADR. _(Formerly, per ADR-0004: the reference authoritative for *how*, product goal and S1–S9 for *whether*.)_
+_Amended 2026-09-19 (ADR-0018, master rule):_ the reference is imitated **in its entirety** — behavior, product experience, and face — except ADR-0018's enumerated exception list, which is exhaustive and is the standard for how close the copy must be. The S1–S9 scope filter (the nine numbered success criteria from the PRD) below applies only to Phase-2/non-core choices not overridden by the ADR. _(Formerly, per ADR-0004: the reference authoritative for *how*, product goal and S1–S9 for *whether*.)_
 _Avoid_: parity, feature match
 
 **Multitask profile**:

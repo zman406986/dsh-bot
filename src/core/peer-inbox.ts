@@ -9,10 +9,12 @@
 
 import {
   effectivePeerPriority,
+  isWorkerReplyStatus,
   samePeerPayload,
   type PeerEnvelope,
   type PeerSendAck,
   type PeerTarget,
+  type WorkerReplyOrigin,
 } from "./peer-types.js";
 
 /** Default undelivered cap per dispatcher session. */
@@ -95,6 +97,34 @@ function validateEnvelope(
   }
   if (!isPresent((to as { agentId?: unknown }).agentId)) {
     return { ok: false, detail: "to.agentId is required" };
+  }
+  // Ticket 122: optional structured provenance. Validated here so a
+  // host-edge caller cannot smuggle an unknown discriminant or a status
+  // outside the declared set into the dispatcher's rendered peer wake.
+  if (envelope.origin !== undefined) {
+    const origin = envelope.origin as Partial<WorkerReplyOrigin> | null;
+    if (
+      origin === null ||
+      typeof origin !== "object" ||
+      origin.kind !== "worker-reply"
+    ) {
+      return {
+        ok: false,
+        detail: `unknown origin kind "${String(origin?.kind)}"`,
+      };
+    }
+    if (!isPresent(origin.workerId)) {
+      return { ok: false, detail: "origin.workerId is required" };
+    }
+    if (
+      origin.status !== undefined &&
+      !isWorkerReplyStatus(origin.status)
+    ) {
+      return {
+        ok: false,
+        detail: `origin.status must be one of progress, blocked, note`,
+      };
+    }
   }
   return { ok: true };
 }

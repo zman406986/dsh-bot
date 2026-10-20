@@ -1,6 +1,6 @@
 # Imitate the reference in its entirety, except an enumerated exception list
 
-**Status:** accepted (human-ruled, 2026-09-18 trim session); vehicle clause amended 2026-09-20 by ADR-0021 — stock dsh stays primary (addon coexistence), U-G amended for dispatcher sessions only
+**Status:** accepted (human-ruled, 2026-09-18 trim session); vehicle clause amended 2026-09-20 by ADR-0021 — stock dsh stays primary (addon coexistence), U-G amended for dispatcher sessions only; **U-G amended further 2026-10-18 by 0025** (human-ruled) for the dispatcher→dispatcher edge only — a dispatcher may summon another dispatcher; **C14's room exclusion superseded 2026-10-18 by 0026** (human-ruled) for this product only — an optional named room; C14's other exclusions and C13 stand
 
 **Supersedes wherever conflicting:** ADR-0005 (flag/toggle semantics), ADR-0009 (activation matrix; its deferred-binding *mechanics* may survive), ADR-0013 (capsule-as-one-overlay-slot; its seam research remains valid), ADR-0016 (already retracted), and the deviation register's U-1 row. **Amends the PRD** in the places listed under Consequences.
 

@@ -1,6 +1,6 @@
 # The collapsed launcher becomes an information-bearing floating capsule — revived by the human's 2026-09-22 ruling
 
-**Status:** accepted (human-ruled, 2026-09-22 in-session directive) — supersedes ADR-0021's capsule-retirement clause in part
+**Status:** accepted (human-ruled, 2026-09-22 in-session directive) — supersedes ADR-0021's capsule-retirement clause in part; **superseded in full 2026-10-18 by 0024** (human-ruled) — the launcher and capsule are withdrawn and the dispatcher UI returns to the native-dsh posture
 
 **Numbering:** 0022, the first free number at filing (2026-09-22; highest in use was 0021). Filed by the scribe session for the 2026-09-22 in-session human ruling; implementation is ticketed separately as ticket 107 per repo rule.
 

@@ -13,9 +13,9 @@
 
 ## 1. Problem
 
-A single agent turn often blocks the chat: research, builds, long tool loops. The user still needs to talk, redirect, or cancel while work runs. The product goal is **one person, many streams**: a dispatcher that stays responsive and runs heavy work in parallel workers, then delivers results as they land.
+A single agent turn often blocks the chat: research, builds, long tool loops. The user still needs to talk, redirect, or cancel while work runs. The product goal is **one person, many streams**: a dispatcher that stays responsive and runs heavy work in parallel workers, then delivers results as they finish.
 
-This is **not** “more subagents.” It is a **policy + wake/steer contract** on top of dsh’s existing spawn / followup / jobs / todo machinery.
+This is **not** “more subagents.” It is a **policy plus a contract for waking and steering** on top of dsh’s existing spawn / followup / jobs / todo machinery.
 
 ---
 
@@ -70,7 +70,7 @@ This is **not** “more subagents.” It is a **policy + wake/steer contract** o
 | S4 | Worker finish wakes dispatcher; dispatcher updates todo and delivers result via user-facing message. |
 | S5 | Workers cannot address the user directly; only the dispatcher can. |
 | S6 | Dispatcher todo list shows multiple `in_progress` streams and is reconciled on every wake. |
-| S7 | ~~No TypeScript file from the reconstruction is imported or vendored into the deliverable.~~ **Voided 2026-09-18 (ADR-0018):** the clean-room identifier grep is no longer a ship gate; the no-verbatim copy policy (§3, AGENTS.md) is the operative rule and naming independence is a quality matter. |
+| S7 | ~~No TypeScript file from the reconstruction is imported or vendored into the deliverable.~~ **Voided 2026-09-18 (ADR-0018):** the clean-room identifier grep is no longer a required check before shipping; the no-verbatim copy policy (§3, AGENTS.md) is the operative rule and naming independence is a quality matter. |
 | S8 | Core modules unit-tested without network/LLM (fake wake/steer/complete). |
 | S9 | (Phase 2) Peer send is async fire-and-forget with optional priority interrupt of non-user work. |
 
@@ -100,7 +100,7 @@ This is **not** “more subagents.” It is a **policy + wake/steer contract** o
 |---|---|
 | **Dispatcher** | The main 1:1 agent. Always multitask-capable. Owns user relationship and delivery. |
 | **Worker** | Headless background agent. One stream of work. Full work tools, **no user messaging**. Starts with empty conversational context. |
-| **Peer agent** (P2) | Separate persistent agent with its own chat; message via async send, not Task result. |
+| **Peer agent** (Phase 2) | Separate persistent agent with its own chat; message via async send, not Task result. |
 | **User** | Human in the primary chat (and other agent chats if multi-agent UI exists). |
 
 ---
@@ -109,17 +109,17 @@ This is **not** “more subagents.” It is a **policy + wake/steer contract** o
 
 ### 6.1 Dispatcher policy (behavioral, not verbatim prompt)
 
-Injected as system / always-on skill. **Amended 2026-09-18 (ADR-0018, supersedes ADR-0005's session-scoped flag):** there is no dispatcher mode, feature flag, or kill switch — the dispatcher is **always-on**, like the reference; ~~the wrapper window / expanded surface *is* the dispatcher~~ **vehicle amended 2026-09-20 (ADR-0021):** stock dsh stays the primary UI (addon coexistence) and the dispatcher's surface is a separate floating window called out from the stock UI — everything typed there goes to the dispatcher(s) living there:
+Injected as system / always-on skill. **Amended 2026-09-18 (ADR-0018, supersedes ADR-0005's session-scoped flag):** there is no dispatcher mode, feature flag, or kill switch — the dispatcher is **always-on**, like the reference; ~~the wrapper window / expanded surface *is* the dispatcher~~ ~~**UI surface amended 2026-09-20 (ADR-0021):** stock dsh stays the primary UI (addon coexistence) and the dispatcher's surface is a separate floating window called out from the stock UI — everything typed there goes to the dispatcher(s) living there~~ **UI surface amended 2026-10-18 (ADR-0024):** the dispatcher UI returns to the native-dsh posture — stock dsh is the primary UI and the only UI, our client module renders nothing into dsh's layout, and there is no floating window, launcher, or capsule. Dispatcher conversation happens in the stock chat, and the stock settings card carries configuration:
 
-- You are a **dispatcher**, not the workhorse.
+- You are a **dispatcher**, not the agent that does the work.
 - Any non-trivial multi-step work → **spawn a worker**; conversational replies and one-step lookups stay inline.
 - Independent work → **parallel workers**; never queue B behind A unless they share a stream.
 - Follow-up/correction to a running stream → **steer that worker**, do not spawn a clone.
 - Every user request → **todo entry** before spawn; `in_progress` when the worker starts; `completed` at **first visible ack** to the user (amended 2026-09-18, ADR-0018 — the stricter "user has the result" criterion is superseded; worker exit alone still completes nothing).
-- On every wake: **reconcile todos first** (running / landed / next to dispatch).
+- On every wake: **reconcile todos first** (what is running, what has finished, what to dispatch next).
 - Worker prompts are **self-contained**: goal, constraints, relevant context, success criteria, report format.
 - Workers **cannot** message the user; dispatcher always delivers.
-- Machinery is invisible to the user: no jargon (no “dispatching an executor”); speak as one busy person.
+- Internal workings stay invisible to the user: no jargon (no “dispatching an executor”); speak like one busy person.
 
 ### 6.2 Worker contract
 
@@ -132,7 +132,7 @@ Injected as system / always-on skill. **Amended 2026-09-18 (ADR-0018, supersedes
 | Resume (optional) | Follow-up after finish may re-enter same agent id if dsh supports it; still re-include needed context. |
 | Report | Final text is the stream’s report to the dispatcher (structured enough to deliver / act on). |
 | Spawning | Workers are **leaves**: only the dispatcher spawns agents; a worker never spawns sub-workers (ADR-0003). |
-| Todos | The todo list is the **dispatcher's private ledger** — never passed into a worker's context (a worker has no user-messaging tool, so it cannot legitimately complete an item); a worker's own list stays empty (ADR-0007). |
+| Todos | The todo list belongs to the dispatcher alone — never passed into a worker's context (a worker has no user-messaging tool, so it cannot legitimately complete an item); a worker's own list stays empty (ADR-0007). |
 
 ### 6.3 Tools / commands (dispatcher-visible)
 
@@ -143,7 +143,7 @@ Surface names are **dsh-native**; do not ship Sand tool names.
 | Spawn stream | existing dsh spawn/task with a **worker** agent type | Blank worker; returns worker id + ack; non-blocking |
 | Check | `check_worker` or job status UI + tool | List running workers; detail: elapsed, tool count, recent activity, transcript path |
 | Steer | `message_worker` / dsh followup-interrupt | Inject into running worker |
-| Stop | `stop_worker` | Abort; no late result revival — late results are dropped, per reference behavior (docs/research/reference-behavior-notes.md) |
+| Stop | `stop_worker` | Abort; a result that arrives after the abort is not brought back — late results are dropped, per reference behavior (docs/research/reference-behavior-notes.md) |
 | Todos | existing todo tools | Allow **multiple** `in_progress`; reconcile on wake |
 | Deliver | existing user message tool | Dispatcher → user only |
 
@@ -153,9 +153,9 @@ Surface names are **dsh-native**; do not ship Sand tool names.
 |---|---|
 | User message | Reply short; update/ack todos; dispatch or steer as needed |
 | Worker completed | Reconcile todo; deliver result; spawn next in that stream if queued |
-| Worker error | Report honest state to user; decide retry / steer / drop |
+| Worker error | Report the true state to user; decide retry / steer / drop |
 | Worker aborted | Close todo as cancelled; tell user if it was visible work |
-| Peer message (P2) | Hidden turn with `[peer]` cue style *concept*; new copy |
+| Peer message (Phase 2) | Hidden turn with a `[peer]` marker — copy the idea of the cue, write new wording |
 | External event — opt-in file inbox | Dispatcher wake turn presenting the job prompt as work material; joins the existing coalescing/batching semantics unchanged *(amended 2026-10-02, ticket 111, ADR-0023: docs/adr/0023-file-driven-external-intake.md — first producer of the `external-event` wake source)* |
 
 **Anti-patterns (explicitly out of policy)**
@@ -193,7 +193,7 @@ States: `pending` | `in_progress` | `completed` | `cancelled`.
 │  policy prompt assembler     worker registry                 │
 │  todo reconciler             completion → wake bus           │
 │  steer queue (pending msg)   lifecycle FSM                   │
-│  (P2) peer inbox + priority lane                             │
+│  (Phase 2) peer inbox + priority queue                       │
 └──────────────────────────────────────────────────────────────┘
          │ thin adapters only
          ▼
@@ -226,15 +226,15 @@ stateDiagram-v2
 1. Steer request arrives for worker `W`.
 2. If `W` is running: queue `pending_steer[W]` and request interrupt of current step.
 3. On step boundary: if `pending_steer` non-empty, pop one, wrap as steering block (“parent correction; continue; do not restart”), run next step.
-4. If multiple steers queued: last-wins or merge—**spec: last-wins** for simplicity; document.
+4. If multiple steers are queued, either last-wins or merge — **spec: last-wins**, meaning only the newest steer is kept; document that.
 5. If `W` not running: return not-running; do not silently recreate.
 
 ### 7.4 Completion → wake
 
 1. Worker settles (completed | error | aborted).
 2. Emit `WorkerSettled{worker_id, parent_session, status, result_summary, transcript_ref}`.
-3. Wake bus enqueues **wakeup** on dispatcher session (same lane class as dsh job completion).
-4. Dispatcher turn: pull wakeups → reconcile todos → deliver or bookkeep.
+3. Wake bus enqueues **wakeup** on dispatcher session (the same kind of queue entry as a dsh job completion).
+4. Dispatcher turn: pull wakeups → reconcile todos → deliver the result or just update internal records.
 5. If dispatcher is mid-user-turn, use dsh’s busy-inject policy (do not starve the user).
 
 ### 7.5 Data model (minimal)
@@ -268,7 +268,7 @@ PeerEnvelope {
 }
 ```
 
-~~Persistence: **dsh session/job store** first; avoid inventing a second transcript DB. In-memory maps are OK for v1 if process lifetime == session lifetime; document restart loss.~~ ~~**Resolved: durable core state in the dsh session/job store is in scope for v1** — worker records, steer tickets, todo↔worker linkage, and **held results that settle while the dispatcher is toggled OFF** (ADR-0005) persist there and survive restart; still no second transcript DB, never an in-memory-only `WorkerRecord`/`SteerTicket` map in shipped code.~~ **Resolved (amended): match the reference's actual split.** Durable: per-agent transcript/KV state, conversation state including the todo list, and small control-plane obligation markers. In-memory: the worker registry/records and steer tickets — reference recon found these are not persisted (`docs/research/reference-behavior-notes.md`). In-memory state is lost on restart, and the reference handles that by **honest amnesia**: a lost worker is reported as unknown-state pointing at its transcript, never replayed. Still no second transcript DB. The blanket "everything durable in v1" claim is withdrawn; held results are moot because there is no off-while-running state (ADR-0005). **Resolved (Q10): hybrid split — `WorkerRecord` durable minimum-to-reconstruct; `SteerTicket` in-memory** (ADR-0006). Durable is the **minimum needed to rebuild the live roster** across a restart — worker id, transcript pointer, todo link, status — written through the reference's control-plane obligation-marker idiom, so the dispatcher can notice an undelivered result after a restart and finish delivery (S4). `SteerTicket` stays in-memory: a steer is transient by definition (single-slot, last-wins), so persisting it means persisting a value expected to be overwritten and meaningless after a restart. The in-memory half imitates the reference's honest-amnesia restart behavior; the durable half is **our deliberate divergence** from it, not imitation.
+~~Persistence: **dsh session/job store** first; avoid inventing a second transcript DB. In-memory maps are OK for v1 if process lifetime == session lifetime; document restart loss.~~ ~~**Resolved: durable core state in the dsh session/job store is in scope for v1** — worker records, steer tickets, todo↔worker linkage, and **held results that settle while the dispatcher is toggled OFF** (ADR-0005) persist there and survive restart; still no second transcript DB, never an in-memory-only `WorkerRecord`/`SteerTicket` map in shipped code.~~ **Resolved (amended): match the reference's actual split.** Durable: per-agent transcript/KV state, conversation state including the todo list, and small markers recording unfinished background work. In-memory: the worker registry/records and steer tickets — reference research found these are not persisted (`docs/research/reference-behavior-notes.md`). In-memory state is lost on restart, and the reference handles that by reporting the loss plainly: a lost worker is reported as unknown-state pointing at its transcript, never replayed. Still no second transcript DB. The blanket "everything durable in v1" claim is withdrawn; held results are moot because there is no off-while-running state (ADR-0005). **Resolved (Q10): split storage by type — `WorkerRecord` durable, holding the minimum needed to rebuild it; `SteerTicket` in-memory** (ADR-0006). Durable is the **minimum needed to rebuild the live list of workers** across a restart — worker id, transcript pointer, todo link, status — written as the same kind of small unfinished-work marker the reference uses, so the dispatcher can notice an undelivered result after a restart and finish delivery (S4). `SteerTicket` stays in-memory: a steer is transient by definition (single-slot, last-wins), so persisting it means persisting a value expected to be overwritten and meaningless after a restart. The in-memory half copies the reference's plain admission of lost state on restart; the durable half is **our deliberate divergence** from it, not imitation.
 
 ### 7.6 Phase 2 — peer agents (optional)
 
@@ -278,7 +278,7 @@ Only if product needs multi-bot:
 |---|---|
 | Transport | Async message queue per target agent; fire-and-forget ack |
 | Wake | New hidden turn with peer cue (new wording) |
-| Priority | Can interrupt non-user lane; never silently drop user |
+| Priority | Can interrupt work that is not from the user; never silently drop the user |
 | Storage | Sender outbound + receiver inbound as normal transcript entries |
 | Directory | File or DB of agents: id, name, description |
 | Images | Optional later; text first |
@@ -301,7 +301,7 @@ Sand-like “full messaging hub” is **out of MVP**. Multitask dispatcher does 
 
 1. Implementers **may** open, read, and **adapt** reconstruction sources — restructure and rename independently; never reproduce text verbatim (code, prompts, identifiers, protocol artifacts).
 2. Design from **this PRD + dsh public docs/API**; the reference is the behavior spec (ADR-0017/0018), not a source to transliterate.
-3. Package/type/function names stay written from §7/§16 glossary and our own vocabulary — as quality, not compliance (the old clean-room identifier grep is voided as a ship gate).
+3. Package/type/function names stay written from §7/§16 glossary and our own vocabulary — as quality, not compliance (the old clean-room identifier grep is voided as a required check before shipping).
 4. Prompt assets are **new or adapted copy** (§10), never textually identical to reference prompt strings.
 
 **Hard rule:** no verbatim text from the reconstruction — adapted only (human accepted-risk decision 2026-09-18).
@@ -341,10 +341,10 @@ Dispatcher-facing tools map 1:1 onto core calls; do not leak core internals into
 
 | Asset | Content requirements |
 |---|---|
-| Dispatcher system section | Roles in §6.1; user-facing tone rules; privacy of machinery |
+| Dispatcher system section | Roles in §6.1; user-facing tone rules; the user never sees internal implementation details |
 | Worker agent definition | Headless, self-contained prompt requirement, report format, no user DM |
 | Steer wrapper | “Correction from parent; incorporate; continue from here; do not restart” |
-| Todo tool description | Parallel in_progress; reconcile on wake; completed = first-visible-ack (ADR-0018) |
+| Todo tool description | Parallel in_progress; reconcile on wake; completed = first visible acknowledgement to the user (ADR-0018) |
 | Check/message/stop tool descriptions | dsh wording; behavior identical to §6.3 |
 
 Deliver as separate files in the product repo (e.g. `prompts/dispatcher.md`). Review for: no Sand phrases, no product-name leaks, bilingual if product requires ZH.
@@ -357,7 +357,7 @@ Deliver as separate files in the product repo (e.g. `prompts/dispatcher.md`). Re
 2. Map Multitask wake bus → dsh job `completionDelivery=wakeup` (or equivalent).
 3. Confirm todo allows multiple `in_progress` (if not, extend or bypass with core-local queue + display).
 4. Confirm worker agent type can run **without** user-facing send tools.
-5. ~~Feature flag: `multitask_dispatcher` ON in the dedicated multitask profile, OFF in stock/default profiles; kill switch not live-applied (ADR-0005).~~ **Voided 2026-09-18 (ADR-0018):** no dispatcher mode, flag, or kill switch — the dispatcher is **always-on**; ~~the wrapper window / expanded surface *is* the dispatcher~~ **vehicle amended 2026-09-20 (ADR-0021):** the dispatcher's surface is a separate floating window over stock dsh, which stays primary (addon coexistence). No on/off-while-running state exists to define.
+5. ~~Feature flag: `multitask_dispatcher` ON in the dedicated multitask profile, OFF in stock/default profiles; kill switch not live-applied (ADR-0005).~~ **Voided 2026-09-18 (ADR-0018):** no dispatcher mode, flag, or kill switch — the dispatcher is **always-on**; ~~the wrapper window / expanded surface *is* the dispatcher~~ ~~**UI surface amended 2026-09-20 (ADR-0021):** the dispatcher's surface is a separate floating window over stock dsh, which stays primary (addon coexistence)~~ **UI surface amended 2026-10-18 (ADR-0024):** the UI returns to the native-dsh posture — stock dsh is the primary UI and the only UI, our client module renders nothing into dsh's layout, and there is no floating window, launcher, or capsule. No on/off-while-running state exists to define.
 6. Telemetry (optional): dispatch count, steer count, time-to-first-reply while busy — no prompt text in telemetry.
 
 ---
@@ -367,8 +367,8 @@ Deliver as separate files in the product repo (e.g. `prompts/dispatcher.md`). Re
 | Layer | Tests |
 |---|---|
 | FSM | spawn→run→steer→complete; abort during steer; double-settle ignored |
-| Steer queue | last-wins; empty pop; steer when not running |
-| Todo reconciler | parallel in_progress; complete only after first-visible-ack (ADR-0018); cancel stale |
+| Steer queue | last-wins; popping from an empty queue; steer when not running |
+| Todo reconciler | parallel in_progress; complete only after the first acknowledgement is visible to the user (ADR-0018); cancel stale |
 | Wake bus | settle enqueues exactly one wake; parent session routing |
 | Adapter (fake dsh) | spawn/interrupt called; user send never called from worker type |
 | E2E (manual/script) | long fake worker + rapid user messages; steer mid-run; delivery text |
@@ -381,10 +381,10 @@ Deliver as separate files in the product repo (e.g. `prompts/dispatcher.md`). Re
 | Phase | Scope | Exit |
 |---|---|---|
 | **M0** | Spec freeze (this PRD); TypeScript in-process plugin confirmed | Team sign-off |
-| **M1** | Core FSM + steer + wake bus + unit tests | S8 green |
+| **M1** | Core FSM + steer + wake bus + unit tests | S8 passing |
 | **M2** | dsh adapter + worker agent type + tools | S1–S5 demo |
 | **M3** | Todos reconcile + policy prompts | S6 demo |
-| **M4** | Docs, ZH/EN prompts; adapted-copy review (§12, re-scoped 2026-09-18 — no verbatim text vs the reference; the old clean-room audit and S7 grep gate are voided, ADR-0018) run once the product is mostly finished | Adapted-copy review recorded |
+| **M4** | Docs, ZH/EN prompts; adapted-copy review (§12, re-scoped 2026-09-18 — no verbatim text vs the reference; the old clean-room audit and the S7 identifier-grep check are voided, ADR-0018) run once the product is mostly finished | Adapted-copy review recorded |
 | **M5** (opt) | Peer async messaging | S9 |
 
 ---
@@ -393,12 +393,12 @@ Deliver as separate files in the product repo (e.g. `prompts/dispatcher.md`). Re
 
 | Risk | Mitigation |
 |---|---|
-| Accidental code/prompt copy (same language as reference) | No-copy discipline: reference reading allowed, independent naming, no shared identifiers or literals, legal grep |
+| Accidental code/prompt copy (same language as reference) | No-copy discipline: reference reading allowed, independent naming, no shared identifiers or literals, and a check that greps for reference identifiers |
 | dsh lacks interrupt-continue | Fall back to “queue steer as next user turn on same agent” (weaker S3) or pick another host primitive |
-| Dispatcher thrash (too many short turns) | Policy: one reconcile pass per wake; coalesce wakes |
+| Dispatcher overloaded by too many short turns | Policy: one reconcile pass per wake; combine wakes |
 | Duplicate workers for same stream | `stream_key` uniqueness while running |
 | Result never delivered | `delivered` flag; idle reconcile job |
-| User spam during heavy load | Priority: user lane always preempts bookkeeping; workers already isolated |
+| User spam during heavy load | Priority: user messages always preempt internal bookkeeping; workers already isolated |
 
 ---
 
@@ -409,8 +409,8 @@ Deliver as separate files in the product repo (e.g. `prompts/dispatcher.md`). Re
 3. ~~Worker `Stop` visibility: silent vs user-visible cancel.~~ **Resolved: imitate reference behavior** (docs/research/reference-behavior-notes.md).
 4. ~~Steer conflict policy: confirm **last-wins**.~~ **Resolved: imitate reference behavior — last-wins confirmed** (docs/research/reference-behavior-notes.md).
 5. ~~Phase 2 peer agents: in scope for this project or separate PRD?~~ **Resolved: in scope for this project** (ADR-0002).
-6. ~~Default feature flag ON/OFF for first release.~~ **Voided 2026-09-18 (ADR-0018; supersedes ADR-0005):** there is no flag and no kill switch — the dispatcher is **always-on**; ~~the wrapper window / expanded surface *is* the dispatcher~~ **vehicle amended 2026-09-20 (ADR-0021):** the dispatcher's surface is a separate floating window over stock dsh, which stays primary (addon coexistence). Q6 and the held-results half of Q8 are moot a fortiori.
-7. ~~Durable `WorkerRecord`/`SteerTicket`.~~ **Resolved: hybrid split.** A **minimum-to-reconstruct `WorkerRecord`** is durable — enough to rebuild the live roster across a restart (worker id, transcript pointer, todo link, status), written through the reference's control-plane obligation-marker idiom, so the dispatcher can notice an undelivered result after a restart and finish delivery (S4). **`SteerTicket` stays in-memory** — a steer is transient by definition (single-slot, last-wins), so persisting it means persisting a value expected to be overwritten. Still no second transcript DB. The in-memory half imitates the reference's honest-amnesia restart behavior; the durable half is **our deliberate divergence** from it (ADR-0006).
+6. ~~Default feature flag ON/OFF for first release.~~ **Voided 2026-09-18 (ADR-0018; supersedes ADR-0005):** there is no flag and no kill switch — the dispatcher is **always-on**; ~~the wrapper window / expanded surface *is* the dispatcher~~ ~~**UI surface amended 2026-09-20 (ADR-0021):** the dispatcher's surface is a separate floating window over stock dsh, which stays primary (addon coexistence)~~ **UI surface amended 2026-10-18 (ADR-0024):** the UI returns to the native-dsh posture — stock dsh is the primary UI and the only UI, our client module renders nothing into dsh's layout, and there is no floating window, launcher, or capsule. Q6 and the held-results half of Q8 no longer apply at all.
+7. ~~Durable `WorkerRecord`/`SteerTicket`.~~ **Resolved: storage is split by type.** A `WorkerRecord` is durable, holding the minimum needed to rebuild it — enough to rebuild the live list of workers across a restart (worker id, transcript pointer, todo link, status), written as the same kind of small unfinished-work marker the reference uses, so the dispatcher can notice an undelivered result after a restart and finish delivery (S4). **`SteerTicket` stays in-memory** — a steer is transient by definition (single-slot, last-wins), so persisting it means persisting a value expected to be overwritten. Still no second transcript DB. The in-memory half copies the reference's plain admission of lost state on restart; the durable half is **our deliberate divergence** from it (ADR-0006).
 
 ---
 
@@ -434,7 +434,7 @@ These are **product concepts**. Implementation names must be chosen independentl
 > Supersedes the original clean-room exclusion list. The reference reconstruction is public with **unknown upstream provenance**; the human accepted the residual risk (2026-09-18). AGENTS.md ("Reference-tree copying policy") is the operative wording.
 
 - **Forbidden:** verbatim copying of any source, tool description strings, system prompt sections, runtime classes/functions, protocol artifacts, or experiment codenames from the reconstruction.
-- **Permitted:** **adapted copying** — restructured, independently named, not textually identical (independent naming is a quality rule, not a compliance gate; the old clean-room identifier grep / S7 ship gate is voided).
+- **Permitted:** **adapted copying** — restructured, independently named, not textually identical (independent naming is a quality rule, not a compliance check; the old clean-room identifier grep / S7 required check is voided).
 - This policy is a human accepted-risk decision, **not a legal clearance**. It can only be changed by a **separate** written human decision — not by default.
 
 ---

@@ -16,6 +16,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { apply } from "../src/plugin.js";
+import { volatileConfig } from "./support/plugin-config.js";
 import {
   DISPATCHER_RESOLVE_COMMAND,
   DISPATCHER_START_COMMAND,
@@ -146,9 +147,13 @@ function createFullCtx() {
       },
     },
     subagents: {
-      async startContinuable() {
+      async startActivation() {
         const childId = `child-${nextChild++}`;
-        return { childId, messageId: `msg-${childId}` };
+        return {
+          childId,
+          messageId: `msg-${childId}`,
+          dispose: async () => {},
+        };
       },
       interrupt() {},
       async sendMessage(
@@ -262,13 +267,13 @@ async function activateWithRunningWorker(ctx: ReturnType<typeof createFullCtx>) 
 describe("steer command — flag matrix and registration", () => {
   it("flag OFF registers no steer command (fully inert)", () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: false });
+    apply(ctx, volatileConfig({ enabled: false }));
     assert.deepEqual(ctx.commandNames(), []);
   });
 
   it("flag ON registers dispatcher-start and dispatcher-steer exactly once", () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     assert.deepEqual(ctx.commandNames(), [
       DISPATCHER_RESOLVE_COMMAND,
       DISPATCHER_START_COMMAND,
@@ -309,7 +314,7 @@ describe("steer command — flag matrix and registration", () => {
 describe("steer command — activation gate", () => {
   it("refuses while dormant with not-active copy", async () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
 
     const result = await ctx.runCommand({
       commandId: DISPATCHER_STEER_COMMAND,
@@ -324,7 +329,7 @@ describe("steer command — activation gate", () => {
 
   it("refuses an invocation without a resolvable chat while dormant", async () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
 
     const result = await ctx.runCommand({
       commandId: DISPATCHER_STEER_COMMAND,
@@ -338,7 +343,7 @@ describe("steer command — activation gate", () => {
 
   it("refuses a different chat than the activated dispatcher", async () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     await ctx.runCommand({
       commandId: DISPATCHER_START_COMMAND,
       agent: createAgent("s-1"),
@@ -357,7 +362,7 @@ describe("steer command — activation gate", () => {
 
   it("refuses a non-top-level chat (a child chat never holds the activation)", async () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     await ctx.runCommand({
       commandId: DISPATCHER_START_COMMAND,
       agent: createAgent("s-1"),
@@ -399,7 +404,7 @@ describe("steer command — payload parsing", () => {
 
   it("refuses empty instructions with usage copy", async () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     await ctx.runCommand({
       commandId: DISPATCHER_START_COMMAND,
       agent: createAgent("s-1"),
@@ -419,7 +424,7 @@ describe("steer command — payload parsing", () => {
 describe("steer command — routes into the existing core steer queue", () => {
   it("queues the instruction, flips running → steering, returns success copy", async () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     const { workerId } = await activateWithRunningWorker(ctx);
 
     const result = await ctx.runCommand({
@@ -439,7 +444,7 @@ describe("steer command — routes into the existing core steer queue", () => {
 
   it("delivers the parked steer at the step boundary as a parent correction", async () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     const { workerId } = await activateWithRunningWorker(ctx);
     await ctx.runCommand({
       commandId: DISPATCHER_STEER_COMMAND,
@@ -462,7 +467,7 @@ describe("steer command — routes into the existing core steer queue", () => {
 
   it("keeps core last-wins: two queued steers deliver only the latest", async () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     const { workerId } = await activateWithRunningWorker(ctx);
 
     const first = await ctx.runCommand({
@@ -492,7 +497,7 @@ describe("steer command — routes into the existing core steer queue", () => {
 describe("steer command — core refusal vocabulary", () => {
   it("refuses an unknown worker with the core's unknown-worker mapping", async () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     await ctx.runCommand({
       commandId: DISPATCHER_START_COMMAND,
       agent: createAgent("s-1"),
@@ -511,7 +516,7 @@ describe("steer command — core refusal vocabulary", () => {
 
   it("refuses a settled worker with the core's not-running mapping", async () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     const { workerId } = await activateWithRunningWorker(ctx);
 
     // Worker settles completed through the real host settle path.
@@ -538,7 +543,7 @@ describe("steer command — core refusal vocabulary", () => {
 describe("steer command — HMR reversal", () => {
   it("dispose-all unregisters the command; nothing lingers", async () => {
     const ctx = createFullCtx();
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     await activateWithRunningWorker(ctx);
     assert.deepEqual(ctx.commandNames(), [
       DISPATCHER_RESOLVE_COMMAND,
@@ -574,7 +579,7 @@ describe("steer command — host duplicate-registration rule (ticket 91)", () =>
     });
 
     assert.throws(
-      () => apply(ctx, { enabled: true }),
+      () => apply(ctx, volatileConfig({ enabled: true })),
       new RegExp(
         `command "${DISPATCHER_STEER_COMMAND}" is already registered`,
       ),

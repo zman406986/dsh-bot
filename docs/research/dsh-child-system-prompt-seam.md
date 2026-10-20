@@ -1,13 +1,13 @@
-# Research: the spawned-dsh-child system-prompt seam (ticket 52, Q2)
+# Research: the system prompt of a spawned dsh child (ticket 52, Q2)
 
-- **Question (Q2, the load-bearing one):** What base system prompt does a spawned dsh child
-  actually carry, and can a plugin set or extend it through a supported seam? This decides
+- **Question (Q2, the decisive one):** What base system prompt does a spawned dsh child
+  actually carry, and can a plugin set or extend it through a supported host API? This decides
   whether the core-loop fidelity requirement (D-1: deliver the worker contract as a *system
   prompt*, not conversation content) is even achievable on dsh.
 - **Scope:** product code (`src/adapter/cordis-dsh-host.ts`, `src/worker/prompt.ts`,
   `src/worker/agent-def.ts`) + the **installed dsh host bundle** at
   `C:\Users\TZhen\.dsh\profiles\node_modules\@deepseek-ai\` (all `@deepseek-ai/dsh-*` packages
-  are version **0.1.5-rc.2**; the ticket/ADR cite 0.1.5-rc.1 — same minor, identical seam set).
+  are version **0.1.5-rc.2**; the ticket/ADR cite 0.1.5-rc.1 — same minor version, same host API surface).
 - **Method:** offline, read-only. Every "available" claim below is tied to the implementing
   line in the compiled bundle, not to a type name or a prior note. The reference tree was not
   opened (clean-room boundary).
@@ -18,11 +18,11 @@
 
 ## Headline answer
 
-**The seam exists and is wired.** A plugin can deliver the worker contract into a **stable,
+**The host API exists and is wired.** A plugin can deliver the worker contract into a **stable,
 system-position** slot on the child via the spawn request's `persona` field. Today we do not use
 it — our adapter passes only `request.prompt` (conversation content). So D-1 is **not** a
-structural impossibility on dsh; it is an unused seam. But the seam is a *prefix/shadow* of one
-section, not a way to blank the child's inherited base system prompt (see §3).
+structural impossibility on dsh; it is an unused host API. But `persona` only *prefixes and
+overrides one section*; it cannot blank the child's inherited base system prompt (see §3).
 
 ---
 
@@ -71,9 +71,9 @@ prompt is inherited via `composeFrom`, independently of that flag.
 
 ---
 
-## 2. Can a plugin supply / extend it through a supported seam?
+## 2. Can a plugin supply / extend it through a supported host API?
 
-**Yes — two wired seams, not display-only.**
+**Yes — two host APIs that are wired, not display-only.**
 
 ### 2a. `persona` → a system-prompt *section* (this is the contract channel)
 
@@ -106,10 +106,10 @@ prompt is inherited via `composeFrom`, independently of that flag.
   `provider / model / reasoningEffort / maxTokens` (+ the stamped `subagentDepth`) —
   `dsh-subagent/lib/index.js:468-484`. **There is no system-prompt / persona field inside
   `agentOptions`.** So `agentOptions` can change *which* model/provider runs the worker, but it
-  does **not** set or extend the worker's system prompt. It is a real, wired seam — just not the
+  does **not** set or extend the worker's system prompt. It is a real, wired host API — just not the
   one D-1 needs.
 
-### 2c. The seams are enforced, not cosmetic
+### 2c. The host APIs are enforced, not cosmetic
 
 - The in-process `spawn` provider advertises both: `capabilities = { agentOptions: true, persona:
   true, … }` — `dsh-subagent-spawn-in-process/lib/index.js:23-29`.
@@ -118,9 +118,9 @@ prompt is inherited via `composeFrom`, independently of that flag.
   comment at `dsh-subagent/lib/index.js:2498-2502` states out-of-process backends advertise all
   `false` so the request is *"rejected… never accepted-then-ignored."* This is the opposite of a
   silent/display-only parameter: passing `persona` to a provider that didn't support it would
-  throw, confirming it is load-bearing.
+  throw, confirming the parameter actually takes effect.
 
-**Conclusion (Q2):** Both `persona` and `agentOptions` are real, wired seams. `persona` is the
+**Conclusion (Q2):** Both `persona` and `agentOptions` are real, wired host APIs. `persona` is the
 one that places content in the child's **system prompt** (as the `deployment:persona-prefix`
 section). Our adapter currently omits both (`src/adapter/cordis-dsh-host.ts:534-544`), so the
 capability is available-but-unused, not absent.
@@ -138,7 +138,7 @@ implements the fix:
   *[harness identity] + [our worker contract as persona-prefix] + [the dispatcher's full
   inherited preset: host base prompt + plugin sections] + [subagent:delegation context]*. The
   contract reaches a stable system position, but the child is not a clean "blank worker with only
-  our contract." There is **no seam** in `agentOptions` or `persona` to strip the inherited base;
+  our contract." There is **no host API** in `agentOptions` or `persona` to strip the inherited base;
   achieving a truly minimal worker system prompt would require a separate, parent-light agent
   preset (a host-side change, out of this plugin's reach).
 - **`persona` is interpolated like the deployment persona** — strict `{{…}}` template semantics
@@ -147,7 +147,7 @@ implements the fix:
   delimiters).
 - `src/worker/agent-def.ts:7-21` (`WorkerAgentDef`) is a **local composition object, not a host
   registry entry** ("Not a host registry object" — `agent-def.ts:9`). There is no
-  "register-an-agent-type whose definition carries instructions" host seam being used; the only
+  "register-an-agent-type whose definition carries instructions" host API being used; the only
   host mechanism that injects instructions into the child is `persona`.
 
 ---
@@ -155,12 +155,12 @@ implements the fix:
 ## 4. Verdict on the fidelity requirement
 
 D-1 ("contract as conversation content vs system prompt") is **achievable on dsh as installed**,
-via the `persona` seam, which delivers the contract into a stable, compaction-surviving system
+via the `persona` field, which delivers the contract into a stable, compaction-surviving system
 position. What is *not* achievable without a host change is a fully blank/minimal worker system
 prompt — the child always inherits the dispatcher's preset. That residual (inherited base) is a
 fidelity *gap* vs the reference's composed-but-parent-independent worker prompt, but it does not
 block placing our contract in a system position. So the "rebuild to match the reference" premise
-is **not** wrecked by a missing seam; the honest outcome is "adapt the delivery channel (use
+is **not** wrecked by a missing host API; the honest outcome is "adapt the delivery channel (use
 `persona`), and accept an inherited base prompt," not "the requirement is impossible."
 
 ---
@@ -175,9 +175,9 @@ is **not** wrecked by a missing seam; the honest outcome is "adapt the delivery 
     fixed `subagent:delegation` context + harness identity (§1). The `inheritsParentContext =
     false` flag governs *conversation* blanking, not the system prompt; the prior note conflated
     the two.
-  - The `persona`/`agentOptions` seams are **not absent** — they are present, typed, advertised by
+  - The `persona`/`agentOptions` fields are **not absent** — they are present, typed, advertised by
     the `spawn` provider, and enforced (§2). The note's "unverified" framing understated a
-    verified, usable seam.
+    verified, usable host API.
 - `docs/research/dsh-adapter-api-notes.md:37,53` was actually **correct**: it already listed
   `agentOptions?` and `persona?` on `SubagentStartRequest`. The two notes disagreed; this research
   confirms the API-notes version and corrects the capability-map version.
@@ -199,7 +199,7 @@ These are the only things left unestablished; each has a concrete settling metho
    registrations; or a trivial live spawn under the AGENTS.md kill-timer rule capturing the
    rendered child system prompt.
 2. **Whether `persona` can fully replace vs only prefix the inherited base.** Established it is a
-   *shadow of one named section* (§2a/§3), so the inherited base remains; not re-litigated here.
+   *shadow of one named section* (§2a/§3), so the inherited base remains; not revisited here.
    *Already settled enough* for the verdict; a host preset change would be needed to blank it.
 3. **`{{…}}` interpolation behaviour for a non-deployment persona.** Established it uses the
    deployment-persona template semantics (§3). *Settle by:* a trivial live `persona` containing a

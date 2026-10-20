@@ -680,27 +680,19 @@ describe("toolview — locale dictionary shape", () => {
 });
 
 describe("toolview — apply() registers one keyed entry per tool via the fake seam", () => {
-  it("registers the five keyed toolview entries alongside the ticket-100 launcher", () => {
+  it("registers the five keyed toolview entries; the overlay era is over", () => {
     const ctx = createClientCtx();
     apply(ctx);
 
-    // Three injects since ticket 100 (ADR-0021): tool.call.toolview
-    // (toolviews), settings.plugin.item (ticket 47's settings card), and
-    // shell.overlay (the floating-window launcher — the ONE additive
-    // overlay entry, fresh id; the capsule stays retired). The `main` page
-    // and `root` election injects stay retired (stock dsh is primary).
-    assert.equal(ctx.injects.length, 3);
+    // Three injects: tool.call.toolview (toolviews) + plugins.row.config
+    // (ticket 47's settings page) + the worker session-kind glyph in the
+    // header actions band (ticket 123). The `main` page and `root` election
+    // are not composed (stock dsh stays primary). The shell.overlay injects
+    // (capsule, launcher) retired at the ticket-78 cutover.
+    assert.equal(ctx.injects.length, 4);
     const overlay = ctx.findInject(SHELL_OVERLAY_SLOT);
     const toolviews = ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT);
-    assert.ok(overlay, "launcher overlay inject present (ticket 100)");
-    assert.equal(
-      overlay.entries.some(
-        (entry) =>
-          (entry.options as { id?: string }).id === "multitask-dispatcher-roster",
-      ),
-      false,
-      "the capsule entry stays retired",
-    );
+    assert.equal(overlay, undefined, "no overlay inject post-cutover");
     assert.ok(toolviews, "toolview inject present");
 
     assert.equal(toolviews.entries.length, TOOLVIEW_TOOL_NAMES.length);
@@ -746,9 +738,9 @@ describe("toolview — HMR reversal over the fake seam", () => {
     // left any entry in its cell (the fake now models that rule), so the
     // HMR-reversal assertion is a real contract check, not just a count.
     assert.doesNotThrow(() => apply(ctx));
-    assert.equal(ctx.injects.length, 3);
+    assert.equal(ctx.injects.length, 4);
     assert.equal(ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT)?.entries.length, 6);
-    assert.ok(ctx.findInject(SHELL_OVERLAY_SLOT), "launcher re-registers");
+    assert.equal(ctx.findInject(SHELL_OVERLAY_SLOT), undefined);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
   });
 });

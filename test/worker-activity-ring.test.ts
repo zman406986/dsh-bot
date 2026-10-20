@@ -6,7 +6,7 @@ import {
   WorkerActivityRing,
   type AdapterContext,
   type AgentLike,
-  type ContinuableStartSpecLike,
+  type ActivationSpecLike,
 } from "../src/adapter/cordis-dsh-host.js";
 
 /** Deterministic ring unit tests: controlled atMs, no clock dependence. */
@@ -135,10 +135,14 @@ function createStubCtx() {
       };
     },
     subagents: {
-      async startContinuable(spec: ContinuableStartSpecLike) {
+      async startActivation(spec: ActivationSpecLike) {
         void spec;
         const childId = `child-${nextChild++}`;
-        return { childId, messageId: `msg-${childId}` };
+        return {
+          childId,
+          messageId: `msg-${childId}`,
+          dispose: async () => {},
+        };
       },
       interrupt() {},
       async sendMessage() {

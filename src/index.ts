@@ -14,7 +14,6 @@ export {
   DISPATCHER_START_NOT_TOP_LEVEL,
   DISPATCHER_START_SUCCESS,
   DISPATCHER_START_UNRESOLVED,
-  installMultitaskSettingsSection,
   isTopLevel,
   listGlobalToolNames,
   mapStopReason,
@@ -50,9 +49,6 @@ export type {
   RegisterDispatcherStartCommandOptions,
   RegisterDispatcherToolsOptions,
   RegisterableTool,
-  SettingsAwareContext,
-  SettingsInjectContext,
-  SettingsProviderLike,
   StorageDomainDurability,
   StorageDomainLike,
   TextBlock,
@@ -258,6 +254,7 @@ export {
 export {
   buildTurnReminderForSession,
   createDispatcherTools,
+  createWorkerLocalToolDefs,
   toToolParametersSchema,
 } from "./core/tools.js";
 export type {
@@ -265,5 +262,6 @@ export type {
   DispatcherToolDef,
   DispatcherToolDeps,
   RecentActivityFn,
+  WorkerReplyToolDeps,
 } from "./core/tools.js";
 

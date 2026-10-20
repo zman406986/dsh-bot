@@ -56,8 +56,8 @@ function createToolsCaptureCtx(): AdapterContext & {
       },
     },
     subagents: {
-      async startContinuable() {
-        return { childId: "child-stub" };
+      async startActivation() {
+        return { childId: "child-stub", dispose: async () => {} };
       },
       interrupt() {},
       async sendMessage() {

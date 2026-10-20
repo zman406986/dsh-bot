@@ -1,25 +1,27 @@
-# Committed dev overlay for the launcher's web route.
-#
+# Committed dev overlay for the desktop launcher.
+
 #   dsh --profile web --patch dev/cordis.web.patch.yml
 #
-# Passed explicitly by the desktop launcher (dsh-bot.ps1) in the SAME command
-# that spawns dsh, so the overlay a live pass ran is reviewable in the tree
-# rather than regenerated in %TEMP% (ticket 43 Requirement 1; ticket 48
-# Requirement 2).
+# Passed by C:\Users\TZhen\Desktop\dsh-bot.bat in the SAME command that spawns
+# dsh, so the overlay a live pass ran is reviewable in the tree rather than
+# regenerated in %TEMP%.
 #
 # `name` is deliberately RELATIVE: the boot layer anchors relative and absolute
 # inserted paths beside the patch file itself into file URLs
-# (`anchorInsertedPluginNames`, dsh-app-boot/lib/index.js:1170-1177), so
-# `../lib/index.js` resolves to the lib/ of whichever checkout passed it. An
-# absolute path would hard-code one checkout and silently strand the other.
+# (`anchorInsertedPluginNames`, dsh-app-boot/lib/index.js:3971 in dsh
+# 0.2.1-rc.2), so `../lib/index.js` resolves to the lib/ of whichever checkout
+# passed it. An absolute path would hard-code one checkout.
 #
 # This is the transient overlay route only. The web profile's package tree and
 # its own cordis.patch.yml are never touched, and the dispatcher's shipping
-# home stays the dedicated multitask profile — the plugin is always-on with no
-# flag or kill switch (ADR-0018, superseding ADR-0005's flag/toggle semantics).
-# Per ADR-0021 (2026-09-20) the patched boot serves stock dsh as the primary UI
-# and this module is purely additive: a "Dispatchers" launcher chip opens the
-# floating dispatcher window. No whole-UI replacement.
+# home stays the dedicated multitask profile (ADR-0018).
+#
+# Worker composition needs no preset row here: it is registered on each child's
+# own scoped context at `agent/created` (src/worker/preset.ts), so the bundle
+# route and this route compose workers identically.
+#
+# Per ADR-0024 (human-ruled 2026-10-18) stock dsh is the whole UI. This module
+# is purely additive: toolviews, a settings card, and session-row glyphs.
 - insert:
     - id: multitask-dispatcher
       name: '../lib/index.js'

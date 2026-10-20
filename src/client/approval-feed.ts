@@ -18,13 +18,14 @@
  * notice feed exists, "resolved" honestly means "left the pending list" —
  * the same settle shape the roster blocked marker has always had (L2).
  *
- * The hub fans the ONE settings-scope read (bound once in
- * `applyClientModule` — a second bind would be a second channel, which the
- * ticket-47 rule forbids) out to the per-mount approval stores, replaying
- * the last good pending set to a store that attaches after a publish.
- * Invalid / unrelated documents leave every store untouched — the roster
- * panel owns corruption and staleness presentation; this feed never
- * fabricates a "nothing waiting" from a document it cannot vouch for.
+ * The hub fans ONE accepted channel read out to the per-mount approval
+ * stores, replaying the last good pending set to a store that attaches after
+ * a publish. It has no live channel on dsh 0.2.1: the settings-scope service
+ * the read rode is gone, and offline tests feed `applyChannelValue` the real
+ * projection directly. Invalid / unrelated documents leave every store
+ * untouched — the roster panel owns corruption and staleness presentation;
+ * this feed never fabricates a "nothing waiting" from a document it cannot
+ * vouch for.
  *
  * Pure data: no React, no DOM, no Cordis — asserted directly by offline
  * tests (S8).
@@ -80,11 +81,11 @@ export function pendingAsksFromChannelValue(
 }
 
 /**
- * The one-channel fan-out hub. `applyChannelValue` is fed from the single
- * settings-scope read in `applyClientModule`; each wrapper mount attaches
- * its own approvals store and gets the current truth immediately (replay),
- * then every later publish. The disposer detaches exactly that store
- * (unsubscribes on unload — the sessions-feed-binding pattern).
+ * The one-channel fan-out hub. `applyChannelValue` takes one accepted channel
+ * value; each wrapper mount attaches its own approvals store and gets the
+ * current truth immediately (replay), then every later publish. The disposer
+ * detaches exactly that store (unsubscribes on unload — the
+ * sessions-feed-binding pattern).
  */
 export interface ApprovalRelayFeed {
   /**

@@ -18,11 +18,7 @@
  * - Slot entry `id`s are `multitask-dispatcher-` prefixed and unique;
  *   `shell.overlay` is an additive list slot (order-sorted, click-through
  *   by default — Finding 5, `registry.d.ts:16-38`), so coexistence is by
- *   unique id, not shadowing. Since ticket 100 (2026-09-20, ADR-0021) the
- *   launcher entry ({@link launcherOverlayRegistration}) is THE one
- *   `shell.overlay` entry the composition registers — the floating
- *   dispatcher window's launch affordance; the roster entry below stays
- *   as retained contract data only.
+ *   unique id, not shadowing.
  * - The locale namespace is the plugin id, matching the settings namespace
  *   (`src/adapter/settings-section.ts`).
  *
@@ -36,34 +32,14 @@ export const SHELL_OVERLAY_SLOT = "shell.overlay";
 /**
  * Overlay entry id for the roster panel (`multitask-dispatcher-` prefix).
  * Replaces ticket 20's retired `multitask-dispatcher-hello` placeholder.
- *
- * The roster CAPSULE entry itself stopped registering at the ticket-78
- * cutover; this contract stays as retained registration data (the panel
- * component is re-hosted inside the floating window — ticket 100).
  */
 export const ROSTER_ENTRY_ID = "multitask-dispatcher-roster";
 
 /**
- * Overlay entry id for the floating-window LAUNCHER (ticket 100,
- * ADR-0021): the one additive `shell.overlay` entry this module registers
- * today. A fresh id — the capsule's entry is not revived, the launcher is
- * a new affordance for the new vehicle.
- */
-export const LAUNCHER_ENTRY_ID = "multitask-dispatcher-launcher";
-
-/**
- * Sort position within the additive overlay list. Low on purpose — the
- * same shipped `-10` convention `ROSTER_OVERLAY_ORDER` cited (design-16
- * §4.2 "low order"; the header action's `-10` in
- * dsh-client-ui-agent-preset): the launcher is a quiet control, sorted
- * early in the list.
- */
-export const LAUNCHER_OVERLAY_ORDER = -10;
-
-/**
- * Sort position of the RETAINED roster overlay contract (the capsule's
- * quiet-status surface ordering; the entry stopped registering at the
- * ticket-78 cutover but the pinned contract stays).
+ * Sort position within the additive overlay list. Low on purpose (design-16
+ * §4.2 "low order"): the roster is a quiet status surface, sorted early in
+ * the list ahead of higher-order entries, mirroring the shipped `-10`
+ * convention from dsh-client-ui-agent-preset's header action.
  */
 export const ROSTER_OVERLAY_ORDER = -10;
 
@@ -88,25 +64,6 @@ export function rosterOverlayRegistration(): SlotRegistrationOptions {
     name: SHELL_OVERLAY_SLOT,
     id: ROSTER_ENTRY_ID,
     order: ROSTER_OVERLAY_ORDER,
-    locale: LOCALE_NAMESPACE,
-  };
-}
-
-/**
- * Build the floating-window launcher's `shell.overlay` registration
- * options (stable, pure). THE one additive entry this module registers
- * today (ticket 100, ADR-0021 decision 2): a list entry with a unique
- * `multitask-dispatcher-` id, so coexistence with shipped and foreign
- * entries is by unique id, never shadowing. When the shipped overlay slot
- * is absent the declaration wait simply never resolves and nothing of
- * ours registers — the honest degrade (the toolview/card injects' own
- * posture).
- */
-export function launcherOverlayRegistration(): SlotRegistrationOptions {
-  return {
-    name: SHELL_OVERLAY_SLOT,
-    id: LAUNCHER_ENTRY_ID,
-    order: LAUNCHER_OVERLAY_ORDER,
     locale: LOCALE_NAMESPACE,
   };
 }
@@ -248,6 +205,10 @@ export const localeDictionary: LocaleDictionary = {
       "Inbox rescan interval (ms)",
     "settings.card.field.inboxRescanIntervalMs.hint":
       "How often the inbox directory is re-scanned as a safety net. Minimum 1000; leave empty to use the default.",
+    "settings.card.field.microcompactEnabled.label":
+      "Microcompact old tool results",
+    "settings.card.field.microcompactEnabled.hint":
+      "When on, older tool output is emptied once a chat fills past a fixed share of the model window, keeping the newest few. This rewrites history, so the provider's prompt cache restarts from the oldest cleared entry.",
     // Ticket 77 (ADR-0020 slice 1): the wrapper shell's chrome copy. The
     // main-surface line survives as the no-seat fallback: since ticket 80
     // the pane is a host seat, and this copy shows only when a composition
@@ -337,48 +298,12 @@ export const localeDictionary: LocaleDictionary = {
     "shell.approval.submitted":
       "Answer sent — this card updates when the dispatcher confirms.",
     "shell.dispatch.gating": "Gate",
-    // Ticket 100 (ADR-0021): the floating-window launcher + the window's
-    // own chrome. Ticket 107 (ADR-0022, the human's dated 2026-09-22
-    // ruling): the launcher chip became the floating CAPSULE — the
-    // collapsed affordance now carries presence counts in the ruling's own
-    // shape [dispatchers | workers]; the visible text is the two counts,
-    // and this key says them in words on the accessible label/title (the
-    // launch role is unchanged: toggle the floating window, aria-pressed).
-    // The chip-only `launcher.chip.label` retired with the chip. The
-    // window titlebar reuses the shared `shell.title` face (one
-    // vocabulary). The failed line is the crash-isolation boundary's
-    // honest fallback — the window stays open with the line and working
-    // chrome; close + reopen recovers.
-    "launcher.capsule.aria":
-      "{dispatchers} dispatchers, {workers} workers running",
-    "launcher.window.close": "Close the dispatcher window",
-    // Ticket 105: the titlebar's maximize/restore toggle — the label swaps
-    // with the window's maximized state (one button, two faces).
-    "launcher.window.maximize": "Maximize the dispatcher window",
-    "launcher.window.restore": "Restore the dispatcher window",
-    "launcher.window.failed":
-      "The dispatcher window hit an error and its content stopped rendering. Close it here and reopen it from the Dispatchers button.",
-    // Ticket 101 (ADR-0021 decision 3): the sidebar's session-lifecycle
-    // affordances. Add = activate a dispatcher in an EXISTING session (no
-    // client-side "create chat" seam exists — the empty state says so
-    // honestly); delete (per dispatcher row, two-step confirm) = deactivate
-    // the dispatcher binding in that session — the chat itself is never
-    // disposed, and /dispatcher-start there re-activates it.
-    "shell.add.label": "Add dispatcher session",
-    "shell.add.empty":
-      "No session is available to activate. Create the chat in dsh first, then add it here.",
-    "shell.row.delete": "Delete dispatcher session",
-    "shell.row.delete-confirm": "Confirm delete",
-    "shell.row.delete-title":
-      "Deactivates the dispatcher in this chat — the chat itself is not deleted. Run /dispatcher-start there to activate it again.",
-    // Ticket 106: the row context menu's one item — the SAME semantics as
-    // the row delete above (deactivate the dispatcher binding; the chat
-    // itself stays), its own wording because the menu says "close" where
-    // the row button says "delete".
-    "shell.row.close": "Close dispatcher",
-    "shell.row.close-confirm": "Confirm close",
-    "shell.row.close-title":
-      "Deactivates the dispatcher in this chat — the chat itself stays. Run /dispatcher-start there to activate it again.",
+    // Ticket 123: the session-kind glyph labels. They are accessible names /
+    // tooltips on a small mark, never visible paragraph copy. The worker mark
+    // is the only one composed today (see src/client/session-kind.tsx); the
+    // dispatcher label ships inert with it so the pair stays a single unit.
+    "indicator.dispatcher": "Dispatcher session",
+    "indicator.worker": "Worker session",
   },
   zh: {
     "roster.title": "工作者",
@@ -452,6 +377,9 @@ export const localeDictionary: LocaleDictionary = {
     "settings.card.field.inboxRescanIntervalMs.label": "收件箱重扫间隔（毫秒）",
     "settings.card.field.inboxRescanIntervalMs.hint":
       "作为兜底，重新扫描收件箱目录的间隔。最小 1000；留空以使用默认值。",
+    "settings.card.field.microcompactEnabled.label": "微压缩旧工具结果",
+    "settings.card.field.microcompactEnabled.hint":
+      "开启后，当会话占用超过模型窗口的固定比例时，清空较早的工具输出，只保留最新的若干条。这会改写历史，因此从最早被清空的位置起，提供方的提示缓存会重新开始。",
     // Ticket 77（ADR-0020 切片 1）：外壳的界面文案。主 surface 的一行是
     // 诚实的骨架状态——会话表面随 ticket 80 接入，文案如实说明。命名与措辞
     // 均为自创（例外 B9：不逐字复制参考文本）。
@@ -526,39 +454,9 @@ export const localeDictionary: LocaleDictionary = {
     "shell.approval.failed": "答复未能送达——没有任何更改。",
     "shell.approval.submitted": "答复已提交——待调度器确认后此卡片会更新。",
     "shell.dispatch.gating": "审批门",
-    // Ticket 100（ADR-0021）：浮动窗口的启动入口与窗口自身镶边。Ticket 107
-    // （ADR-0022，2026-09-22 的人工裁定）：启动芯片变为浮动胶囊——收起态
-    // 入口现在按裁定自定的形状 [调度会话数 | 进行中工作者数] 显示存在计数；
-    // 可见文本就是两个数字，本键把它们用文字放到无障碍标签/提示上（启动
-    // 角色不变：切换浮动窗口，aria-pressed）。芯片专用的
-    // `launcher.chip.label` 随芯片一并退场。窗口标题栏复用共享的
-    // `shell.title` 文案（同一套词汇）。失败文案是崩溃隔离边界的如实回退
-    // ——窗口保持打开并显示该行与可用的镶边；关闭后重新打开即可恢复。
-    "launcher.capsule.aria":
-      "{dispatchers} 个调度会话，{workers} 个工作者进行中",
-    "launcher.window.close": "关闭调度窗口",
-    // Ticket 105：标题栏的最大化/还原切换按钮——标签随窗口的最大化状态切换
-    // （一个按钮，两份文案）。
-    "launcher.window.maximize": "最大化调度窗口",
-    "launcher.window.restore": "还原调度窗口",
-    "launcher.window.failed":
-      "调度窗口遇到错误，内容已停止渲染。请在此关闭它，再通过“调度台”按钮重新打开。",
-    // Ticket 101（ADR-0021 决定 3）：侧栏的会话生命周期入口。添加 = 在一个
-    // 已存在的会话中激活调度器（客户端没有“新建聊天”缝隙——空状态如实说明）；
-    // 删除（每个调度会话行上，两步确认）= 停用该会话中的调度器绑定——聊天
-    // 本身不会被删除，在该聊天中运行 /dispatcher-start 可重新激活。
-    "shell.add.label": "添加调度会话",
-    "shell.add.empty": "没有可激活的会话。请先在 dsh 中创建聊天，再在这里添加。",
-    "shell.row.delete": "删除调度会话",
-    "shell.row.delete-confirm": "确认删除",
-    "shell.row.delete-title":
-      "停用该聊天中的调度器——聊天本身不会被删除。在该聊天中运行 /dispatcher-start 可重新激活。",
-    // Ticket 106：行右键菜单的唯一一项——与上面的行内删除同一语义（停用调度
-    // 绑定；聊天本身保留）。菜单里说“关闭”，行内按钮说“删除”，各用各的词。
-    "shell.row.close": "关闭调度会话",
-    "shell.row.close-confirm": "确认关闭",
-    "shell.row.close-title":
-      "停用该聊天中的调度器——聊天本身保留。在该聊天中运行 /dispatcher-start 可重新激活。",
+    // Ticket 123：会话类别图标文案（仅作无障碍名称/悬停提示，不是可见段落）。
+    "indicator.dispatcher": "调度会话",
+    "indicator.worker": "工作者会话",
   },
 };
 

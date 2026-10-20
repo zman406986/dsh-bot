@@ -10,7 +10,7 @@ import {
   createCordisDshHost,
   type AdapterContext,
   type AgentLike,
-  type ContinuableStartSpecLike,
+  type ActivationSpecLike,
   type WorkerActivityEntry,
 } from "../src/adapter/cordis-dsh-host.js";
 import { bindDispatcherLifecycle } from "../src/adapter/parent-agent.js";
@@ -148,10 +148,14 @@ function createStubCtx() {
       };
     },
     subagents: {
-      async startContinuable(spec: ContinuableStartSpecLike) {
+      async startActivation(spec: ActivationSpecLike) {
         void spec;
         const childId = `child-${nextChild++}`;
-        return { childId, messageId: `msg-${childId}` };
+        return {
+          childId,
+          messageId: `msg-${childId}`,
+          dispose: async () => {},
+        };
       },
       interrupt() {},
       async sendMessage() {

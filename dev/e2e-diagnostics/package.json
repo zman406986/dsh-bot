@@ -1,0 +1,6 @@
+{
+  "name": "e2e-diagnostics",
+  "private": true,
+  "type": "module",
+  "main": "index.mjs"
+}

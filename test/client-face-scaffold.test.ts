@@ -16,7 +16,6 @@ import { readFileSync } from "node:fs";
 import { apply, inject as clientInject } from "../src/client/index.js";
 import type { ClientContext } from "../src/client/context.js";
 import {
-  LAUNCHER_ENTRY_ID,
   LOCALE_NAMESPACE,
   ROSTER_ENTRY_ID,
   localeDictionary,
@@ -32,7 +31,7 @@ import {
   ROOT_FRAME_SLOT,
 } from "../src/client/shell-mount.js";
 import { TOOL_CALL_TOOLVIEW_SLOT, TOOLVIEW_TOOL_NAMES } from "../src/client/toolviews.js";
-import { SETTINGS_PLUGIN_ITEM_SLOT } from "../src/client/settings-card-store.js";
+import { PLUGINS_ROW_CONFIG_SLOT } from "../src/client/settings-card-store.js";
 
 /**
  * Fake the client face the way the shipped Cordis runtime behaves:
@@ -251,8 +250,10 @@ const CLIENT_SERVICE_FACES = new Set([
   // parent `remote` does not authorize this read.
   "remote.commands",
   "conversation",
+  "configForms",
+  // A shipped face this module does not read: the guard must still refuse it
+  // when read bare (the negative control below).
   "layout",
-  "settingsScope",
 ]);
 
 /**
@@ -417,18 +418,17 @@ describe("client face scaffold — shell.overlay entry builder (Finding 5, desig
     // matches by exact string and never dot-splits, so the parent entry does
     // not authorize the member read; the shipped precedent is
     // dsh-client-ui-commands' `["inputTriggers","sessions","remote",
-    // "remote.commands"]`), conversation ← dsh-client-ui-conversation.
-    // `layout` and `settingsScope` are deliberately NOT declared — genuinely
-    // optional faces reached through the runtime `ctx.inject([...])` wrapper
-    // instead (tickets 46/84); a hard declaration would hold the module
-    // PENDING when they are absent.
+    // "remote.commands"]`), conversation ← dsh-client-ui-conversation, and
+    // configForms ← dsh-client-ui-settings (the Plugins page's own contract,
+    // `dsh-client-ui-plugin-manager/lib/client.js:4357-4367`).
     assert.deepEqual([...clientInject], [
       "slots",
       "locale",
       "sessions",
       "remote",
-      "remote.commands",
       "conversation",
+      "remote.commands",
+      "configForms",
     ]);
   });
 });
@@ -446,16 +446,10 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
     // keys left with the capsule's deletion — ticket 89, 2026-09-19.)
     assert.deepEqual(keys, [
       "activation.presence-hint",
-      // Ticket 100 (ADR-0021): the floating-window launcher + the window
-      // chrome (the titlebar reuses `shell.title`). Ticket 105 adds the
-      // maximize/restore toggle's label pair (one button, two states).
-      // Ticket 107 (ADR-0022): the chip became the floating capsule — the
-      // counts-in-words aria face replaces the retired chip label.
-      "launcher.capsule.aria",
-      "launcher.window.close",
-      "launcher.window.failed",
-      "launcher.window.maximize",
-      "launcher.window.restore",
+      // Ticket 123: the session-kind glyph labels (accessible names on a
+      // 16px mark, never visible paragraph copy).
+      "indicator.dispatcher",
+      "indicator.worker",
       "roster.activity.toolcalls",
       "roster.blocked.credential",
       "roster.blocked.filesystem",
@@ -491,6 +485,10 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
       "settings.card.field.inboxEnabled.label",
       "settings.card.field.inboxRescanIntervalMs.hint",
       "settings.card.field.inboxRescanIntervalMs.label",
+      // Ticket 124: the microcompact switch (one label/hint pair per schema
+      // field, same pairing rule).
+      "settings.card.field.microcompactEnabled.hint",
+      "settings.card.field.microcompactEnabled.label",
       // Ticket 108: the wake-coalescing window field (one label/hint pair
       // per schema field, in the same pairing rule).
       "settings.card.field.wakeCoalesceWindowMs.hint",
@@ -502,10 +500,6 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
       "settings.card.save",
       "settings.card.title",
       "settings.card.unsaved",
-      // Ticket 101 (ADR-0021 decision 3): the session-lifecycle affordances
-      // (the sidebar's add picker copy).
-      "shell.add.empty",
-      "shell.add.label",
       // Ticket 81 (ADR-0020 slice 5): the approval cards' own chrome (the
       // option labels, location line, expired copy, and secret-stored
       // reassurance ride the projections as ticket 30's shipped copy —
@@ -553,17 +547,7 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
       "shell.onboard.step",
       "shell.onboard.tools.body",
       "shell.onboard.tools.title",
-      // Ticket 101 (ADR-0021 decision 3): the per-row delete affordance's
-      // copy (two-step confirm; the title states the deactivation semantics).
-      // Ticket 106: the right-click close menu's copy — same semantics as
-      // the delete pair, its own "close" wording (en+zh lockstep).
-      "shell.row.close",
-      "shell.row.close-confirm",
-      "shell.row.close-title",
       "shell.row.copy-id",
-      "shell.row.delete",
-      "shell.row.delete-confirm",
-      "shell.row.delete-title",
       "shell.row.finished",
       "shell.row.needs-you",
       "shell.row.presence-unavailable",
@@ -603,7 +587,7 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
 });
 
 describe("client face scaffold — apply over fake client seams", () => {
-  it("registers the locale namespace and the ONE shell.overlay launcher entry (ticket 100)", () => {
+  it("registers the locale namespace and NO shell.overlay entry (capsule retired)", () => {
     const ctx = createClientCtx();
     apply(ctx);
 
@@ -615,22 +599,16 @@ describe("client face scaffold — apply over fake client seams", () => {
     );
 
     // Ticket 24 adds a second inject (tool.call.toolview) and ticket 47 a
-    // third (settings.plugin.item); the ticket-78 CUTOVER (2026-09-19)
-    // retired the additive overlay entries — the capsule (ticket 38) and
-    // the staging launcher chip — and ticket 99 (2026-09-20, ADR-0021)
-    // retired the displacement registrations themselves (`main` page,
-    // `root` election): stock dsh is the primary UI and is never displaced.
-    // Ticket 100 registers THE one additive overlay entry again — the
-    // floating-window launcher (a fresh id, never the capsule's).
+    // third (plugins.row.config); the ticket-78 CUTOVER (2026-09-19)
+    // retires the additive overlay entries — the capsule (ticket 38) and
+    // the staging launcher chip — so NO `shell.overlay` inject remains.
+    // The `main` page and `root` election are not registered either: stock
+    // dsh is the primary UI and is never displaced — only additive slots
+    // register. The removed client settings-scope watch left with dsh 0.2.1.
     const overlay = ctx.injects.find(
       (candidate) => candidate.parent === SHELL_OVERLAY_SLOT,
     );
-    assert.ok(overlay, "the launcher's shell.overlay inject registers");
-    assert.equal(overlay.entries.length, 1, "one additive entry");
-    const capsule = ctx.injects
-      .flatMap((candidate) => candidate.entries)
-      .find((entry) => (entry.options as { id?: string }).id === ROSTER_ENTRY_ID);
-    assert.equal(capsule, undefined, "the capsule entry stays retired");
+    assert.equal(overlay, undefined, "no shell.overlay inject post-cutover");
   });
 
   it("slot entries declare the locale namespace so the t seat resolves", () => {
@@ -647,11 +625,12 @@ describe("client face scaffold — apply over fake client seams", () => {
   it("fiber teardown (HMR/unload) reverses the namespace and the entry; re-apply restores", () => {
     const ctx = createClientCtx();
     apply(ctx);
-    // Three declaration waits since ticket 100 (ADR-0021): tool.call.toolview
-    // (ticket 24), settings.plugin.item (ticket 47), and shell.overlay (the
-    // floating-window launcher). The `main` page and the `root` election
-    // stay retired from the composition.
-    assert.equal(ctx.injects.length, 3);
+    // Three declaration waits: tool.call.toolview (ticket 24),
+    // plugins.row.config (ticket 47), and the worker session-kind glyph in
+    // the header actions band (ticket 123). The `main` page and the `root`
+    // election are not composed; the capsule + launcher shell.overlay injects
+    // retired at the cutover.
+    assert.equal(ctx.injects.length, 4);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
 
     ctx.runFiberTeardown();
@@ -661,7 +640,7 @@ describe("client face scaffold — apply over fake client seams", () => {
 
     // A fresh fiber (post-HMR apply) registers everything again.
     apply(ctx);
-    assert.equal(ctx.injects.length, 3);
+    assert.equal(ctx.injects.length, 4);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
   });
 });
@@ -750,22 +729,13 @@ describe("client face scaffold — shipped slot register semantics (ticket 86)",
     const ctx = createClientCtx();
     apply(ctx);
     assert.equal(ctx.cells.get(TOOL_CALL_TOOLVIEW_SLOT)?.length, TOOLVIEW_TOOL_NAMES.length);
-    assert.equal(ctx.cells.get(SETTINGS_PLUGIN_ITEM_SLOT)?.length, 1);
-    // Ticket 99 (ADR-0021): nothing of ours lands in dsh's layout — the
-    // `main` page cell and the `root` frame cell stay unclaimed by us.
+    assert.equal(ctx.cells.get(PLUGINS_ROW_CONFIG_SLOT)?.length, 1);
+    // Nothing of ours lands in dsh's layout — the `main` page cell and the
+    // `root` frame cell stay unclaimed by us.
     assert.equal(ctx.cells.get(MAIN_PAGE_SLOT), undefined);
     assert.equal(ctx.cells.get(ROOT_FRAME_SLOT), undefined);
-    // Ticket 100: the launcher is the ONE entry in the additive overlay
-    // cell (the capsule stays retired).
-    assert.equal(ctx.cells.get(SHELL_OVERLAY_SLOT)?.length, 1);
-    assert.equal(
-      (
-        ctx.cells.get(SHELL_OVERLAY_SLOT)?.[0] as {
-          options: { id?: string };
-        }
-      ).options.id,
-      LAUNCHER_ENTRY_ID,
-    );
+    // No shell.overlay entry survives the ticket-78 cutover.
+    assert.equal(ctx.cells.get(SHELL_OVERLAY_SLOT), undefined);
   });
 
   it("fiber teardown frees every cell; a re-apply cannot collide with the dead fiber", () => {
@@ -791,11 +761,10 @@ describe("client face scaffold — host inject guard semantics (ticket 84)", () 
     // any face outside its declared inject list.
     const ctx = createStrictHostCtx();
     assert.doesNotThrow(() => apply(ctx));
-    // The one optional face still watched is the settings namespace (the
-    // roster/card/onboarding data path) — requested through the runtime
-    // inject wrapper, never a bare read. The launcher's `layout` watch
-    // retired with the ticket-78 cutover, so it is no longer requested.
-    assert.deepEqual(ctx.injectRequests, [["settingsScope"]]);
+    // The composition makes no runtime inject request at all: the removed
+    // client settings-scope watch left with dsh 0.2.1, and the settings page's
+    // form arrives through the slot owner props.
+    assert.deepEqual(ctx.injectRequests, []);
   });
 
   it("declared faces resolve and undeclared faces throw with the host's message", () => {
@@ -834,12 +803,8 @@ describe("client face scaffold — built bundle registers through the module loa
 
     // Externals resolved through the factory's require (platform seed), and
     // no ESM import statements survive (CJS-only, materialization-safe).
-    // Ticket 100: the floating window's portal imports react-dom — ALSO a
-    // platform seed word the loader's require resolves
-    // (`src/client/wrapper.ts`, ticket 20 Finding 4) — so BOTH externals
-    // stay requires, never inlined.
     assert.ok(bundle.includes('require("react/jsx-runtime")'));
-    assert.ok(bundle.includes('require("react-dom")'));
+    assert.ok(!bundle.includes('require("react-dom")'));
     assert.ok(!/\bimport\s/.test(bundle));
 
     // The module exports the Cordis plugin face: apply + inject.

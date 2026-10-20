@@ -13,64 +13,27 @@
  * READS on `ctx` — the shipped idiom (dsh-client-ui-session exports
  * `inject = ["sessions", "slots"]`): the context proxy THROWS on any service
  * property the module's inject list does not declare, wherever the read
- * happens (`cannot get property "X" without inject` — ticket 84). So the
- * always-shipped faces we read (`sessions`, `remote`, `conversation`) are
- * declared here; `settingsScope` is the one genuinely OPTIONAL face, reached
- * through the runtime `ctx.inject([...])` wrapper instead (tickets 46/84) — a
- * hard declaration would hold the whole module PENDING when it is absent.
- * (The launcher's optional `layout` face and its `ctx.inject(["layout"])`
- * watch were DELETED with the launcher; ticket 89, 2026-09-19.)
+ * happens (`cannot get property "X" without inject` — ticket 84). So every
+ * always-shipped face we read is declared here.
  *
  * What registers (design-16 §4.2/§5):
  * 1. the `multitask-dispatcher` locale namespace ({en, zh});
- * 2. the data path: a bind on our settings namespace through the shipped
- *    `ctx.settingsScope` service, where the host half mirrors the roster
- *    snapshot under the `roster` key (the documented config-channel fallback —
- *    no invented push channel);
- * 3. ~~the dispatcher capsule entry~~ RETIRED at the ticket-78 cutover
- *    (2026-09-19): the `shell.overlay` chip/panel registration stopped (the
- *    capsule era ends; ADR-0020 supersedes ADR-0013's vehicle). Its stores,
- *    copy, and component were retained briefly as re-host assets and are now
- *    DELETED outright (ticket 89, 2026-09-19) — nothing consumed them.
- * 4. the per-tool call views (ticket 24): keyed `tool.call.toolview` entries
+ * 2. the per-tool call views (ticket 24): keyed `tool.call.toolview` entries
  *    for the six dispatcher wire tool names (five at 24; `send_peer` joined
  *    under ticket 70) — unclaimed keys, so additive-
  *    safe against the shipped composition (research Finding 5);
- * 5. the plugin's settings card (ticket 47): one keyed `settings.plugin.item`
- *    entry whose `key` is our settings namespace, so the shipped
- *    插件配置 tab pairs our card with the namespace the Host serves.
- * 6. ~~the staging launcher chip~~ RETIRED at the ticket-78 cutover
- *    (2026-09-19) alongside the capsule: the `shell.overlay` chip and its
- *    `layout` watch stopped with the frame election (item 10). Its contracts
- *    and component were retained briefly as re-host assets and are now
- *    DELETED outright (ticket 89, 2026-09-19) — nothing consumed them; the
- *    main-page contracts (item 7) stay as retained machinery.
- * 7. ~~the wrapper shell page~~ + ~~the `root` frame election~~ RETIRED from
- *    the DEFAULT POSTURE (2026-09-20, ticket 99, ADR-0021 — the human-ruled
- *    coexistence vehicle): stock dsh is the user's primary UI and is never
- *    displaced, so this composition no longer registers the keyed `main`
- *    page (ticket 78 staging), the conversation pane / onboarding seats that
- *    hosted inside it (tickets 80/68), or the DYNAMIC `root` entry that
- *    displaced the shipped AppFrame (ticket 78 CUTOVER). The registration
- *    machinery — `mountShellPage` (store + feeds + pane/seat wiring) and the
- *    `shell-mount.ts` contracts (`MAIN_PAGE_SLOT`/`shellPageRegistration`,
- *    `ROOT_FRAME_SLOT`/`shellRootRegistration`) — stays in the tree,
- *    reversible at ONE registration site. Fail isolation is re-based onto
- *    the additive posture: our registrations fail within our own module and
- *    the stock app is never shadowed.
- * 8. the floating dispatcher window + its stock-UI launcher (ticket 100,
- *    ADR-0021 decisions 2 + 4): ONE additive `shell.overlay` entry — a
- *    small chip that toggles a floating window hosting the EXISTING shell
- *    surfaces (re-hosted, not rebuilt: sidebar roster, conversation pane,
- *    approval cards, roster panel, onboarding — the `mountShellPage`
- *    wiring runs again, pushed into `mounts`). The window portals into a
- *    body-level container (the DOM-technique decision + citations live in
- *    `floating-window.tsx`); the shell sits behind our own error boundary
- *    inside the window, so a crashed window never takes the chip — or
- *    stock dsh — down (isolation re-based onto the additive posture; the
- *    host's per-entry boundary stands underneath as the second layer).
- *    No `root` entry, no `main` entry: the window is additive, never a
- *    displacement.
+ * 3. the plugin's configuration page: one keyed `plugins.row.config` entry
+ *    for the row `<package name>#<settings namespace>`, whose form comes from
+ *    the slot owner's props (0.2.1 replaced the removed `settings.plugin.item`
+ *    slot and `ctx.settingsScope` service with this path);
+ * 4. the worker session-kind glyph (ticket 123): one additive `list` entry
+ *    in the stock conversation header's actions band, which marks a
+ *    subagent session on its own conversation.
+ *
+ * The roster/config watch and its feeds are NOT composed: no client service
+ * serves that document on 0.2.1. `mountShellPage` and the shell-mount
+ * contracts stay in the tree as retained, unmounted machinery (ADR-0024),
+ * reversible at ONE registration site.
  *
  * Ticket 40 binds the capsule/panel intents to ticket 36's verified seams
  * at THIS composition point and nowhere else: the narrow CommandTransport
@@ -79,9 +42,8 @@
  * sink with the locale-keyed conversational phrasing) and the per-row steer
  * prefill seat (`input.for(actx).setDraft`) are built in `mountShellPage`
  * over lazy service sources — the conversation pane and hosted roster panel
- * are their only consumers. Since ticket 100 (ADR-0021) the floating-window
- * launcher inject composes `mountShellPage` again — the window hosts those
- * two surfaces.
+ * are their only consumers. `mountShellPage` is NOT composed by default (no
+ * inject calls it); offline tests drive it directly.
  * The faces are read lazily so their VALUES are fresh at send/click time;
  * the services themselves are DECLARED in the module inject (ticket 84 — an
  * undeclared property read throws on the real host wherever it happens),
@@ -91,21 +53,13 @@
 
 import { createElement } from "react";
 import type { JSX } from "react";
-import type {
-  ClientContext,
-  ClientSettingsScopeLike,
-} from "./context.js";
+import type { ClientContext } from "./context.js";
 import {
   LOCALE_NAMESPACE,
-  SHELL_OVERLAY_SLOT,
-  launcherOverlayRegistration,
   localeDictionary,
 } from "./overlay.js";
-import { createDispatcherShell, type ShellHosts } from "./shell.js";
 import {
   bindCommandTransport,
-  DISPATCHER_START_LINE,
-  DISPATCHER_STOP_LINE,
   submitAccessResolve,
   tryPrefillSteer,
   type SteerPrefillOutcome,
@@ -118,7 +72,7 @@ import {
   toolviewRegistration,
 } from "./toolviews.js";
 import {
-  SETTINGS_PLUGIN_ITEM_SLOT,
+  PLUGINS_ROW_CONFIG_SLOT,
   createSettingsCardStore,
   settingsCardRegistration,
   type SettingsCardStore,
@@ -129,6 +83,7 @@ import {
   shellSeatHostsPanel,
   shellSeatPanelState,
 } from "./shell-mount.js";
+import type { ShellHosts } from "./shell.js";
 import {
   createDispatcherShellStore,
   type DispatcherShellStore,
@@ -161,72 +116,41 @@ import {
 } from "./conversation.js";
 import {
   createOnboardingStore,
-  writeOnboardingSeenRecord,
   type OnboardingStore,
 } from "./onboarding.js";
 import { createOnboardingPane } from "./onboarding-pane.js";
-import { createFloatingWindowStore } from "./floating-window-store.js";
 import {
-  createLauncherChip,
-  disposeWindowLayer,
-} from "./floating-window.js";
+  createSessionKindGlyph,
+  workerGlyphRegistration,
+  dispatcherGlyphRegistration,
+} from "./session-kind.js";
 
 /**
  * Client services this module READS on `ctx`, declared per the shipped
  * Cordis idiom (ticket 84): the context proxy throws `cannot get property
  * "X" without inject` on any undeclared service property — at read time,
- * wherever it happens — so every service face the module touches must
- * appear here unless it is reached through the runtime `ctx.inject([...])`
- * wrapper instead. A NESTED face is its own entry under its full dotted
- * name (`remote.commands`): the resolver matches inject entries by EXACT
- * STRING and never dot-splits, so declaring only the parent service
- * instance does not authorize reading a member of it. Declared: the
- * always-shipped load-bearing faces (`slots` ← ui-renderer, `locale` ←
- * client-locale, `sessions` ← ui-session, `remote` ← api-gateway and its
- * nested `remote.commands` transaction face, `conversation` ←
- * ui-conversation).
- * Wrapper-only, deliberately NOT declared because a hard requirement would
- * hold the whole module PENDING when absent: `settingsScope` (ticket 46's
- * settings watch — since ticket 69 L1 also the approval-cards relay feed's
- * channel). (`layout` — the retired staging launcher's optional page
- * controller — stopped being requested at the ticket-78 cutover, and the
- * launcher contracts themselves were deleted by ticket 89.)
- *
- * Ticket 69 (L1/L3) face audit — why NO NEW SERVICE is declared here: the
- * relay FEED rides the settingsScope wrapper above (the roster mirror, one
- * channel); the resolve TRANSPORT rides the `remote.commands` transaction
- * declared below (`remote` for the parent instance, `remote.commands` for
- * the nested face — the exact shipped precedent is
- * `@deepseek-ai/dsh-client-ui-commands`' client, whose
- * `static inject = ["inputTriggers","sessions","remote","remote.commands"]`
- * declares BOTH the parent and the full nested path; every shipped caller
- * of a nested face does the same, without exception) plus the card's own
- * `parentSessionId`; and the
- * dispatch ANSWERER (`ctx.approval`, `@deepseek-ai/dsh-user-approval` —
- * adapter notes :220/:390) is a HOST service wired in `src/plugin.ts`'s
- * inject, never read client-side: the client half of that waterfall is the
- * shipped `dsh-client-ui-approval` composer over the forwarded
- * `approval/request` Remote event, which composes independently of this
- * module (with the ADR-0021 coexistence posture the shipped frame is never
- * displaced, so the composer should answer natively — deferred ticket 98's
- * gap 1 is expected-moot, pending the live lane's confirmation).
+ * wherever it happens — so every service face the module touches appears
+ * here. Declared: `slots` ← ui-renderer, `locale` ← client-locale,
+ * `sessions` ← ui-session, `remote` ← api-gateway, `remote.commands` (its
+ * own nested entry — the resolver matches exact strings and never
+ * dot-splits), `conversation` ← ui-conversation, and `configForms` ←
+ * ui-settings (the settings page's shared form service; the Plugins page
+ * itself requires it, `dsh-client-ui-plugin-manager/lib/client.js:4357-4367`).
  */
 export const inject: readonly string[] = [
   "slots",
   "locale",
   "sessions",
   "remote",
-  // Ticket 102b: the nested transaction face is its OWN inject entry — the
-  // resolver matches by exact string, so the parent `remote` above does not
-  // authorize this read (the shipped ui-commands precedent declares both).
-  "remote.commands",
   "conversation",
+  "remote.commands",
+  "configForms",
 ];
 
 /**
  * Browser plugin entry. Every registration is an effect on this module's
- * fiber, so an unload/HMR swap reverses the namespace, the settings watch,
- * and the slot entry.
+ * fiber, so an unload/HMR swap reverses the namespace, the toolviews, and the
+ * settings entry.
  */
 export function apply(ctx: ClientContext): void {
   applyClientModule(
@@ -239,22 +163,20 @@ export function apply(ctx: ClientContext): void {
 /**
  * What the composition built, handed back so offline tests can drive the
  * REAL wiring instead of reconstructing it by hand (ticket 69, L1 offline
- * composition pin). Two facts, both live references:
+ * composition pin). Three facts, all live references:
  *
- * - `approvalsFeed` — the ONE relay feed the settings watch feeds and every
- *   mount attaches to (the shared hub).
- * - `mirrorsFeed` — the ONE per-session mirror feed the same settings watch
- *   feeds and every mount attaches its shell store to (ticket 94; the
- *   read side the live surface was missing).
+ * - `approvalsFeed` — the relay feed every mount may attach to (the shared
+ *   hub). No live channel feeds it on 0.2.1.
+ * - `mirrorsFeed` — the per-session mirror hub every mount's shell store may
+ *   join. No live channel feeds it on 0.2.1.
  * - `mounts` — every `mountShellPage` result the slot injects created, in
- *   registration order. Since ticket 100 (ADR-0021) the default composition
- *   creates exactly ONE mount — the floating window's shell (the
- *   `shell.overlay` launcher inject) — so it holds that mount after
- *   `apply`. Offline tests can also attach MORE `mountShellPage` results to
- *   the returned feeds to drive the mount data path (the ticket-99 pin
- *   idiom). The array is the SAME array the inject pushes into, so it also
- *   collects mounts that arrive AFTER the call returns. Offline fakes run
- *   the callback synchronously, so the list is complete at return there.
+ *   registration order. The default composition creates NO mounts (no inject
+ *   calls it); it stays the push-site for a registration that re-hosts the
+ *   shell, and offline tests attach the real `mountShellPage` to the returned
+ *   feeds to drive the mount data path. The array is the SAME array such an
+ *   inject pushes into, so it also collects mounts that arrive AFTER the call
+ *   returns. Offline fakes run the callback synchronously, so the list is
+ *   complete at return there.
  *
  * Additive only: `apply` ignores the return, and the mounted stores were
  * previously reachable only through the React component closure.
@@ -268,13 +190,10 @@ export interface ClientModuleComposition {
 
 /**
  * The module body, factored over explicit stores so offline tests can drive
- * the data path end to end (watch payload → store → view model) without a
- * DOM harness. Not a second entry point: `apply` is the only thing the
- * loader registers. The onboarding store (ticket 68) holds the first-run
- * beat walk plus the seen input read from the SAME watch; defaulting it
- * starts a fresh fiber at beat one. (The capsule-era store parameters were
- * deleted with the capsule — ticket 89; older callers passing them would
- * now misalign, and `apply` is the only production caller.)
+ * each surface without a DOM harness. Not a second entry point: `apply` is
+ * the only thing the loader registers. The trailing parameters are kept as
+ * the seam offline tests pass their own stores through; production `apply`
+ * defaults them.
  *
  * Returns the {@link ClientModuleComposition} (ticket 69, L1): the feed and
  * every mount, so the composition itself — not a hand-rebuilt copy of it —
@@ -293,135 +212,26 @@ export function applyClientModule(
     "multitask-dispatcher: locale dictionaries",
   );
 
-  // Roster data path (ticket 21, design-16 §4.2 honest gap; contract corrected
-  // by ticket 46): bind our namespace's scope on the shipped settings base
-  // plugin's `ctx.settingsScope` service. NOT `ctx.inject(["settings"])` — that
-  // is the HOST seam; client-side the service is `settingsScope`, and the shape
-  // is `bind({namespace})` → `{getSnapshot, subscribe}`, with no `watch(ns, cb)`
-  // in the contract (see `context.ts`). The old name never resolved, so this
-  // body never ran and the store sat at `waiting` forever (live: the roster
-  // never flipped). The panel degrades to "unavailable" copy
-  // when the service is missing or the feed is stale — never against an
-  // unverified live push channel. (The ticket-42 footer store — once the
-  // snapshot's second reader — was deleted with the capsule, ticket 89.)
-  //
-  // Ticket 47 attaches its settings card to this SAME bind: one namespace, one
-  // scope, and the card's writes (`set`/`unset`) leave through the transport
-  // that bind already owns. A second bind would be a second channel with its
-  // own revision view, which is exactly what the ticket forbids.
-  //
-  // Ticket 68 rides this SAME bind for the onboarding suppression input: each
-  // accepted document feeds the store's seen extraction, and an unavailable
-  // namespace feeds an explicit `undefined` — fail-open (the flow shows when
-  // the record cannot be read; it is never silently hidden).
-  //
-  // Ticket 69 (L1 offline half): the SAME document also feeds the
-  // approval-cards relay feed — the roster snapshot's v4 `pendingAsks`
-  // envelope field IS the relay's pending-ask truth, re-published by the
-  // host on every park/resolve transition. One channel, one more honest
-  // reader (the roster panel's own "Needs you" list was already on it);
-  // never a second feed. The hub fans out to the per-mount approvals stores
-  // (each `mountShellPage` attaches its own) with last-truth replay, and a
-  // corrupt or unrelated document leaves every store untouched — the roster
-  // panel owns corruption/staleness presentation, and this feed never
-  // fabricates a "nothing waiting" from a document it cannot vouch for.
+  // Roster/approval/mirror data path: NOT composed. dsh 0.2.1 removed the
+  // client settings-scope service this watch rode, and the host half's
+  // `roster`/`roster.<id>` keys are no longer accepted by the settings
+  // document (undeclared keys are rejected as non-volatile). The feeds stay
+  // as retained machinery with no live channel: a surface that returns needs
+  // a 0.2.1-native transport, not a smuggled config key (ADR-0024).
   const approvalFeed = createApprovalRelayFeed();
   /**
-   * Ticket 94: the shell stores' mirror hub. The live surface had NO reader
-   * for the per-session family at all — `applySessionMirror` was defined and
-   * pinned but never called, so `state.mirrors` stayed empty forever
-   * (`data-dispatcher="false"`, the `状态不可用` chip, no hosted panel). Fed
-   * from the SAME single settings read as the two readers above, fanned out
-   * to every mount's shell store with a last-truth replay. (Since ticket
-   * 100 the floating-window launcher inject attaches the default mount's
-   * store to this hub; offline tests may attach more.)
+   * The shell stores' mirror hub. It has no live channel on 0.2.1; offline
+   * tests attach the real `mountShellPage` to it to drive the mount data
+   * path, and the mount machinery stays reversible at one registration site.
    */
   const mirrorsFeed = createShellMirrorFeed();
-  /**
-   * Ticket 69 (L1): every mount this composition creates, in order. Since
-   * ticket 100 (ADR-0021) the floating-window launcher inject creates the
-   * ONE default mount — the array stays the one place a registration site
-   * pushes into.
-   */
+  /** Every mount this composition creates; none by default (ADR-0024). */
   const mounts: ShellPageMount[] = [];
-  /**
-   * The ONE bound settings scope, kept for the onboarding seen-write
-   * hand-off below (A5: the write rides the same scope the watch reads —
-   * never a second channel). Nulled when the watch disposes.
-   */
-  let seenScope: ClientSettingsScopeLike | null = null;
-  ctx.effect(() => {
-    let disposeWatch: (() => void) | undefined;
-    if (typeof ctx.inject !== "function") {
-      store.set({ kind: "channel-missing" });
-      card.attachUnavailable();
-      return () => {};
-    }
-    ctx.inject(["settingsScope"], (child) => {
-      const binder = child.settingsScope;
-      if (binder === undefined || typeof binder.bind !== "function") {
-        store.set({ kind: "channel-missing" });
-        card.attachUnavailable();
-        return;
-      }
-      const scope = binder.bind({ namespace: LOCALE_NAMESPACE });
-      seenScope = scope;
-      card.attach(scope);
-      const readSnapshot = () => {
-        const snapshot = scope.getSnapshot();
-        if (snapshot.status === "unavailable") {
-          // Namespace not exposed to this client (or preferences are
-          // process-local): no honest feed exists at all.
-          store.set({ kind: "channel-missing" });
-          // Ticket 68/87: a SETTLED unreadable read — the explicit fail-open
-          // reset (the flow shows) with the pane's read no longer in flight.
-          onboarding.applySnapshot("unavailable", undefined);
-          return;
-        }
-        // Ticket 87: the suppression input settles WITH the document. A
-        // `loading` snapshot (the shipped controller's pre-acceptance state —
-        // the describe read our own bind starts is still on the wire) sets
-        // the pane's buffering flag instead of deciding from the fail-open
-        // default; the document's arrival feeds the store and re-evaluates
-        // the decision reactively. A runtime that never binds a scope never
-        // buffers: the flow shows (the original fail-open pin).
-        onboarding.applySnapshot(snapshot.status, snapshot.value);
-        // `loading` (or a first-section-less `ready`) means the namespace's
-        // document has not been accepted yet: stay `waiting` — the feed is
-        // alive, the roster simply is not in it.
-        if (snapshot.value === undefined) return;
-        store.applyChannelValue(snapshot.value);
-        approvalFeed.applyChannelValue(snapshot.value);
-        // Ticket 94: the same accepted document feeds the shell stores'
-        // per-session mirrors (`roster.<sessionId>`) — the reader the live
-        // surface was missing. One document, three honest readers.
-        mirrorsFeed.applyChannelValue(snapshot.value);
-      };
-      disposeWatch = scope.subscribe(readSnapshot);
-      // Subscribe only fires on replacements; a scope bound after the first
-      // accepted section already stands at `ready`, so read once now or the
-      // roster would wait for a write that may never come.
-      readSnapshot();
-    });
-    return () => {
-      if (disposeWatch !== undefined) disposeWatch();
-      seenScope = null;
-      card.detach();
-    };
-  }, "multitask-dispatcher: roster settings watch");
 
-  // The onboarding seen-write hand-off (ticket 68; restored with the
-  // floating-window mount, ticket 100): a best-effort write of the seen
-  // record through the ONE bound scope (A5 — never a second channel),
-  // factored as the pure `writeOnboardingSeenRecord` (offline pinned). A
-  // resolved write stays silent — the watch re-delivers the document and
-  // the suppression decision closes the flow. A missing write path or a
-  // rejected write sets the honest save-failed notice instead: the flow
-  // closes for this visit and simply shows again next launch — fail-open,
-  // so nothing strands either way.
-  const writeOnboardingSeen = (): void => {
-    writeOnboardingSeenRecord(seenScope, () => onboarding.markSaveFailed());
-  };
+  // The onboarding store's suppression inputs are no longer fed: the
+  // settings-backed seen record and the per-session mirrors both rode the
+  // removed client channel. The beat walk and the decision logic stay pure
+  // and offline-pinned; the pane is unmounted with the shell machinery.
 
   // Per-tool call views (ticket 24): one inject at the shipped keyed slot,
   // one entry per dispatcher wire tool name. Keys are the plugin-owned core
@@ -448,20 +258,18 @@ export function applyClientModule(
     }
   });
 
-  // Settings card (ticket 47): one keyed `settings.plugin.item` entry. The
-  // slot is declared at runtime by the shipped configurable-plugins tab
-  // (`dsh-client-ui-settings-plugins/lib/client.js:1773-1784`), which is why
-  // this rides the declaration wait like every other entry here — the tab
-  // dispatches `renderSlot("settings.plugin.item", {}, { entryKey: ns })` per
-  // served namespace and renders the intersection with the cards that claim
-  // them, so a served namespace without a card renders nothing at all. The key
-  // is our settings namespace (the whole pairing contract); the card reads and
-  // writes through the scope bound above, never a second channel.
+  // Settings page (ticket 47): one keyed `plugins.row.config` entry. The
+  // Plugins page declares the slot while its `main` entry is mounted
+  // (`dsh-client-ui-plugin-manager/lib/client.js:4440-4444`) and dispatches
+  // the row's cell with the entry's form as owner props (`:2815-2822`), so a
+  // row the Host serves no namespace for gets no configure control at all.
+  // The key is `<package name>#<row id>` (`:27-29`), both strings the Host
+  // owns; the card edits the form the page hands it.
   //
   // Deliberately no entry-level `inject`: the shipped cards pass one because
   // their components read an injected controller face as props, while ours is a
   // factory bound to its seats at composition time — the same pattern the
-  // capsule and toolviews already use.
+  // toolviews use.
   //
   // And a plain callback returning the registration's disposer, not the shipped
   // generator: `SlotRegistry.inject` documents both forms ("callback effects
@@ -469,7 +277,7 @@ export function applyClientModule(
   // return value is the declaration-lifetime disposer either way, and our
   // offline fakes drive the callback form — a generator body would simply never
   // run there, so the entry could not be pinned offline.
-  ctx.slots.inject(SETTINGS_PLUGIN_ITEM_SLOT, () => {
+  ctx.slots.inject(PLUGINS_ROW_CONFIG_SLOT, () => {
     const t = ctx.locale.bind(LOCALE_NAMESPACE);
     return ctx.slots.register(
       settingsCardRegistration(),
@@ -477,73 +285,45 @@ export function applyClientModule(
     );
   });
 
-  // ── The floating dispatcher window + its stock-UI launcher (ticket 100,
-  // ADR-0021 decisions 2 + 4; the launcher's capsule form — ticket 107,
-  // ADR-0022) ──
+  // Session-kind indicator (ticket 123; ADR-0024 rider + addendum): ONE
+  // additive list entry in the stock conversation header's actions band,
+  // marking a worker (subagent) session on its own conversation.
   //
-  // ONE additive `shell.overlay` entry (ADR-0013's sanctioned seam; unique
-  // `multitask-dispatcher-` id — coexistence by id, never shadowing): a
-  // floating capsule that toggles the window and, since ticket 107
-  // (ADR-0022), shows [dispatcher count | running workers] derived purely
-  // from the mount's shell-store mirrors (the launch seam is unchanged;
-  // only the affordance's shape and content changed). The inject callback
-  // ALSO creates the window's shell mount HERE — the same `mountShellPage`
-  // wiring the retired `main`/`root` injects ran (the feed attaches, the
-  // sessions/conversation bindings, the seat projection — all effects on
-  // this module's fiber) — and pushes the result into `mounts`, the
-  // designated push-site, so offline tests drive the REAL data path. The
-  // mount's shell store is passed into `createLauncherChip` so the capsule
-  // subscribes to the same mirror truth the hosted shell renders. The
-  // mount's feeds stay attached while the window is CLOSED (the hubs
-  // replay last truth at attach), so opening shows live data immediately;
-  // fiber teardown detaches everything.
+  // Seat choice: `conversation.session.header.actions` (`list`, session
+  // scope) — NOT `conversation.session.header.lineage`, which is a `single`
+  // slot already owned at the default priority by `dsh-client-ui-subagent`
+  // (`dsh-client-ui-subagent/lib/client.js:978-982`); a second single entry
+  // would throw on a same-priority collision or displace the stock
+  // breadcrumb renderer. The actions band holds the same claim additively by
+  // `id`, beside stock `subagent-catalog` (order 10) and `job-list` (order 20).
   //
-  // DOM technique (this ticket's evidence, per ADR-0021's open question):
-  // the window PORTALS into a body-level container — see floating-window.tsx
-  // for the rejected second-overlay-entry alternative and the citations.
-  // Since the 2026-09-22 live-lane repair the launcher capsule portals into
-  // the SAME container (still this ONE entry), and the capsule's styles ship
-  // with the entry itself — see CAPSULE_CSS in floating-window.tsx: with the
-  // window closed the capsule must stay floating (its styles can no longer
-  // ride the window's portal <style>), and its surface must stack above the
-  // window's. The container's lifecycle rides this fiber (unload/HMR removes
-  // it); offline (no `document`) the container, the window, and the capsule
-  // all no-op.
-  //
-  // Crash isolation (ADR-0021 decision 2, re-based onto the additive
-  // posture — the retired root abdication has no successor because nothing
-  // is shadowed): dsh renders every slot entry inside its per-entry error
-  // boundary, and a crashing LIST entry abdicates — retired from the
-  // layer while siblings and the app stand (dsh-capsule-seams.md Seam 1,
-  // ui-renderer lib/client.js:511-532). The window additionally wraps the
-  // hosted shell in OUR OWN boundary inside the window
-  // (floating-window.tsx), so a shell crash never even reaches the host's:
-  // the chip and stock dsh survive, the window shows its honest failed
-  // line with working chrome, and close + reopen recovers.
-  const floatingWindow = createFloatingWindowStore();
-  ctx.effect(
-    () => () => disposeWindowLayer(),
-    "multitask-dispatcher: floating window layer",
+  // Why both marks are composed: workers are identified by
+  // `origin: 'subagent'`, a durable header fact. Dispatchers are identified by
+  // the `sessionKind` projection the adapter registers, which folds the
+  // `command/run` + `command/done` pair `/dispatcher-start` already writes —
+  // so the identity is durable and needs no event of our own. `agentPreset`
+  // is unusable here (every durable header reads "standard").
+  ctx.slots.inject(
+    workerGlyphRegistration().name,
+    () => {
+      const t = ctx.locale.bind(LOCALE_NAMESPACE);
+      return ctx.slots.register(
+        workerGlyphRegistration(),
+        createSessionKindGlyph("worker", t),
+      );
+    },
   );
-  ctx.slots.inject(SHELL_OVERLAY_SLOT, () => {
-    const t = ctx.locale.bind(LOCALE_NAMESPACE);
-    const mount = mountShellPage(ctx, {
-      store: onboarding,
-      onSeen: writeOnboardingSeen,
-      approvalsFeed: approvalFeed,
-      mirrorsFeed: mirrorsFeed,
-    });
-    mounts.push(mount);
-    return ctx.slots.register(
-      launcherOverlayRegistration(),
-      createLauncherChip(
-        t,
-        floatingWindow,
-        mount.store,
-        createElement(createDispatcherShell(t, mount.store, mount.hosts)),
-      ),
-    );
-  });
+
+  ctx.slots.inject(
+    dispatcherGlyphRegistration().name,
+    () => {
+      const t = ctx.locale.bind(LOCALE_NAMESPACE);
+      return ctx.slots.register(
+        dispatcherGlyphRegistration(),
+        createSessionKindGlyph("dispatcher", t),
+      );
+    },
+  );
 
   // ── The displacement registrations RETIRED from the default posture
   // (2026-09-20, ticket 99, ADR-0021) ──
@@ -559,16 +339,19 @@ export function applyClientModule(
   //    shipped AppFrame with an abdication failsafe.
   //
   // ADR-0021 (the human-ruled coexistence vehicle) retires both: stock dsh
-  // is the user's primary UI and is never displaced. The re-host site this
-  // retired posture was waiting for is the floating-window registration
-  // ABOVE (ticket 100): the same surfaces, in a separate window, behind an
-  // additive launcher. The machinery stays retained, NOT deleted: the
+  // is the user's primary UI and is never displaced. This module now renders
+  // NOTHING into dsh's layout — the intermediate state before ticket 100
+  // re-hosts the shell surfaces into a separate floating window behind an
+  // additive launcher. The machinery is retained, NOT deleted: the
   // registration contracts stay exported from `shell-mount.ts`
   // (`shellPageRegistration`, `shellRootRegistration`, the priority
   // constant) and the mounting path stays exported below
-  // (`mountShellPage`). Fail isolation is re-based onto the additive
-  // posture (see the launcher inject above). The retired-path tests remain
-  // records of that machinery in `test/client-shell-mount.test.ts`.
+  // (`mountShellPage`), so the vehicle is reversible at ONE registration
+  // site — exactly the site ticket 100 adds. Fail isolation is re-based
+  // onto the additive posture: with no shadowing entry there is no cell to
+  // abdicate; our registrations fail within our own module and the stock
+  // app is never shadowed. The retired-path tests remain records of that
+  // machinery in `test/client-shell-mount.test.ts`.
 
   return { approvalsFeed: approvalFeed, mirrorsFeed, mounts };
 }
@@ -577,15 +360,14 @@ export function applyClientModule(
  * The shell page's live mounting path (ticket 78 staging), factored over
  * explicit stores so offline tests can drive the data path end to end —
  * feed snapshot → shell store → hosted-panel seat — without a DOM harness
- * (same discipline as `applyClientModule`). RETAINED MACHINERY re-hosted
- * (ticket 100, ADR-0021): the `main`/`root` injects that used to call it
- * left the default composition (ticket 99), and the floating-window
- * launcher inject is now its ONE production caller — the window hosts the
- * same surfaces, additively. Offline tests also drive it directly (also
- * against the real composition's feeds). Its effects still land on the
- * caller's fiber, so unloading the caller's registration reverses the feed
- * bindings and the seat projection with it (HMR-safe; the ticket's
- * "reverse every registration" constraint).
+ * (same discipline as `applyClientModule`). RETAINED MACHINERY (ticket 99,
+ * ADR-0021): the `main`/`root` injects that used to call it left the
+ * default composition, so nothing in production calls it today — ticket
+ * 100's floating-window registration is its next caller, and offline tests
+ * drive it directly (also against the real composition's feeds). Its
+ * effects still land on the caller's fiber, so unloading the caller's
+ * registration reverses the feed bindings and the seat projection with it
+ * (HMR-safe; the ticket's "reverse every registration" constraint).
  *
  * - The sidebar rides `bindShellSessionsFeed` (ticket 79's projection) over
  *   `ctx.sessions` — a DECLARED read (ticket 84), so it cannot throw; an
@@ -618,10 +400,10 @@ export interface ShellPageMount {
 }
 
 /**
- * The first-run onboarding wiring (ticket 68): the store the settings watch
- * feeds and the composition's seen-write hand-off. Optional so a composition
- * (or a test) can mount the shell without the flow — the no-selection state
- * keeps its bare copy.
+ * The first-run onboarding wiring (ticket 68): the store the pane reads and
+ * the composition's seen-write hand-off. Optional so a composition (or a
+ * test) can mount the shell without the flow — the no-selection state keeps
+ * its bare copy.
  */
 export interface ShellOnboardingWiring {
   readonly store: OnboardingStore;
@@ -663,9 +445,9 @@ export function mountShellPage(
   const seat = createRosterStore();
   const conversation = createConversationStore();
   // Ticket 81/69: the approval-cards store (the "Needs you" area's data
-  // seam). Fed from the ONE settings watch through the shared relay feed
-  // when the wiring provides it (below); unfed stores render nothing —
-  // honest unknown, never a fabricated "nothing needs you".
+  // seam). Fed through the shared relay hub when the wiring provides it
+  // (below); unfed stores render nothing — honest unknown, never a
+  // fabricated "nothing needs you".
   const approvalsStore = createApprovalCardsStore();
   let binding: ShellFeedBinding | undefined;
 
@@ -721,9 +503,9 @@ export function mountShellPage(
   }, "multitask-dispatcher: shell conversation window binding");
 
   // The conversation send transport: ticket 40's verified plain-prompt sink
-  // (historical: the same transport the retired capsule's stop ask once used),
-  // resolved lazily at send time. One sink for the whole module — the
-  // composer never builds a parallel channel (A4).
+  // (the SAME one the capsule's stop ask uses), resolved lazily at send
+  // time. One sink for the whole module — the composer never builds a
+  // parallel channel (A4).
   const sendTransport = bindCommandTransport({
     remote: () => ctx.remote,
     sessions: () => ctx.sessions,
@@ -826,31 +608,6 @@ export function mountShellPage(
       ? createElement(seatPanel)
       : null;
 
-  // Ticket 102b diagnostic — the session-lifecycle seats' console-only
-  // tripwire. Contained must not mean SILENT: the seats are fire-and-forget
-  // (the mirrors are the truth, never an optimistic flip), but before this
-  // every failure mode of the ONE command egress vanished without a signal,
-  // so an under-declared Cordis inject read exactly like a dead click. This
-  // reports `executed` as the only silent outcome — `no-channel`,
-  // `unresolved`, or a rejected transport all warn, once, in the browser
-  // console. Deliberately NOT a UI surface: no state, no copy, no new result
-  // kinds (ticket 102b's defect scope is the egress, not the presentation).
-  const reportCommandFailure = (
-    line: string,
-    sessionId: string,
-    outcome: unknown,
-  ): void => {
-    const kind =
-      typeof outcome === "object" && outcome !== null
-        ? (outcome as { readonly kind?: unknown }).kind
-        : undefined;
-    if (kind === "executed") return;
-    console.warn(
-      `[multitask-dispatcher] "${line}" in session ${sessionId} did not reach the host command channel`,
-      outcome,
-    );
-  };
-
   const hosts: ShellHosts = {
     // Host the panel ONLY for a session our mirrors vouch for (a parsed or
     // corrupt dispatcher snapshot); anything else renders an empty pane —
@@ -876,65 +633,6 @@ export function mountShellPage(
     // provides it (ticket 68); the seat itself settles to the no-selection
     // copy once suppressed. (Ticket 88: a component, rendered as an element.)
     onboarding: onboardingPane,
-    // Ticket 101 (ADR-0021 decision 3) — the session-lifecycle seats, both
-    // riding the ONE command transport (the composer's exact transaction,
-    // `commands.execute(sessionId, line, [])` — never a second channel):
-    // add = `/dispatcher-start` verbatim in the chosen session (the same
-    // host command a typed line reaches there); delete = `/dispatcher-stop`
-    // verbatim in that session (deactivates the binding through the host
-    // dispose path; never disposes the chat). Outcomes are host-owned: the
-    // command result copy is the surface, and the sidebar's dispatcher flags
-    // follow the MIRRORS (the roster publish / clear), never an optimistic
-    // flip — ADR-0010 honesty, honest mirror lag allowed. The seats are
-    // fire-and-forget: a transport rejection is contained (nothing was
-    // changed anywhere — the mirrors are the truth either way).
-    //
-    // Ticket 102b diagnostic: contained must not mean SILENT. Both seats
-    // previously ended in `.catch(() => {})` and ignored the result kind, so
-    // every failure mode of this egress — a throwing nested-face read (an
-    // under-declared Cordis inject), `no-channel`, `unresolved` — vanished
-    // with no signal, and the live symptom was indistinguishable from a dead
-    // click. `reportCommandFailure` (above) is a console-only tripwire: no
-    // UI, no copy, no state, no new result kinds.
-    onAddDispatcherSession: (sessionId) => {
-      void sendTransport
-        .sendCommand(sessionId, DISPATCHER_START_LINE)
-        .then((result) =>
-          reportCommandFailure(DISPATCHER_START_LINE, sessionId, result),
-        )
-        .catch((error: unknown) =>
-          reportCommandFailure(DISPATCHER_START_LINE, sessionId, error),
-        );
-    },
-    onDeleteDispatcherSession: (sessionId) => {
-      void sendTransport
-        .sendCommand(sessionId, DISPATCHER_STOP_LINE)
-        .then((result) =>
-          reportCommandFailure(DISPATCHER_STOP_LINE, sessionId, result),
-        )
-        .catch((error: unknown) =>
-          reportCommandFailure(DISPATCHER_STOP_LINE, sessionId, error),
-        );
-    },
-    // Ticket 106 — the CLOSE seat: the sidebar rows' right-click context
-    // menu sends the exact same line through the exact same ONE command
-    // transport as the delete seat above (`/dispatcher-stop` verbatim, the
-    // composer's transaction), with the same `reportCommandFailure`
-    // tripwire. Nothing new here but the seat itself: no second transport,
-    // no host-side change. After a confirmed stop the row re-renders as a
-    // normal session only when the host's mirror clear arrives — never an
-    // optimistic local flip (ADR-0010). The key says "close" (the
-    // affordance's word) and stays clear of the pinned banned-verb scan.
-    onCloseDispatcherSession: (sessionId) => {
-      void sendTransport
-        .sendCommand(sessionId, DISPATCHER_STOP_LINE)
-        .then((result) =>
-          reportCommandFailure(DISPATCHER_STOP_LINE, sessionId, result),
-        )
-        .catch((error: unknown) =>
-          reportCommandFailure(DISPATCHER_STOP_LINE, sessionId, error),
-        );
-    },
   };
 
   return { store, seat, conversation, approvals: approvalsStore, hosts };

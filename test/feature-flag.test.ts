@@ -2,31 +2,26 @@
  * Ticket 12 — feature flag + profile split (ADR-0005).
  *
  * Unit tests, no network / LLM / real dsh host.
- * Covers: freeze semantics, disabled early-return, settings always installed,
- * settings writes are runtime no-ops, policy gate, schema defaults.
+ * Covers: freeze semantics, disabled early-return, the volatile settings
+ * form, policy gate, schema defaults.
+ *
+ * 0.2.1 has no settings registration API: the plugin's own Config schema IS
+ * the form, keyed by its Loader row id (`SETTINGS_NAMESPACE`), and only
+ * `.volatile()` fields appear or accept writes. These cases pin that shape.
  *
  * Fake-vs-host (ticket 91): the stub `commands.register` / `tools.register`
  * are fail-loud on a duplicate name, like the shipped `NamedEntries` tables
  * (`@deepseek-ai/dsh-commands/lib/index.js:82`,
  * `@deepseek-ai/dsh-tools/lib/index.js:2538`).
- *
- * Fake-vs-host (ticket 93): the stub settings provider models the shipped
- * scope contract — `register(ns, schema, options?)` returns the owner scope
- * (`@deepseek-ai/dsh-settings/lib/index.js:281-315`) while
- * `installSection(...)` returns VOID (`:327-343`;
- * `lib/types/index.d.ts:228`).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { Config, apply } from "../src/plugin.js";
+import { volatileConfig } from "./support/plugin-config.js";
 import {
   assembleSessionPolicy,
 } from "../src/core/policy/assembler.js";
-import {
-  installMultitaskSettingsSection,
-  SETTINGS_NAMESPACE,
-  type SettingsProviderLike,
-} from "../src/adapter/settings-section.js";
+import { SETTINGS_NAMESPACE } from "../src/adapter/settings-section.js";
 import { DISPATCHER_START_COMMAND } from "../src/adapter/activation-command.js";
 import { DISPATCHER_STEER_COMMAND } from "../src/adapter/steer-command.js";
 import { DISPATCHER_RESOLVE_COMMAND } from "../src/adapter/resolve-command.js";
@@ -36,52 +31,26 @@ import type {
   CommandDefinitionLike,
 } from "../src/adapter/cordis-dsh-host.js";
 
-interface StubSettingsCall {
-  ns: string;
-  schema: unknown;
-  /** Composition base layer handed to `register` (host `:281-315`). */
-  base: unknown;
-}
-
 function createStubCtx(options?: {
   withTools?: boolean;
-  withSettings?: boolean;
 }): AdapterContext & {
   effect: (execute: () => unknown, label?: string) => unknown;
-  inject: (
-    services: readonly string[],
-    callback: (child: { settings?: SettingsProviderLike }) => void,
-  ) => void;
   disposers: Array<() => void>;
   listeners: Map<string, Array<(payload: never) => void>>;
-  settingsCalls: StubSettingsCall[];
-  /** Every value written through the registered owner scope's `update`. */
-  settingsWrites: unknown[];
   registeredTools: Array<{ name: string }>;
   registeredCommands: CommandDefinitionLike[];
-  settings?: SettingsProviderLike;
-  /** The owner scope the plugin's own `register` call received (ticket 93). */
-  settingsScope?: { update(value: unknown): Promise<void> };
 } {
   const disposers: Array<() => void> = [];
   const listeners = new Map<string, Array<(payload: never) => void>>();
   const tables = new Map<string, Map<string, unknown>>();
-  const settingsCalls: StubSettingsCall[] = [];
-  const settingsWrites: unknown[] = [];
   const registeredTools: Array<{ name: string }> = [];
   const registeredCommands: CommandDefinitionLike[] = [];
-  let settingsScope: { update(value: unknown): Promise<void> } | undefined;
 
   const ctx: ReturnType<typeof createStubCtx> = {
     disposers,
     listeners,
-    settingsCalls,
-    settingsWrites,
     registeredTools,
     registeredCommands,
-    get settingsScope() {
-      return settingsScope;
-    },
     // Cordis effect contract (ticket 44): `execute` runs at apply; a returned
     // function — or each value a generator yields — is the unload disposer.
     effect(execute: () => unknown, label?: string) {
@@ -99,11 +68,6 @@ function createStubCtx(options?: {
         for (const step of result as Iterable<unknown>) {
           if (typeof step === "function") disposers.push(step as () => void);
         }
-      }
-    },
-    inject(services, callback) {
-      if (services.includes("settings") && ctx.settings !== undefined) {
-        callback(ctx);
       }
     },
     on(name: string, cb: (payload: never) => void) {
@@ -134,8 +98,8 @@ function createStubCtx(options?: {
       },
     },
     subagents: {
-      async startContinuable() {
-        return { childId: "child-stub" };
+      async startActivation() {
+        return { childId: "child-stub", dispose: async () => {} };
       },
       interrupt() {},
       async sendMessage() {
@@ -207,65 +171,38 @@ function createStubCtx(options?: {
     };
   }
 
-  if (options?.withSettings === true) {
-    const claimedNamespaces = new Set<string>();
-    const claim = (
-      ns: string,
-      schema: unknown,
-      base: unknown,
-    ): { update(value: unknown): Promise<void> } => {
-      // Shipped rule (ticket 91): a second claim of the same namespace
-      // throws (dsh-settings lib/index.js:283).
-      if (claimedNamespaces.has(ns)) {
-        throw new Error(`settings namespace "${ns}" is already registered`);
-      }
-      claimedNamespaces.add(ns);
-      settingsCalls.push({ ns, schema, base });
-      const scope = {
-        // The host scope's `update` is ASYNC (dsh-settings
-        // lib/types/index.d.ts:105-108).
-        async update(value: unknown) {
-          settingsWrites.push(value);
-        },
-      };
-      settingsScope = scope;
-      return scope;
-    };
-    ctx.settings = {
-      // Host rule (ticket 93): `register(ns, schema, options?)` is the
-      // SCOPE-RETURNING API (dsh-settings lib/index.js:281-315); the scope
-      // `{get, watch, update, replace}` is built at `:298-314`.
-      register(ns: string, schema: unknown, opts?: { base?: unknown }) {
-        return claim(ns, schema, opts?.base);
-      },
-      // Host rule (ticket 93): `installSection(...)` returns VOID — it
-      // registers through `register` and DISCARDS the scope
-      // (dsh-settings lib/index.js:327-343; the shipped type is
-      // `installSection(…): void`, lib/types/index.d.ts:228). A caller that
-      // uses its return value gets `undefined`, exactly as on the live host.
-      installSection(_owner: unknown, ns: string) {
-        claim(ns, undefined, undefined);
-      },
-    };
-  }
-
   return ctx;
 }
 
 describe("feature flag — schema", () => {
+  // 0.2.1: `.volatile()` makes every field parse to a stable reference, so the
+  // value is read with `get()` — the same shape the host hands `apply`.
   it("Config({}) yields enabled: true (default)", () => {
-    const parsed = Config({}) as { enabled: boolean };
-    assert.equal(parsed.enabled, true);
+    const parsed = Config({}) as { enabled: { get(): boolean } };
+    assert.equal(parsed.enabled.get(), true);
   });
 
   it("Config({ enabled: false }) yields enabled: false", () => {
-    const parsed = Config({ enabled: false }) as { enabled: boolean };
-    assert.equal(parsed.enabled, false);
+    const parsed = Config({ enabled: false }) as { enabled: { get(): boolean } };
+    assert.equal(parsed.enabled.get(), false);
   });
 
   it("Config({ enabled: true }) yields enabled: true", () => {
-    const parsed = Config({ enabled: true }) as { enabled: boolean };
-    assert.equal(parsed.enabled, true);
+    const parsed = Config({ enabled: true }) as { enabled: { get(): boolean } };
+    assert.equal(parsed.enabled.get(), true);
+  });
+
+  it("defaults the inbox off and the rescan floor at 5000", () => {
+    const parsed = Config({}) as {
+      inboxEnabled: { get(): boolean };
+      inboxDir: { get(): string };
+      inboxRescanIntervalMs: { get(): number };
+      wakeCoalesceWindowMs: { get(): number };
+    };
+    assert.equal(parsed.inboxEnabled.get(), false);
+    assert.equal(parsed.inboxDir.get(), "");
+    assert.equal(parsed.inboxRescanIntervalMs.get(), 5000);
+    assert.equal(parsed.wakeCoalesceWindowMs.get(), 0);
   });
 });
 
@@ -285,7 +222,7 @@ describe("feature flag — policy assembler gate", () => {
 describe("feature flag — disabled path is stock dsh", () => {
   it("apply with enabled:false does not register tools, listeners, or effects", () => {
     const ctx = createStubCtx({ withTools: true });
-    apply(ctx, { enabled: false });
+    apply(ctx, volatileConfig({ enabled: false }));
     assert.equal(ctx.disposers.length, 0);
     assert.equal(ctx.registeredTools.length, 0);
     assert.equal(ctx.listeners.size, 0);
@@ -293,7 +230,7 @@ describe("feature flag — disabled path is stock dsh", () => {
 
   it("apply with enabled:false does not wire session-start / status listeners", () => {
     const ctx = createStubCtx();
-    apply(ctx, { enabled: false });
+    apply(ctx, volatileConfig({ enabled: false }));
     assert.ok(!ctx.listeners.has("agent/session-start"));
     assert.ok(!ctx.listeners.has("agent/status"));
     assert.ok(!ctx.listeners.has("subagent/end"));
@@ -303,7 +240,7 @@ describe("feature flag — disabled path is stock dsh", () => {
 describe("feature flag — enabled path boots dormant (ticket 19)", () => {
   it("apply with enabled:true registers the command, no tools, no capture", () => {
     const ctx = createStubCtx({ withTools: true });
-    apply(ctx, { enabled: true });
+    apply(ctx, volatileConfig({ enabled: true }));
     // Dormant: the host commands are the visible affordances (ticket 22 added
     // dispatcher-steer; ticket 69 the resolve command; ticket 101 the stop
     // command; all gate on activation).
@@ -325,13 +262,14 @@ describe("feature flag — enabled path boots dormant (ticket 19)", () => {
 });
 
 describe("feature flag — freeze semantics (ADR-0005)", () => {
-  it("mutating config.enabled after apply does not change the dormant boot or activation", () => {
+  it("mutating the enabled ref after apply does not change the dormant boot or activation", () => {
     const ctx = createStubCtx({ withTools: true });
-    const config = { enabled: true };
+    const config = volatileConfig({ enabled: true });
     apply(ctx, config);
 
-    // Mid-session flip — forbidden live toggle.
-    config.enabled = false;
+    // Mid-session flip — forbidden live toggle, even via the host's own
+    // volatile commit (the ref value changes; the frozen copy does not).
+    config.enabled.set(false);
 
     // Boot state unchanged (freeze copied the primitive at apply entry):
     // the commands are still registered and the lifecycle still activates
@@ -357,12 +295,12 @@ describe("feature flag — freeze semantics (ADR-0005)", () => {
     assert.equal(lifecycleAgent.injected.length, 1);
   });
 
-  it("disabled session stays disabled when config.enabled is flipped to true", () => {
+  it("disabled session stays disabled when the enabled ref is flipped to true", () => {
     const ctx = createStubCtx({ withTools: true });
-    const config = { enabled: false };
+    const config = volatileConfig({ enabled: false });
     apply(ctx, config);
 
-    config.enabled = true;
+    config.enabled.set(true);
 
     // Still stock: freeze captured false — no command, no tools, no listeners.
     assert.equal(ctx.disposers.length, 0);
@@ -372,108 +310,59 @@ describe("feature flag — freeze semantics (ADR-0005)", () => {
   });
 });
 
-describe("feature flag — settings section always installed", () => {
-  it("settings namespace is registered when enabled:true", () => {
-    const ctx = createStubCtx({ withSettings: true });
-    apply(ctx, { enabled: true });
-    assert.equal(ctx.settingsCalls.length, 1);
-    assert.equal(ctx.settingsCalls[0]?.ns, SETTINGS_NAMESPACE);
-    // The composition entry rides as the base layer (host `register`'s
-    // `options.base`, dsh-settings lib/index.js:281-315) so a cleared field
-    // reverts to the shipped default.
-    assert.deepEqual(ctx.settingsCalls[0]?.base, { enabled: true });
-  });
-
-  it("settings namespace is registered when enabled:false", () => {
-    const ctx = createStubCtx({ withSettings: true });
-    apply(ctx, { enabled: false });
-    assert.equal(ctx.settingsCalls.length, 1);
-    assert.equal(ctx.settingsCalls[0]?.ns, SETTINGS_NAMESPACE);
-  });
-
-  it("install is a no-op when ctx.settings is absent", () => {
-    const ctx = createStubCtx();
-    assert.doesNotThrow(() => {
-      apply(ctx, { enabled: true });
-    });
-  });
-
-  it("installMultitaskSettingsSection uses the multitask-dispatcher namespace and claims it through register", () => {
-    const calls: StubSettingsCall[] = [];
-    const ctx = {
-      inject(
-        services: readonly string[],
-        callback: (child: { settings?: SettingsProviderLike }) => void,
-      ) {
-        if (services.includes("settings")) callback(ctx);
-      },
-      settings: {
-        // Ticket 93: the host's scope-returning API. `installSection`
-        // returns void on the live host (`dsh-settings/lib/index.js:327-343`)
-        // — a product that relies on its return starves, so this stub has no
-        // installSection at all: the call would be a TypeError.
-        register(ns: string, schema: unknown, opts?: { base?: unknown }) {
-          calls.push({ ns, schema, base: opts?.base });
-          return { async update() {} };
-        },
-      },
-    };
-    installMultitaskSettingsSection(ctx, Config, { enabled: true });
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0]?.ns, "multitask-dispatcher");
-    assert.deepEqual(calls[0]?.base, { enabled: true });
-  });
-});
-
-describe("feature flag — settings writes are a runtime no-op", () => {
-  it("a persisted settings write after a true-start does not tear down the session", () => {
-    const ctx = createStubCtx({ withTools: true, withSettings: true });
-    apply(ctx, { enabled: true });
-
-    // ADR-0005: the plugin passes NO change hooks to the provider (the
-    // host's `register` takes no hooks at all — `installSection`'s
-    // setSource/onChange bookkeeping was the old seam and is gone, ticket
-    // 93). A settings write therefore cannot reach the running session.
-    assert.deepEqual(Object.keys(ctx.settingsCalls[0] ?? {}).sort(), [
-      "base",
-      "ns",
-      "schema",
+describe("feature flag — volatile settings form (0.2.1)", () => {
+  it("every Config field is volatile, so the host form exposes and accepts it", () => {
+    const dict = (Config as unknown as {
+      dict: Record<string, { meta?: { volatile?: boolean } }>;
+    }).dict;
+    assert.deepEqual(Object.keys(dict).sort(), [
+      "accessRequestTimeoutMs",
+      "enabled",
+      "inboxDir",
+      "inboxEnabled",
+      "inboxRescanIntervalMs",
+      "microcompactEnabled",
+      "wakeCoalesceWindowMs",
     ]);
-
-    // Running session unchanged: no teardown, commands still present.
-    assert.equal(ctx.registeredCommands.length, 4);
-    assert.equal(ctx.disposers.length, 5);
-    assert.ok(ctx.listeners.has("agent/status"));
+    for (const [field, schema] of Object.entries(dict)) {
+      assert.equal(
+        schema.meta?.volatile,
+        true,
+        `Config field "${field}" must be volatile (0.2.1 rejects non-volatile writes)`,
+      );
+    }
   });
 
-  it("a settings-document write does not reconfigure the frozen flag", async () => {
-    const ctx = createStubCtx({ withSettings: true });
-    apply(ctx, { enabled: true });
+  it("the settings namespace is the Loader row id, not a registration argument", () => {
+    assert.equal(SETTINGS_NAMESPACE, "multitask-dispatcher");
+  });
 
-    // The registered scope is the only write path the plugin holds; drive a
-    // write that flips `enabled:false` for the NEXT session and confirm the
-    // running session is untouched (frozen flag, ADR-0005).
-    await ctx.settingsScope?.update({ enabled: false });
-    assert.deepEqual(ctx.settingsWrites, [{ enabled: false }]);
+  it("optional refs may be absent; apply falls back to the shipped defaults", () => {
+    // The host always hands validated refs, but stub contexts (and a future
+    // composition that omits a row-level config) may not. The optional chain
+    // must not throw, and the inbox must stay off.
+    const ctx = createStubCtx({ withTools: true });
+    apply(ctx, { enabled: { get: () => true } });
     assert.equal(ctx.registeredCommands.length, 4);
+    assert.ok(ctx.listeners.has("agent/status"));
   });
 });
 
 describe("feature flag — no off-while-running", () => {
   it("there is no API path that disables a running dispatcher mid-session", () => {
     // Structural guarantee: apply is the only entry, and it freezes the flag.
-    // The plugin holds no live config reference and no settings change hook
-    // (ticket 93 removed the `installSection` seam entirely). No exported
-    // function mutates a running Multitask's enabled state, and the command
-    // surface has no flag-off verb (the flag is frozen per session, ADR-0005;
+    // Volatile refs update live on the host, but the plugin only ever reads
+    // one at apply time and never subscribes to `loader/volatile-update`. No
+    // exported function mutates a running Multitask's enabled state, and the
+    // command surface has no flag-off verb (the flag is frozen per session, ADR-0005;
     // ticket 101's /dispatcher-stop deactivates a session BINDING under
     // ADR-0021 decision 3 — it does not touch the flag or the core).
-    const ctx = createStubCtx({ withTools: true, withSettings: true });
-    const config = { enabled: true };
+    const ctx = createStubCtx({ withTools: true });
+    const config = volatileConfig({ enabled: true });
     apply(ctx, config);
 
     // Even a config mutation storm leaves the session intact.
-    config.enabled = false;
+    config.enabled.set(false);
 
     assert.equal(ctx.registeredCommands.length, 4);
     assert.equal(ctx.registeredCommands[0]?.name, DISPATCHER_START_COMMAND);
@@ -491,7 +380,7 @@ describe("feature flag — host duplicate-registration rule (ticket 91)", () => 
     });
 
     assert.throws(
-      () => apply(ctx, { enabled: true }),
+      () => apply(ctx, volatileConfig({ enabled: true })),
       new RegExp(`command "${DISPATCHER_STEER_COMMAND}" is already registered`),
     );
   });

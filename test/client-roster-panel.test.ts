@@ -123,15 +123,8 @@ function rowById(view: RosterPanelView, workerId: string): RosterRowView | undef
 }
 
 /**
- * Fake the client face (see test/client-face-scaffold.test.ts for the idiom),
- * extended with the optional settings-scope seam.
- *
- * The settings fake models the SHIPPED client contract (ticket 46): the service
- * is `settingsScope`, a binder whose `bind({namespace})` returns a scope with
- * `getSnapshot()` + `subscribe(listener)`. There is deliberately no
- * `watch(namespace, cb)` here — a watch-shaped call would throw, so a
- * regression to the pre-ticket-46 shape fails offline instead of passing on a
- * fake that never existed live.
+ * Fake the client face (see test/client-face-scaffold.test.ts for the idiom)
+ * over the declared service faces.
  *
  * Ticket 86 (2026-09-19): the slots fake carries the shipped SlotCore register
  * rule (one cell per slot name, `(priority ?? 0)` default, per-kind collision
@@ -139,7 +132,7 @@ function rowById(view: RosterPanelView, workerId: string): RosterRowView | undef
  * live. See test/client-face-scaffold.test.ts for the full citation
  * (`dsh-web-frontend/dist/assets/index-BKQ_L1z6.js`, minified SlotCore.register).
  */
-function createClientCtx(options?: { withSettings?: boolean }) {
+function createClientCtx() {
   const locales = new Map<string, unknown>();
   const cells = new Map<string, FakeSlotEntry[]>();
   const injects: Array<{
@@ -148,12 +141,6 @@ function createClientCtx(options?: { withSettings?: boolean }) {
   }> = [];
   const injectControllers: Array<() => void> = [];
   const effectDisposers: Array<() => void> = [];
-  const boundNamespaces: string[] = [];
-  const injectRequests: string[][] = [];
-  const subscribers = new Set<() => void>();
-  let snapshot: ClientSettingsScopeSnapshotLike = { status: "loading" };
-  let watchDisposed = 0;
-  const withSettings = options?.withSettings ?? true;
 
   const ctx = {
     effect(execute: () => unknown, label?: string) {
@@ -163,27 +150,6 @@ function createClientCtx(options?: { withSettings?: boolean }) {
         typeof returned === "function" ? returned : () => {};
       effectDisposers.push(disposer);
       return () => {};
-    },
-    inject(services: readonly string[], callback: (child: unknown) => void) {
-      injectRequests.push([...services]);
-      if (!withSettings || !services.includes("settingsScope")) return;
-      callback({
-        settingsScope: {
-          bind(spec: { namespace: string }) {
-            boundNamespaces.push(spec.namespace);
-            return {
-              getSnapshot: () => snapshot,
-              subscribe(listener: () => void) {
-                subscribers.add(listener);
-                return () => {
-                  subscribers.delete(listener);
-                  watchDisposed += 1;
-                };
-              },
-            };
-          },
-        },
-      });
     },
     slots: {
       inject(parent: string, callback: () => unknown) {
@@ -227,21 +193,6 @@ function createClientCtx(options?: { withSettings?: boolean }) {
     locales,
     injects,
     cells,
-    /** Every service list the module asked to inject, in call order. */
-    injectRequests,
-    /** Every namespace the module bound a settings scope on. */
-    boundNamespaces,
-    /** Publish a host document the way a real scope replacement would. */
-    fireSettingsWatch(value: unknown) {
-      snapshot = { status: "ready", value };
-      for (const listener of [...subscribers]) listener();
-    },
-    /** Force a raw snapshot replacement (status included). */
-    pushSettingsSnapshot(next: ClientSettingsScopeSnapshotLike) {
-      snapshot = next;
-      for (const listener of [...subscribers]) listener();
-    },
-    watchDisposedCount: () => watchDisposed,
     runFiberTeardown() {
       for (const dispose of [...effectDisposers, ...injectControllers]) {
         dispose();
@@ -249,11 +200,6 @@ function createClientCtx(options?: { withSettings?: boolean }) {
     },
   };
   return ctx as typeof ctx & ClientContext & {
-    injectRequests: string[][];
-    boundNamespaces: string[];
-    fireSettingsWatch(value: unknown): void;
-    pushSettingsSnapshot(next: ClientSettingsScopeSnapshotLike): void;
-    watchDisposedCount(): number;
     runFiberTeardown(): void;
     cells: Map<string, FakeSlotEntry[]>;
   };
@@ -935,25 +881,18 @@ describe("roster panel — store applies the settings-watch feed", () => {
   });
 });
 
-describe("roster panel — apply() wires the fallback data path; the capsule entry stays retired", () => {
-  it("registers locale, no ROSTER overlay entry (the launcher is the one overlay entry), and the settings watch", () => {
+describe("roster panel — apply() registers only the additive entries; the overlay entry is retired", () => {
+  it("registers locale and NO overlay entry (retired at the cutover)", () => {
     const ctx = createClientCtx();
     apply(ctx);
 
-    // The ticket-78 CUTOVER (2026-09-19) ended the capsule era: the roster
-    // capsule's `shell.overlay` entry never registers again. Since ticket
-    // 100 (2026-09-20, ADR-0021) an overlay inject EXISTS again — the
-    // floating-window launcher — but the capsule's id is not on it: the
-    // panel is re-hosted INSIDE the floating window (the wrapper's right
-    // seat inventory), never re-registered as its own entry.
+    // The roster capsule's `shell.overlay` entry no longer registers. The
+    // panel component and its store stay as re-host assets (the shell's right
+    // seat hosts them; the shell is retained, unmounted machinery).
     const overlay = ctx.injects.find(
       (candidate) => candidate.parent === SHELL_OVERLAY_SLOT,
     );
-    assert.ok(overlay, "the launcher's overlay inject registers (ticket 100)");
-    const capsuleEntry = overlay.entries.find(
-      (entry) => (entry.options as { id?: string }).id === ROSTER_ENTRY_ID,
-    );
-    assert.equal(capsuleEntry, undefined, "the capsule entry stays retired");
+    assert.equal(overlay, undefined, "no overlay inject post-cutover");
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
   });
 
@@ -966,12 +905,10 @@ describe("roster panel — apply() wires the fallback data path; the capsule ent
     assert.equal(options.locale, "multitask-dispatcher");
   });
 
-  it("the data-fallback path feeds the panel: watch payload becomes rows", () => {
-    const ctx = createClientCtx();
+  it("the store's own channel verb still projects a host document into rows", () => {
+    // The store, its parsing, and its view model are unchanged; only the
+    // composition's channel is gone on 0.2.1.
     const store = createRosterStore();
-    applyClientModule(ctx, store);
-
-    // Host mirror lands under the roster key with two workers (v2 rows).
     const feed = snapshot([
       row("w-1", "running", { title: "Parser", startedAtMs: 1_000, toolCallCount: 4 }),
       row("w-2", "steering", {
@@ -981,9 +918,8 @@ describe("roster panel — apply() wires the fallback data path; the capsule ent
         toolCallCount: 2,
       }),
     ]);
-    ctx.fireSettingsWatch({ [ROSTER_SETTINGS_KEY]: feed });
+    store.applyChannelValue({ [ROSTER_SETTINGS_KEY]: feed });
 
-    // The same store the panel component subscribes to now holds the rows.
     assert.deepEqual(store.getBox().state, { kind: "snapshot", snapshot: feed });
     const view = describeRosterPanel(store.getBox().state, 2_000);
     assert.ok(view.kind === "rows");
@@ -1004,26 +940,23 @@ describe("roster panel — apply() wires the fallback data path; the capsule ent
     );
 
     // The rendered entry is bound to the plugin's copy seat.
-    const t = ctx.locale.bind(LOCALE_NAMESPACE);
-    assert.equal(t("roster.title"), "Workers");
+    const dict = localeDictionary.en;
+    assert.equal(dict["roster.title"], "Workers");
   });
 
-  it("a garbage feed flips the panel to the unavailable copy, never a hang", () => {
-    const ctx = createClientCtx();
-    apply(ctx);
-    ctx.fireSettingsWatch({ [ROSTER_SETTINGS_KEY]: { broken: true } });
-    const view = describeRosterPanel({ kind: "invalid" }, 1_000);
-    assert.deepEqual(view, { kind: "unavailable" });
+  it("a garbage document flips the panel to the unavailable copy, never a hang", () => {
+    const store = createRosterStore();
+    store.applyChannelValue({ [ROSTER_SETTINGS_KEY]: { broken: true } });
+    assert.deepEqual(describeRosterPanel(store.getBox().state, 1_000), {
+      kind: "unavailable",
+    });
     // The copy exists in both faces for the degraded state.
     assert.equal(typeof localeDictionary.en["roster.unavailable"], "string");
     assert.equal(typeof localeDictionary.zh["roster.unavailable"], "string");
   });
 
-  it("no settings service ever appearing: the store stays `waiting`, never a fake degrade", () => {
-    // The runtime-dynamic inject simply never resolves (ticket 46's live
-    // symptom). Honest face: `waiting` — the pre-activation state the chip
-    // renders as the grey `dormant` dot, not an error.
-    const ctx = createClientCtx({ withSettings: false });
+  it("no channel: the store stays `waiting`, never a fake degrade", () => {
+    const ctx = createClientCtx();
     const store = createRosterStore();
     applyClientModule(ctx, store);
     assert.deepEqual(store.getBox().state, { kind: "waiting" });
@@ -1032,117 +965,52 @@ describe("roster panel — apply() wires the fallback data path; the capsule ent
     });
   });
 
-  it("injects the SHIPPED client service name — `settingsScope`, never the host-side `settings` (ticket 46 pin)", () => {
+  it("no `settingsScope` request survives: 0.2.1 removed the service", () => {
     const ctx = createClientCtx();
     apply(ctx);
-    // Cordis `inject(deps, cb)` resolves only when EVERY named service exists
-    // (vendor registry.ts:300-302), so a wrong name means the callback never
-    // runs — exactly the live defect. The browser provides `settingsScope`
-    // (dsh-client-ui-settings `lib/types/client/index.d.ts:2-3`); the client
-    // has no `settings` service at all. The launcher's `layout` watch (the
-    // ticket-84 second request) retired with the ticket-78 cutover.
-    assert.deepEqual(ctx.injectRequests, [["settingsScope"]]);
-    for (const requested of ctx.injectRequests) {
-      assert.ok(!requested.includes("settings"));
-    }
+    assert.ok(![...clientInject].includes("settingsScope"));
+    assert.ok(
+      ctx.injects.every((record) => record.parent !== "settings.plugin.item"),
+    );
   });
 
-  it("binds the scope on the plugin's own namespace, not a guessed one", () => {
+  it("fiber teardown (HMR) frees every registration; re-apply restores three waits", () => {
     const ctx = createClientCtx();
     apply(ctx);
-    assert.deepEqual(ctx.boundNamespaces, [LOCALE_NAMESPACE]);
-  });
-
-  it("reads an ALREADY-ready snapshot at bind time (subscribe alone would miss it)", () => {
-    const ctx = createClientCtx();
-    const store = createRosterStore();
-    const feed = snapshot([row("w-1", "running", { title: "Parser" })]);
-    // The section was accepted before our module ever bound the scope.
-    ctx.pushSettingsSnapshot({ status: "ready", value: { [ROSTER_SETTINGS_KEY]: feed } });
-    applyClientModule(ctx, store);
-    assert.deepEqual(store.getBox().state, { kind: "snapshot", snapshot: feed });
-  });
-
-  it("a `loading` snapshot stays waiting until a section is accepted", () => {
-    const ctx = createClientCtx();
-    const store = createRosterStore();
-    applyClientModule(ctx, store);
-    // The fake's initial snapshot IS `{status:"loading"}` — nothing to read.
-    assert.deepEqual(store.getBox().state, { kind: "waiting" });
-    ctx.pushSettingsSnapshot({ status: "ready" });
-    assert.deepEqual(store.getBox().state, { kind: "waiting" });
-    ctx.fireSettingsWatch({ [ROSTER_SETTINGS_KEY]: snapshot([]) });
-    assert.equal(store.getBox().state.kind, "snapshot");
-  });
-
-  it("an `unavailable` namespace degrades to channel-missing (honest, not an error guess)", () => {
-    const ctx = createClientCtx();
-    const store = createRosterStore();
-    applyClientModule(ctx, store);
-    ctx.pushSettingsSnapshot({ status: "unavailable" });
-    assert.deepEqual(store.getBox().state, { kind: "channel-missing" });
-    assert.deepEqual(describeRosterPanel(store.getBox().state, 0), {
-      kind: "unavailable",
-    });
-  });
-
-  it("no inject capability: channel-missing without throwing", () => {
-    const ctx = createClientCtx();
-    delete (ctx as { inject?: unknown }).inject;
-    assert.doesNotThrow(() => apply(ctx));
-  });
-
-  it("fiber teardown (HMR) unsubscribes the scope; re-apply binds one fresh", () => {
-    const ctx = createClientCtx();
-    apply(ctx);
-    // Three declaration waits since ticket 100 (ADR-0021): tool.call.toolview
-    // (ticket 24), settings.plugin.item (ticket 47), and shell.overlay (the
-    // floating-window launcher). The `main` page and the cutover's `root`
-    // frame election stay retired from the composition (ADR-0021). The
-    // settings scope stays ONE bind — the card attaches to the same scope
-    // the roster watch holds, so there are exactly TWO subscriptions on
-    // that one scope (roster watch + settings card).
-    assert.equal(ctx.injects.length, 3);
-    assert.equal(ctx.boundNamespaces.length, 1);
-    assert.equal(ctx.watchDisposedCount(), 0);
+    // Three declaration waits: tool.call.toolview (ticket 24),
+    // plugins.row.config (ticket 47), and the worker session-kind glyph
+    // (ticket 123). No settings-scope watch exists on 0.2.1, so the
+    // composition makes no runtime inject request at all.
+    assert.equal(ctx.injects.length, 4);
 
     ctx.runFiberTeardown();
     assert.equal(ctx.injects.length, 0);
-    assert.equal(ctx.watchDisposedCount(), 2);
     assert.equal(ctx.locales.has(LOCALE_NAMESPACE), false);
 
     // Post-HMR fiber: no duplicate accumulation. Ticket 86: re-applying over a
-    // live cell would throw the shipped slot collision (the fake now models
-    // that rule), so teardown really must free every cell — assert it.
+    // live cell would throw the shipped slot collision (the fake models that
+    // rule), so teardown really must free every cell — assert it.
     assert.doesNotThrow(() => apply(ctx));
-    assert.equal(ctx.injects.length, 3);
-    assert.equal(ctx.boundNamespaces.length, 2);
-    assert.equal(ctx.watchDisposedCount(), 2);
+    assert.equal(ctx.injects.length, 4);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
-    // A second fiber re-reads the standing snapshot it binds to.
-    ctx.fireSettingsWatch({ [ROSTER_SETTINGS_KEY]: snapshot([]) });
-    assert.equal(ctx.watchDisposedCount(), 2);
   });
 });
 
 describe("roster panel — module-level Cordis inject list", () => {
-  it("declares every read face; the optional ones stay runtime injects (tickets 46 + 84)", () => {
+  it("declares every read face, including configForms and the nested remote transaction face", () => {
     // The context proxy throws on any undeclared service-property read
     // (ticket 84): the always-shipped faces the module touches are all
     // declared here. A NESTED face is its OWN entry under its full dotted
     // name — the resolver matches by exact string and never dot-splits, so
-    // `remote.commands` must be declared alongside its parent `remote`
-    // (ticket 102b; the shipped dsh-client-ui-commands precedent declares
-    // both). `settingsScope` and `layout` stay runtime-optional
-    // injects — a hard declaration would hold the module PENDING without
-    // them (ticket 46's lesson, applied to the launcher's layout face).
+    // `remote.commands` must be declared alongside its parent `remote`.
     assert.deepEqual([...clientInject], [
       "slots",
       "locale",
       "sessions",
       "remote",
-      "remote.commands",
       "conversation",
+      "remote.commands",
+      "configForms",
     ]);
   });
 });

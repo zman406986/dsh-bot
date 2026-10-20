@@ -5,7 +5,6 @@ import {
   type InboxJobResolution,
   type Multitask,
 } from "./core/multitask.js";
-import { projectRosterSnapshot } from "./core/roster-snapshot.js";
 import {
   assemblePeerWakeTurn,
   assembleTurnReminder,
@@ -20,9 +19,7 @@ import {
   createAccessPromptPump,
   createCordisDshHost,
   createDispatchApprovalSeam,
-  createSettingsRosterChannel,
   createStorageDomainDurability,
-  installMultitaskSettingsSection,
   isWildcardAccessTarget,
   readInboxJobDiskState,
   registerDispatcherResolveCommand,
@@ -30,6 +27,8 @@ import {
   registerDispatcherSteerCommand,
   registerDispatcherStopCommand,
   registerDispatcherTools,
+  registerSessionKindProjection,
+  registerMicrocompact,
   resolveExecSessionId,
   resolveInboxJobText,
   RESTART_DEGRADED_NOTICE,
@@ -46,12 +45,14 @@ import {
   type AccessPromptPump,
   type AdapterContext,
   type CordisDshHost,
-  type SettingsInjectContext,
+  type SessionProjectionChildLike,
   type StorageDomainDurability,
+  type TokenMeterLike,
 } from "./adapter/index.js";
 import { registerWorkerAccessTool, createPendingAskSettleWaiter } from "./adapter/worker-access-tool.js";
 import type { WorkerActivityEntry } from "./adapter/cordis-dsh-host.js";
 import { clampActivity, clampReport } from "./core/report-clamp.js";
+import { createWorkerLocalToolDefs } from "./core/tools.js";
 import { createWorkerAgentDef } from "./worker/agent-def.js";
 
 /**
@@ -61,8 +62,10 @@ import { createWorkerAgentDef } from "./worker/agent-def.js";
  * stock isolation is the installation gate, not the flag default — the
  * multitask profile's insert row sets `enabled: true` explicitly.
  *
- * Read once at dispatcher-session start and frozen for that session's
- * lifetime. A settings change persists for the *next* session only.
+ * Every field is `.volatile()`: 0.2.1 derives the settings form from this
+ * schema and rejects any field that is not volatile, so an unmarked field is
+ * invisible and unwritable. The host passes volatile fields as stable
+ * references; `apply` reads each one ONCE and freezes it for the session.
  */
 export const Config = z.object({
   /**
@@ -70,12 +73,12 @@ export const Config = z.object({
    * Read once at dispatcher-session start and fixed for that session's lifetime.
    * A settings change persists for the *next* session; it is not live-applied.
    */
-  enabled: z.boolean().default(true),
+  enabled: z.boolean().default(true).volatile(),
   /**
    * Unanswered access-ask timeout in ms (ticket 13).
    * Default deny after this wait. Tests inject a tiny value.
    */
-  accessRequestTimeoutMs: z.number().default(120_000),
+  accessRequestTimeoutMs: z.number().default(120_000).volatile(),
   /**
    * Ticket 108: idle-side wake coalescing window in ms. 0 (default) keeps
    * current semantics — every idle settle/peer wakes the dispatcher at once.
@@ -83,7 +86,7 @@ export const Config = z.object({
    * user messages still preempt the window immediately. Read once at
    * dispatcher-session start like `enabled`.
    */
-  wakeCoalesceWindowMs: z.number().min(0).default(0),
+  wakeCoalesceWindowMs: z.number().min(0).default(0).volatile(),
   /**
    * Ticket 113 / ADR-0023: opt-in file inbox. When on and `inboxDir` is
    * non-empty, the adapter watches `<inboxDir>/queue.jsonl` plus per-job
@@ -91,17 +94,31 @@ export const Config = z.object({
    * session as a wake. Off (default) starts nothing at all.
    *
    * Flat keys (not a nested `inbox` object) deliberately: the settings card
-   * maps Config rows 1:1 to flat controls (pinned parity test), and
-   * `scope.set` persists flat fields only. Read once at apply like `enabled`.
+   * maps Config rows 1:1 to flat controls (pinned parity test), and the
+   * settings service writes flat fields only. Read once at apply like
+   * `enabled`.
    */
-  inboxEnabled: z.boolean().default(false),
+  inboxEnabled: z.boolean().default(false).volatile(),
   /** Inbox root directory. Empty (default) disables intake even when enabled. */
-  inboxDir: z.string().default(""),
+  inboxDir: z.string().default("").volatile(),
   /**
    * Fallback rescan interval in ms (ADR-0023 decision 1: fs.watch plus an
    * interval). Clamped to the protocol floor of 1000 ms.
    */
-  inboxRescanIntervalMs: z.number().min(1000).default(5000),
+  inboxRescanIntervalMs: z.number().min(1000).default(5000).volatile(),
+  /**
+   * Ticket 124 / ADR-0029: deterministic microcompact on activated dispatcher
+   * sessions. When on, an `agent/pre-step` listener clears the CONTENT of old
+   * tool results once measured usage crosses a fixed ratio of the advertised
+   * window, keeps the newest few, and records the compaction boundary as the
+   * success marker resume reads. No model call, no full compaction.
+   *
+   * Off by default: a pass rewrites the surface, which invalidates the
+   * provider prefix cache from the oldest cleared node, and the ticket's live
+   * verification has not run. Read once at apply like `enabled`; a change
+   * lands in the next session.
+   */
+  microcompactEnabled: z.boolean().default(false).volatile(),
 });
 
 export const name = "multitask-dispatcher";
@@ -135,32 +152,54 @@ export const inject: string[] = [
 ];
 
 export interface PluginConfig {
-  enabled: boolean;
-  accessRequestTimeoutMs?: number;
+  /**
+   * Volatile fields arrive from the host as stable references (schemastery
+   * `.volatile()`); `apply` reads each once with `get()`. Optional so stub
+   * contexts in tests can omit a field.
+   */
+  enabled: { get(): boolean };
+  accessRequestTimeoutMs?: { get(): number | undefined };
   /** Ticket 108: idle wake coalescing window in ms (0 = off). */
-  wakeCoalesceWindowMs?: number;
+  wakeCoalesceWindowMs?: { get(): number | undefined };
   /** Ticket 113: opt-in file inbox (flat keys — see Config doc). */
-  inboxEnabled?: boolean;
+  inboxEnabled?: { get(): boolean | undefined };
   /** Ticket 113: inbox root directory; empty disables intake. */
-  inboxDir?: string;
+  inboxDir?: { get(): string | undefined };
   /** Ticket 113: fallback rescan interval in ms (min 1000). */
-  inboxRescanIntervalMs?: number;
+  inboxRescanIntervalMs?: { get(): number | undefined };
+  /** Ticket 124: deterministic microcompact on dispatcher sessions. */
+  microcompactEnabled?: { get(): boolean | undefined };
 }
 
 /**
  * Narrow Cordis context surface. Prefer a local interface over importing
- * full Cordis types until peerDeps grow. `settings` is optional so stub
- * contexts stay minimal; the live host injects it for the UI control.
+ * full Cordis types until peerDeps grow.
  *
  * `effect` is the real Cordis effect seat (ticket 44, mirroring cordis 4.0.2
  * `Fiber.effect`): `execute` runs immediately at apply; a returned function —
  * or each value a generator function yields — is collected as the unload
  * disposer. It never takes a bare cleanup callback.
  */
-type CordisContext = AdapterContext &
-  SettingsInjectContext & {
-    effect: (execute: () => unknown, label?: string) => unknown;
-  };
+type CordisContext = AdapterContext & {
+  effect: (execute: () => unknown, label?: string) => unknown;
+  /**
+   * Optional-service injection (the host's contributor route for
+   * `sessionProjections`, `dsh-session-projection/lib/types/index.d.ts:125-140`).
+   * Optional so stub contexts in tests stay minimal; the projection is
+   * skipped when the service is unavailable.
+   */
+  inject?: (
+    services: readonly string[],
+    callback: (child: SessionProjectionChildLike) => void,
+  ) => unknown;
+  /**
+   * Ticket 124: guarded service read (cordis `ctx.get`, `lib/index.js:763`).
+   * Used for `tokenMeter`, which lives on the host plane rather than in this
+   * plugin's inject list. Optional so stub contexts stay minimal; an absent
+   * getter means the microcompact pass declines with a stated reason.
+   */
+  get?: (name: string) => unknown;
+};
 
 /**
  * Ticket 69 (L3 offline half): the dispatch approval seam's live face as
@@ -374,9 +413,11 @@ export function composeWakeText(
  *
  * Flag semantics (ADR-0005 / ticket 12) with the activation model
  * (ticket 19 / ADR-0009 / design-16 §3.7):
- * - `enabled` is copied once at apply entry and frozen for this session.
- * - Settings section is always installed so the user can flip the flag for
- *   the *next* session (no file hand-editing, no rebuild).
+ * - `enabled` is a volatile config reference; it is read once at apply entry
+ *   and frozen for this session.
+ * - The settings form is the plugin's own Config schema, keyed by the
+ *   `multitask-dispatcher` Loader row id; the user flips the flag for the
+ *   *next* session from that form (no file hand-editing, no rebuild).
  * - Disabled path returns early: stock dsh — no core, no command, no tools,
  *   no policy, no wake handling.
  * - Enabled path boots dormant: stock experience plus the passive core/host
@@ -385,28 +426,25 @@ export function composeWakeText(
  *   primary chat is never captured on load.
  */
 export function apply(ctx: CordisContext, config: PluginConfig): void {
-  // ADR-0005: read once at session start; freeze for this session's lifetime.
-  // Copy the primitive — do not hold a live reference into `config`.
-  const enabled: boolean = Boolean(config.enabled);
-
-  // Always install the settings section (design-12 §5.2 option A). Present
-  // on both paths so OFF can be flipped back ON from the UI for next session.
-  //
-  // Roster mirror channel (ticket 21, design-16 §4.2): attaches to the
-  // section's owner scope when the settings service appears; the activated
-  // dispatcher's roster snapshot is mirrored into our namespace under the
-  // `roster` key for the client panel to watch. Inert on the OFF path (no
-  // core exists to project from).
-  const rosterChannel = createSettingsRosterChannel();
-  installMultitaskSettingsSection(ctx, Config, config, {
-    onScope: (scope) => rosterChannel.attach(scope),
-  });
+  // ADR-0005: read the volatile reference once at apply; freeze for this
+  // session's lifetime. Copy the primitive — do not hold a live reference.
+  const enabled: boolean = Boolean(config.enabled.get());
 
   if (!enabled) {
     // Stock dsh behavior: no Multitask core, no dispatcher tools,
     // no policy, no wake handling, no worker agent type.
     return;
   }
+
+  // Ticket 123: the session-kind projection — the durable host-side marker
+  // the client reads as `projectionValues.sessionKind`. It folds the host's
+  // OWN declared command log (`command/run` + `command/done` for
+  // `/dispatcher-start` / `/dispatcher-stop`; dsh-commands
+  // `lib/index.js:334/:341`), so nothing is appended by us and no event kind
+  // is invented. Per-session by construction: the pair lands in the invoking
+  // session's log only (ADR-0019). Registration is an effect on the calling
+  // fiber, so unloading this plugin removes the key.
+  registerSessionKindProjection(ctx);
 
   const markers: StorageDomainDurability = createStorageDomainDurability(
     ctx.storageDomain,
@@ -416,16 +454,17 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   // Flat config keys (see Config doc — settings-card parity pin). The
   // watcher is the only fs dependency and lives in the adapter; the core
   // never sees a filesystem (ADR-0023 consequence 1).
-  const inboxEnabled = config.inboxEnabled === true;
+  const inboxEnabled = config.inboxEnabled?.get() === true;
+  const rawInboxDir = config.inboxDir?.get();
   const inboxRoot =
-    typeof config.inboxDir === "string" && config.inboxDir.trim().length > 0
-      ? resolve(config.inboxDir.trim())
+    typeof rawInboxDir === "string" && rawInboxDir.trim().length > 0
+      ? resolve(rawInboxDir.trim())
       : "";
   // Defensive floor — the schema enforces min 1000; apply never trusts it.
+  const rawRescan = config.inboxRescanIntervalMs?.get();
   const inboxRescanIntervalMs =
-    typeof config.inboxRescanIntervalMs === "number" &&
-    Number.isFinite(config.inboxRescanIntervalMs)
-      ? Math.max(1000, config.inboxRescanIntervalMs)
+    typeof rawRescan === "number" && Number.isFinite(rawRescan)
+      ? Math.max(1000, rawRescan)
       : 5000;
 
   /**
@@ -529,25 +568,7 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     })().catch((error) => inboxError(error, `resolution ${resolution.jobId}`));
   };
 
-  /**
-   * Activation rebuilds currently in flight: sessionId → the activation
-   * generation the rebuild was started for (ticket 90, F3). While a rebuild
-   * for a session is pending, the roster observer stays silent for that
-   * session: a snapshot taken now is a PRE-rebuild one, and ticket 31's
-   * acceptance rule is that the first snapshot after activation already
-   * carries the restored rows (see `rebuildAndNotice`). The marker read
-   * awaits the store, so a concurrent roster-affecting transition (spawn,
-   * settle, access park/resolve, delivery, reconcile) could otherwise publish
-   * first. Nothing is lost: the chain's own post-rebuild publish projects the
-   * live roster, which already includes the transition.
-   *
-   * Keyed by generation (ticket 90, F2), not by session id: a stale chain
-   * from an earlier activation of the same session id exits while a NEW
-   * activation's rebuild is still reading — a session-keyed flag would be
-   * cleared by that exit and reopen the pre-rebuild publish window.
-   */
-  const rebuildsInFlight = new Map<string, number>();
-  // T10: real worker agent type — self-contained prompt + tool barrier + leaf depth.
+  // T10: real worker agent type — preset id + contract text + leaf depth.
   let multitaskRef: Multitask | null = null;
   const host: CordisDshHost = createCordisDshHost(ctx, {
     markers,
@@ -568,17 +589,31 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
         (workerId, n) => host.recentActivities(workerId, n),
       );
     },
+    // Ticket 122: the child's mid-task reply channel. Registered on the
+    // child's own scope at `agent/created`, so the dispatcher's surface never
+    // lists it. `multitaskRef` is initialized by the time a child exists.
+    workerLocalTools: () => {
+      if (multitaskRef === null) return [];
+      return createWorkerLocalToolDefs({
+        multitask: multitaskRef,
+        // Same resolution as the worker access tool: the exec session id IS
+        // the worker id once this host owns it. The reply addresses
+        // `getWorker(workerId).parentSessionId` — never a tool argument.
+        resolveWorkerId: (exec) => {
+          const sessionId = resolveExecSessionId(exec);
+          if (sessionId === null) return null;
+          return host.owns(sessionId) ? sessionId : null;
+        },
+      });
+    },
   });
-  const accessTimeoutMs =
-    typeof config.accessRequestTimeoutMs === "number"
-      ? config.accessRequestTimeoutMs
-      : undefined;
+  const accessTimeoutMs = config.accessRequestTimeoutMs?.get();
   // Ticket 108: clamped defensively here too — the schema enforces min 0,
   // but apply() must never trust raw config for a window that arms timers.
+  const rawWakeCoalesce = config.wakeCoalesceWindowMs?.get();
   const wakeCoalesceWindowMs =
-    typeof config.wakeCoalesceWindowMs === "number" &&
-    Number.isFinite(config.wakeCoalesceWindowMs)
-      ? Math.max(0, config.wakeCoalesceWindowMs)
+    typeof rawWakeCoalesce === "number" && Number.isFinite(rawWakeCoalesce)
+      ? Math.max(0, rawWakeCoalesce)
       : 0;
   const multitask: Multitask = createMultitask(host, {
     durability: markers,
@@ -594,24 +629,9 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     // a peer send to a session that is not a live dispatcher refuses with
     // `unknown-target` instead of acking into a phantom inbox. `lifecycle`
     // is assigned below; the closure only runs once sends happen, never
-    // during apply (same pattern as onRosterChanged).
+    // during apply.
     isLiveDispatcherSession: (sessionId) =>
       lifecycle.isDispatcherSession(sessionId),
-    // Ticket 21: mirror roster-affecting transitions into the settings
-    // namespace. `lifecycle` is assigned below — the closure only runs once
-    // activation exists, never during apply. ADR-0019: the gate is
-    // per session — a transition publishes the CHANGED session's snapshot
-    // whenever that session is an activated dispatcher (no single-active
-    // slot); the snapshot itself carries its `dispatcherSessionId`.
-    // Ticket 90 (F3): a rebuild in flight for that session suppresses the
-    // publish — the ordering guarantee (restored rows in the FIRST snapshot)
-    // outranks publishing a pre-rebuild one, and the chain's own publish
-    // carries this transition anyway.
-    onRosterChanged: (sessionId) => {
-      if (!lifecycle.isDispatcherSession(sessionId)) return;
-      if (rebuildsInFlight.has(sessionId)) return;
-      publishRosterSnapshot(sessionId);
-    },
     // Ticket 113: the reply writer — the core decides WHEN (terminal paths),
     // this owns HOW (job-dir files; the core never touches the filesystem).
     onInboxJobResolved: writeInboxResolution,
@@ -624,29 +644,6 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   // test-only before, structurally stuck at 0). Same subscription as the
   // activity phrase — no new seam, no polling.
   host.onWorkerToolCall((workerId) => multitask.noteToolCall(workerId));
-
-  // Roster snapshot projection (tickets 21 + 27). Pure projection of the
-  // core roster — never a second source of truth. The core observer fires on
-  // every roster-affecting transition (including access-ask park/resolve and
-  // todo delivery), gated to the activated dispatcher session; before
-  // activation nothing is published (no dispatcher roster exists). On
-  // deactivation publishing simply stops: the snapshot ages past the stale
-  // window and the panel degrades to "unavailable" copy (design-16 §3.6 —
-  // the panel shows state only while a live session exists). The v2
-  // presence fields join existing core truth at publish time: pending
-  // access asks (blocked, names only) and the ledger's delivered state.
-  // Ticket 41 (v3): the deliverables line's `recentResult` joins at publish
-  // time too — the adapter's own settle observation (`host.recentResult`,
-  // clamped), never a core store. No new core state holds report text.
-  const publishRosterSnapshot = (sessionId: string): void => {
-    rosterChannel.publish(
-      projectRosterSnapshot(sessionId, multitask.listWorkers(sessionId), Date.now(), {
-        pendingAccess: multitask.listPendingAccess(sessionId),
-        todos: multitask.listTodos(sessionId),
-        recentResultOf: (workerId) => host.recentResult(workerId),
-      }),
-    );
-  };
 
   // Access-request prompt pumps (ticket 23, design-16 §4.4; ADR-0019
   // per-session): surfaces a dispatcher session's pending asks through the
@@ -860,87 +857,70 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   // activate/deactivate hooks. Policy flag is session-scoped (ADR-0005); the
   // frozen `enabled` is the authority — policy is ON whenever we are here.
   // Ticket 31 (design-17 §4.7): restart honesty. The rebuild is async, so
-  // activation completes immediately; the chain below lands the first roster
-  // publish and the one-time restart notice once markers have been read.
-  // Ordering is the acceptance rule: `rebuildFromDurability` runs BEFORE the
-  // first `publishRosterSnapshot`, so restored terminal rows are in the very
-  // first snapshot the panel sees, and landed-undelivered items flush on the
-  // first wake (S4 across restart). Core rebuild semantics are frozen
-  // (ADR-0006); this is adapter ordering only.
+  // activation completes immediately; the chain below lands the one-time
+  // restart notice and the delivery redrive once markers have been read.
+  // Ordering is the acceptance rule: `rebuildFromDurability` runs first, and
+  // landed-undelivered items flush on the first wake (S4 across restart).
+  // Core rebuild semantics are frozen (ADR-0006); this is adapter ordering
+  // only.
   const rebuildAndNotice = async (sessionId: string): Promise<void> => {
     // Ticket 90 (F2): the chain acts for the activation it started under.
     // Captured before the first await; `onActivated` guarantees a live one.
     const activation = lifecycle.activationGeneration(sessionId);
-    // Ticket 90 (F3): the observer stays silent for this session until the
-    // rebuild has landed and its own publish is out.
-    if (activation !== null) rebuildsInFlight.set(sessionId, activation);
     let notice: string | null = null;
     try {
-      try {
-        notice = assembleRestartNotice(
-          await multitask.rebuildFromDurability(sessionId),
-        );
-      } catch {
-        // Marker store unreadable: activation still succeeds; the honest
-        // degraded notice says nothing was restored or replayed.
-        notice = RESTART_DEGRADED_NOTICE;
-      }
-      // The activation may have ended while markers were being read — never
-      // publish or inject for a session that is no longer an activated
-      // dispatcher (ADR-0019: per-session liveness, not a single-active slot).
-      // Ticket 90 (F2): the comparison is the ACTIVATION GENERATION, not the
-      // session id. `isDispatcherSession` is set membership, so a chain from
-      // activation #1 resuming after a deactivate → re-activate of the SAME
-      // id would pass it and act for activation #2 — a double publish and a
-      // second redrive attempt against the persisted D-5 budget. The
-      // generation is null once its activation ends, so this single compare
-      // covers the deactivation and the stale-chain window alike.
-      if (
-        activation === null ||
-        lifecycle.activationGeneration(sessionId) !== activation
-      ) {
-        return;
-      }
-      publishRosterSnapshot(sessionId);
-      // Ticket 23: prompts sync stays after the first publish, as before
-      // (this session's pump only).
-      pumpFor(sessionId).sync();
-      if (notice !== null) {
-        // Ticket 57 (D-4): route recovery through the WAKING primitive.
-        // `injectNotice` only queues context; the reference re-wakes its parent
-        // on boot so the notice is acted on without the user speaking first.
-        // The trigger stays activation-driven (ADR-0009) — only the primitive
-        // changes. A future boot hook (if ADR-0016 is signed) calls this same
-        // method; item U-1 (is activation itself a deviation?) is not decided
-        // here.
-        lifecycle.wakeNotice(sessionId, notice);
-      }
-      // Ticket 58 (register D-5): activation is also a delivery opportunity.
-      // A restored result that settled before the restart and was never
-      // delivered gets a redrive turn — bounded, so it cannot become the
-      // unbounded persistence this ticket exists to remove. Called
-      // unconditionally: it is a cheap no-op when nothing is owed, and it is
-      // also the pass that escalates an already-exhausted obligation to `lost`.
-      multitask.redriveUndelivered(sessionId);
-      // Ticket 113: activation is also the inbox re-presentation opportunity.
-      // Claimed-but-unpresented jobs (no dispatcher was live) and crash
-      // orphans route to the earliest live session — idempotent (core
-      // dedupe by jobId; a still-live owner is never stolen). No-op when
-      // the inbox is off or was never on for this install.
-      if (inboxEnabled && inboxRoot.length > 0) {
-        await rescanInboxCheckpoints().catch((error) =>
-          inboxError(error, "boot rescan"),
-        );
-      }
-    } finally {
-      // Only clear OUR entry: a stale chain must not reopen the gate while a
-      // later activation's rebuild is still in flight (ticket 90, F2/F3).
-      if (
-        activation !== null &&
-        rebuildsInFlight.get(sessionId) === activation
-      ) {
-        rebuildsInFlight.delete(sessionId);
-      }
+      notice = assembleRestartNotice(
+        await multitask.rebuildFromDurability(sessionId),
+      );
+    } catch {
+      // Marker store unreadable: activation still succeeds; the honest
+      // degraded notice says nothing was restored or replayed.
+      notice = RESTART_DEGRADED_NOTICE;
+    }
+    // The activation may have ended while markers were being read — never
+    // inject or redrive for a session that is no longer an activated
+    // dispatcher (ADR-0019: per-session liveness, not a single-active slot).
+    // Ticket 90 (F2): the comparison is the ACTIVATION GENERATION, not the
+    // session id. `isDispatcherSession` is set membership, so a chain from
+    // activation #1 resuming after a deactivate → re-activate of the SAME
+    // id would pass it and act for activation #2 — a second redrive attempt
+    // against the persisted D-5 budget. The generation is null once its
+    // activation ends, so this single compare covers the deactivation and
+    // the stale-chain window alike.
+    if (
+      activation === null ||
+      lifecycle.activationGeneration(sessionId) !== activation
+    ) {
+      return;
+    }
+    // Ticket 23: prompts sync runs once the rebuild has landed.
+    pumpFor(sessionId).sync();
+    if (notice !== null) {
+      // Ticket 57 (D-4): route recovery through the WAKING primitive.
+      // `injectNotice` only queues context; the reference re-wakes its parent
+      // on boot so the notice is acted on without the user speaking first.
+      // The trigger stays activation-driven (ADR-0009) — only the primitive
+      // changes. A future boot hook (if ADR-0016 is signed) calls this same
+      // method; item U-1 (is activation itself a deviation?) is not decided
+      // here.
+      lifecycle.wakeNotice(sessionId, notice);
+    }
+    // Ticket 58 (register D-5): activation is also a delivery opportunity.
+    // A restored result that settled before the restart and was never
+    // delivered gets a redrive turn — bounded, so it cannot become the
+    // unbounded persistence this ticket exists to remove. Called
+    // unconditionally: it is a cheap no-op when nothing is owed, and it is
+    // also the pass that escalates an already-exhausted obligation to `lost`.
+    multitask.redriveUndelivered(sessionId);
+    // Ticket 113: activation is also the inbox re-presentation opportunity.
+    // Claimed-but-unpresented jobs (no dispatcher was live) and crash
+    // orphans route to the earliest live session — idempotent (core
+    // dedupe by jobId; a still-live owner is never stolen). No-op when
+    // the inbox is off or was never on for this install.
+    if (inboxEnabled && inboxRoot.length > 0) {
+      await rescanInboxCheckpoints().catch((error) =>
+        inboxError(error, "boot rescan"),
+      );
     }
   };
 
@@ -948,10 +928,8 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     policyEnabled: enabled,
     onActivated: (sessionId) => {
       activateToolSurface(sessionId);
-      // Ticket 21: publish immediately on activation so the panel has a
-      // fresh (possibly empty) snapshot without waiting for a transition.
-      // Ticket 31: the publish now happens inside `rebuildAndNotice`, AFTER
-      // the durability rebuild, so restored rows are in the first snapshot.
+      // Ticket 31: the restart notice and redrive ride the durability
+      // rebuild, so activation itself returns immediately.
       void rebuildAndNotice(sessionId);
     },
     // ADR-0019: exactly ONE session's surface, policy rows, and prompts end
@@ -966,12 +944,59 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       // outstanding ones. Their tickets keep the armed relay timeouts
       // (ADR-0008 deny-by-default); nothing waits indefinitely.
       accessPumps.get(sessionId)?.reset();
-      // Ticket 79: the session's roster mirror key goes too — the wrapper
-      // sidebar reads `roster.<sessionId>` for the dispatcher flag, so a
-      // deactivated session must not keep rendering as a live dispatcher.
-      rosterChannel.clearSession(sessionId);
     },
   });
+
+  // ── Ticket 124 / ADR-0029: deterministic microcompact ────────────────
+  // Registered ONLY on activated dispatcher sessions (`shouldHandle`) — the
+  // listener otherwise sits on the outer scope and would rewrite an ordinary
+  // user chat (the scope rule: an outer scope receives descendants). The
+  // token meter is read through `ctx.get`: it is mounted on the host plane
+  // (`dsh-base/cordis.patch.yml:348`), not in this plugin's inject list, and
+  // a direct property read on an un-injected service throws.
+  const microcompactEnabled = config.microcompactEnabled?.get() === true;
+  if (microcompactEnabled) {
+    ctx.effect(
+      function* () {
+        yield registerMicrocompact(
+          ctx,
+          {
+            enabled: true,
+            shouldHandle: (sessionId) =>
+              lifecycle.isDispatcherSession(sessionId),
+            onOutcome: (outcome) => {
+              // Audit line only (design constraint 6): cleared count and bytes
+              // go to the host log, which is the evidence path for this
+              // feature. Never fatal.
+              if (!outcome.compacted) return;
+              const boundary = outcome.boundary;
+              try {
+                console.info(
+                  `[multitask-dispatcher] microcompact ${boundary?.sessionId ?? "?"} #${boundary?.passSeq ?? "?"}: cleared ${outcome.clearedCount} tool results, ${boundary?.clearedBytes ?? 0} bytes, freed ${outcome.freedTokens} tokens`,
+                );
+              } catch {
+                // A broken console must never break the turn.
+              }
+            },
+          },
+          markers,
+          () => {
+            // Cordis throws when a service is absent on a context that never
+            // injected it, so the read is guarded here rather than at the call
+            // site in the adapter.
+            try {
+              return (ctx.get?.("tokenMeter") ?? undefined) as
+                | TokenMeterLike
+                | undefined;
+            } catch {
+              return undefined;
+            }
+          },
+        );
+      },
+      "multitask-dispatcher: microcompact",
+    );
+  }
 
   // ── Ticket 113: presentation + intake wiring (needs `lifecycle`) ──────
 
@@ -1270,10 +1295,6 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       for (const pump of accessPumps.values()) {
         pump.reset();
       }
-      // Ticket 79: no per-session roster mirror key outlives the plugin —
-      // a stale `roster.<id>` would re-flag a dead session as a dispatcher
-      // on the next enable.
-      rosterChannel.clearAllSessions();
       host.dispose();
       void markers.dispose();
     },

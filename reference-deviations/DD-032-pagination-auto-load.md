@@ -1,0 +1,27 @@
+# DD-032 — Auto load-older with states vs manual silent button
+- **Area:** transcript delivery states (A4)
+- **Type:** deliberate-divergence (recorded in module docs)
+- **Date:** 2026-09-23
+
+## What the reference does
+The reference transcript loads older history automatically. A passive scroll listener on the transcript container fires whenever the pane is scrolled near the top (threshold: scroll position within roughly 600px of the top) and older entries exist. Two independent guards prevent duplicate fetches: a component-level "loading older" flag, and a local in-flight ref that is only cleared when the fetch promise settles. The effect also attempts one load immediately on mount, so pre-loading happens without any user click. The backing pagination model is cursor-based: the history cursor moves through unprobed → paged (with a sequence bound to page backwards from) → exhausted (or unavailable). The snapshot the root hands to the view carries explicit has-older and is-loading-older flags and an older-page-failure slot, so the UI can show an in-progress indication and can show (and recover from) a failed page fetch. Reference files: `frontend/src/recovered/features/conversation/workspace/transcript.tsx:38-42,651-676`; `frontend/src/recovered/features/conversation/workspace/pagination.ts:13-48`.
+
+## What the current build does
+The build renders a manual affordance at the top of the conversation scroll area (a localized "more entries" style button, `src/client/conversation.tsx:421-430`) that is shown while the host reports more history remains. Clicking it invokes the scoped session verb via `requestOlder`, which is fire-and-forget: the promise is not awaited and its errors are dropped (`void face.loadOlder().catch(() => {})`, `src/client/conversation-feed.ts:124-137`). There is no loading indication while the fetch runs, no failure message if it fails, and no retry control. The module doc records this explicitly as intentional: the transcript window is the only source of truth, and the pane stays silent until the window itself changes — no optimistic "loaded" claim, no retry affordance; errors are contained in the host snapshot and the helper never throws (`src/client/conversation-feed.ts:114-123`).
+
+## The deviation
+The reference makes older-page delivery automatic (scroll-position-triggered, guarded against two fetches running at once) and stateful (in-flight flag plus a dedicated older-page failure slot in the snapshot); the build keeps it manual and silent (button click, call not awaited, no outcome message). The silence is recorded as deliberate in the build's module docs; the auto-scroll trigger (including its 600px-style threshold) and the reference's failure-state copy are not covered by any build ruling.
+
+## Verdict: DO-NOT-INCORPORATE
+The build's silent manual path is a recorded-deliberate divergence: the module doc's rule of making no optimistic claims and treating the window as the only source of truth is exactly the reporting rule the ADR index enforces (ADR-0018, including its clean-room re-scoping and the retraction of the fabricated "verbatim directive"), so auto-adopting the reference's automatic loader would reverse a recorded decision — a human reversal, not a silent pick, per the repo's ruling order. The unruled parts (scroll-proximity trigger value, failure-state wording) have no recorded decision either way; if the human wants auto-loading or failure messages that report only the real outcome, that is a fresh ruling to request, not something to incorporate by default. Verbatim copying is barred regardless (ADR-0018 B9).
+
+## Incorporation notes
+- **Where it would live:** if ever ruled in — scroll wiring and duplicate-fetch guards around the transcript window in `src/client/conversation.tsx` (or the feed layer in `src/client/conversation-feed.ts`), plus an older-page loading/failure slot on the host's transcript snapshot state that the pane can render; the manual button would become a fallback or disappear.
+- **Constraints:** must preserve the recorded rule of no optimistic claims — any failure indication states only the observable outcome of the request, never an optimistic success claim; failures stay contained (the helper must keep never throwing); any trigger threshold and failure copy are unruled and need an explicit ruling before landing.
+- **License note:** ADR-0018 B9 — re-derive independently; no verbatim copying from the reference tree.
+- **Effort/risk:** M — scroll-listener guards plus a new snapshot state slot touch both pane and host state; the main risk is accidentally drifting from the recorded rule of no optimistic claims.
+- **Key reference anchors:** scroll trigger and duplicate-fetch guards at `frontend/src/recovered/features/conversation/workspace/transcript.tsx:651-676`; action surface (has-older / is-loading-older flags and the load-older action) at `transcript.tsx:38-42`; cursor kinds and snapshot with the older-page failure slot at `frontend/src/recovered/features/conversation/workspace/pagination.ts:13-48`.
+
+## Evidence
+- Reference: `reference material-NOT LICENSE SAFE DONT COPY-grok bot/frontend/src/recovered/features/conversation/workspace/transcript.tsx` (lines 38-42, 651-676); `reference material-NOT LICENSE SAFE DONT COPY-grok bot/frontend/src/recovered/features/conversation/workspace/pagination.ts` (lines 13-48)
+- Build: `src/client/conversation.tsx` (lines 421-430); `src/client/conversation-feed.ts` (lines 114-137, deliberate-divergence record at 114-123)

@@ -6,21 +6,27 @@ import {
   MARKER_DOMAIN_NAME,
   MARKER_TABLE_NAME,
   INBOX_TABLE_NAME,
+  COMPACTION_BOUNDARY_TABLE_NAME,
   type DomainLike,
   type KvTableLike,
   type StorageDomainLike,
   type InboxJobCheckpoint,
 } from "../src/adapter/durable-marker.js";
-import type { DurableWorkerMarker } from "../src/core/durability.js";
+import type {
+  CompactionBoundary,
+  DurableWorkerMarker,
+} from "../src/core/durability.js";
 
 function createStubStorageDomain(): StorageDomainLike & {
   opens: unknown[];
   table: Map<string, DurableWorkerMarker>;
   inbox: Map<string, InboxJobCheckpoint>;
+  boundaries: Map<string, CompactionBoundary>;
   closed: boolean;
 } {
   const table = new Map<string, DurableWorkerMarker>();
   const inbox = new Map<string, InboxJobCheckpoint>();
+  const boundaries = new Map<string, CompactionBoundary>();
   const opens: unknown[] = [];
   let closed = false;
 
@@ -54,10 +60,26 @@ function createStubStorageDomain(): StorageDomainLike & {
     },
   };
 
+  const boundaryKv: KvTableLike<CompactionBoundary> = {
+    get(key: string) {
+      return boundaries.get(key);
+    },
+    entries() {
+      return boundaries.entries();
+    },
+    async put(key: string, value: CompactionBoundary) {
+      boundaries.set(key, { ...value });
+    },
+    async delete(key: string) {
+      return boundaries.delete(key);
+    },
+  };
+
   return {
     opens,
     table,
     inbox,
+    boundaries,
     get closed() {
       return closed;
     },
@@ -73,10 +95,12 @@ function createStubStorageDomain(): StorageDomainLike & {
       assert.equal(s.version, 2);
       assert.ok(s.tables[MARKER_TABLE_NAME]);
       assert.ok(s.tables[INBOX_TABLE_NAME]);
+      assert.ok(s.tables[COMPACTION_BOUNDARY_TABLE_NAME]);
       return {
         table(name: string) {
           if (name === MARKER_TABLE_NAME) return kv;
           if (name === INBOX_TABLE_NAME) return inboxKv;
+          if (name === COMPACTION_BOUNDARY_TABLE_NAME) return boundaryKv;
           throw new Error(`unexpected table ${name}`);
         },
         async close() {
@@ -115,6 +139,33 @@ function checkpoint(
     presentedAtMs: null,
     endedAtMs: null,
     presentAttempts: 0,
+    ...overrides,
+  };
+}
+
+/** One compaction boundary row (ticket 124). */
+function boundary(
+  overrides: Partial<CompactionBoundary> = {},
+): CompactionBoundary {
+  return {
+    sessionId: "s-1",
+    passSeq: 1,
+    status: "applied",
+    layer: "microcompact",
+    trigger: "ratio",
+    ratio: 0.55,
+    keepNewest: 5,
+    usedTokens: 600_000,
+    windowTokens: 1_000_000,
+    thresholdTokens: 550_000,
+    clearedSeqs: [2, 3],
+    replacementSeqs: [8, 9],
+    boundarySeq: 9,
+    clearedCount: 2,
+    clearedChars: 12_000,
+    clearedBytes: 12_000,
+    freedTokens: 9_000,
+    updatedAtMs: 1_700_000_000_000,
     ...overrides,
   };
 }
@@ -204,6 +255,46 @@ describe("durable marker store over storageDomain", () => {
     assert.throws(() => parse(checkpoint({ jobDir: "" })));
     assert.throws(() => parse(checkpoint({ state: "meh" })));
     assert.doesNotThrow(() => parse(checkpoint()));
+  });
+
+  it("writes and reads a compaction boundary in the SAME domain (ticket 124)", async () => {
+    const sd = createStubStorageDomain();
+    const durability = createStorageDomainDurability(sd);
+
+    assert.equal(await durability.readCompactionBoundary("s-1"), undefined);
+
+    await durability.writeCompactionBoundary(boundary());
+    assert.equal(sd.opens.length, 1, "the boundary shares the one open domain");
+    assert.equal(sd.boundaries.size, 1);
+
+    const read = await durability.readCompactionBoundary("s-1");
+    assert.ok(read);
+    assert.equal(read.status, "applied");
+    assert.deepEqual(read.clearedSeqs, [2, 3]);
+    assert.equal(read.boundarySeq, 9);
+
+    // A later pass overwrites the row — one row per session, newest wins.
+    await durability.writeCompactionBoundary(
+      boundary({ passSeq: 2, boundarySeq: 15, clearedSeqs: [12] }),
+    );
+    assert.equal(sd.boundaries.size, 1);
+    assert.equal((await durability.readCompactionBoundary("s-1"))?.passSeq, 2);
+  });
+
+  it("schema parse rejects a malformed boundary row (ticket 124)", () => {
+    const spec = markerDomainSpec() as {
+      tables: Record<string, { valueSchema: { parse(v: unknown): unknown } }>;
+    };
+    const parse =
+      spec.tables[COMPACTION_BOUNDARY_TABLE_NAME]?.valueSchema.parse;
+    assert.ok(parse);
+    assert.throws(() => parse({}));
+    assert.throws(() => parse(null));
+    assert.throws(() => parse(boundary({ status: "planned" as never })));
+    assert.throws(() => parse(boundary({ passSeq: -1 })));
+    assert.throws(() => parse(boundary({ layer: "native" as never })));
+    assert.throws(() => parse(boundary({ clearedSeqs: ["x" as never] })));
+    assert.doesNotThrow(() => parse(boundary()));
   });
 
   it("dispose closes the domain and rejects further writes", async () => {

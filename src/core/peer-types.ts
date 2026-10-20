@@ -13,6 +13,38 @@
  */
 export type PeerTarget = { readonly kind: "agent"; readonly agentId: string };
 
+/**
+ * Declared status words a worker may attach to a mid-task reply
+ * (ticket 122 / ADR-0028). A closed set on purpose: the status is metadata
+ * the dispatcher can act on, not free prose, and it must never read as a
+ * completion signal — `done` is deliberately absent.
+ */
+export type WorkerReplyStatus = "progress" | "blocked" | "note";
+
+/** Runtime membership check for the status enum (host-edge validation). */
+export function isWorkerReplyStatus(
+  value: unknown,
+): value is WorkerReplyStatus {
+  return value === "progress" || value === "blocked" || value === "note";
+}
+
+/**
+ * Structured provenance for a worker's mid-task reply (ticket 122 /
+ * ADR-0028 decision 5). It rides the peer envelope so the dispatcher never
+ * parses message text to learn where a message came from: `kind` is the
+ * declared discriminant, `workerId` is the sending worker, and `status` is
+ * the optional status word. Absent on a dispatcher-to-dispatcher peer
+ * message — absence IS the "ordinary peer" case.
+ *
+ * The worker tool sets this field from core truth; there is no tool argument
+ * for it, so a model cannot claim another worker's identity.
+ */
+export interface WorkerReplyOrigin {
+  readonly kind: "worker-reply";
+  readonly workerId: string;
+  readonly status?: WorkerReplyStatus;
+}
+
 /** One peer message. Immutable after accept. */
 export interface PeerEnvelope {
   /** Sender-assigned unique id. Primary dedupe key. Required. */
@@ -37,6 +69,13 @@ export interface PeerEnvelope {
    */
   readonly priority: boolean;
   readonly createdAtMs: number;
+  /**
+   * Structured provenance (ticket 122). Present only on a worker's mid-task
+   * reply; absent on a dispatcher-to-dispatcher peer message. Never derived
+   * from `text` — the rendering may show a label, but this field is the
+   * authority.
+   */
+  readonly origin?: WorkerReplyOrigin;
 }
 
 /**
@@ -78,6 +117,33 @@ export interface PeerNotice {
   readonly text: string;
   readonly priority: boolean;
   readonly createdAtMs: number;
+  /** Structured provenance carried through from the envelope (ticket 122). */
+  readonly origin?: WorkerReplyOrigin;
+}
+
+/**
+ * Whether a notice is a worker's mid-task reply rather than an ordinary
+ * dispatcher peer message. Structural check — never a text inspection.
+ */
+export function isWorkerReply(notice: PeerNotice): boolean {
+  return notice.origin?.kind === "worker-reply";
+}
+
+/**
+ * Sender label for a worker reply, rendered by the peer wake under its
+ * "not from the user" heading. It is host-composed from the worker record
+ * and the validated status word — the worker model supplies only the body
+ * text, so it cannot fabricate this label. Presentation only: the
+ * authoritative provenance is {@link WorkerReplyOrigin}.
+ */
+export function workerReplySenderLabel(
+  workerTitle: string,
+  status: WorkerReplyStatus | undefined,
+): string {
+  const title = workerTitle.length > 0 ? workerTitle : "worker";
+  return status === undefined
+    ? `worker reply — ${title}`
+    : `worker reply (${status}) — ${title}`;
 }
 
 /**
@@ -108,6 +174,7 @@ export function toPeerNotice(
     text: envelope.text,
     priority,
     createdAtMs: envelope.createdAtMs,
+    ...(envelope.origin !== undefined ? { origin: envelope.origin } : {}),
   };
 }
 
@@ -127,7 +194,18 @@ export function samePeerPayload(
     a.text === b.text &&
     a.priority === b.priority &&
     targetsEqual(a.to, b.to) &&
-    imageRefsEqual(a.imageRefs, b.imageRefs)
+    imageRefsEqual(a.imageRefs, b.imageRefs) &&
+    originsEqual(a.origin, b.origin)
+  );
+}
+
+function originsEqual(
+  a: WorkerReplyOrigin | undefined,
+  b: WorkerReplyOrigin | undefined,
+): boolean {
+  if (a === undefined || b === undefined) return a === b;
+  return (
+    a.kind === b.kind && a.workerId === b.workerId && a.status === b.status
   );
 }
 

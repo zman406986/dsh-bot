@@ -1,0 +1,21 @@
+# Bundle patch for dsh-multitask-dispatcher.
+#
+# Selected through `dsh.bundle.patch` in package.json. It contributes exactly
+# one row: the plugin itself, whose id must equal the settings namespace so the
+# plugin's Config form is addressable.
+#
+# There is no worker-preset row. Worker composition (contract section + tool
+# barrier) is registered on each child's own scoped context at `agent/created`
+# by `src/worker/preset.ts`, so it works identically on every boot route — the
+# bundle route and a manually inserted overlay row — and needs neither a named
+# preset nor the preset registry.
+#
+# Insertion path: select this bundle in the profile
+# (`dsh.profile.bundles: [..., "dsh-multitask-dispatcher"]`) and do NOT also
+# insert the row by hand. Two rows with one id make the settings form vanish
+# (the config editor drops non-unique entry ids).
+- insert:
+    - id: multitask-dispatcher
+      name: 'dsh-multitask-dispatcher'
+      config:
+        enabled: true

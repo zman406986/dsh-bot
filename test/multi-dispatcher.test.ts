@@ -46,6 +46,7 @@ import {
   type UserQuestionsLike,
 } from "../src/adapter/index.js";
 import { ROSTER_SETTINGS_KEY } from "../src/core/roster-snapshot.js";
+import { volatileConfig } from "./support/plugin-config.js";
 
 function tick(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
@@ -267,7 +268,7 @@ function createMultiCtx(seam?: UserQuestionsLike) {
       },
     },
     subagents: {
-      async startContinuable(spec: {
+      async startActivation(spec: {
         request: { parent: AgentLike };
       }) {
         const childId = `child-${nextChild++}`;
@@ -275,7 +276,7 @@ function createMultiCtx(seam?: UserQuestionsLike) {
           childId,
           parentSessionId: String(spec.request.parent.session.id),
         });
-        return { childId, messageId: `msg-${childId}` };
+        return { childId, messageId: `msg-${childId}`, dispose: async () => {} };
       },
       interrupt() {},
       async sendMessage(
@@ -372,7 +373,7 @@ async function spawnVia(
 describe("multi-dispatcher — scoped surfaces (ADR-0019)", () => {
   it("each dispatcher sees only its own six tools; request_access is the one global", async () => {
     const multi = createMultiCtx();
-    apply(multi.ctx, { enabled: true });
+    apply(multi.ctx, volatileConfig({ enabled: true }));
     const a = createScopedAgent("s-a");
     const b = createScopedAgent("s-b");
 
@@ -401,7 +402,7 @@ describe("multi-dispatcher — scoped surfaces (ADR-0019)", () => {
 
   it("handlers route to their own session's state", async () => {
     const multi = createMultiCtx();
-    apply(multi.ctx, { enabled: true });
+    apply(multi.ctx, volatileConfig({ enabled: true }));
     const a = createScopedAgent("s-a");
     const b = createScopedAgent("s-b");
     await activate(multi, a);
@@ -443,7 +444,7 @@ describe("multi-dispatcher — scoped surfaces (ADR-0019)", () => {
 
   it("the same stream_key in two sessions does not collide; within one session it still refuses", async () => {
     const multi = createMultiCtx();
-    apply(multi.ctx, { enabled: true });
+    apply(multi.ctx, volatileConfig({ enabled: true }));
     const a = createScopedAgent("s-a");
     const b = createScopedAgent("s-b");
     await activate(multi, a);
@@ -461,9 +462,9 @@ describe("multi-dispatcher — scoped surfaces (ADR-0019)", () => {
     assert.equal(dup.reason, "duplicate-stream-key");
   });
 
-  it("roster publishes carry the changed session's id (no single-active gate)", async () => {
+  it("roster reads are per-session and no settings mirror is written (0.2.1)", async () => {
     const multi = createMultiCtx();
-    apply(multi.ctx, { enabled: true });
+    apply(multi.ctx, volatileConfig({ enabled: true }));
     const a = createScopedAgent("s-a");
     const b = createScopedAgent("s-b");
     await activate(multi, a);
@@ -472,25 +473,39 @@ describe("multi-dispatcher — scoped surfaces (ADR-0019)", () => {
     await spawnVia(a, "k-a");
     await spawnVia(b, "k-b");
 
-    const publishedSessions = new Set(
-      multi.ctx.updates
-        .map((update) => update[ROSTER_SETTINGS_KEY])
-        .filter(
-          (snapshot): snapshot is { dispatcherSessionId: string } =>
-            typeof snapshot === "object" &&
-            snapshot !== null &&
-            "dispatcherSessionId" in snapshot,
-        )
-        .map((snapshot) => snapshot.dispatcherSessionId),
+    // 0.2.1 port: the roster settings mirror is GONE — there is no settings
+    // registry to publish into, so nothing writes `ROSTER_SETTINGS_KEY`.
+    // The live roster read is the per-session `check_workers` tool, which
+    // stays scoped to the calling dispatcher.
+    const mirrorUpdates = multi.ctx.updates.filter(
+      (update) => ROSTER_SETTINGS_KEY in update,
     );
-    // BOTH sessions published under the changed-session id.
-    assert.ok(publishedSessions.has("s-a"));
-    assert.ok(publishedSessions.has("s-b"));
+    assert.deepEqual(
+      mirrorUpdates,
+      [],
+      "no roster mirror exists to publish into",
+    );
+
+    for (const [session, agent] of [
+      ["s-a", a],
+      ["s-b", b],
+    ] as const) {
+      const check = agent.scopedTool("check_workers");
+      assert.ok(check, `${session} can read its own roster`);
+      const roster = (await check.execute({}, undefined)) as {
+        ok: boolean;
+        rows: Array<{ worker_id: string }>;
+      };
+      assert.equal(roster.ok, true);
+      // Isolation is enforced by the SURFACE: each session's tool sees only
+      // the workers that session spawned (the row carries no dispatcher id).
+      assert.equal(roster.rows.length, 1, `${session} sees exactly its own worker`);
+    }
   });
 
-  it("deactivating session A clears only A's per-session mirror key (ticket 79)", async () => {
+  it("deactivating session A drops only A's roster view (ticket 79)", async () => {
     const multi = createMultiCtx();
-    apply(multi.ctx, { enabled: true });
+    apply(multi.ctx, volatileConfig({ enabled: true }));
     const a = createScopedAgent("s-a");
     const b = createScopedAgent("s-b");
     await activate(multi, a);
@@ -498,36 +513,29 @@ describe("multi-dispatcher — scoped surfaces (ADR-0019)", () => {
     await spawnVia(a, "k-a");
     await spawnVia(b, "k-b");
 
-    // Both sessions' snapshots ride their own mirror keys.
-    const mirrorA = multi.ctx.updates.filter(
-      (update) => "roster.s-a" in update,
-    );
-    assert.ok(mirrorA.length > 0);
-
-    // Deactivate A: its mirror key is nulled — the wrapper sidebar's
-    // dispatcher flag must fall — and ONLY its key; B keeps publishing.
+    // Deactivate A: its tool surface is torn down with it. There is no
+    // per-session mirror key to clear on 0.2.1 — the surface IS the read
+    // path, so its absence is the honest signal.
     multi.ctx.fire("agent/disposed", { agent: a });
     await tick();
     await tick();
-    const clearedA = multi.ctx.updates.filter(
-      (update) =>
-        "roster.s-a" in update && update["roster.s-a"] === null,
-    );
-    assert.ok(clearedA.length > 0, "A's mirror key was cleared");
-    const clearedB = multi.ctx.updates.filter(
-      (update) =>
-        "roster.s-b" in update && update["roster.s-b"] === null,
-    );
-    assert.deepEqual(clearedB, [], "B's mirror key must survive");
+    assert.equal(a.scopedTool("check_workers"), undefined, "A's surface is gone");
 
-    // A transition in B still publishes under B's own key afterward.
+    // B keeps its own surface and its own roster.
+    const checkB = b.scopedTool("check_workers");
+    assert.ok(checkB, "B's surface survives A's deactivation");
+    const rosterB = (await checkB.execute({}, undefined)) as {
+      ok: boolean;
+      rows: Array<{ worker_id: string }>;
+    };
+    assert.equal(rosterB.rows.length, 1);
+
+    // A later transition in B still answers through B's own surface.
     await spawnVia(b, "k-b2");
-    const mirrorB = multi.ctx.updates.filter(
-      (update) =>
-        typeof update["roster.s-b"] === "object" &&
-        update["roster.s-b"] !== null,
-    );
-    assert.ok(mirrorB.length > 0, "B's mirror keeps publishing");
+    const after = (await checkB.execute({}, undefined)) as {
+      rows: Array<{ worker_id: string }>;
+    };
+    assert.equal(after.rows.length, 2, "B's roster keeps advancing");
   });
 });
 
@@ -570,7 +578,7 @@ describe("multi-dispatcher — per-session prompts and policy rows (ADR-0019)", 
   it("deactivating session A abandons only A's outstanding prompt", async () => {
     const seam = createFakeUserQuestions();
     const multi = createMultiCtx(seam);
-    apply(multi.ctx, { enabled: true, accessRequestTimeoutMs: 50 });
+    apply(multi.ctx, volatileConfig({ enabled: true, accessRequestTimeoutMs: 50 }));
     const a = createScopedAgent("s-a");
     const b = createScopedAgent("s-b");
     await activate(multi, a);
@@ -617,7 +625,7 @@ describe("multi-dispatcher — per-session prompts and policy rows (ADR-0019)", 
   it("session A's always-allow is cleared on deactivation; B's survives and keeps answering", async () => {
     const seam = createFakeUserQuestions();
     const multi = createMultiCtx(seam);
-    apply(multi.ctx, { enabled: true, accessRequestTimeoutMs: 50 });
+    apply(multi.ctx, volatileConfig({ enabled: true, accessRequestTimeoutMs: 50 }));
     const a = createScopedAgent("s-a");
     const b = createScopedAgent("s-b");
     await activate(multi, a);
@@ -700,7 +708,7 @@ describe("multi-dispatcher — host duplicate-registration rule (ticket 91)", ()
     });
 
     assert.throws(
-      () => apply(multi.ctx, { enabled: true }),
+      () => apply(multi.ctx, volatileConfig({ enabled: true })),
       new RegExp(
         `command "${DISPATCHER_START_COMMAND}" is already registered`,
       ),

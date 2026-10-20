@@ -1,20 +1,20 @@
 # dsh agents rulebook
 
-The authority stack, reading order, and moved-rule register for agent work in this repo. Ticket 97 (2026-09-20) decomposed the old wall-of-text `AGENTS.md` into this rulebook plus per-activity `read-before-*.md` guides; nothing was deleted — every old rule is either located here in the register, moved unmodified into a guide, or already had its authoritative home in a higher document that this rulebook points at.
+The authority stack — the numbered list of which document wins when two disagree — plus reading order and the moved-rule register for agent work in this repo. Ticket 97 (2026-09-20) decomposed the old single long `AGENTS.md` into this rulebook plus per-activity `read-before-*.md` guides; nothing was deleted — every old rule is either located here in the register, moved unmodified into a guide, or already had its authoritative home in a higher document that this rulebook points at.
 
-**Why this file is tracked:** `AGENTS.md` is git-ignored (`.gitignore`, local-only). Moving the rules into tracked files (`docs/agents-rulebook.md`, the `read-before-*.md` guides, `Issue-tracker/issue-tracker.md`) is what makes the rulebook durable and reviewable; `AGENTS.md` remains only as a local thin pointer stub so agents that read it first still land correctly.
+**Why this file is tracked:** `AGENTS.md` is git-ignored (`.gitignore`, local-only). Moving the rules into tracked files (`docs/agents-rulebook.md`, the `read-before-*.md` guides, `Issue-tracker/issue-tracker.md`) is what makes the rulebook durable and reviewable; `AGENTS.md` remains only as a local thin pointer stub so agents that read it first still find their way.
 
 ## Reading order
 
-1. `AGENTS.md` — the local stub: current state, type-of-work routing, stack summary.
-2. `docs/agents-rulebook.md` — this file: the authority stack, settled conflicts, moved-rule register, environment/network rules.
+1. `AGENTS.md` — the local stub: current state, type-of-work routing, summary of the tech stack.
+2. `docs/agents-rulebook.md` — this file: the authority stack (which document wins when two disagree), settled conflicts, moved-rule register, environment/network rules.
 3. `CONTEXT.md` — the shared-language glossary; use its vocabulary.
 4. `PRD-dsh-multitask-dispatcher.md` — product behavior, scope, success criteria S1–S9. Read before any implementation work.
 5. `docs/adr/README.md` — the index of every recorded decision; read the ADRs that touch your area before working in it.
 6. The type-of-work table (below, and in `AGENTS.md`) — the guide for your activity.
 7. `Issue-tracker/issue-tracker.md` — the tracker guide. Log an issue before implementing anything.
 
-For behavior the PRD leaves open, the reference is the feature inventory (ADR-0004), and ADR-0018's exception list is the exhaustive fidelity bar. Where documents conflict, the authority stack below decides — not folder names, not the reference README, not this rulebook's own prose.
+For behavior the PRD leaves open, the reference is the feature inventory (ADR-0004), and ADR-0018's exception list is the exhaustive standard for how closely we must match the reference. Where documents conflict, the authority stack below decides — not folder names, not the reference README, not this rulebook's own prose.
 
 ## Type-of-work rules live with the work
 
@@ -31,6 +31,8 @@ For behavior the PRD leaves open, the reference is the feature inventory (ADR-00
 
 ## Authority stack
 
+The authority stack is the numbered list of which document wins when two disagree.
+
 > **Flag (ticket 97):** this order is a **proposed order, verified against recorded practice — human reversal possible**. Each level cites at least one real repo record proving the level has operated that way. Adjacencies the record does not test are marked. If a rule conflicts between layers and **no recorded decision covers the conflict, stop and ask the human; never silently pick.**
 
 In order, highest first:
@@ -44,13 +46,13 @@ In order, highest first:
 7. **Recorded ticket rulings** — including agent rulings explicitly marked subject to human reversal. *Practice:* ticket 69's Q1 — "ruled 2026-09-19 (overnight dispatched ruling, agent — subject to human reversal)" (`Issue-tracker/resolved/69-classifier-gated-auto-review.md`); the U-I re-scope "Agent-recorded 2026-09-19 as a dispatched overnight ruling, subject to human reversal" (recorded in ADR-0018's exception U-I, ticket 71). *Untested adjacency:* no record pits a ticket ruling directly against an AGENTS.md process rule; the sketch's order (process rules above ticket rulings) is kept and flagged.
 8. **Research notes** (`docs/research/`) — evidence and decision inputs, **never rulings**. *Practice:* ADR-0001 cites `docs/research/dsh-extension-surface.md` as its evidence base; the notes themselves "take no side" (same file, on the language question).
 
-**The stack settles, it does not re-open.** A recorded decision is the ruling — do not re-litigate ADR-0018, the ADR-0016 retraction, the S7 voiding, ticket 69's Q1, or any other recorded ruling by re-arguing precedence here. And verify a decision's **stated premise** before recording a new one: ADR-0016 was retracted 2026-09-18 as "signed under a fabricated premise" (`docs/adr/README.md`; tickets 50/51 cancelled) — that episode is why explicit precedence and premise-checking exist.
+**The authority stack settles conflicts; it does not re-open them.** A recorded decision is the ruling — do not re-argue ADR-0018, the ADR-0016 retraction, the S7 voiding, ticket 69's Q1, or any other recorded ruling by appealing to precedence here. And verify a decision's **stated premise** before recording a new one: ADR-0016 was retracted 2026-09-18 as "signed under a fabricated premise" (`docs/adr/README.md`; tickets 50/51 cancelled) — that episode is why explicit precedence and premise-checking exist.
 
-## Settled conflicts (cited by the stack, not re-opened)
+## Settled conflicts (decided by the authority stack, not re-opened)
 
-1. **S7 self-contradiction (settled).** Old AGENTS.md voided the S7 clean-room identifier grep in its reference-policy section (2026-09-18 human ruling) while its "Definition of working" still required it. Settled by levels 1–2 over level 6: the grep is **voided** as a ship gate (ADR-0018; PRD §4 S7 carries the strikethrough).
+1. **S7 self-contradiction (settled).** Old AGENTS.md voided the S7 clean-room identifier grep in its reference-policy section (2026-09-18 human ruling) while its "Definition of working" still required it. Settled by levels 1–2 (human override and accepted ADRs) over level 6 (process rules): the grep is **voided** as a ship gate (ADR-0018; PRD §4 S7 carries the strikethrough).
 2. **"Not TypeScript" row vs ADR-0001 (settled).** The constraints-table row "Not TypeScript. Prefer Go, else Python or Rust" is **superseded by accepted ADR-0001** (TypeScript in-process core; PRD §8/§15 had already resolved it). The row is preserved verbatim, marked superseded, in the register below.
-3. **PRD-preference claim vs ADR-0018 (settled).** Old AGENTS.md said "prefer the PRD over folder names or the reference README"; accepted ADR-0018 voids PRD requirements (flag, S7) and the PRD was amended to conform (ticket 64). The real order — accepted ADRs above the PRD — is levels 2–3 above.
+3. **PRD-preference claim vs ADR-0018 (settled).** Old AGENTS.md said "prefer the PRD over folder names or the reference README"; accepted ADR-0018 voids PRD requirements (flag, S7) and the PRD was amended to conform (ticket 64). The real order — accepted ADRs above the PRD — is levels 2–3 in the list above.
 
 ## Environment & network
 
@@ -62,20 +64,20 @@ npm (not pnpm) drives typecheck, offline tests, and the build (`package.json`).
 
 ## Testing artifacts & evidence layout (operator rule, 2026-09-20)
 
-**Human explicit override (authority-stack level 1), operator instruction recorded 2026-09-20.** This is a **new** rule from the operator, not a move: it does not appear in the pre-decomposition `AGENTS.md`, adds no row to the moved-rule register below, and leaves the register's no-rule-lost inventory untouched.
+**Human explicit override (level 1 of the authority stack), operator instruction recorded 2026-09-20.** This is a **new** rule from the operator, not a move: it does not appear in the pre-decomposition `AGENTS.md`, adds no row to the moved-rule register below, and leaves the register's no-rule-lost inventory untouched.
 
 - **All** future live-test/process artifacts — evidence subfolders, boot/teardown logs, probes, kill-timer records, driver scripts and their outputs, any process artifacts — go under `.scratch/testing/<yyyy-mm-dd>-<slug>/` in the repo, created **before** the session starts.
 - **No new evidence/process folders on the Desktop, ever.** Existing Desktop folders stay put; closed tickets citing them stand as written.
 - The layout is git-ignored (`.gitignore`) — artifacts may contain private dsh session content; **never commit them**.
 - From now on, ticket comments cite the in-repo path, not a Desktop path.
 
-The full rule's level-6 home is `read-before-running-live-and-browser-tests.md` §Evidence and process artifacts; the folder carries a short local README describing what belongs there.
+The full rule's level-6 home (the process-rules level) is `read-before-running-live-and-browser-tests.md` §Evidence and process artifacts; the folder carries a short local README describing what belongs there.
 
-## Moved-rule register (the no-rule-lost inventory)
+## Moved-rule register (the inventory proving no rule was lost)
 
 Line-by-line disposition of every rule in the pre-decomposition `AGENTS.md` (2026-09-20 tree, tickets 96/97 open). **None deleted.** Grouped by the authority level of the destination home; within groups, old-file order. "Moved, unmodified" = the text now lives verbatim at the destination; "Point(er)" = the rule's authoritative text already lives at the destination and the old wording was a restatement.
 
-### Rules whose home is a higher authority (levels 1–5) — AGENTS.md pointed, now the rulebook points
+### Rules whose home is a higher authority (levels 1–5) — AGENTS.md pointed at them, now the rulebook points at them
 
 | Old AGENTS.md section | Rule | Disposition | Home |
 |---|---|---|---|
@@ -98,7 +100,7 @@ Line-by-line disposition of every rule in the pre-decomposition `AGENTS.md` (202
 | Definition of “working” | "Legal QA: grep the shipped tree for reconstruction identifiers — S7 / PRD §12." | **Marked voided** | ADR-0018 (S7 grep voided); PRD §4 S7 strikethrough. See Settled conflict 1 |
 | Source of truth | "Prefer the PRD over folder names or the reference README when they conflict." | Kept, scoped | Reading order above — and scoped below levels 1–2 per Settled conflict 3 |
 
-### Rules whose home is a process rule (level 6) — moved unmodified into guides, the tracker guide, or this rulebook
+### Rules whose home is a process rule (level 6: process rules) — moved unmodified into guides, the tracker guide, or this rulebook
 
 | Old AGENTS.md section | Rule | Disposition | Home |
 |---|---|---|---|
@@ -116,3 +118,12 @@ Line-by-line disposition of every rule in the pre-decomposition `AGENTS.md` (202
 | Non-goals | "Do not rebuild dsh inference/transcript/tool runtime, remote sandbox, or peer messaging hub … Do not chase Sand/Cursor/Grok Bot binary or UI parity." | Pointer | PRD §2 Non-goals (home); listed in the stub so it stays visible |
 
 Register maintained by ticket 97 (2026-09-20). Verification hint for auditors: diff the pre-decomposition `AGENTS.md` against this table — every section and rule line above appears exactly once, moved or pointed, none deleted.
+
+## Standing rules
+
+These bind every task in this repo.
+
+1. Summon subagents in background mode by default.
+2. Owner works from 2 devices: one has `C:\Users\TZhen\`, the other has `C:\Users\TZ\`.
+3. Never invent jargon, codenames, or project shorthand. Talk to the human in plain, very concise language, as if he has ADHD: short sentences, concrete words, no metaphors, no private vocabulary. A term that needs explaining to a newcomer is not allowed in a sentence to the owner.
+4. Run the smallest test set that can fail. Do not run end-to-end tests when unit tests cover the change. Group tests into one run instead of starting one run per change.

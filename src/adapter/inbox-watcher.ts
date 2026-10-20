@@ -339,8 +339,18 @@ export interface InboxWatcherHandle {
   /** Stop watching and cancel every armed timer. Idempotent. */
   stop(): void;
   /**
+   * Settles once the watcher is armed: the root dir is ensured, `fs.watch`
+   * is attached (or failed — errors go to `onError`), the initial sweep has
+   * finished, and the rescan fallback is armed. Callers that drive the
+   * watcher directly (tests, alternate schedulers) await this instead of
+   * guessing how long the startup pass takes. Also settles on `stop()` and
+   * never rejects.
+   */
+  readonly ready: Promise<void>;
+  /**
    * Run one scan-claim pass now. Directly callable so tests can drive the
-   * protocol deterministically without waiting on timers.
+   * protocol deterministically without waiting on timers. Returns null when
+   * stopped or when another pass (e.g. the initial sweep) is in flight.
    */
   scanOnce(): Promise<InboxScanReport | null>;
 }
@@ -375,6 +385,15 @@ export function startInboxWatcher(
   let cancelWatchDebounce: (() => void) | null = null;
   let cancelRescan: (() => void) | null = null;
   let fsWatcher: FSWatcher | null = null;
+  let readySettled = false;
+  let settleReady!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    settleReady = () => {
+      if (readySettled) return;
+      readySettled = true;
+      resolve();
+    };
+  });
 
   const fail = (error: unknown, context: string): void => {
     try {
@@ -443,28 +462,54 @@ export function startInboxWatcher(
     }, Math.max(1000, options.rescanIntervalMs));
   }
 
+  /** Close the live watch handle exactly once; safe after an error/stop. */
+  function closeFsWatcher(): void {
+    if (fsWatcher === null) return;
+    const watcher = fsWatcher;
+    fsWatcher = null;
+    try {
+      watcher.close();
+    } catch {
+      // Already dead (the error path may have closed it first).
+    }
+  }
+
   void (async () => {
     try {
       await mkdir(root, { recursive: true });
     } catch (error) {
       fail(error, "ensure dir");
     }
-    if (stopped) return;
+    if (stopped) {
+      settleReady();
+      return;
+    }
     try {
       fsWatcher = watchFs(root, { persistent: false }, () => scheduleScan());
       fsWatcher.on("error", (error: Error) => {
         fail(error, "fs.watch");
-        // The interval fallback owns intake from here; drop the dead watch.
-        fsWatcher = null;
+        // The interval fallback owns intake from here; drop the dead watch
+        // AND release its handle — an unclosed handle keeps the host alive
+        // after dispose (and blocks root removal on Windows).
+        closeFsWatcher();
       });
     } catch (error) {
       fail(error, "start fs.watch");
     }
-    // Initial sweep: jobs queued before we started are picked up now.
-    void scanOnce().then(() => armRescan());
+    // Initial sweep: jobs queued before we started are picked up now. The
+    // `ready` promise settles only after it finished, so a caller that drives
+    // `scanOnce` directly never races an in-flight startup pass.
+    await scanOnce();
+    if (stopped) {
+      settleReady();
+      return;
+    }
+    armRescan();
+    settleReady();
   })();
 
   return {
+    ready,
     stop(): void {
       if (stopped) return;
       stopped = true;
@@ -472,12 +517,10 @@ export function startInboxWatcher(
       cancelWatchDebounce = null;
       cancelRescan?.();
       cancelRescan = null;
-      if (fsWatcher !== null) {
-        // fs.watch errors after close() are prevented by the null guard; the
-        // "error" handler also already cleared the reference on a dead watch.
-        fsWatcher.close();
-        fsWatcher = null;
-      }
+      // The "error" handler also closes on a dead watch; this guard makes
+      // the double case safe.
+      closeFsWatcher();
+      settleReady();
     },
     scanOnce,
   };

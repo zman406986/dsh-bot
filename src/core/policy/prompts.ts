@@ -67,6 +67,22 @@ export const PEER_WAKE_SECTION_HEADINGS = [
   "## What to do now",
 ] as const;
 
+/**
+ * Tail-pushed peer roster (ticket 121 / ADR-0027 decisions 2–3).
+ * The heading reuses the established provenance convention
+ * (`PEER_WAKE_SECTION_HEADINGS[0]`): these rows are OTHER AGENTS, never the
+ * user. Injected text, never a tool call (C13).
+ */
+export const PEER_ROSTER_SECTION_HEADING = "## Other agents — not the user";
+
+/**
+ * One-line orientation under the heading. Constant text on purpose: the
+ * section must be byte-stable for an unchanged roster (tail placement), so
+ * nothing here may carry a clock, a counter, or a turn number.
+ */
+export const PEER_ROSTER_INTRO =
+  "Other assistant sessions you can message with send_peer, addressed by session id. They are not the user. Status is what this session can observe: idle means no turn, no parked request, and no queued wake.";
+
 /** Empty-ledger marker in the per-turn reminder. */
 export const EMPTY_LEDGER_LINE = "(empty)";
 
@@ -86,7 +102,7 @@ export function buildDispatcherPolicySection(): string {
     "- Independent requests run in parallel. Never make stream B wait on stream A unless they share one logical stream.",
     "- A correction to work already in flight is a steer on that worker. Do not spawn a second worker for the same stream.",
     "- One live worker per stream. Check before you spawn if you are unsure.",
-    "- Write a todo entry before you spawn. Several entries may be `in_progress` at once. Mark an entry `completed` only after the user actually has the result — not when the worker merely exits.",
+    "- Write a todo entry before you spawn. Several entries may be `in_progress` at once. Mark an entry `completed` at the first visible acknowledgement to the user — they have seen or been told the outcome is underway or delivered. Worker exit alone completes nothing.",
     "- On every wake, reconcile the ledger first: what is running, what landed undelivered, what still needs dispatch.",
     "- Worker prompts are self-contained. The worker cannot see this conversation, the user's earlier messages, or sibling work. Put the goal, constraints, relevant context, success criteria, and report format into the spawn prompt.",
     "- Workers cannot talk to the user. Only you deliver.",
@@ -114,7 +130,7 @@ export function buildStandingRulesBlock(): string {
     "- Short turn: reply or act, then end. Do not wait on workers.",
     "- Non-trivial multi-step work → spawn; independent work → parallel.",
     "- Correction → steer the running worker; do not clone.",
-    "- Todo before spawn. `completed` only after the user has the result.",
+    "- Todo before spawn. `completed` at the first visible acknowledgement to the user — never on worker exit.",
     "- Reconcile the ledger on every wake before you speak.",
     "- Workers never message the user. You deliver. Never name the machinery.",
   ].join("\n");
@@ -125,7 +141,7 @@ export function buildWakeInstructionsBlock(): string {
   return [
     "## What to do now",
     "",
-    "1. Reconcile the todo ledger first. Match each settled worker to its entry (`todo_id` on the worker record). Do not mark anything `completed` until you have delivered it.",
+    "1. Reconcile the todo ledger first. Match each settled worker to its entry (`todo_id` on the worker record). A settle does not complete anything — mark `completed` only at the first visible acknowledgement to the user.",
     "2. Decide, for each result, whether the user should hear about it:",
     "   - Tell them if the result is new, relevant, or they asked to be told.",
     "   - Stay silent if it is stale, a duplicate of what you already said, superseded by a newer correction, or irrelevant now.",

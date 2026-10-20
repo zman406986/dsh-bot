@@ -8,7 +8,7 @@
   - **(b)** inferred — derived from surrounding call sites / types, not from the mechanism itself.
   - **(c)** unobservable in this reconstruction — cannot be evidenced here; not guessed.
   - **(d)** open — not resolvable from the tree as it stands.
-- **Date.** 2026-09-18. **Author.** ref-gaps observation pass.
+- **Date.** 2026-09-18. **Author.** observation pass over the four open gaps.
 
 ---
 
@@ -16,13 +16,13 @@
 
 ### G1. Acknowledgement redrive scheduling policy — **CLOSED (a)**
 
-The redrive delay lives in a small scheduling primitive, not in the obligation controller. Concretely:
+The redrive delay — the wait before a failed acknowledgement is retried — lives in a small scheduling helper, not in the obligation controller. Concretely:
 
 - The obligation controller arms a timer through a policy object of type `ExpiryPolicy`, constructed as `createExpiryPolicy(clock, { name, ttlMs: ACK_REDRIVE_IDLE_DELAY_MS })`. `ACK_REDRIVE_IDLE_DELAY_MS` is a module constant equal to **5000 ms** (`ack-obligations.ts`).
-- The `ExpiryPolicy` implementation (`internal/scheduling.ts`, `createExpiryPolicy`) does exactly one thing on `arm(key, onExpire)`: it calls `clock.schedule(ttlMs, onExpire)` and returns a disposable. There is **no jitter** — the wait is the literal `ttlMs`, with no randomization or backoff. Re-arming the same `key` disposes the prior timer, so it is **last-arm-wins per agentId** (the key is the agentId).
+- The `ExpiryPolicy` implementation (`internal/scheduling.ts`, `createExpiryPolicy`) does exactly one thing on `arm(key, onExpire)`: it calls `clock.schedule(ttlMs, onExpire)` and returns a disposable. There is **no jitter** — the wait is the literal `ttlMs`, with no randomization or backoff. Re-arming the same `key` disposes the prior timer, so the last timer set for a key wins, and the key is the agentId.
 - **Delay:** fixed 5 seconds, both for the idle trigger (`scheduleAckRedriveAfterIdle`) and the boot trigger (`redriveUnfulfilledAckObligations` → `armAckRedriveTimer(..., "boot")`). No separate boot delay exists.
 - **Bounded per boot? No.** The policy primitive itself is unbounded per boot — every boot can re-arm a fresh 5s timer. The *actual* bound is on the **persisted attempt counter**, not on the timer. `redriveAckObligation` refuses once `obligation.redriveAttempts >= MAX_ACK_REDRIVES`, where `MAX_ACK_REDRIVES = 3`. Each fire calls `store.recordRedriveAttempt(agentId)`, which increments `redriveAttempts` and writes the durable sidecar (`sand-ack-obligation-store.ts`). Because the counter lives in the durable ledger, the three attempts **accumulate across boots** — it is a 3-attempt lifetime bound, not 3-per-boot. After the third attempt the obligation is marked `lost` with reason `max_redrives`.
-- The recovery turn runs as a hidden background-lane turn and is instructed, in my own paraphrase, to actually invoke the message-send tool (the channel is the only thing the user sees), to treat the newest user message as possibly absent from context, and never to claim completion of work it cannot see.
+- The recovery turn runs as a hidden background turn — a turn on the background priority level — and is instructed, in my own paraphrase, to actually invoke the message-send tool (the channel is the only thing the user sees), to treat the newest user message as possibly absent from context, and never to claim completion of work it cannot see.
 
 ### G2. Boot redrive of pending wakes — **CLOSED (a): parent-only, worker never reconstructed**
 
@@ -36,15 +36,15 @@ The redrive delay lives in a small scheduling primitive, not in the obligation c
 
 ### G3. Watchdog interrupt semantics — **CLOSED (a) for the scheduler's use; (c) for the runner's internals**
 
-- The watchdog lives in the run scheduler. On trip it calls an injected callback `interruptWedgedRun(agentId)` once, records the returned boolean as `interrupted` telemetry, and **never branches on it**. It then marks the active run `phase: "interrupted"` unconditionally and starts a grace timer. On grace expiry `escapeWedgedRun` **resolves the run's promise and parks its settle in a zombie set** — the underlying task keeps running unsupervised.
+- The watchdog lives in the run scheduler. On trip it calls an injected callback `interruptWedgedRun(agentId)` once, records the returned boolean as `interrupted` telemetry, and **never branches on it**. It then marks the active run `phase: "interrupted"` unconditionally and starts a grace timer. On grace expiry `escapeWedgedRun` **resolves the run's promise and adds the run to a set of abandoned runs** — the underlying task keeps running unsupervised.
 - The real implementation of that callback (`runner-registry.ts`, `interruptWedgedRunForWatchdog`) calls the registered runner's `interrupt(reason)` method (and the group-member runner's, if any) and returns whether an active run existed to interrupt. So the watchdog's *request* to the runner is best-effort.
-- Whether the runner's `interrupt` is cooperative cancellation or a hard stop is determined inside the runner (agent-exec / runner code not in the read set). **That internal semantics is (c) unobservable here.** But it does not change the observable loop: the scheduler abandons regardless. So the name `interruptWedgedRunForWatchdog` is **not** evidence of either cooperative or hard-stop behaviour — the watchdog's own contract is "signal, then abandon," identical in both cases. Treat the reference watchdog as **advisory-interrupt + escape**, not as a canceller.
+- Whether the runner's `interrupt` is cooperative cancellation or a hard stop is determined inside the runner (agent-exec / runner code not among the files read for this note). **That internal semantics is (c) unobservable here.** But it does not change the observable loop: the scheduler abandons regardless. So the name `interruptWedgedRunForWatchdog` is **not** evidence of either cooperative or hard-stop behaviour — the watchdog's own behaviour is to signal and then abandon, identical in both cases. Treat the reference watchdog as something that **asks the runner to stop and then abandons the run**, not as something that cancels it.
 
 ### G4. Worker lifecycle FSM — **CLOSED: not evidenced in this reconstruction (c)**
 
 - The dedicated worker state machine is `source/packages/agent-exec/subagent-lifecycle-state-machine.ts` and its `subagent-lifecycle-store.ts`. Both are **empty stubs**: `export {}` (the state-machine file) and an import of that file plus `export {}` (the store). Only the initializer edge survives tree-shaking.
 - I checked the surrounding `agent-exec` package: other files there (execution timing, hook executor, error classification) are **populated**, so the package is not wholesale stripped — only the worker-lifecycle FSM and its store were removed by the reconstruction.
-- **Plain statement for the auditeers:** "the reference has a worker FSM" is **not something this tree can evidence**. There is no populated worker FSM to read, cite, or match against. Any dsh design that assumes a reference worker FSM must treat that assumption as (c) and design from first principles, not from the reference.
+- **Plain statement for the people auditing this:** "the reference has a worker FSM" is **not something this tree can evidence**. There is no populated worker FSM to read, cite, or match against. Any dsh design that assumes a reference worker FSM must treat that assumption as (c) and design from first principles, not from the reference.
 
 ---
 
@@ -53,48 +53,48 @@ The redrive delay lives in a small scheduling primitive, not in the obligation c
 Ordered, implementable. Each sub-element carries an evidence grade.
 
 ### Stage 1 — Intake
-- A user message is accepted for an agent; the session is minted/committed and "kickstarted" run-ready. A run window opens on first begin and closes only when the in-flight counter returns to zero (re-entrant). **(a)** `run-lifecycle.ts` (`beginSessionRun`, `endSessionRun`), `agent-lifecycle.ts` (`createAgent`, `kickstartAgent`).
+- A user message is accepted for an agent; the session is created and committed and "kickstarted" run-ready. A run window opens on first begin and closes only when the in-flight counter returns to zero (re-entrant). **(a)** `run-lifecycle.ts` (`beginSessionRun`, `endSessionRun`), `agent-lifecycle.ts` (`createAgent`, `kickstartAgent`).
 - On accept, an **acknowledgement obligation** is recorded for the agent (coalescing repeated sends into one obligation with an incremented count). **(a)** `ack-obligations.ts` (`recordAckObligationSend`, `armSendGuard`).
 - An obligation is also created defensively on disposal if none exists, and on interrupt-confirmation. **(a)** `ack-obligations.ts` (`confirmAckObligationAfterInterrupt`).
 
 ### Stage 2 — Triage
-- The decision to answer inline versus dispatch a worker is **not a separate coded gate in the read set**; it is expressed as guidance in the main agent's prompt (a "delegating background work" section) plus the dispatcher's spawn path. **(b)** from `system-prompt.ts` delegation section (per prompt-inventory note) and the dispatch entry in `subagent-runtime.ts`. The loop is always-on and multitask is a standing mode, so triage is a per-turn model decision, not a branch the core loop enforces. **(c)** the exact dispatch-trigger code path is not isolated in this pass.
+- The decision to answer inline versus dispatch a worker is **not a separate coded check in the files read**; it is expressed as guidance in the main agent's prompt (a "delegating background work" section) plus the dispatcher's spawn path. **(b)** from `system-prompt.ts` delegation section (per prompt-inventory note) and the dispatch entry in `subagent-runtime.ts`. The loop is always-on and multitask is a standing mode, so triage is a per-turn model decision, not a branch the core loop enforces. **(c)** the exact dispatch-trigger code path is not isolated in this pass.
 
 ### Stage 3 — Spawn + contract assembly
 - A worker is spawned idempotently (a second dispatch for a live worker id is a no-op) and tracked across five parallel maps plus two sets (live handles, run promise, immutable runtime meta, observable status registry, post-mortem outlines, parked-steer map, aborting set). **(a)** `subagent-runtime.ts` (`dispatchBackgroundSubagent`).
 - The **display title is derived from the prompt**; the **worker request id is derived from the parent's tool-call id**, enforcing one-worker-per-parent-tool-call, with a lineage record. **(a)** `subagent-runtime.ts` (`computeSubagentRequestId`, `SubagentRecord`).
-- **Contract composition (the crux for our D-1/D-3):** the worker's instructions are delivered as a **system prompt built by a dedicated subagent prompt constructor**, not as conversation-role content. The constructor takes a type string and a readonly boolean, interpolates the type name into one sentence, appends a fixed behavioural block (work autonomously; end with a plain-text final answer that is the result; no user channel; do not ask follow-up questions), conditionally appends a readonly line, and appends **one shared safety section constant**. **(a)** `system-prompt.ts` (the subagent prompt constructor and its shared safety section constant) per prompt-inventory note L2.
+- **Contract composition (the central question for our D-1/D-3 — D-1 being how the worker contract is delivered, D-3 the missing shared safety section):** the worker's instructions are delivered as a **system prompt built by a dedicated subagent prompt constructor**, not as conversation-role content. The constructor takes a type string and a readonly boolean, interpolates the type name into one sentence, appends a fixed behavioural block (work autonomously; end with a plain-text final answer that is the result; no user channel; do not ask follow-up questions), conditionally appends a readonly line, and appends **one shared safety section constant**. **(a)** `system-prompt.ts` (the subagent prompt constructor and its shared safety section constant) per prompt-inventory note L2.
 - The system prompt is assembled through the general context assembler; a subagent runner is differentiated from the main agent by `null`-guards on several sections, `canSendMessage: false` on the spotlight section, and a declined profile-snapshot lifecycle — **not** by a blank system prompt. "Blank context" for a worker means a blank *conversation*, not a blank *system prompt*. **(a)** `system-prompt-assembly.ts` per prompt-inventory note Appendix B.
 - Observable status is a four-state enum (running / done / error / aborted); dispatch fires a fan-out of events in one step including a **durable pending-wake armed marker** and a registry-changed event. **(a)** `subagent-runtime.ts`.
 - The durable wake marker is armed *at dispatch, before work runs*; the observable status record persists *after* the runner handle is deleted. **(a)** `subagent-runtime.ts`, `completion-revivals.ts`.
 
 ### Stage 4 — Concurrency
-- **One active run per agent**, plus a background queue, governed by a per-agent scheduler with **three priority lanes: user > agent > background**. The scheduler is a feature-flagged replacement for a plain promise chain; with it disabled, runs still serialize but lose lanes and the watchdog. **(a)** `run-scheduler.ts` (`enqueue`, `pump`, `takeNextUserTask`), `run-lifecycle.ts` (`enqueueExclusiveRun`, `isRunSchedulerDisabled`).
+- **One active run per agent**, plus a background queue, governed by a per-agent scheduler with **three priority levels: user > agent > background**. The scheduler is a feature-flagged replacement for a plain promise chain; with it disabled, runs still serialize but lose the priority levels and the watchdog. **(a)** `run-scheduler.ts` (`enqueue`, `pump`, `takeNextUserTask`), `run-lifecycle.ts` (`enqueueExclusiveRun`, `isRunSchedulerDisabled`).
 - A waiting user task behind an active run arms the watchdog; a background run wedged for an hour is noticed by nothing. **(a)** `run-scheduler.ts` (`armWatchdog`, `waitedBehindActiveMs`).
 - Defaults: a two-minute watchdog and a thirty-second grace, both env-tunable, behind a single kill switch that disables the scheduler. **(a)** `run-lifecycle.ts`.
 
 ### Stage 5 — Steer
-- Steering is **interrupt-then-resume on a preserved session**, not mid-stream injection. A steer parks the message in a per-worker map (giving **last-wins** for free), then interrupts the current turn. On settlement, if a steer is parked, the worker is not aborting, and a runner still exists, the runtime starts a **new turn on the same session** with the steer text — context is preserved because the session is the same. Result is `ok` or `not-running`. **(a)** `subagent-runtime.ts` (`steerSubagent`, `settleBackgroundSubagentTurn`) per lifecycle note §6.
+- Steering is **interrupt-then-resume on a preserved session**, not mid-stream injection. A steer parks the message in a per-worker map (the last parked message wins automatically), then interrupts the current turn. On settlement, if a steer is parked, the worker is not aborting, and a runner still exists, the runtime starts a **new turn on the same session** with the steer text — context is preserved because the session is the same. Result is `ok` or `not-running`. **(a)** `subagent-runtime.ts` (`steerSubagent`, `settleBackgroundSubagentTurn`) per lifecycle note §6.
 
 ### Stage 6 — Stop
 - Termination is **cooperative and ordered**. Abort first marks the worker aborting (so settlement will not resume it), clears any parked steer (so a queued steer cannot resurrect it), disarms the durable pending wake, and only then interrupts. The final state is resolved later, on settle, by precedence: aborting flag → aborted → completed→done → else error. **(a)** `subagent-runtime.ts` (`abortSubagent`) per lifecycle note §6.
 - **A worker that is aborted never reports back**: on settlement it disarms its pending wake and returns before any completion event. Abort is silent by design. **(a)** `completion-revivals.ts` / `subagent-runtime.ts` per lifecycle note §3.
-- **A late result from a superseded run** is dropped: a newer run aborting an older one yields the `superseded` outcome; a stale-generation settle from a zombie produces telemetry only, never disturbing the queue. **(a)** `completion-revivals.ts` (`superseded`), `run-scheduler.ts` (`onTaskSettled` stale-generation branch).
+- **A late result from a superseded run** is dropped: a newer run aborting an older one yields the `superseded` outcome; a settle that carries an out-of-date generation number from an abandoned run produces telemetry only, never disturbing the queue. **(a)** `completion-revivals.ts` (`superseded`), `run-scheduler.ts` (`onTaskSettled` stale-generation branch).
 
 ### Stage 7 — Settle → wake
 - Worker settles → a **settlement callback** fires → the parent-side handler queues it → a **synthesised parent turn** runs. **(a)** `completion-revivals.ts` (`handleBackgroundSubagentCompletion`, `reviveForSubagentCompletions`, `runSubagentRevival`).
-- Parent-side handler order: drop if parent deleted; **deduplicate by worker id**; queue per parent with an in-progress set guarding re-entrant revival; **coalesce** N completions into one wake and loop while more arrive; for each consumed completion **clear its durable pending wake**; run the wake as a **hidden turn on the background lane with silence explicitly allowed**. **(a)** `completion-revivals.ts`.
+- Parent-side handler order: drop if parent deleted; **deduplicate by worker id**; queue per parent with an in-progress set guarding re-entrant revival; **coalesce** N completions into one wake and loop while more arrive; for each consumed completion **clear its durable pending wake**; run the wake as a **hidden turn at background priority, with silence explicitly allowed**. **(a)** `completion-revivals.ts`.
 - The completion payload is **never empty**: empty/aborted/error outcomes are each substituted with a canned line, always with the worker's title and type attached. **(a)** `completion-revivals.ts` per lifecycle note §3.
-- Outcome taxonomy (all telemetried): `delivered`, `superseded`, `dropped` (reasons: no_runner, session_unavailable, quiesced, error, agent_deleted, agent_gone). **(a)** `completion-revivals.ts`.
+- Outcome taxonomy (records a telemetry event for every outcome): `delivered`, `superseded`, `dropped` (reasons: no_runner, session_unavailable, quiesced, error, agent_deleted, agent_gone). **(a)** `completion-revivals.ts`.
 
 ### Stage 8 — Reconcile + deliver
-- Because the wake is a real turn, the parent may deliver, stay silent, or start more work. Two carry-forwards are wired in: **unanswered user-question prompts are re-supplied** to the revival turn, and an **approval epoch of "continue"** is passed so approval state survives. **(a)** `completion-revivals.ts` (`collectUnansweredQuestionPrompts`, `autoReviewEpoch: "continue"`).
+- Because the wake is a real turn, the parent may deliver, stay silent, or start more work. Two pieces of state are carried forward: **unanswered user-question prompts are re-supplied** to the revival turn, and an **approval epoch of "continue"** is passed so approval state survives. **(a)** `completion-revivals.ts` (`collectUnansweredQuestionPrompts`, `autoReviewEpoch: "continue"`).
 - Quiet-origin (routine / quiet self-initiated) completions use a variant that strongly prefers silence and permits one message only if the outcome is genuinely new, actionable, or blocking. **(a)** `completion-revivals.ts` (`isAllQuietOrigin`, `QUIET_REVIVAL_INSTRUCTION` per my paraphrase).
 
 ### Stage 9 — Obligation (if never delivered)
-- An obligation means *this agent owes the user a visible acknowledgement*. It is **fulfilled only by a run holding a live run token** (minted per agent on a satisfying run start, retired on end). **(a)** `ack-obligations.ts` (`mintAckRunToken`, `fulfillAckObligation`, `retireAckRunToken`).
+- An obligation means *this agent owes the user a visible acknowledgement*. It is **fulfilled only by a run holding a live run token** (issued per agent at the start of a qualifying run, retired when the run ends). **(a)** `ack-obligations.ts` (`mintAckRunToken`, `fulfillAckObligation`, `retireAckRunToken`).
 - Redriven when the agent goes idle (after a short delay) and **on boot** (every outstanding obligation re-arms). **(a)** `ack-obligations.ts` (`scheduleAckRedriveAfterIdle`, `redriveUnfulfilledAckObligations`) — see G1 for the precise policy.
-- **Bounded**: `MAX_ACK_REDRIVES = 3`, then marked `lost` (`max_redrives`); a deleted agent also marks it `lost` (`agent_deleted`). Outcomes telemetried: created, coalesced, redrive, fulfilled, lost; a redrive that still delivered nothing is reported as an empty-delivery event with the outstanding-ack flag set. **(a)** `ack-obligations.ts`, `sand-ack-obligation-store.ts`.
+- **Bounded**: `MAX_ACK_REDRIVES = 3`, then marked `lost` (`max_redrives`); a deleted agent also marks it `lost` (`agent_deleted`). Outcomes that record a telemetry event: created, coalesced, redrive, fulfilled, lost; a redrive that still delivered nothing is reported as an empty-delivery event with the outstanding-ack flag set. **(a)** `ack-obligations.ts`, `sand-ack-obligation-store.ts`.
 - Group and remote rooms opt out: their obligations are cleared rather than redriven. **(a)** `ack-obligations.ts` (`redriveAckObligation` group/remote checks).
 - Storage is a versioned JSON sidecar with atomic `.part`-then-rename and an in-memory cache; every field defensively coerced; every filesystem call wrapped so corruption degrades to "no obligations." **(a)** `sand-ack-obligation-store.ts`.
 
@@ -110,7 +110,7 @@ Ordered, implementable. Each sub-element carries an evidence grade.
 Counts across the 10 stages and the four gaps (distinct graded claims):
 
 - **(a) directly evidenced:** the large majority — all four gaps (G1, G2, G3's scheduler use, G4's stub finding), and stages 1, 3 (contract composition + assembler), 4, 5, 6, 7, 8, 9, 10. Every (a) carries a named source file.
-- **(b) inferred:** Stage 2 (triage) — the dispatch decision is inferred to be a prompt-guided model choice rather than a coded gate, because no separate triage branch is isolated in the read set.
+- **(b) inferred:** Stage 2 (triage) — the dispatch decision is inferred to be a prompt-guided model choice rather than a coded check, because no separate triage branch was isolated in the files read.
 - **(c) unobservable:** G3's runner-internal interrupt mechanism (cooperative vs hard stop); G4's worker FSM (stubbed out); the exact Stage-2 dispatch-trigger code path.
 - **(d) open:** none outstanding after this pass.
 

@@ -1,6 +1,6 @@
 # Dispatcher-only spawning (flat team topology)
 
-**Status:** accepted
+**Status:** accepted; **the flat-topology spawning clause (only the dispatcher spawns agents; nested spawning is out) superseded 2026-10-18 by 0025** (human-ruled) for the **dispatcher→dispatcher edge only** — a dispatcher may summon another dispatcher; the worker-leaf rule, the single-parent rule, and the no-worker-to-worker rule are retained unchanged
 
 The team topology is **flat: only the dispatcher spawns agents**. Workers are leaves — they never spawn sub-workers. Nested spawning is out (deferred, behind a future ADR if ever needed). Worker-to-worker messaging topology is not decided here.
 

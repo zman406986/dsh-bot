@@ -1,0 +1,45 @@
+# DD-188 — Per-agent memory feature absent
+- **Area:** A23 memory
+- **Type:** deliberate-divergence
+- **Date:** 2026-09-23
+
+## What the reference does
+The reference ships a full per-agent memory subsystem, so an agent builds up durable knowledge about the user and the project across sessions instead of re-reading transcripts.
+
+Its parts, described by role:
+
+- **A memory extension behind an on/off gate.** The extension wires a memory service into the host, and its background synthesis capability is pinned to an authenticated-bootstrap experiment gate: when the gate is off, synthesis is skipped and the skip is reported to telemetry (`the reference tree's source/host/extensions/memory/extension.ts:11`). The service owns the durable fact store, with sibling modules in the same folder carrying per-agent state and project-membership scoping, so facts can be separated per agent and per project (`the reference tree's source/host/extensions/memory/memory-service.ts`, `agent-state.ts`, `project-membership.ts`).
+- **A background synthesis job.** A dedicated service reviews recent conversation evidence on a cadence and emits create/update/remove operations on facts, with dedupe, debounce, retry, and refresh behavior (`the reference tree's source/host/extensions/memory/memory-synthesis-service.ts`; telemetry in `the reference tree's source/host/extensions/telemetry/memory-synthesis-telemetry.ts`). Memory is thus built up over time by an LLM job, not only written explicitly during turns.
+- **An agent-facing state tool with a memory state kind.** The tool's state kinds include a memory kind alongside the others, i.e. CRUD over durable facts from inside a turn — writing a fact and forgetting a recorded fact — with the input schema carrying the fact text, a tier distinguishing enduring profile facts from a dated log and from fast-fading notes, and a scope distinguishing the agent's own memory, shared user memory, and a project-scoped shard (`the reference tree's source/host/runner/tools/sand-state-tool.ts:10-11`, `:134-137`, `:171-172`, `:289-290`).
+- **Prompt-side injection and extraction.** Runner modules assemble the memory sections injected into the agent's view and drive the per-turn recall/extraction cadence (`the reference tree's source/host/runner/sand-memory.ts`, `the reference tree's source/host/runner/turn-memory.ts`), with size-limited listing and guidance to read or search the underlying memory folders for older facts.
+
+Net effect: an agent starts a session already knowing the user and the project.
+
+## What the current build does
+**Absent.** The build has no memory feature, no memory tool, and no memory state kind. Its only cross-session persistence is a durability snapshot of dispatcher bookkeeping: durable worker markers — the minimum-to-reconstruct record of spawned workers, with a last-known status snapshot at write time — written through a host-backed store and deleted once the worker's obligation closes (`src/core/durability.ts:4`, `:9`, `:31-44`; the marker store contract in `src/core/multitask.ts:86`, per ADR-0006). Steer tickets are explicitly in-memory and never restored (`src/core/multitask.ts:214`).
+
+That is bookkeeping about in-flight work — who was spawned, what was delivered — not knowledge about the user or the project. Nothing about the user is written down, nothing is built up over time, and no memory text is injected into the worker prompt (`src/worker/prompt.ts` assembles the worker prompt sections and carries no memory section). A case-insensitive scan of `src/` and `client/` finds only in-process-storage senses of the word (an in-memory durability implementation, process-local client store modes, a comment about a client join cache) — no memory feature anywhere.
+
+## The deviation
+The reference treats durable per-agent memory as a first-class product feature: a gated extension, a durable fact store with profile/log/note-style tiers and agent/user/project scopes, a background synthesis job, an agent-facing write/forget tool, and prompt injection under size limits. The build ships none of it and reserves no place for it.
+
+This is a **ruled exclusion, not an oversight**: per-agent memory is an explicit item on the recorded exception list. The sibling A23 findings (synthesis behavior, the on-disk memory format, prompt injection) are internals of this same ruled-out feature and share this verdict family.
+
+## Verdict: DO-NOT-INCORPORATE
+ADR-0018 (accepted, position 2 in the authority stack, and the human-ruled master among the ADRs) names per-agent memory explicitly in exception **C14**: no org chart, no routines/automations subsystem, no per-agent memory, no group rooms (`docs/adr/0018-imitate-reference-in-entirety-exception-list.md:29`). The wording is decisive — "no per-agent memory," stated in substance verbatim — so the capability sits squarely inside the exception and requires no new judgment: this is ruled, not unruled. The capability-gaps register independently records it as Gap 1, framed "PRD: absent," and recommends adding a PRD section with a minimal dispatcher-scoped store (`docs/research/prd-vs-reference-capability-gaps.md:12-24`) — but research notes are evidence, never rulings (authority stack position 8), so C14 settles it and the register's recommendation does not override it. Nothing in the build's recorded rulings reverses C14, and no PRD amendment (ticket-64 or later) is recorded as reinstating memory.
+
+## Incorporation notes
+- **Where it would live:** Nowhere, under C14. If the human ever reverses C14, the natural shape is a sibling core module under `src/core/` (a durable fact store plus a per-turn recall/extraction hook), an adapter layer, and a new prompt section for the dispatcher or worker prompt in `src/worker/prompt.ts` — but the build has no durable per-agent store to reuse: the durability port persists only worker markers, so a memory store would have to solve persistence rather than inherit it (see the storage-architecture deviation, DD-177).
+- **Constraints:** C14 forbids the feature outright, so any work here needs a dated human reversal of C14 first, not an agent ruling. If it were ever reopened: prompt injection would need a size cap and touches prompt assembly; the agent-facing write/forget tool would need a tool hook the build does not have; synthesis implies a periodic LLM job with dedupe/debounce/retry that the build has no machinery for; and project-scoped separation implies a project-membership concept the build does not model. The one existing persistence asset — the durability marker store — is deliberately minimal bookkeeping, just enough to rebuild state, and is not a foundation for fact storage.
+- **License note:** ADR-0018 B9 — re-derive independently; no verbatim copying from the reference tree.
+- **Effort/risk:** L — the ruling is what blocks this, not the code: a C14 reversal would reopen a whole capability area (durable store, prompt injection with size limits, agent-facing fact CRUD, background synthesis job) on top of a build whose only persistence is dispatcher bookkeeping.
+- **Key reference anchors:**
+  - `the reference tree's source/host/extensions/memory/extension.ts:11` — gated wiring; synthesis pinned to an experiment gate, skip reported to telemetry.
+  - `the reference tree's source/host/extensions/memory/memory-service.ts`; `agent-state.ts`; `project-membership.ts` — durable fact store, per-agent state, project scoping.
+  - `the reference tree's source/host/extensions/memory/memory-synthesis-service.ts`; `the reference tree's source/host/extensions/telemetry/memory-synthesis-telemetry.ts` — background synthesis job and its telemetry.
+  - `the reference tree's source/host/runner/tools/sand-state-tool.ts:10-11`, `:134-137`, `:171-172`, `:289-290` — memory state kind with write/forget CRUD, tier and scope parameters.
+  - `the reference tree's source/host/runner/sand-memory.ts`; `the reference tree's source/host/runner/turn-memory.ts` — prompt-side memory sections and per-turn extraction/recall.
+
+## Evidence
+- Reference: `reference material-NOT LICENSE SAFE DONT COPY-grok bot/source/host/extensions/memory/` (memory service, synthesis service, per-agent state, project membership, gated extension); `.../source/host/extensions/telemetry/memory-synthesis-telemetry.ts`; `.../source/host/runner/tools/sand-state-tool.ts` (memory state kind); `.../source/host/runner/sand-memory.ts`; `.../source/host/runner/turn-memory.ts`.
+- Build: `src/core/durability.ts:4`, `:9`, `:31-44` (durable worker markers, ADR-0006 — the only cross-session persistence); `src/core/multitask.ts:86`, `:214` (marker store; steer tickets never restored); `src/worker/prompt.ts` (worker prompt assembly, no memory section); case-insensitive scan of `src/` and `client/` yields only in-process-storage senses. Rulings and register: `docs/adr/0018-imitate-reference-in-entirety-exception-list.md:29` (C14 — no org chart, no routines/automations subsystem, no per-agent memory, no group rooms); `docs/research/prd-vs-reference-capability-gaps.md:12-24` (Gap 1 — memory system, PRD: absent).

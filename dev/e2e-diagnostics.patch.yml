@@ -1,0 +1,11 @@
+# Harness-only diagnostics overlay, passed by dev/e2e-mock.mjs AFTER the
+# committed dev/cordis.web.patch.yml. Loads dev/e2e-diagnostics/, which
+# forwards the host logger to stderr so a failed turn can be diagnosed from
+# dsh-web.log. Never used by the shipped profiles; never a product route.
+#
+# It has its own package.json on purpose: the host's client-module registry
+# identifies packages by name, and a loose .mjs beside the plugin made both
+# resolve as "dsh-multitask-dispatcher".
+- insert:
+    - id: e2e-diagnostics
+      name: './e2e-diagnostics/index.mjs'

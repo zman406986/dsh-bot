@@ -1,6 +1,6 @@
 # Restart replays durability, never work
 
-**Status:** draft (non-human-approved) — agent-drafted 2026-09-19 (ticket 33 close-out, part 1), pending human sign-off; records the decision actually shipped by ticket 31 (+ tickets 57/58)
+**Status:** draft (non-human-approved) — agent-drafted 2026-09-19 (ticket 33 close-out, part 1), pending human sign-off; records the decision actually shipped by ticket 31 (+ tickets 57/58). **Wording loosened by human ruling 2026-10-18:** the no-re-run behavior below is the chosen product shape, not a permanent prohibition — it may be breached in future for a good reason, with the reason recorded.
 
 **Approval:** non-human — agent-drafted, pending human sign-off
 
@@ -8,7 +8,7 @@
 
 ## Decision
 
-When a dispatcher session (re)starts, the dispatcher **replays durable records only** — it never re-runs a worker, re-dispatches work, or invents state the markers do not carry. As shipped by ticket 31 (commit `818d03c`, merged `400450f`):
+**Current shape (human-directed, revocable).** When a dispatcher session (re)starts, it **replays durable records only** — it does not re-run a worker, re-dispatch work, or invent state the markers do not carry. This is the behavior we ship today because it avoids duplicate side effects, not a standing prohibition: a future change may resume interrupted work if it brings a good reason, and that reason is recorded here or in the ADR that revises this one. As shipped by ticket 31 (commit `818d03c`, merged `400450f`):
 
 1. **Rebuild before first publish.** `multitask.rebuildFromDurability(sessionId)` completes **before** the first `publishRosterSnapshot` and the prompt-pump sync (`src/plugin.ts` `rebuildAndNotice`), so restored terminal rows are in the very first snapshot and landed-undelivered items flush on the first wake (S4 across restart). Core rebuild semantics stay frozen (ADR-0006) — this is adapter ordering only, and the ordering is the acceptance rule (pinned by test).
 2. **One-time unknown-state honesty.** A marker whose worker state is unknown is reported once, conversationally — count, ids, transcript refs, "state is unknown, nothing was replayed" — and the unknown-state row **never lands on the roster** (core rule); a restored-with-undelivered-results rebuild emits `restart.restored` instead. Fires at most once per activation; silence on an empty report; a marker-store failure degrades to one honest "nothing was restored and nothing was replayed" notice while activation still succeeds.
@@ -25,3 +25,4 @@ When a dispatcher session (re)starts, the dispatcher **replays durable records o
 - Restart can lose live workers' *presence* but never silently fabricate it: unknown-state is honest-by-notice, absent-by-roster.
 - The restart path is bounded by construction: one notice, one redrive pass, no re-execution — replay cost is marker reading only.
 - If a future boot hook generalizes the trigger beyond the per-session bind (the ADR-0016-retracted idea), it must call this same method — the replay rule, not the trigger, is the decision.
+- **This shape is not a veto.** Resuming interrupted work after a restart is a legitimate future option — DeepSeek-Bot's `resume.js` is one reference shape for it (see `docs/research/third-party-dsh-plugin-comparison-2026-10-18.md`, item 2). Adopting it needs a ticket that states the duplicate-side-effect risk it accepts and how the risk is bounded; until then, the current shape stands.
