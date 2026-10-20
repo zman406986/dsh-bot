@@ -209,6 +209,9 @@ export const localeDictionary: LocaleDictionary = {
       "Microcompact old tool results",
     "settings.card.field.microcompactEnabled.hint":
       "When on, older tool output is emptied once a chat fills past a fixed share of the model window, keeping the newest few. This rewrites history, so the provider's prompt cache restarts from the oldest cleared entry.",
+    "settings.card.field.racoonsEnabled.label": "Context cleanup (RACOONS)",
+    "settings.card.field.racoonsEnabled.hint":
+      "When on, oversized tool results are capped and failed searches are sealed, with the originals restorable by recall id. Originals are kept in memory for this process only. Applies to new chats.",
     // Ticket 77 (ADR-0020 slice 1): the wrapper shell's chrome copy. The
     // main-surface line survives as the no-seat fallback: since ticket 80
     // the pane is a host seat, and this copy shows only when a composition
@@ -371,6 +374,9 @@ export const localeDictionary: LocaleDictionary = {
     "settings.card.field.inboxEnabled.label": "启用文件收件箱",
     "settings.card.field.inboxEnabled.hint":
       "保存为调度器的设置：对新会话生效。开启后，调度器还会从下方目录接收任务。",
+    "settings.card.field.racoonsEnabled.label": "上下文清理（RACOONS）",
+    "settings.card.field.racoonsEnabled.hint":
+      "开启后，过大的工具结果会被裁剪，失败的搜索会被封存，原始内容可通过 recall id 取回。原始内容仅保存在本进程内存中。对新会话生效。",
     "settings.card.field.inboxDir.label": "收件箱目录",
     "settings.card.field.inboxDir.hint":
       "外部系统写入队列任务的文件夹。留空则保持收件箱关闭。",

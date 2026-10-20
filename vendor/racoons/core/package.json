@@ -1,0 +1,14 @@
+{
+  "name": "@racoons/core",
+  "version": "0.1.0-m1",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "types": "./public-types.d.ts",
+  "exports": {
+    ".": { "types": "./public-types.d.ts" },
+    "./*.js": { "types": "./lib/*.d.ts", "import": "./lib/*.js" }
+  },
+  "files": ["lib", "public-types.d.ts"],
+  "engines": { "node": ">=22" }
+}

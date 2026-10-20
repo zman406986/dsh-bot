@@ -51,6 +51,7 @@ import {
 } from "./adapter/index.js";
 import { registerWorkerAccessTool, createPendingAskSettleWaiter } from "./adapter/worker-access-tool.js";
 import type { WorkerActivityEntry } from "./adapter/cordis-dsh-host.js";
+import { registerRacoons } from "./adapter/racoons.js";
 import { clampActivity, clampReport } from "./core/report-clamp.js";
 import { createWorkerLocalToolDefs } from "./core/tools.js";
 import { createWorkerAgentDef } from "./worker/agent-def.js";
@@ -99,6 +100,14 @@ export const Config = z.object({
    * `enabled`.
    */
   inboxEnabled: z.boolean().default(false).volatile(),
+  /**
+   * RACOONS M1 context cleanup, merged from the racoons-integration lane.
+   * Off by default. M1 scope: cap + append-mode seal; library config and
+   * structured evidence still apply. In-memory ledger and blobs expire on unload.
+   * No recall tool is registered. Independent of other opt-in flags.
+   * Read once at apply like `enabled`.
+   */
+  racoonsEnabled: z.boolean().default(false).volatile(),
   /** Inbox root directory. Empty (default) disables intake even when enabled. */
   inboxDir: z.string().default("").volatile(),
   /**
@@ -159,6 +168,8 @@ export interface PluginConfig {
    */
   enabled: { get(): boolean };
   accessRequestTimeoutMs?: { get(): number | undefined };
+  /** Opt-in RACOONS M1; in-memory ledger, independent of other flags. */
+  racoonsEnabled?: { get(): boolean | undefined };
   /** Ticket 108: idle wake coalescing window in ms (0 = off). */
   wakeCoalesceWindowMs?: { get(): number | undefined };
   /** Ticket 113: opt-in file inbox (flat keys — see Config doc). */
@@ -1179,6 +1190,16 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
         inboxWatcher.stop();
       },
       "multitask-dispatcher: inbox watcher",
+    );
+  }
+
+  if (config.racoonsEnabled?.get() === true) {
+    ctx.effect(
+      () => registerRacoons(ctx, {
+        enabled: true,
+        shouldHandle: (sessionId) => lifecycle.isDispatcherSession(sessionId),
+      }),
+      "multitask-dispatcher: racoons",
     );
   }
 

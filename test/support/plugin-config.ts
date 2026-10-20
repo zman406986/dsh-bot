@@ -63,3 +63,13 @@ export function volatileConfig(values: TestConfigValues): TestPluginConfig {
     microcompactEnabled: mutableRef(values.microcompactEnabled),
   };
 }
+
+/**
+ * Plain config values (from the racoons-integration lane): what a test
+ * means, not what the host passes. For ref-shaped config use `volatileConfig`.
+ */
+export function pluginConfig(
+  values: { enabled?: boolean; racoonsEnabled?: boolean } = {},
+): { enabled: boolean; racoonsEnabled?: boolean } {
+  return { enabled: true, racoonsEnabled: false, ...values };
+}

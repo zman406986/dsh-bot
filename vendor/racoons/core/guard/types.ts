@@ -1,0 +1,84 @@
+import type { RacoonsConfig } from "../config.js";
+import type { EngineInput } from "../engine/types.js";
+import type { ArchiveRecord, Ledger } from "../ledger/types.js";
+import type { RulePlan } from "../rules/types.js";
+import type {
+  ByteRange, Bytes, EpisodeId, EventId, NodeId, RecallId,
+  Revision, RuleId, SessionId, Sha256, SourceRef,
+} from "../types/identity.js";
+import type { CapabilityFlags, SessionSnapshot } from "../types/transcript.js";
+
+export type { ArchiveRecord } from "../ledger/types.js";
+export type ValidationCode =
+  | "invalid-plan" | "stale-revision" | "wrong-session" | "wrong-rule"
+  | "unknown-source" | "source-hash-mismatch" | "source-length-mismatch"
+  | "invalid-range" | "overlapping-removals" | "conflicting-operations"
+  | "unaccounted-removal" | "unused-removal" | "invalid-note"
+  | "protected-content" | "outside-fresh-zone" | "pairing-changed"
+  | "adjacency-changed" | "retained-bytes-changed" | "invalid-line-range"
+  | "unsupported-capability" | "episode-open" | "episode-not-sealed"
+  | "episode-evidence-missing" | "hit-removal" | "late-seal"
+  | "cold-boundary-required" | "recursive-removal" | "recall-manifest-mismatch"
+  | "invalid-generated-record" | "breaker-disabled";
+
+export interface ValidationIssue {
+  readonly code: ValidationCode;
+  readonly ruleId: RuleId | null;
+  readonly operationIndex: number | null;
+  readonly nodeId: NodeId | null;
+  readonly detail: string;
+}
+export interface BreakerState {
+  readonly consecutiveValidationFailures: 0 | 1 | 2;
+  readonly disabled: boolean;
+}
+export interface RetainedCopy {
+  readonly sourceRange: ByteRange;
+  readonly outputRange: ByteRange;
+}
+export interface Replacement {
+  readonly source: SourceRef;
+  readonly bytes: Bytes;
+  readonly sha256: Sha256;
+  readonly retainedCopies: readonly RetainedCopy[];
+  readonly generatedRanges: readonly ByteRange[];
+  readonly evidenceRecallId: RecallId | null;
+}
+export interface RenderedRecord {
+  readonly recordId: string;
+  readonly bytes: Bytes;
+  readonly sha256: Sha256;
+}
+
+declare const guardValidated: unique symbol;
+export interface ValidatedApplication {
+  readonly [guardValidated]: true;
+  readonly sessionId: SessionId;
+  readonly eventId: EventId;
+  readonly baseRevision: Revision;
+  readonly phase: "entry" | "at-rest";
+  readonly mode: "entry" | "append" | "rewrite" | "rehydrate";
+  readonly applicationSha256: Sha256;
+  readonly replacements: readonly Replacement[];
+  readonly appendRecords: readonly RenderedRecord[];
+  readonly archives: readonly ArchiveRecord[];
+  readonly sealedEpisodeIds: readonly EpisodeId[];
+  readonly createdAtMs: number;
+}
+export interface ValidationInput {
+  readonly input: EngineInput;
+  readonly snapshot: SessionSnapshot;
+  readonly capabilities: CapabilityFlags;
+  readonly config: RacoonsConfig;
+  readonly plans: readonly RulePlan[];
+  readonly sealedEpisodeIds: readonly EpisodeId[];
+  readonly nowMs: number;
+}
+export type ValidationResult =
+  | { readonly ok: true; readonly application: ValidatedApplication; readonly breaker: BreakerState }
+  | { readonly ok: false; readonly issues: readonly ValidationIssue[]; readonly breaker: BreakerState };
+export interface GuardOptions {
+  readonly ledger: Ledger;
+  readonly initialState: BreakerState;
+}
+export type { Guard } from "./guard.js";

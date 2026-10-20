@@ -322,6 +322,7 @@ describe("feature flag — volatile settings form (0.2.1)", () => {
       "inboxEnabled",
       "inboxRescanIntervalMs",
       "microcompactEnabled",
+      "racoonsEnabled",
       "wakeCoalesceWindowMs",
     ]);
     for (const [field, schema] of Object.entries(dict)) {

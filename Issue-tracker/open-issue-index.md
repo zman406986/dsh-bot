@@ -2,7 +2,7 @@
 
 # Open ticket index
 
-Generated from `Issue-tracker/open/*.md` — 18 open tickets. The row set is owned by the folder, so a ticket that moves cannot leave a stale row behind (ticket 96). Titles and labels mirror each ticket's own lines.
+Generated from `Issue-tracker/open/*.md` — 20 open tickets. The row set is owned by the folder, so a ticket that moves cannot leave a stale row behind (ticket 96). Titles and labels mirror each ticket's own lines.
 
 | # | Ticket | Title | Status | Labels |
 |---|---|---|---|---|
@@ -24,3 +24,5 @@ Generated from `Issue-tracker/open/*.md` — 18 open tickets. The row set is own
 | 123 | [123-session-kind-indicators](open/123-session-kind-indicators.md) | Session-kind indicators: dispatcher glyph in the sidebar, worker marker in the conversation header | open | needs-triage |
 | 124 | [124-microcompact-boundary-marker](open/124-microcompact-boundary-marker.md) | Microcompact + compaction boundary marker (deterministic, no model call) | open | ready-for-agent |
 | 125 | [125-chatroom-broadcasting](open/125-chatroom-broadcasting.md) | Chatroom broadcasting: optional named room a dispatcher can address | open | ready-for-agent |
+| 126 | [126-racoons-integration](open/126-racoons-integration.md) | Add the RACOONS M1 integration | open | ready-for-human |
+| 127 | [127-racoons-desktop-launcher](open/127-racoons-desktop-launcher.md) | Add the RACOONS desktop launcher | open | ready-for-human |

@@ -1,0 +1,10 @@
+# RACOONS overlay for the racoons-integration worktree.
+# Run from that worktree: dsh --profile web --patch dev/cordis.racoons.patch.yml
+# The plugin path resolves relative to this patch, so it uses this worktree's build.
+# To turn RACOONS off, set racoonsEnabled to false below and restart dsh.
+- insert:
+    - id: multitask-dispatcher
+      name: '../lib/index.js'
+      config:
+        enabled: true
+        racoonsEnabled: true
