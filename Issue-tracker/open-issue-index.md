@@ -2,7 +2,7 @@
 
 # Open ticket index
 
-Generated from `Issue-tracker/open/*.md` — 6 open tickets. The row set is owned by the folder, so a ticket that moves cannot leave a stale row behind (ticket 96). Titles and labels mirror each ticket's own lines.
+Generated from `Issue-tracker/open/*.md` — 8 open tickets. The row set is owned by the folder, so a ticket that moves cannot leave a stale row behind (ticket 96). Titles and labels mirror each ticket's own lines.
 
 | # | Ticket | Title | Status | Labels |
 |---|---|---|---|---|
@@ -12,3 +12,5 @@ Generated from `Issue-tracker/open/*.md` — 6 open tickets. The row set is owne
 | 110 | [110-worker-activity-ring-wake-digest](open/110-worker-activity-ring-wake-digest.md) | Bounded worker-activity ring + inline wake digest | open | ready-for-agent |
 | 112 | [112-wake-bus-disposal-wiring](open/112-wake-bus-disposal-wiring.md) | Wire wake-bus disposal into plugin teardown (plus dead-field cleanup) | open | ready-for-agent |
 | 113 | [113-implement-file-inbox-per-adr-0023](open/113-implement-file-inbox-per-adr-0023.md) | Implement file inbox per ADR-0023 | open | ready-for-agent |
+| 114 | [114-racoons-integration](open/114-racoons-integration.md) | Add the RACOONS M1 integration | open | ready-for-human |
+| 115 | [115-racoons-desktop-launcher](open/115-racoons-desktop-launcher.md) | Add the RACOONS desktop launcher | open | ready-for-human |
