@@ -1,0 +1,6 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": { "rootDir": ".", "outDir": "lib" },
+  "include": ["**/*.ts"],
+  "exclude": ["lib", "public-types.d.ts"]
+}

@@ -1,0 +1,11 @@
+{
+  "name": "racoons-dsh",
+  "version": "0.1.0-m1",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "exports": { "./*.js": { "types": "./lib/*.d.ts", "import": "./lib/*.js" } },
+  "files": ["lib"],
+  "dependencies": { "@racoons/core": "0.1.0-m1" },
+  "engines": { "node": ">=22" }
+}

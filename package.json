@@ -3,6 +3,7 @@
   "description": "Always-on multitask dispatcher plugin for DeepSeek Harness (dsh)",
   "version": "0.1.0",
   "type": "module",
+  "workspaces": ["vendor/racoons/core", "vendor/racoons/adapter"],
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "dsh": {
@@ -28,12 +29,16 @@
   "files": [
     "lib",
     "client",
-    "README.md"
+    "README.md",
+    "vendor/racoons"
   ],
+  "bundledDependencies": ["@racoons/core", "racoons-dsh"],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build:vendor": "tsc -p vendor/racoons/core/tsconfig.json && tsc -p vendor/racoons/adapter/tsconfig.json",
+    "build": "npm run build:vendor && tsc -p tsconfig.json",
     "build:client": "node --import tsx scripts/build-client.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "typecheck": "npm run build:vendor && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "pretest": "npm run build:vendor",
     "test": "tsx --tsconfig tsconfig.client.json --test test/**/*.test.ts",
     "lint:docs": "node tools/doc-lint.mjs && node tools/issue-index.mjs --check && node tools/adr-index.mjs --check",
     "prepare": "npm run build",
@@ -55,7 +60,9 @@
     "@deepseek-ai/cordis": "*"
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "*"
+    "@deepseek-ai/schemastery": "*",
+    "@racoons/core": "0.1.0-m1",
+    "racoons-dsh": "0.1.0-m1"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

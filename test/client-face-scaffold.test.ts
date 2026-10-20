@@ -491,6 +491,10 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
       "settings.card.field.inboxEnabled.label",
       "settings.card.field.inboxRescanIntervalMs.hint",
       "settings.card.field.inboxRescanIntervalMs.label",
+      // Ticket 114: the RACOONS opt-in field (one label/hint pair per schema
+      // field, in the same pairing rule).
+      "settings.card.field.racoonsEnabled.hint",
+      "settings.card.field.racoonsEnabled.label",
       // Ticket 108: the wake-coalescing window field (one label/hint pair
       // per schema field, in the same pairing rule).
       "settings.card.field.wakeCoalesceWindowMs.hint",

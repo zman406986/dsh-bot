@@ -51,6 +51,7 @@ import {
 } from "./adapter/index.js";
 import { registerWorkerAccessTool, createPendingAskSettleWaiter } from "./adapter/worker-access-tool.js";
 import type { WorkerActivityEntry } from "./adapter/cordis-dsh-host.js";
+import { registerRacoons } from "./adapter/racoons.js";
 import { clampActivity, clampReport } from "./core/report-clamp.js";
 import { createWorkerAgentDef } from "./worker/agent-def.js";
 
@@ -95,6 +96,12 @@ export const Config = z.object({
    * `scope.set` persists flat fields only. Read once at apply like `enabled`.
    */
   inboxEnabled: z.boolean().default(false),
+  /**
+   * Off by default. M1 scope: cap + append-mode seal; library config and
+   * structured evidence still apply. In-memory ledger and blobs expire on unload.
+   * No recall tool is registered. Independent of other opt-in flags.
+   */
+  racoonsEnabled: z.boolean().default(false),
   /** Inbox root directory. Empty (default) disables intake even when enabled. */
   inboxDir: z.string().default(""),
   /**
@@ -136,6 +143,8 @@ export const inject: string[] = [
 
 export interface PluginConfig {
   enabled: boolean;
+  /** Opt-in RACOONS M1; in-memory ledger, independent of other flags. */
+  racoonsEnabled?: boolean;
   accessRequestTimeoutMs?: number;
   /** Ticket 108: idle wake coalescing window in ms (0 = off). */
   wakeCoalesceWindowMs?: number;
@@ -1154,6 +1163,16 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
         inboxWatcher.stop();
       },
       "multitask-dispatcher: inbox watcher",
+    );
+  }
+
+  if (config.racoonsEnabled === true) {
+    ctx.effect(
+      () => registerRacoons(ctx, {
+        enabled: true,
+        shouldHandle: (sessionId) => lifecycle.isDispatcherSession(sessionId),
+      }),
+      "multitask-dispatcher: racoons",
     );
   }
 
