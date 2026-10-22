@@ -1,6 +1,6 @@
 # 131 — Second-level dispatcher spawn is admitted: the host depth ceiling never refuses a mitosis hop
 
-**Status:** deferred
+**Status:** resolved
 **Labels:** needs-info
 **Deferred:** 2026-10-22 — blocked on a human decision: current behavior is ADR-0025-ruled (no mitosis bound of ours); see the 2026-10-22 comment for citations and both unblock options.
 **Blocked by:** nothing
@@ -83,3 +83,7 @@ Code unchanged: `src/worker/agent-def.ts:105-107` still returns `parentDepth + 2
 ### 2026-10-22 — deferred by agent ruling (subject to human reversal)
 
 Deferred 2026-10-22 by agent ruling (subject to human reversal), which supersedes the "ticket stays open" line above. This is not a defect: admitting a second-level dispatcher spawn is ruled intended by accepted ADR-0025, which mandates `maxDepth = parentDepth + 2` per hop and forbids any gate of ours, and `test/spawn-dispatcher-activation.test.ts:606` already pins the behaviour. Unblocking needs a dated human ruling on file, either (A) an ADR-0025 amendment choosing a generation bound and stating its tradeoff, which then needs a code ticket, or (B) a dated ruling that depth is not a mitosis bound, plus trimming the stale "host depth ceiling" wording in ADR-0025 §Starting bounds and PRD lines 136, 150, and 434. The 2026-10-22 comment above carries the full citations for both paths; this comment records only the parking decision. Move back to `open/` when that ruling lands.
+
+### 2026-10-22 — resolved by owner ruling
+
+The owner ruled on 2026-10-22 (spoken, this date): the unbounded mitosis hop is **not a problem** — no depth cap is wanted. This is the dated human ruling the deferral was waiting for, and it picks neither unblock option because neither change is wanted: ADR-0025 stays as accepted (no bound of ours), no ADR amendment, no PRD trim. The behaviour pinned at `test/spawn-dispatcher-activation.test.ts:606` stands as intended. A matching dated note was appended to ADR-0025 §Alternatives left open. Ticket closed; nothing to implement.

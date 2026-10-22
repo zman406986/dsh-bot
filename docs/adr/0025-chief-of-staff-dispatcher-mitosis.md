@@ -64,6 +64,8 @@ The first implementation adds no cap of its own and leans on what the host alrea
 
 **Alternatives left open.** The design note's proposals — generation 1 only, 4 live spawned dispatchers, `recursion-limit` and `dispatcher-cap` refusals, a durable spawn counter — are recorded there as proposals only. They remain available as future options; adopting one needs its own ticket stating the tradeoff, not a fresh ruling. A child dispatcher may itself summon another dispatcher; the host's depth and pool values are what stop it in the first implementation.
 
+**Dated note 2026-10-22.** The owner ruled the unbounded mitosis hop is not a problem and no cap is wanted (ticket 131, resolved on that ruling). The alternatives above stay unimplemented unless a future dated ruling says otherwise.
+
 ## Consequences
 
 - The dispatcher topology is no longer flat: it becomes dispatcher trees. ADR-0003's flat-team intent survives in the worker rule.
