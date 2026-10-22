@@ -46,7 +46,7 @@ import {
   type ToolsLike,
 } from "../src/adapter/index.js";
 import { resolveSessionKind } from "../src/client/session-kind.js";
-import { DISPATCHER_SESSION_TABLE_NAME } from "../src/adapter/durable-marker.js";
+import { DISPATCHER_SESSION_TABLE_NAME, WORKER_SESSION_TABLE_NAME } from "../src/adapter/durable-marker.js";
 import { SPAWN_DISPATCHER_TOOL } from "../src/core/policy/prompts.js";
 import { WORKER_PERSONA_SECTION } from "../src/worker/preset.js";
 
@@ -209,16 +209,51 @@ function createActivationCtx(storage: StorageTables = new Map()) {
   const startActivationCalls: ActivationSpecLike[] = [];
   const children: StubChild[] = [];
   const agentsById = new Map<string, AgentLike>();
+  /** Ticket 138: every host `sendMessage`, with its resume payload. */
+  const sendMessageCalls: Array<{
+    senderSessionId: string;
+    targetId: string;
+    text: string;
+  }> = [];
   let nextChild = 1;
   let heldGate: (() => void) | null = null;
   let holdNext = false;
   let announceChildren = true;
   let sabotageNext = false;
+  /**
+   * Ticket 142: park cold resumes so a test can send TWICE before the child
+   * returns (the coalescing case) and then release them in order. The first
+   * released call recreates the child and announces it; later ones find it
+   * live, exactly as the host's own `sendMessage` does.
+   */
+  let holdResumes = false;
+  const parkedResumes: Array<{
+    sender: AgentLike;
+    targetId: string;
+    text: string;
+  }> = [];
 
   const fire = (name: string, payload: unknown): void => {
     for (const cb of [...(listeners.get(name) ?? [])]) {
       (cb as (arg: unknown) => void)(payload);
     }
+  };
+
+  /** Ticket 138/142: the host's cold-resume of an absent child. */
+  const resumeTarget = (sender: AgentLike, target: string): void => {
+    if (agentsById.has(target)) return;
+    const parentSessionId = String(sender.session.id);
+    const parentDepth = sender.session.header?.delegationDepth ?? 0;
+    const resumed = createScopedAgent(target, {
+      topLevel: false,
+      depth: parentDepth + 1,
+      parentSessionId,
+    });
+    children.push({ id: target, agent: resumed });
+    agentsById.set(target, resumed);
+    // The host announces a cold resume under its own source value — the shape
+    // tickets 130/142 handle.
+    fire("agent/created", { agent: resumed, source: "resume" });
   };
 
   const ctx = {
@@ -352,8 +387,32 @@ function createActivationCtx(storage: StorageTables = new Map()) {
         };
       },
       interrupt() {},
-      async sendMessage() {
-        return "msg-stub";
+      /**
+       * Ticket 138: the installed host's `sendMessage` cold-resumes an absent
+       * child (`docs/research/dsh-adapter-api-notes.md:83`: "steers nearest
+       * step if running; wakes if idle; cold-resumes absent child"). Modelled
+       * here so wake-on-send is measured against the real seam instead of a
+       * no-op: an absent target is re-created, announced with
+       * `source: "resume"`, and returned as live.
+       */
+      async sendMessage(
+        sender: AgentLike,
+        targetId: unknown,
+        content: Array<{ type?: string; text?: string }>,
+      ) {
+        const target = String(targetId);
+        const text = content.map((block) => block.text ?? "").join("");
+        sendMessageCalls.push({
+          senderSessionId: String(sender.session.id),
+          targetId: target,
+          text,
+        });
+        if (holdResumes) {
+          parkedResumes.push({ sender, targetId: target, text });
+          return `msg-${target}`;
+        }
+        resumeTarget(sender, target);
+        return `msg-${target}`;
       },
     },
     agents: {
@@ -393,6 +452,7 @@ function createActivationCtx(storage: StorageTables = new Map()) {
     startActivationCalls,
     children,
     agentsById,
+    sendMessageCalls,
     /** Park the NEXT `agent/created` announcement until `releaseHeld()`. */
     holdNextActivation() {
       holdNext = true;
@@ -410,6 +470,20 @@ function createActivationCtx(storage: StorageTables = new Map()) {
     sabotageNextChildRegistration() {
       sabotageNext = true;
     },
+    /** Ticket 142: park cold resumes until `releaseResumes()`. */
+    holdResumes() {
+      holdResumes = true;
+    },
+    /** Deliver every parked resume, in call order. */
+    async releaseResumes() {
+      holdResumes = false;
+      const parked = parkedResumes.splice(0);
+      for (const call of parked) {
+        resumeTarget(call.sender, call.targetId);
+      }
+      await Promise.resolve();
+    },
+    parkedResumes,
     commandNames: () => [...commands.keys()],
     globalToolNames: () => [...globalTools.keys()],
     globalTool: (name: string) => globalTools.get(name),
@@ -511,6 +585,75 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     assert.ok(textOf(child.agent.injected[0]).includes("# Multitask dispatcher"));
     // A dispatcher child is NOT composed as a worker: no contract, no barrier.
     assert.ok(!child.agent.scopedSections.includes(WORKER_PERSONA_SECTION));
+  });
+
+  it("the spawned origin reaches the policy text; the user-started text is untouched (ticket 141)", async () => {
+    const ctx = createActivationCtx();
+    apply(ctx, volatileConfig({ enabled: true }));
+    const creator = createScopedAgent("chat-1");
+    await activateDispatcher(ctx, creator);
+    await spawnPeer(creator);
+    const child = ctx.children[0] as StubChild;
+
+    const creatorPolicy = textOf(creator.injected[0]);
+    const childPolicy = textOf(child.agent.injected[0]);
+
+    // The user-started dispatcher keeps the original opener and delivery line.
+    assert.ok(
+      creatorPolicy.includes(
+        "You are the user's main assistant in this chat.",
+      ),
+    );
+    assert.ok(creatorPolicy.includes("Only you deliver."));
+    assert.ok(!creatorPolicy.includes("Another dispatcher summoned you."));
+
+    // The summoned dispatcher is told what it is, and where its results go.
+    assert.ok(
+      childPolicy.includes("Another dispatcher summoned you."),
+      "the child policy names the summoner",
+    );
+    assert.ok(
+      childPolicy.includes(
+        "your results go back to that dispatcher, not to a user",
+      ),
+    );
+    assert.ok(
+      !childPolicy.includes("You are the user's main assistant in this chat."),
+      "the child is never told it is the user's assistant",
+    );
+    assert.ok(
+      !childPolicy.includes("Only you deliver."),
+      "the child is never told it owns the user channel",
+    );
+
+    // Both surfaces carry the same eight dispatcher tools.
+    assert.deepEqual(creator.scopedTools.names().sort(), DISPATCHER_TOOL_SET);
+    assert.deepEqual(child.agent.scopedTools.names().sort(), DISPATCHER_TOOL_SET);
+  });
+
+  it("a cold-resumed child is re-activated with the spawned wording (ticket 141)", async () => {
+    const storage: StorageTables = new Map();
+    const first = createActivationCtx(storage);
+    apply(first, volatileConfig({ enabled: true }));
+    const creator = createScopedAgent("chat-1");
+    await activateDispatcher(first, creator);
+    const spawned = await spawnPeer(creator);
+    const dispatcherId = String(spawned.dispatcher_id);
+
+    const second = createActivationCtx(storage);
+    apply(second, volatileConfig({ enabled: true }));
+    const resumedChild = createScopedAgent(dispatcherId, {
+      topLevel: false,
+      parentSessionId: "chat-1",
+      agentPreset: "standard",
+    });
+    second.agentsById.set(dispatcherId, resumedChild);
+    second.fire("agent/created", { agent: resumedChild, source: "resume" });
+    await drain();
+
+    const policy = textOf(resumedChild.injected[0]);
+    assert.ok(policy.includes("Another dispatcher summoned you."));
+    assert.ok(!policy.includes("You are the user's main assistant in this chat."));
   });
 
   it("activate() still refuses a non-top-level user chat — the command gate moved nowhere", async () => {
@@ -916,7 +1059,10 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     const creator = createScopedAgent("chat-1");
     await activateDispatcher(ctx, creator);
 
-    assert.equal(storage.get(DISPATCHER_SESSIONS_TABLE), undefined);
+    // Ticket 138: an activation now WARMS the mark mirror (read-only), so the
+    // table may exist here — what must not exist is a mark. The pin's intent
+    // is unchanged: nothing is written before a dispatcher is spawned.
+    assert.deepEqual([...(storage.get(DISPATCHER_SESSIONS_TABLE) ?? [])], []);
 
     const spawned = await spawnPeer(creator);
     const dispatcherId = String(spawned.dispatcher_id);
@@ -1042,5 +1188,457 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
 
     assert.deepEqual(plainChild.scopedTools.names(), []);
     assert.equal(plainChild.injected.length, 0);
+  });
+
+  /**
+   * Ticket 138 (owner ruling 2026-10-22: "bots should be wake-able, both
+   * dispatchers and children" — the DISPATCHERS half).
+   *
+   * A send to a marked dispatcher that is NOT live must be accepted and must
+   * wake it: the adapter cold-resumes the child through the host's own
+   * `subagents.sendMessage` (the documented resume seam), the host announces
+   * `agent/created` with `source: "resume"`, ticket 130's activation path
+   * brings the dispatcher surface back, and the parked wake turn delivers the
+   * peer message. A target with NO mark keeps the ticket-70 refusal.
+   */
+  it("a send to a marked dispatcher that is not live cold-resumes and wakes it (ticket 138)", async () => {
+    const storage: StorageTables = new Map();
+    const first = createActivationCtx(storage);
+    apply(first, volatileConfig({ enabled: true }));
+    const creator = createScopedAgent("chat-1");
+    await activateDispatcher(first, creator);
+    const spawned = await spawnPeer(creator);
+    const dispatcherId = String(spawned.dispatcher_id);
+
+    // The mark now records the spawner — the sender a cold resume needs.
+    const marks = await readMarks(storage);
+    assert.equal(
+      (marks.get(dispatcherId) as { parentSessionId?: string })
+        .parentSessionId,
+      "chat-1",
+    );
+
+    // ── process restart ────────────────────────────────────────────────
+    // Same storage, fresh plugin + host. NOTHING re-announces the child:
+    // the send is the only thing that can bring it back.
+    const second = createActivationCtx(storage);
+    apply(second, volatileConfig({ enabled: true }));
+    await drain();
+    const creatorTwo = createScopedAgent("chat-1");
+    await activateDispatcher(second, creatorTwo);
+    assert.equal(second.children.length, 0, "the child is not live yet");
+
+    const sent = await callScoped(creatorTwo, "message_agent", {
+      target: dispatcherId,
+      text: "Pick the work back up.",
+    });
+    assert.equal(sent.ok, true, JSON.stringify(sent));
+    if (!sent.ok) return;
+    assert.equal(sent.delivered_as, "peer");
+    await drain();
+
+    // (a) The resume went through the host's own seam, from the SPAWNER.
+    assert.equal(second.sendMessageCalls.length, 1);
+    const resume = second.sendMessageCalls[0];
+    assert.ok(resume);
+    assert.equal(resume.targetId, dispatcherId);
+    assert.equal(resume.senderSessionId, "chat-1");
+    // The payload is the resume cue, never the peer text — the peer message
+    // rides the parked wake turn, so it is not delivered twice.
+    assert.ok(resume.text.includes("resumed"));
+    assert.ok(!resume.text.includes("Pick the work back up."));
+
+    // (b) The child exists again and came back AS A DISPATCHER.
+    const resumed = second.children.find((child) => child.id === dispatcherId);
+    assert.ok(resumed, "the host's sendMessage resumed the child");
+    assert.deepEqual(resumed.agent.scopedTools.names().sort(), DISPATCHER_TOOL_SET);
+    assert.equal(resumed.agent.injected.length, 1);
+
+    // (c) It received the peer message as its wake turn, with the structured
+    // agent-message origin — not as user input.
+    assert.equal(resumed.agent.followed.length, 1);
+    const wake = resumed.agent.followed[0] as {
+      content?: Array<{ text?: string }>;
+      source?: { kind?: string; senderSessionId?: string };
+    };
+    const wakeText = textOf(wake);
+    assert.ok(wakeText.includes("Pick the work back up."));
+    assert.equal(wake.source?.kind, "agent-message");
+    assert.equal(wake.source?.senderSessionId, "chat-1");
+    // Exactly one activation: a second resume would throw on the scoped
+    // registry (duplicate tool names) or add a second policy inject.
+    assert.equal(resumed.agent.injected.length, 1);
+  });
+
+  it("a marked dispatcher that IS live takes the normal wake path — no resume, no double activation (ticket 138)", async () => {
+    const storage: StorageTables = new Map();
+    const first = createActivationCtx(storage);
+    apply(first, volatileConfig({ enabled: true }));
+    const creator = createScopedAgent("chat-1");
+    await activateDispatcher(first, creator);
+    const spawned = await spawnPeer(creator);
+    const dispatcherId = String(spawned.dispatcher_id);
+
+    const second = createActivationCtx(storage);
+    apply(second, volatileConfig({ enabled: true }));
+    await drain();
+    const creatorTwo = createScopedAgent("chat-1");
+    await activateDispatcher(second, creatorTwo);
+
+    // The child IS live: the host announced it (any announcement, not just a
+    // resume) and ticket 130 re-activated it from the mark.
+    const live = createScopedAgent(dispatcherId, {
+      topLevel: false,
+      parentSessionId: "chat-1",
+    });
+    second.agentsById.set(dispatcherId, live);
+    second.fire("agent/created", { agent: live, source: "startup" });
+    await drain();
+    assert.equal(live.injected.length, 1);
+
+    const sent = await callScoped(creatorTwo, "message_agent", {
+      target: dispatcherId,
+      text: "Still there?",
+    });
+    assert.equal(sent.ok, true, JSON.stringify(sent));
+    await drain();
+
+    // Normal path: one followup, no resume call, one activation.
+    assert.equal(second.sendMessageCalls.length, 0);
+    assert.equal(live.followed.length, 1);
+    assert.ok(textOf(live.followed[0]).includes("Still there?"));
+    assert.equal(live.injected.length, 1);
+    assert.deepEqual(live.scopedTools.names().sort(), DISPATCHER_TOOL_SET);
+  });
+
+  it("an unmarked unknown target still refuses unknown-target through the real wiring (ticket 138 fence)", async () => {
+    const ctx = createActivationCtx();
+    apply(ctx, volatileConfig({ enabled: true }));
+    const creator = createScopedAgent("chat-1");
+    await activateDispatcher(ctx, creator);
+
+    const refused = await callScoped(creator, "message_agent", {
+      target: "never-spawned-session",
+      text: "hello?",
+    });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.reason, "unknown-target");
+    assert.equal(ctx.sendMessageCalls.length, 0);
+    assert.equal(ctx.children.length, 0);
+  });
+
+  /**
+   * Ticket 142 (owner ruling 2026-10-22: "yes bots should be wake-able, both
+   * dispatchers and children" — the CHILDREN half).
+   *
+   * The worker half parallels the dispatcher half: the SAME `sendMessage`
+   * cold-resume seam, the same cue payload and the same "deliver on
+   * activation" rule. What is different is what has to come back with the
+   * child — a worker must be re-composed as a worker (contract + barrier +
+   * reply tool), never inherit the dispatcher surface — and that the core's
+   * ticket-59 unknown-state hold is resolved on live evidence.
+   *
+   * The storage tables are the only thing that survives the restart, exactly
+   * as in the ticket-130/138 tests above.
+   */
+  const WORKER_SESSIONS_TABLE = WORKER_SESSION_TABLE_NAME;
+
+  async function readWorkerSessions(
+    storage: StorageTables,
+  ): Promise<Map<string, unknown>> {
+    return new Map(storage.get(WORKER_SESSIONS_TABLE) ?? []);
+  }
+
+  it("writes a durable worker session row at spawn, with the spawning dispatcher as parent (ticket 142)", async () => {
+    const storage: StorageTables = new Map();
+    const ctx = createActivationCtx(storage);
+    apply(ctx, volatileConfig({ enabled: true }));
+    const creator = createScopedAgent("chat-1");
+    await activateDispatcher(ctx, creator);
+
+    // Nothing is written before a worker exists.
+    assert.deepEqual([...(storage.get(WORKER_SESSIONS_TABLE) ?? [])], []);
+
+    const spawned = await callScoped(creator, "spawn_worker", {
+      stream_key: "migrate",
+      title: "Migration",
+      prompt: "Do it.",
+    });
+    assert.equal(spawned.ok, true, JSON.stringify(spawned));
+    const workerId = String(spawned.worker_id);
+
+    const rows = await readWorkerSessions(storage);
+    assert.deepEqual([...rows.keys()], [workerId]);
+    assert.deepEqual(rows.get(workerId), {
+      sessionId: workerId,
+      parentSessionId: "chat-1",
+    });
+  });
+
+  it("a settled worker's row is dropped, so the store never wakes a finished worker (ticket 142)", async () => {
+    const storage: StorageTables = new Map();
+    const ctx = createActivationCtx(storage);
+    apply(ctx, volatileConfig({ enabled: true }));
+    const creator = createScopedAgent("chat-1");
+    await activateDispatcher(ctx, creator);
+
+    const spawned = await callScoped(creator, "spawn_worker", {
+      stream_key: "migrate",
+      title: "Migration",
+      prompt: "Do it.",
+    });
+    const workerId = String(spawned.worker_id);
+    assert.equal((await readWorkerSessions(storage)).size, 1);
+
+    ctx.fire("agent/status", {
+      agent: { session: { id: workerId, header: { parentSession: "chat-1" } } },
+      status: "running",
+    });
+    ctx.fire("subagent/end", {
+      id: workerId,
+      stopReason: "completed",
+      lastAssistantMessage: [{ type: "text", text: "Done." }],
+    });
+    await drain();
+
+    // The OBLIGATION marker stays (a result may still be owed a delivery);
+    // the WAKE row goes (a finished worker must not be woken back).
+    assert.equal((await readWorkerSessions(storage)).size, 0);
+    const refusedSteer = await callScoped(creator, "message_agent", {
+      target: workerId,
+      text: "one more thing",
+    });
+    assert.equal(refusedSteer.ok, false);
+    assert.equal(refusedSteer.reason, "not-running");
+  });
+});
+
+describe("ticket 142 — a durably marked worker is wake-able by a send", () => {
+  it("a send to a marked worker that is not live cold-resumes it and delivers exactly once", async () => {
+    const storage: StorageTables = new Map();
+    const first = createActivationCtx(storage);
+    apply(first, volatileConfig({ enabled: true }));
+    const creator = createScopedAgent("chat-1");
+    await activateDispatcher(first, creator);
+    const spawned = await callScoped(creator, "spawn_worker", {
+      stream_key: "migrate",
+      title: "Migration",
+      prompt: "Do the migration.",
+    });
+    assert.equal(spawned.ok, true, JSON.stringify(spawned));
+    const workerId = String(spawned.worker_id);
+    const workerDepth = first.children[0]?.agent.session.header
+      ?.delegationDepth;
+
+    // ── process restart ────────────────────────────────────────────────
+    // Same storage, fresh plugin + host. Nothing announces the worker: the
+    // send is the only thing that can bring it back.
+    const second = createActivationCtx(storage);
+    apply(second, volatileConfig({ enabled: true }));
+    await drain();
+    const creatorTwo = createScopedAgent("chat-1");
+    await activateDispatcher(second, creatorTwo);
+    // The rebuild ran: the live marker is an unknown-state hold, not a roster
+    // record, which is exactly why the id needs the durable wake row.
+    const holdsBefore = await callScoped(creatorTwo, "check_workers", {});
+    assert.deepEqual(holdsBefore.rows, []);
+    assert.equal(second.children.length, 0, "the worker is not live yet");
+
+    const sent = await callScoped(creatorTwo, "message_agent", {
+      target: workerId,
+      text: "Pick the migration back up.",
+    });
+    assert.equal(sent.ok, true, JSON.stringify(sent));
+    if (!sent.ok) return;
+    assert.equal(sent.delivered_as, "steer");
+    await drain();
+
+    // (a) One cold resume, through the host seam, from the SPAWNER, carrying
+    // the cue rather than the correction text.
+    const resumes = second.sendMessageCalls.filter((call) =>
+      call.text.includes("resumed"),
+    );
+    assert.equal(resumes.length, 1);
+    const resume = resumes[0];
+    assert.ok(resume);
+    assert.equal(resume.targetId, workerId);
+    assert.equal(resume.senderSessionId, "chat-1");
+    assert.ok(!resume.text.includes("Pick the migration back up."));
+
+    // (b) The worker exists again and was composed as a WORKER: no dispatcher
+    // tools, its own reply tool, and the contract section on its scope.
+    const resumed = second.children.find((child) => child.id === workerId);
+    assert.ok(resumed, "the host's sendMessage resumed the worker");
+    assert.deepEqual(resumed.agent.scopedTools.names(), ["reply_to_dispatcher"]);
+    assert.deepEqual(resumed.agent.scopedSections, [WORKER_PERSONA_SECTION]);
+    assert.equal(resumed.agent.injected.length, 0, "no dispatcher policy");
+
+    // (c) The correction was delivered as its own message, exactly once, with
+    // the parent-correction wrapper a live steer gets.
+    const delivered = second.sendMessageCalls.filter(
+      (call) => call.text.includes("Pick the migration back up."),
+    );
+    assert.equal(delivered.length, 1);
+    assert.ok(delivered[0]?.text.includes("[Parent correction]"));
+
+    // (d) The core's unknown-state hold became a live roster record.
+    const roster = await callScoped(creatorTwo, "check_workers", {});
+    assert.deepEqual(
+      (roster.rows as Array<{ worker_id: string }>).map((row) => row.worker_id),
+      [workerId],
+    );
+
+    // Depth is the persisted one, not recomputed.
+    assert.equal(
+      resumed.agent.session.header?.delegationDepth,
+      workerDepth ?? 1,
+    );
+  });
+
+  it("two sends before the worker returns coalesce: one resume, one delivered correction (the latest)", async () => {
+    const storage: StorageTables = new Map();
+    const first = createActivationCtx(storage);
+    apply(first, volatileConfig({ enabled: true }));
+    const creator = createScopedAgent("chat-1");
+    await activateDispatcher(first, creator);
+    const spawned = await callScoped(creator, "spawn_worker", {
+      stream_key: "migrate",
+      title: "Migration",
+      prompt: "Do the migration.",
+    });
+    const workerId = String(spawned.worker_id);
+
+    const second = createActivationCtx(storage);
+    apply(second, volatileConfig({ enabled: true }));
+    await drain();
+    const creatorTwo = createScopedAgent("chat-1");
+    await activateDispatcher(second, creatorTwo);
+
+    second.holdResumes();
+    const firstSend = await callScoped(creatorTwo, "message_agent", {
+      target: workerId,
+      text: "first instruction",
+    });
+    assert.equal(firstSend.ok, true, JSON.stringify(firstSend));
+    const secondSend = await callScoped(creatorTwo, "message_agent", {
+      target: workerId,
+      text: "second instruction",
+    });
+    assert.equal(secondSend.ok, true, JSON.stringify(secondSend));
+    // Both accepted, one resume requested (the guard), nothing delivered yet.
+    assert.equal(second.sendMessageCalls.length, 1);
+
+    await second.releaseResumes();
+    await drain();
+
+    // One resume call total, and only the LATEST correction is delivered —
+    // the same last-wins rule the live steer queue applies.
+    const resumeCalls = second.sendMessageCalls.filter((call) =>
+      call.text.includes("resumed"),
+    );
+    assert.equal(resumeCalls.length, 1);
+    const delivered = second.sendMessageCalls.filter(
+      (call) => !call.text.includes("resumed"),
+    );
+    assert.equal(delivered.length, 1);
+    assert.ok(delivered[0]?.text.includes("second instruction"));
+    assert.ok(!delivered[0]?.text.includes("first instruction"));
+  });
+
+  it("a second announcement of the resumed worker delivers nothing new (no double delivery)", async () => {
+    const storage: StorageTables = new Map();
+    const first = createActivationCtx(storage);
+    apply(first, volatileConfig({ enabled: true }));
+    const creator = createScopedAgent("chat-1");
+    await activateDispatcher(first, creator);
+    const spawned = await callScoped(creator, "spawn_worker", {
+      stream_key: "migrate",
+      title: "Migration",
+      prompt: "Do the migration.",
+    });
+    const workerId = String(spawned.worker_id);
+
+    const second = createActivationCtx(storage);
+    apply(second, volatileConfig({ enabled: true }));
+    await drain();
+    const creatorTwo = createScopedAgent("chat-1");
+    await activateDispatcher(second, creatorTwo);
+
+    await callScoped(creatorTwo, "message_agent", {
+      target: workerId,
+      text: "resume it",
+    });
+    await drain();
+    const afterFirst = second.sendMessageCalls.length;
+    assert.equal(afterFirst, 2, "one resume + one correction");
+
+    const resumed = second.children.find((child) => child.id === workerId);
+    assert.ok(resumed);
+    // The host re-announces the same live session (a second resume, a
+    // reconnect): the parked slot is empty, so nothing is sent again.
+    second.fire("agent/created", { agent: resumed.agent, source: "resume" });
+    await drain();
+    assert.equal(second.sendMessageCalls.length, afterFirst);
+  });
+
+  it("an UNMARKED dead worker keeps the fence: unknown-worker from steer_worker, nothing resumed", async () => {
+    const ctx = createActivationCtx();
+    apply(ctx, volatileConfig({ enabled: true }));
+    const creator = createScopedAgent("chat-1");
+    await activateDispatcher(ctx, creator);
+
+    const steered = await callScoped(creator, "steer_worker", {
+      worker_id: "never-spawned-worker",
+      message: "try harder",
+    });
+    assert.equal(steered.ok, false);
+    assert.equal(steered.reason, "unknown-worker");
+    assert.equal(ctx.sendMessageCalls.length, 0);
+    assert.equal(ctx.children.length, 0);
+
+    const messaged = await callScoped(creator, "message_agent", {
+      target: "never-spawned-worker",
+      text: "hello?",
+    });
+    assert.equal(messaged.ok, false);
+    assert.equal(messaged.reason, "unknown-target");
+    assert.equal(ctx.sendMessageCalls.length, 0);
+  });
+
+  it("a LIVE worker takes the unchanged steer path — no resume, no re-composition", async () => {
+    const storage: StorageTables = new Map();
+    const ctx = createActivationCtx(storage);
+    apply(ctx, volatileConfig({ enabled: true }));
+    const creator = createScopedAgent("chat-1");
+    await activateDispatcher(ctx, creator);
+    const spawned = await callScoped(creator, "spawn_worker", {
+      stream_key: "migrate",
+      title: "Migration",
+      prompt: "Do the migration.",
+    });
+    const workerId = String(spawned.worker_id);
+    await drain();
+    const child = ctx.children.find((entry) => entry.id === workerId);
+    assert.ok(child);
+    const toolsBefore = [...child.agent.scopedTools.names()];
+    const sectionsBefore = [...child.agent.scopedSections];
+
+    ctx.fire("agent/status", {
+      agent: child.agent,
+      status: "running",
+    });
+    const sent = await callScoped(creator, "message_agent", {
+      target: workerId,
+      text: "tweak the plan",
+    });
+    assert.equal(sent.ok, true, JSON.stringify(sent));
+    await drain();
+
+    // The correction went into the worker's own turn, not through a resume.
+    assert.equal(ctx.sendMessageCalls.length, 0);
+    // Composition was not re-applied: no duplicate section, no new tool. The
+    // scoped tool registry would have thrown on a duplicate register call.
+    assert.deepEqual(child.agent.scopedTools.names(), toolsBefore);
+    assert.deepEqual(child.agent.scopedSections, sectionsBefore);
   });
 });

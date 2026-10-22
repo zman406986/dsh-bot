@@ -26,6 +26,8 @@ import {
 } from "../src/core/policy/prompts.js";
 import { emptyReportPlaceholder, REPORT_CLAMP_CHARS } from "../src/core/report-clamp.js";
 import {
+  formatDormantSteerNote,
+  formatMessageAgentDormantSteerNote,
   formatSpawnAck,
   formatSteerNote,
   formatStopNote,
@@ -234,6 +236,101 @@ describe("wake-turn assembler", () => {
   });
 });
 
+describe("spawned dispatcher policy variant (ticket 141)", () => {
+  // The two activation paths share one policy block. Only the statements that
+  // are FALSE for a summoned dispatcher may differ; everything else is
+  // byte-identical, so the user-started text is pinned against the default.
+
+  it("user-started text is byte-identical to the pre-141 default", () => {
+    const byDefault = buildDispatcherPolicySection();
+    assert.equal(byDefault, buildDispatcherPolicySection("user"));
+    assert.equal(assembleSessionPolicy(true), byDefault);
+    assert.equal(assembleSessionPolicy(true, "user"), byDefault);
+    assert.ok(byDefault.includes("You are the user's main assistant in this chat."));
+    assert.ok(byDefault.includes("Only you deliver."));
+  });
+
+  it("spawned text says what the session is: summoned by a dispatcher, results go back to it", () => {
+    const spawned = buildDispatcherPolicySection("spawned");
+    assert.ok(
+      spawned.includes("Another dispatcher summoned you."),
+      "the opener names the summoner",
+    );
+    assert.ok(
+      spawned.includes(
+        "your results go back to that dispatcher, not to a user",
+      ),
+      "the opener states where results go",
+    );
+    assert.ok(
+      spawned.includes(
+        "Mark an entry `completed` at your first report of its outcome to the dispatcher that summoned you.",
+      ),
+      "the todo trigger is the report to the summoner, not a user acknowledgement",
+    );
+    assert.ok(
+      spawned.includes(
+        "Their results come back to you; yours go back to the dispatcher that summoned you.",
+      ),
+      "the delivery line names the only channel a child has",
+    );
+    assert.equal(assembleSessionPolicy(true, "spawned"), spawned);
+  });
+
+  it("spawned text drops the two statements a child cannot honour", () => {
+    const spawned = buildDispatcherPolicySection("spawned");
+    assert.ok(
+      !spawned.includes("You are the user's main assistant in this chat"),
+      "a spawned dispatcher is not the user's assistant in a chat",
+    );
+    assert.ok(
+      !spawned.includes("Only you deliver"),
+      "a spawned dispatcher has no user-facing delivery",
+    );
+    assert.ok(
+      !spawned.includes("first visible acknowledgement to the user"),
+      "a child has no user-visible acknowledgement to wait for",
+    );
+  });
+
+  it("both variants keep the stable headings, order, and the shared doctrine", () => {
+    for (const origin of ["user", "spawned"] as const) {
+      const policy = buildDispatcherPolicySection(origin);
+      let last = -1;
+      for (const heading of [
+        "# Multitask dispatcher",
+        "## How you work",
+        "## What you never do",
+      ]) {
+        const at = policy.indexOf(heading);
+        assert.ok(at >= 0, `${origin}: missing section ${heading}`);
+        assert.ok(at > last, `${origin}: section out of order ${heading}`);
+        last = at;
+      }
+      for (const needle of [
+        "dispatcher, not the workhorse",
+        "You may summon another dispatcher",
+        "never reference a task board or milestone view",
+        "Poll in a loop.",
+      ]) {
+        assert.ok(policy.includes(needle), `${origin}: missing ${needle}`);
+      }
+      assertNewCopy(policy);
+    }
+    // Everything except the three rewritten lines is shared: the two texts
+    // differ in exactly those three places.
+    const userLines = buildDispatcherPolicySection("user").split("\n");
+    const spawnedLines = buildDispatcherPolicySection("spawned").split("\n");
+    assert.equal(spawnedLines.length, userLines.length);
+    const differing = userLines.filter((line, index) => line !== spawnedLines[index]);
+    assert.equal(differing.length, 3, "exactly three lines differ");
+  });
+
+  it("flag OFF stays empty for either origin", () => {
+    assert.equal(assembleSessionPolicy(false, "spawned"), "");
+  });
+});
+
 describe("tool descriptions (new copy)", () => {
   it("covers the dispatcher tool names", () => {
     assert.deepEqual(
@@ -328,6 +425,11 @@ describe("wake-copy narration guard (ticket 29)", () => {
       }),
     );
     assertOrdinaryNarration(formatSteerNote("Rewrite auth docs"));
+    // Ticket 142: the dormant-worker variants stay narration-shaped too.
+    assertOrdinaryNarration(formatDormantSteerNote("Rewrite auth docs"));
+    assertOrdinaryNarration(
+      formatMessageAgentDormantSteerNote("Rewrite auth docs"),
+    );
     assertOrdinaryNarration(formatStopNote());
   });
 

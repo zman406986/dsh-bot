@@ -127,6 +127,41 @@ export interface CompactionBoundary {
  */
 export interface DurableDispatcherMark {
   readonly sessionId: string;
+  /**
+   * Ticket 138: the session that spawned this dispatcher. Present on rows
+   * written from 138 on; absent on rows written before it (accepted window —
+   * such a row still answers "this is not a phantom", it just cannot be
+   * cold-resumed from a send, because the host's `sendMessage` needs the
+   * exact live parent Agent as sender).
+   *
+   * Nothing else is derived from it: it is the sender for the resume call,
+   * never a permission.
+   */
+  readonly parentSessionId?: string;
+}
+
+/**
+ * Ticket 142 (owner ruling 2026-10-22 — the CHILDREN half of "bots should be
+ * wake-able"): the durable wake identity of a WORKER session — one row per
+ * child this plugin spawned as a worker, keyed by the worker id (which IS the
+ * child session id).
+ *
+ * The row is deliberately separate from {@link DurableWorkerMarker}: the
+ * marker is an OBLIGATION record (it exists while delivery may still be owed,
+ * and is deleted on abort or hold release), while this row answers "is this
+ * id a worker we spawned, and who spawned it?" — the two facts a send needs
+ * to wake a dormant worker. Rows are deleted when the worker becomes terminal
+ * or is abandoned: a finished worker must never be resurrected (ticket 04).
+ */
+export interface DurableWorkerSession {
+  readonly sessionId: string;
+  /**
+   * The dispatcher session that spawned this worker — the sender a cold
+   * resume needs. Unlike the dispatcher mark's optional field, this is
+   * REQUIRED: a row without a spawner could not be resumed, so the schema
+   * rejects it rather than reading it as "no parent".
+   */
+  readonly parentSessionId: string;
 }
 
 /**
@@ -190,6 +225,41 @@ export interface DurabilityPort {
     | DurableDispatcherMark
     | undefined
     | Promise<DurableDispatcherMark | undefined>;
+  /**
+   * Ticket 138: every mark in the table, any order. The adapter reads this
+   * ONCE per activation to warm its synchronous "is this target durably
+   * known?" set — the peer fence is synchronous and cannot await a store
+   * read, so the mark table is mirrored in memory. Optional for the same
+   * reason as the two seams above.
+   */
+  listDispatcherMarks?():
+    | readonly DurableDispatcherMark[]
+    | Promise<readonly DurableDispatcherMark[]>;
+  /**
+   * Ticket 142 (owner ruling 2026-10-22 — children half): record that this
+   * worker id is a live worker session this plugin spawned, and which
+   * dispatcher spawned it. Written once at spawn; dropped on settle, abort,
+   * or hold release.
+   *
+   * Optional so stores and test doubles written before this ticket keep
+   * compiling; a store that omits it simply has no durable worker wake
+   * identity, which is the pre-142 behaviour.
+   */
+  writeWorkerSession?(session: DurableWorkerSession): void | Promise<void>;
+  /** Ticket 142: the row for one worker id, or undefined. */
+  readWorkerSession?(
+    workerId: string,
+  ): DurableWorkerSession | undefined | Promise<DurableWorkerSession | undefined>;
+  /** Ticket 142: drop the row once the worker is terminal or abandoned. */
+  deleteWorkerSession?(workerId: string): void | Promise<void>;
+  /**
+   * Ticket 142: every row, any order. Read ONCE per dispatcher activation to
+   * warm the adapter's synchronous mirror — the steer/message fence is
+   * synchronous and cannot await a store read.
+   */
+  listWorkerSessions?():
+    | readonly DurableWorkerSession[]
+    | Promise<readonly DurableWorkerSession[]>;
 }
 
 /**
@@ -263,6 +333,8 @@ export interface InMemoryDurability
   readonly boundaries: Map<string, CompactionBoundary>;
   /** Ticket 130: dispatcher identity marks, keyed by session id. */
   readonly dispatcherMarks: Map<string, DurableDispatcherMark>;
+  /** Ticket 142: worker wake identity rows, keyed by worker id. */
+  readonly workerSessions: Map<string, DurableWorkerSession>;
 }
 
 export function createInMemoryDurability(): InMemoryDurability {
@@ -272,10 +344,13 @@ export function createInMemoryDurability(): InMemoryDurability {
   const boundaries = new Map<string, CompactionBoundary>();
   // Ticket 130: same store again; the mark's presence is the whole fact.
   const dispatcherMarks = new Map<string, DurableDispatcherMark>();
+  // Ticket 142: worker wake identity, same store, its own table.
+  const workerSessions = new Map<string, DurableWorkerSession>();
   return {
     markers,
     boundaries,
     dispatcherMarks,
+    workerSessions,
     writeWorkerMarker(marker: DurableWorkerMarker): void {
       markers.set(marker.workerId, { ...marker });
     },
@@ -302,6 +377,21 @@ export function createInMemoryDurability(): InMemoryDurability {
     },
     readDispatcherMark(sessionId: string): DurableDispatcherMark | undefined {
       return dispatcherMarks.get(sessionId);
+    },
+    listDispatcherMarks(): readonly DurableDispatcherMark[] {
+      return [...dispatcherMarks.values()];
+    },
+    writeWorkerSession(session: DurableWorkerSession): void {
+      workerSessions.set(session.sessionId, { ...session });
+    },
+    readWorkerSession(workerId: string): DurableWorkerSession | undefined {
+      return workerSessions.get(workerId);
+    },
+    deleteWorkerSession(workerId: string): void {
+      workerSessions.delete(workerId);
+    },
+    listWorkerSessions(): readonly DurableWorkerSession[] {
+      return [...workerSessions.values()];
     },
   };
 }

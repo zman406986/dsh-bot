@@ -224,6 +224,38 @@ export interface MultitaskOptions {
    */
   readonly isLiveDispatcherSession?: (sessionId: string) => boolean;
   /**
+   * Ticket 138 (owner ruling 2026-10-22: "bots should be wake-able, both
+   * dispatchers and children"): the DURABLE half of the same question. True
+   * when the session carries our own `dispatcher_sessions` mark — i.e. this
+   * plugin spawned it as a dispatcher in an earlier process. A marked target
+   * that is not live is not a phantom: it is a spawned dispatcher the host
+   * has not cold-resumed yet, so the send is ACCEPTED and the wake path
+   * resumes it (the adapter's `requestDispatcherWakeup`). A target with no
+   * mark keeps ticket 70 §2's `unknown-target` refusal — the fence is intact.
+   *
+   * Synchronous by design: the peer fence is synchronous and must not await
+   * a store read. The adapter keeps a warm in-memory set of marks.
+   */
+  readonly isDurablyMarkedDispatcher?: (sessionId: string) => boolean;
+  /**
+   * Ticket 142 (owner ruling 2026-10-22 — the CHILDREN half): the durable
+   * wake identity of a worker this plugin spawned, read synchronously from
+   * the adapter's mirror of the `worker_sessions` table. Present means "this
+   * id is a worker we spawned and it has a spawner we can resume from".
+   *
+   * A marked id that is NOT on the live roster is not unknown: it is a
+   * dormant worker, so `steerWorker` accepts the correction and the host's
+   * `wakeDormantWorker` cold-resumes it. An id with no row (or a store with
+   * no such table) keeps the shipped `unknown-worker` refusal — ticket 70's
+   * fence is untouched.
+   *
+   * Synchronous for the same reason as the dispatcher port: the fence must
+   * not await a store read.
+   */
+  readonly findDurableWorker?: (
+    workerId: string,
+  ) => { readonly parentSessionId: string } | undefined;
+  /**
    * Ticket 113: fired when an inbox-origin obligation reaches a terminal
    * outcome — `replied` (worker settled AND the result was delivered via
    * `markDelivered`), `failed` (worker error, delivery or not), or
@@ -274,8 +306,29 @@ export interface Multitask {
    * Park a steer for a live worker and interrupt its current step.
    * Single-slot last-wins: a newer steer replaces any undelivered one.
    * Refused (and never recreates a worker) when the worker is not live mid-work.
+   *
+   * Ticket 142 (owner ruling 2026-10-22 — children half): the one exception is
+   * a worker the adapter reports through `findDurableWorker` as a session this
+   * plugin spawned whose spawner is known. Such a worker is not unknown, so
+   * the correction is ACCEPTED and handed to `host.wakeDormantWorker`, which
+   * cold-resumes the session and delivers it as its next steer. An id with no
+   * durable row keeps the shipped `unknown-worker` refusal.
    */
   steerWorker(workerId: string, message: string): Promise<SteerResult>;
+  /**
+   * Ticket 142: re-adopt a worker the host just brought back from the dormant
+   * state (a cold resume announced on `agent/created`). The adapter calls this
+   * once, after it has registered the worker and composed the child, with the
+   * id and the spawner read off the durable row.
+   *
+   * It resolves the ticket-59 unknown-state hold for that id into a live
+   * roster record — the hold says "we cannot tell whether this worker is
+   * alive", and a session the host just re-created is evidence that it is —
+   * so `check_workers` lists it again and `stop_worker` can interrupt it.
+   * Returns false when the id was not held (a worker already on the roster is
+   * left untouched).
+   */
+  reclaimWorker(workerId: string, parentSessionId: string): boolean;
   /**
    * First turn started: spawned → running. Marks any linked todo in_progress.
    * No-op if illegal.
@@ -293,6 +346,15 @@ export interface Multitask {
    */
   listWorkers(parentSessionId: string): WorkerSummary[];
   getWorker(workerId: string): WorkerRecord | undefined;
+  /**
+   * Ticket 142: the spawner recorded on a worker's durable wake row, or
+   * undefined when the id carries no row (never spawned by us, already
+   * terminal, or abandoned). Synchronous — the adapter mirrors the table.
+   * `message_agent` consults it to route a dormant worker to the steer
+   * branch and to keep refusing ANOTHER session's worker as `unknown-target`
+   * without leaking that it exists.
+   */
+  durableWorkerParent(workerId: string): string | undefined;
   /**
    * Create a dispatcher-private ledger entry. Call before spawn for any
    * user-visible work; pure chat and trivial lookups create no entry.
@@ -390,8 +452,11 @@ export interface Multitask {
    * Fire-and-forget peer accept (ticket 14; fences ticket 70 §2). Returns a
    * structural ack only — never a reply. Newly accepted envelopes join the
    * priority or normal lane by the 1:1 priority flag; delivery is wake-bus +
-   * host followup. Self-targets refuse unconditionally; unknown targets
-   * refuse when `isLiveDispatcherSession` is wired.
+   * host followup. Self-targets refuse unconditionally; a target that is not
+   * a live dispatcher refuses `unknown-target` when `isLiveDispatcherSession`
+   * is wired — UNLESS `isDurablyMarkedDispatcher` says the session carries
+   * our own durable dispatcher mark (ticket 138, owner ruling 2026-10-22):
+   * then it is accepted and the host's wake path cold-resumes it.
    */
   sendPeer(sessionId: string, envelope: PeerEnvelope): PeerSendAck;
   /** Undelivered peer envelopes for a session (status tools / tests). */
@@ -491,6 +556,8 @@ export function createMultitask(
 ): Multitask {
   const durability = options?.durability;
   const isLiveDispatcherSession = options?.isLiveDispatcherSession;
+  const isDurablyMarkedDispatcher = options?.isDurablyMarkedDispatcher;
+  const findDurableWorker = options?.findDurableWorker;
   const workers = new Map<string, WorkerRecord>();
   /**
    * Live (non-terminal) worker per stream, keyed `(parentSessionId, streamKey)`
@@ -524,6 +591,15 @@ export function createMultitask(
    * stream.
    */
   const unknownStateHolds = new Map<string, UnknownStateWorker>();
+  /**
+   * Ticket 142: workers the host adopted back (a cold resume on send) for
+   * which THIS core had no unknown-state hold yet — the narrow window where a
+   * send lands before the activation chain's `rebuildFromDurability` finishes.
+   * The rebuild consults this so the marker restores a normal live record
+   * instead of turning live evidence into a hold that would block the stream
+   * key forever.
+   */
+  const adoptedAwaitingMarker = new Map<string, string>();
   const steerQueue: SteerQueue = createSteerQueue();
   const todoLedger: TodoLedger = createTodoLedger();
   const peerInbox: PeerInbox = createPeerInbox(options?.peer);
@@ -630,6 +706,35 @@ export function createMultitask(
     } catch {
       // Telemetry must never break the core.
     }
+  }
+
+  /**
+   * Ticket 142: a worker became terminal or was abandoned, so it must stop
+   * being wake-able. Drops the durable `worker_sessions` row AND the adapter's
+   * in-memory mirror (through the host seam) so a send arriving in the same
+   * process cannot park against a dead worker. Both halves are best-effort:
+   * the settle/stop path must never fail on bookkeeping.
+   */
+  function forgetWorkerWake(workerId: string): void {
+    adoptedAwaitingMarker.delete(workerId);
+    try {
+      host.forgetWorkerWake?.(workerId);
+    } catch {
+      // A host mirror failure must not break the settle path.
+    }
+    if (durability === undefined) return;
+    void Promise.resolve(durability.deleteWorkerSession?.(workerId)).catch(
+      (error) => {
+        try {
+          console.warn(
+            `[multitask-dispatcher] worker session row for ${workerId} could not be dropped:`,
+            error,
+          );
+        } catch {
+          // A broken console must not break the settle path either.
+        }
+      },
+    );
   }
 
   /**
@@ -805,6 +910,11 @@ export function createMultitask(
         );
       }
     }
+    // Ticket 142: every settle is terminal, and a finished worker must not be
+    // woken back (ticket 04: stop is for good). Drop the durable wake row and
+    // the adapter's mirror. The worker OBLIGATION marker above is untouched —
+    // a terminal result may still be owed a delivery (S4, ticket 58).
+    forgetWorkerWake(record.workerId);
     // Ticket 115: the settle record is written BEFORE the wake is enqueued,
     // so a wait that races the wake still sees the record. Additive
     // bookkeeping read off this exact path — wake composition and ordering
@@ -1028,6 +1138,46 @@ export function createMultitask(
               toDurableMarker(record, todoExternalOf(record.todoId)),
             ),
           );
+          // Ticket 142: the durable WAKE identity, beside the obligation
+          // marker but a separate row with a separate lifecycle. Written at
+          // the same moment (after the spawn resolved — there is no id to key
+          // on before that) so a send to this worker can wake it after a
+          // restart. A store without the table keeps the pre-142 refusal.
+          //
+          // The host mirror is fed FIRST, synchronously, so a send arriving
+          // before the store write settles already sees the mark (same rule
+          // as the dispatcher mark).
+          //
+          // A worker that already SETTLED while the spawn was in flight is
+          // skipped: the settle path dropped its wake row, and re-writing it
+          // here would make a finished worker wake-able again (ticket 04).
+          if (!isTerminalStatus(record.status)) {
+            try {
+              host.rememberWorkerWake?.(workerId, request.parentSessionId);
+            } catch {
+              // A mirror failure must not break an accepted spawn.
+            }
+            try {
+              await Promise.resolve(
+                durability.writeWorkerSession?.({
+                  sessionId: workerId,
+                  parentSessionId: request.parentSessionId,
+                }),
+              );
+            } catch (error) {
+              // The host already accepted the spawn; a store failure must
+              // never read as a refusal. The lost row is the accepted crash
+              // window, one step wider.
+              try {
+                console.warn(
+                  `[multitask-dispatcher] worker session row for ${workerId} could not be written:`,
+                  error,
+                );
+              } catch {
+                // A broken console must not break the spawn either.
+              }
+            }
+          }
         }
         notifyRosterChanged(request.parentSessionId);
         return { ok: true, workerId };
@@ -1071,6 +1221,10 @@ export function createMultitask(
       cancelLinkedTodo(record);
       // Marker obligation closed: nothing to deliver after a restart.
       void durability?.deleteWorkerMarker(workerId);
+      // Ticket 142: and the wake identity goes with it — a stopped worker is
+      // not wake-able (ticket 04). Done BEFORE the interrupt so a settle that
+      // races the stop cannot leave a row behind either.
+      forgetWorkerWake(workerId);
       // Mark first, then interrupt: a late host settle must not revive the worker.
       // The stop path never sends a user-facing message.
       await host.interruptWorker(workerId);
@@ -1080,6 +1234,24 @@ export function createMultitask(
     async steerWorker(workerId: string, message: string): Promise<SteerResult> {
       const record = workers.get(workerId);
       if (record === undefined) {
+        // Ticket 142 (owner ruling 2026-10-22 — children half): a worker id
+        // this plugin durably spawned is not unknown just because it carries
+        // no roster record. It is dormant — a live marker became an
+        // unknown-state hold at rebuild, or the child was never re-announced
+        // this boot — so the correction is ACCEPTED and the host cold-resumes
+        // the session through `wakeDormantWorker`. An id with NO durable row
+        // keeps the shipped refusal, byte-identical to before this ticket.
+        const durable = findDurableWorker?.(workerId);
+        if (durable !== undefined) {
+          const wake = host.wakeDormantWorker;
+          if (wake !== undefined) {
+            // Accepted either way: the mark is the whole permission. A wake
+            // that cannot be issued is the host's to log (it keeps the text
+            // parked for the next activation); it never becomes a refusal.
+            await wake.call(host, workerId, wrapParentCorrection(message));
+            return { ok: true, dormant: true };
+          }
+        }
         return {
           ok: false,
           reason: "unknown-worker",
@@ -1122,6 +1294,53 @@ export function createMultitask(
       }
     },
 
+    reclaimWorker(workerId: string, parentSessionId: string): boolean {
+      // Ticket 142: a host announcement brought this session back. Only a held
+      // id is adopted — a worker already on the roster (or one this core never
+      // saw) is left exactly as it is, so a re-announcement cannot reset a
+      // live record's status, stream key, or redrive budget.
+      const hold = unknownStateHolds.get(workerId);
+      if (hold === undefined) {
+        // A worker already on the roster needs nothing (the host re-announced
+        // a live session). One this core has not seen yet may be a
+        // send-before-rebuild: the host has just proved the worker live, so
+        // remember it and let the pending rebuild restore a live record
+        // instead of turning that evidence into a stream-key hold.
+        if (!workers.has(workerId)) {
+          adoptedAwaitingMarker.set(workerId, parentSessionId);
+        }
+        return false;
+      }
+      if (hold.parentSessionId !== parentSessionId) return false;
+      adoptedAwaitingMarker.delete(workerId);
+      unknownStateHolds.delete(workerId);
+      workers.set(workerId, {
+        workerId,
+        parentSessionId,
+        streamKey: hold.streamKey,
+        title: hold.title,
+        // The host re-created the session; it has not taken a turn yet in this
+        // process, so `spawned` is the honest starting state — the first
+        // `agent/status: running` advances it exactly like a fresh spawn.
+        status: "spawned",
+        // The hold carried no clock: elapsed time is measured from the new
+        // activation rather than invented.
+        startedAtMs: Date.now(),
+        toolCallCount: 0,
+        transcriptRef: hold.transcriptRef,
+        todoId: hold.todoId,
+        redriveAttempts: 0,
+      });
+      // The stream key is held again by a LIVE worker — the same invariant a
+      // fresh spawn establishes, and the reason ticket 59 exists.
+      liveByStreamKey.set(
+        liveStreamKeyId(parentSessionId, hold.streamKey),
+        workerId,
+      );
+      notifyRosterChanged(parentSessionId);
+      return true;
+    },
+
     noteSteerReceived(workerId: string): void {
       transition(workerId, { type: "steer-received" });
     },
@@ -1156,6 +1375,10 @@ export function createMultitask(
 
     getWorker(workerId: string): WorkerRecord | undefined {
       return workers.get(workerId);
+    },
+
+    durableWorkerParent(workerId: string): string | undefined {
+      return findDurableWorker?.(workerId)?.parentSessionId;
     },
 
     createTodo(input: CreateTodoInput): TodoItem {
@@ -1352,6 +1575,33 @@ export function createMultitask(
       for (const marker of markers) {
         // Fresh-core assumption: never overwrite an in-memory entry.
         if (workers.has(marker.workerId)) continue;
+        // Ticket 142: the host adopted this worker back while this rebuild was
+        // still in flight (a send landed first). That is live evidence, so a
+        // live marker restores a normal roster record instead of a hold —
+        // which would otherwise block the stream key with a worker that is
+        // provably running.
+        if (adoptedAwaitingMarker.has(marker.workerId)) {
+          adoptedAwaitingMarker.delete(marker.workerId);
+          const recovered: WorkerRecord = {
+            workerId: marker.workerId,
+            parentSessionId: marker.parentSessionId,
+            streamKey: marker.streamKey,
+            title: marker.title,
+            status: "spawned",
+            startedAtMs: Date.now(),
+            toolCallCount: 0,
+            transcriptRef: marker.transcriptRef,
+            todoId: marker.todoId,
+            redriveAttempts: marker.redriveAttempts ?? 0,
+          };
+          workers.set(recovered.workerId, recovered);
+          liveByStreamKey.set(
+            liveStreamKeyId(marker.parentSessionId, marker.streamKey),
+            recovered.workerId,
+          );
+          restored.push(recovered);
+          continue;
+        }
         if (!isTerminalStatus(marker.status)) {
           // Live at crash time: honest unknown-state. Never replayed,
           // never resumed, never invented. Stream key stays free so the
@@ -1447,6 +1697,28 @@ export function createMultitask(
       // an unresolvable-remedy loop, which is worse than the block it fixes.
       if (durability !== undefined) {
         await Promise.resolve(durability.deleteWorkerMarker(workerId));
+        // Ticket 142: the marker deletion answers "no delivery is owed"; the
+        // wake row answers "this id is a worker we can wake" and must go too,
+        // or the hold would be released while a send could still resurrect the
+        // worker the dispatcher just abandoned.
+        try {
+          await Promise.resolve(durability.deleteWorkerSession?.(workerId));
+        } catch (error) {
+          try {
+            console.warn(
+              `[multitask-dispatcher] worker session row for ${workerId} could not be dropped:`,
+              error,
+            );
+          } catch {
+            // A broken console must not break the release either.
+          }
+        }
+      }
+      // The adapter's mirror goes with it, for the same reason.
+      try {
+        host.forgetWorkerWake?.(workerId);
+      } catch {
+        // Mirror failures never break the release.
       }
       return true;
     },
@@ -1482,12 +1754,24 @@ export function createMultitask(
         };
       }
       if (isLiveDispatcherSession !== undefined && !isLiveDispatcherSession(sessionId)) {
-        return {
-          ok: false,
-          messageId: envelope.messageId,
-          reason: "unknown-target",
-          detail: `no live dispatcher session "${sessionId}" — the message was not delivered`,
-        };
+        // Ticket 138 (owner ruling 2026-10-22): a target that carries our own
+        // durable dispatcher mark is not a phantom. It is a spawned dispatcher
+        // this process has not cold-resumed yet, so the send is accepted and
+        // the wake path resumes it (the adapter reaches the host's
+        // `subagents.sendMessage`, which cold-resumes an absent child). A
+        // target with NO mark keeps ticket 70 §2's refusal — the fence still
+        // holds for true phantoms.
+        const durablyMarked =
+          isDurablyMarkedDispatcher !== undefined &&
+          isDurablyMarkedDispatcher(sessionId);
+        if (!durablyMarked) {
+          return {
+            ok: false,
+            messageId: envelope.messageId,
+            reason: "unknown-target",
+            detail: `no live dispatcher session "${sessionId}" — the message was not delivered`,
+          };
+        }
       }
       const result = peerInbox.send(sessionId, envelope);
       if (!result.ack.ok || !result.appended) {

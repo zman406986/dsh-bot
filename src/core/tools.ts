@@ -45,6 +45,8 @@ import {
   formatMessageAgentRateLimited,
   formatMessageAgentRefusal,
   formatMessageAgentSteerNote,
+  formatMessageAgentDormantSteerNote,
+  formatDormantSteerNote,
   formatPeerSendAck,
   formatSpawnAck,
   formatSpawnDispatcherNote,
@@ -933,7 +935,15 @@ export function createDispatcherTools(
         };
       }
       const title = multitask.getWorker(workerId)?.title ?? workerId;
-      return { ok: true, note: formatSteerNote(title) };
+      return {
+        ok: true,
+        // Ticket 142: a dormant worker's session is being resumed, so the
+        // "next step boundary" copy would be false for it.
+        note:
+          result.dormant === true
+            ? formatDormantSteerNote(title)
+            : formatSteerNote(title),
+      };
     },
   };
 
@@ -1149,6 +1159,30 @@ export function createDispatcherTools(
         };
       }
 
+      /**
+       * Ticket 142 (owner ruling 2026-10-22 — children half): an id with no
+       * roster record that carries our own durable worker row is a DORMANT
+       * worker of this session, not an unknown peer. It routes to the steer
+       * branch (the same `steerWorker` call) so the wake path can resume it.
+       * The session fence is the same rule the roster branch uses: another
+       * session's worker must refuse `unknown-target` without leaking that it
+       * exists.
+       */
+      const durableParent =
+        workerRecord === undefined
+          ? multitask.durableWorkerParent(target)
+          : undefined;
+      if (durableParent !== undefined && durableParent !== senderSessionId) {
+        return {
+          ok: false,
+          reason: "unknown-target",
+          detail: formatMessageAgentRefusal({
+            reason: "unknown-target",
+            target,
+          }),
+        };
+      }
+
       // The budget gates acceptance: past the limit nothing may be parked or
       // appended, so this check precedes both sends. Identity fences above
       // run first so a wrong-target refusal never reads as a rate refusal.
@@ -1166,8 +1200,9 @@ export function createDispatcherTools(
 
       const messageId = `agent-${crypto.randomUUID()}`;
 
-      if (workerRecord !== undefined) {
-        // Worker target: the existing steer path, unchanged.
+      if (workerRecord !== undefined || durableParent !== undefined) {
+        // Worker target: the existing steer path, unchanged — a dormant
+        // worker is accepted there through the durable mark (ticket 142).
         const result = await multitask.steerWorker(target, text);
         if (!result.ok) {
           // steerWorker refuses not-running for terminal or never-started
@@ -1189,7 +1224,13 @@ export function createDispatcherTools(
           target,
           delivered_as: "steer",
           message_id: messageId,
-          note: formatMessageAgentSteerNote(workerRecord.title),
+          // Ticket 142: a dormant worker gets honest copy — its session is
+          // being resumed and the text arrives as its next message, so the
+          // "next step boundary" promise a live steer makes would be false.
+          note:
+            result.dormant === true
+              ? formatMessageAgentDormantSteerNote(workerRecord?.title ?? target)
+              : formatMessageAgentSteerNote(workerRecord?.title ?? target),
         };
       }
 

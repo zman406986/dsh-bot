@@ -54,11 +54,19 @@ interface Rig {
 
 async function rig(options?: {
   isLive?: (sessionId: string) => boolean;
+  isMarked?: (sessionId: string) => boolean;
+  isWorkerMarked?: (workerId: string) => { parentSessionId: string } | undefined;
 }): Promise<Rig> {
   const host = new FakeDshHost();
   const multitask = createMultitask(host, {
     ...(options?.isLive !== undefined
       ? { isLiveDispatcherSession: options.isLive }
+      : {}),
+    ...(options?.isMarked !== undefined
+      ? { isDurablyMarkedDispatcher: options.isMarked }
+      : {}),
+    ...(options?.isWorkerMarked !== undefined
+      ? { findDurableWorker: options.isWorkerMarked }
       : {}),
     // The access relay's default 120 s timer must never outlive a test.
     access: { timeoutMs: 50, schedule: () => () => {} },
@@ -324,6 +332,188 @@ describe("ticket 116 — dispatcher target rides the existing peer lane", () => 
     if (!accepted.ok) return;
     assert.equal(accepted.delivered_as, "peer");
     assert.equal(r.multitask.peerInbox.pendingCount(PEER), 1);
+  });
+});
+
+/**
+ * Ticket 138 (owner ruling 2026-10-22: "bots should be wake-able, both
+ * dispatchers and children" — this is the DISPATCHERS half).
+ *
+ * The fence keeps ticket 70 §2's refusal for a target with NO durable mark.
+ * A target that carries our own `dispatcher_sessions` mark is a spawned
+ * dispatcher this process has not re-announced yet: the send is ACCEPTED, its
+ * wake is requested, and the adapter's wake path cold-resumes the child.
+ */
+describe("ticket 138 — a durably marked dispatcher is wake-able by a send", () => {
+  it("a marked-but-not-live target accepts and requests its wake (no unknown-target)", async () => {
+    const marked = new Set<string>([PEER]);
+    const r = await rig({ isLive: () => false, isMarked: (id) => marked.has(id) });
+
+    const result = await r.exec({ target: PEER, text: "are you back?" });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    if (!result.ok) return;
+    assert.equal(result.delivered_as, "peer");
+    assert.equal(result.target, PEER);
+    // Accepted means exactly what it always meant: queued in the peer inbox
+    // and the wake lane. The acceptance copy must not promise more.
+    assert.ok(result.note.includes("Accepted"));
+    assert.ok(result.note.includes("no reply"));
+
+    assert.equal(r.multitask.peerInbox.pendingCount(PEER), 1);
+    assert.deepEqual(r.host.wakeCalls, [PEER]);
+    // The wake names the sender so the adapter can resume from it.
+    assert.deepEqual(r.host.wakeOrigins, [
+      {
+        sessionId: PEER,
+        origin: {
+          kind: "agent-message",
+          form: "relay",
+          senderSessionId: SENDER,
+        },
+      },
+    ]);
+  });
+
+  it("an UNMARKED unknown target still refuses unknown-target — the fence is intact", async () => {
+    const r = await rig({
+      isLive: () => false,
+      isMarked: () => false,
+    });
+
+    const result = refused(
+      await r.exec({ target: PEER, text: "anyone there?" }),
+      "unknown-target",
+    );
+    assert.ok(result.detail.includes(PEER));
+    assert.ok(result.detail.includes("NOT delivered"));
+    assert.equal(r.multitask.peerInbox.pendingCount(PEER), 0);
+    assert.deepEqual(r.host.wakeCalls, []);
+  });
+
+  it("a mark only widens the fence while the target is NOT live: a live dispatcher keeps the normal path", async () => {
+    // Both knobs true: the live check decides first, so the mark is never
+    // consulted and no second wake/resume path exists.
+    const r = await rig({ isLive: () => true, isMarked: () => true });
+
+    const result = await r.exec({ target: PEER, text: "status?" });
+    assert.equal(result.ok, true);
+    assert.equal(r.multitask.peerInbox.pendingCount(PEER), 1);
+    assert.deepEqual(r.host.wakeCalls, [PEER]);
+  });
+
+  it("absent mark knob keeps pre-138 behavior: a non-live target refuses exactly as before", async () => {
+    const r = await rig({ isLive: () => false });
+
+    refused(await r.exec({ target: PEER, text: "hello?" }), "unknown-target");
+    assert.deepEqual(r.host.wakeCalls, []);
+  });
+});
+
+/**
+ * Ticket 142 (owner ruling 2026-10-22: "yes bots should be wake-able, both
+ * dispatchers and children" — the CHILDREN half).
+ *
+ * A worker id with no roster record that carries our own durable
+ * `worker_sessions` row is a DORMANT worker, not an unknown peer: the message
+ * routes to the steer branch, `steerWorker` accepts it, and the host's
+ * `wakeDormantWorker` cold-resumes the session. An id with no row, or another
+ * session's row, keeps the refusal it has always had.
+ */
+describe("ticket 142 — a durably marked worker is wake-able by a message", () => {
+  const DORMANT = "worker-dormant-1";
+
+  it("a marked-but-not-live WORKER accepts and is woken (no unknown-target)", async () => {
+    const r = await rig({
+      isLive: () => false,
+      isWorkerMarked: (id) =>
+        id === DORMANT ? { parentSessionId: SENDER } : undefined,
+    });
+
+    const result = await r.exec({ target: DORMANT, text: "resume the migration" });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    if (!result.ok) return;
+    // It takes the STEER lane, not the peer lane: the target is a worker.
+    assert.equal(result.delivered_as, "steer");
+    assert.equal(result.target, DORMANT);
+    assert.ok(result.message_id.startsWith("agent-"));
+    // Honest copy: the session is resumed, so it must not promise a step
+    // boundary that does not exist yet.
+    assert.ok(result.note.includes("dormant"));
+    assert.ok(result.note.includes("being resumed"));
+    assert.ok(!result.note.includes("step boundary"));
+
+    // The host wake seam got the WRAPPED correction (the same wrapper a live
+    // steer gets), and the peer inbox was never touched — a worker is not a
+    // peer.
+    assert.equal(r.host.dormantWakeCalls.length, 1);
+    const wake = r.host.dormantWakeCalls[0];
+    assert.ok(wake);
+    assert.equal(wake.workerId, DORMANT);
+    assert.ok(wake.message.includes("resume the migration"));
+    assert.ok(wake.message.includes("[Parent correction]"));
+    assert.equal(r.multitask.peerInbox.pendingCount(DORMANT), 0);
+    assert.deepEqual(r.host.wakeCalls, []);
+  });
+
+  it("an UNMARKED dead worker still refuses unknown-target — the fence is intact", async () => {
+    const r = await rig({ isLive: () => false });
+
+    const result = refused(
+      await r.exec({ target: "dead-worker", text: "come back" }),
+      "unknown-target",
+    );
+    assert.ok(result.detail.includes("dead-worker"));
+    assert.equal(r.host.dormantWakeCalls.length, 0);
+    assert.equal(r.multitask.peerInbox.pendingCount("dead-worker"), 0);
+    assert.deepEqual(r.host.wakeCalls, []);
+  });
+
+  it("another session's marked worker refuses unknown-target without leaking it", async () => {
+    const r = await rig({
+      isLive: () => false,
+      isWorkerMarked: (id) =>
+        id === DORMANT ? { parentSessionId: "session-2" } : undefined,
+    });
+
+    refused(
+      await r.exec({ target: DORMANT, text: "not yours" }),
+      "unknown-target",
+    );
+    assert.equal(r.host.dormantWakeCalls.length, 0);
+    assert.equal(r.multitask.peerInbox.pendingCount(DORMANT), 0);
+  });
+
+  it("a LIVE worker keeps the unchanged steer path: parked, no dormant wake", async () => {
+    const r = await rig({
+      isWorkerMarked: (id) =>
+        id === DORMANT ? { parentSessionId: SENDER } : undefined,
+    });
+    const workerId = await spawnRunning(r.multitask, SENDER, "s-live", "Live work");
+
+    const result = await r.exec({ target: workerId, text: "tweak the intro" });
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(result.delivered_as, "steer");
+    // The normal path: an interrupt, no dormant wake, and the text is parked
+    // for the step boundary rather than sent now.
+    assert.deepEqual(r.host.interruptCalls, [workerId]);
+    assert.equal(r.host.dormantWakeCalls.length, 0);
+    assert.deepEqual(r.host.sendMessageCalls, []);
+  });
+
+  it("an identity refusal runs before the rate fence: a foreign marked worker still reads unknown-target", async () => {
+    const r = await rig({
+      isLive: () => true,
+      isWorkerMarked: (id) =>
+        id === DORMANT ? { parentSessionId: "session-2" } : undefined,
+    });
+    for (let i = 0; i < MESSAGE_AGENT_RATE_LIMIT; i += 1) {
+      const accepted = await r.exec({ target: PEER, text: `note ${i}` });
+      assert.equal(accepted.ok, true, `message ${i} should be accepted`);
+    }
+    // Budget exhausted, but the identity fence decides first — the refusal is
+    // about the target, not the rate, so the caller learns the useful fact.
+    refused(await r.exec({ target: DORMANT, text: "x" }), "unknown-target");
   });
 });
 

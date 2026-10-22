@@ -155,7 +155,18 @@ export type SpawnResult =
  * A refusal never creates a replacement worker.
  */
 export type SteerResult =
-  | { readonly ok: true }
+  | {
+      readonly ok: true;
+      /**
+       * Ticket 142: present when the worker had NO roster record and the
+       * correction was accepted through its durable wake row — the host was
+       * asked to cold-resume the session, so the text becomes that session's
+       * next message instead of folding in at a step boundary that does not
+       * exist yet. Absent on the normal live path, so existing exact-shape
+       * assertions (`deepEqual(result, { ok: true })`) stay valid.
+       */
+      readonly dormant?: true;
+    }
   | {
       readonly ok: false;
       readonly reason: "unknown-worker" | "not-running";

@@ -220,6 +220,17 @@ export function formatMessageAgentSteerNote(title: string): string {
 }
 
 /**
+ * Ticket 142: `message_agent`'s steer-branch note for a DORMANT worker (an id
+ * carried by its durable wake row with no live session). The host resumes the
+ * session and the text arrives as its next message, so the live path's "next
+ * step boundary" promise would be false here. It still promises no reply and
+ * keeps the last-wins rule for repeat sends before delivery.
+ */
+export function formatMessageAgentDormantSteerNote(title: string): string {
+  return `Message accepted for dormant worker "${title}". Its session is being resumed; the message is delivered as its next turn. If you message this worker again before it comes back, only the latest message applies.`;
+}
+
+/**
  * Ticket 117 / ADR-0025: `await_agent`'s wire result. Snake_case on purpose —
  * the core's {@link AwaitWorkerOutcome} is camelCase, so the tool layer maps
  * field for field at the single boundary in {@link toAwaitAgentToolResult}.
@@ -469,6 +480,15 @@ export function formatSpawnAck(input: {
 /** Steer success note. Does not re-echo the parked message. */
 export function formatSteerNote(title: string): string {
   return `Correction parked for "${title}". It will fold in at the next step boundary and continue from where it is — no restart. If you send another correction before delivery, only the latest applies.`;
+}
+
+/**
+ * Ticket 142: `steer_worker`'s success note for a DORMANT worker — same
+ * honesty rule as {@link formatMessageAgentDormantSteerNote}: the session is
+ * being resumed, so there is no step boundary to fold into yet.
+ */
+export function formatDormantSteerNote(title: string): string {
+  return `Correction accepted for dormant worker "${title}". Its session is being resumed; the correction is delivered as its next turn. If you send another correction before it comes back, only the latest applies.`;
 }
 
 /** Stop success note. Silent to the user by default. */

@@ -43,6 +43,35 @@ export interface DshHost {
    * Context preserved; never spawns or restarts the worker.
    */
   sendMessage(workerId: string, message: string): Promise<void>;
+  /**
+   * Ticket 142 (owner ruling 2026-10-22 — the CHILDREN half of "bots should
+   * be wake-able, both dispatchers and children"): deliver a correction into
+   * a worker that is NOT on this process's roster, waking it if the host has
+   * to cold-resume the session.
+   *
+   * The host resolves the sender from the worker's durable wake mark (the
+   * spawner recorded at spawn) and hands the correction to the same
+   * `ctx.subagents.sendMessage` seam a live steer eventually rides. The core
+   * has already ACCEPTED the send — the mark is the whole permission — so a
+   * wake that cannot be issued is logged and remembered, never turned into a
+   * refusal. Optional so pre-142 host doubles keep compiling; absent means a
+   * marked-but-dormant worker keeps the pre-142 `unknown-worker` refusal.
+   */
+  wakeDormantWorker?(workerId: string, message: string): Promise<void>;
+  /**
+   * Ticket 142: record in the host's synchronous mirror that this worker id
+   * is wake-able and who spawned it. Called by the core at the same moment it
+   * writes the durable row, so an in-process send never waits for a store
+   * round trip. Optional for the same reason as the other 142 seams.
+   */
+  rememberWorkerWake?(workerId: string, parentSessionId: string): void;
+  /**
+   * Ticket 142: drop the in-memory wake identity for a worker whose durable
+   * row was just deleted (settled, aborted, or released from an unknown-state
+   * hold). A finished worker must never be woken back (ticket 04: stop is for
+   * good). Idempotent.
+   */
+  forgetWorkerWake?(workerId: string): void;
   /** Subscribe to worker-settled events. Host invokes callbacks on settle. */
   onWorkerSettled(cb: (event: SettledEvent) => void): void;
   /**

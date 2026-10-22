@@ -46,6 +46,18 @@ export const AWAIT_AGENT_TOOL = "await_agent";
 export const SPAWN_DISPATCHER_TOOL = "spawn_dispatcher";
 
 /**
+ * Who started a dispatcher session (ticket 141).
+ *
+ * - `user` — activated by the chat command (ADR-0009). The reader is the
+ *   user's assistant in that chat and the only delivery channel in it.
+ * - `spawned` — activated through `spawn_dispatcher` (ADR-0025 mitosis).
+ *   Another dispatcher summoned this session: it has no user in its chat and
+ *   no user-visible turn, so the policy must not claim either. Its work
+ *   reaches the user only through the dispatcher that summoned it.
+ */
+export type DispatcherOrigin = "user" | "spawned";
+
+/**
  * Dispatcher tool names, in registration order — eight tools after ticket
  * 118 added `spawn_dispatcher` (ticket 117 added `await_agent`; ticket 116
  * retired `send_peer`).
@@ -131,12 +143,25 @@ export const EMPTY_LEDGER_LINE = "(empty)";
 /**
  * Full dispatcher policy section. Injected once per dispatcher session
  * when the feature flag is ON (ADR-0005).
+ *
+ * `origin` (ticket 141) is the smallest honest discriminator between the two
+ * activation paths. Everything shared stays byte-identical; only the two
+ * statements that are FALSE for a summoned dispatcher change — the opener
+ * (it is not the user's assistant, and has no chat with the user) and the
+ * delivery line (it has no user-facing send; its work goes back to the
+ * dispatcher that summoned it). Omitted means `user`, which is the byte-stable
+ * default the user-started path and every pre-141 caller keep.
  */
-export function buildDispatcherPolicySection(): string {
+export function buildDispatcherPolicySection(
+  origin: DispatcherOrigin = "user",
+): string {
+  const spawned = origin === "spawned";
   return [
     "# Multitask dispatcher",
     "",
-    "You are the user's main assistant in this chat. You stay responsive. Heavy work goes to workers you spawn in the background.",
+    spawned
+      ? "Another dispatcher summoned you. You are a dispatcher in your own session: you coordinate workers the same way, and your results go back to that dispatcher, not to a user. You stay responsive. Heavy work goes to workers you spawn in the background."
+      : "You are the user's main assistant in this chat. You stay responsive. Heavy work goes to workers you spawn in the background.",
     "",
     "## How you work",
     "",
@@ -144,10 +169,14 @@ export function buildDispatcherPolicySection(): string {
     "- Independent requests run in parallel. Never make stream B wait on stream A unless they share one logical stream.",
     "- A correction to work already in flight is a steer on that worker. Do not spawn a second worker for the same stream.",
     "- One live worker per stream. Check before you spawn if you are unsure.",
-    "- Write a todo entry before you spawn. Several entries may be `in_progress` at once. Mark an entry `completed` at the first visible acknowledgement to the user — they have seen or been told the outcome is underway or delivered. Worker exit alone completes nothing.",
+    spawned
+      ? "- Write a todo entry before you spawn. Several entries may be `in_progress` at once. Mark an entry `completed` at your first report of its outcome to the dispatcher that summoned you. Worker exit alone completes nothing."
+      : "- Write a todo entry before you spawn. Several entries may be `in_progress` at once. Mark an entry `completed` at the first visible acknowledgement to the user — they have seen or been told the outcome is underway or delivered. Worker exit alone completes nothing.",
     "- On every wake, reconcile the ledger first: what is running, what landed undelivered, what still needs dispatch.",
     "- Worker prompts are self-contained. The worker cannot see this conversation, the user's earlier messages, or sibling work. Put the goal, constraints, relevant context, success criteria, and report format into the spawn prompt.",
-    "- Workers cannot talk to the user. Only you deliver.",
+    spawned
+      ? "- Workers cannot talk to the user. Their results come back to you; yours go back to the dispatcher that summoned you."
+      : "- Workers cannot talk to the user. Only you deliver.",
     // Ticket 119 / ADR-0025: one messaging verb for both peer kinds, one
     // bounded wait, and mitosis. The tool descriptions carry the parameters;
     // these lines carry the doctrine.

@@ -22,6 +22,7 @@ import {
   PEER_ROSTER_INTRO,
   PEER_ROSTER_SECTION_HEADING,
   PEER_WAKE_SECTION_HEADINGS,
+  type DispatcherOrigin,
 } from "./prompts.js";
 
 /**
@@ -36,10 +37,18 @@ export interface WakeNotice {
   readonly transcriptRef: string | null;
 }
 
-/** Session policy section. Empty string when the flag is OFF. */
-export function assembleSessionPolicy(enabled: boolean): string {
+/**
+ * Session policy section. Empty string when the flag is OFF.
+ *
+ * `origin` (ticket 141) selects the spawned wording; omitted means `user`,
+ * so every pre-141 caller produces the same bytes it always did.
+ */
+export function assembleSessionPolicy(
+  enabled: boolean,
+  origin: DispatcherOrigin = "user",
+): string {
   if (!enabled) return "";
-  return buildDispatcherPolicySection();
+  return buildDispatcherPolicySection(origin);
 }
 
 /** Render one ledger line for the per-turn reminder. */

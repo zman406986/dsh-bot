@@ -70,6 +70,8 @@ export {
   MARKER_TABLE_NAME,
   INBOX_TABLE_NAME,
   COMPACTION_BOUNDARY_TABLE_NAME,
+  DISPATCHER_SESSION_TABLE_NAME,
+  WORKER_SESSION_TABLE_NAME,
   type DomainLike,
   type InboxCheckpointStore,
   type InboxJobCheckpoint,
@@ -230,6 +232,7 @@ export {
 export {
   PLUGIN_NAME,
   PEER_WAKE_CUE,
+  RESUME_WAKE_CUE,
   WAKE_CUE,
   wakeUserMessage,
   type WakeMessageSource,

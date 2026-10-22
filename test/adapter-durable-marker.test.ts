@@ -8,6 +8,7 @@ import {
   INBOX_TABLE_NAME,
   COMPACTION_BOUNDARY_TABLE_NAME,
   DISPATCHER_SESSION_TABLE_NAME,
+  WORKER_SESSION_TABLE_NAME,
   type DomainLike,
   type KvTableLike,
   type StorageDomainLike,
@@ -17,6 +18,7 @@ import type {
   CompactionBoundary,
   DurableDispatcherMark,
   DurableWorkerMarker,
+  DurableWorkerSession,
 } from "../src/core/durability.js";
 
 function createStubStorageDomain(): StorageDomainLike & {
@@ -25,12 +27,14 @@ function createStubStorageDomain(): StorageDomainLike & {
   inbox: Map<string, InboxJobCheckpoint>;
   boundaries: Map<string, CompactionBoundary>;
   dispatchers: Map<string, DurableDispatcherMark>;
+  workerSessions: Map<string, DurableWorkerSession>;
   closed: boolean;
 } {
   const table = new Map<string, DurableWorkerMarker>();
   const inbox = new Map<string, InboxJobCheckpoint>();
   const boundaries = new Map<string, CompactionBoundary>();
   const dispatchers = new Map<string, DurableDispatcherMark>();
+  const workerSessionRows = new Map<string, DurableWorkerSession>();
   const opens: unknown[] = [];
   let closed = false;
 
@@ -94,12 +98,28 @@ function createStubStorageDomain(): StorageDomainLike & {
     },
   };
 
+  const workerSessionKv: KvTableLike<DurableWorkerSession> = {
+    get(key: string) {
+      return workerSessionRows.get(key);
+    },
+    entries() {
+      return workerSessionRows.entries();
+    },
+    async put(key: string, value: DurableWorkerSession) {
+      workerSessionRows.set(key, { ...value });
+    },
+    async delete(key: string) {
+      return workerSessionRows.delete(key);
+    },
+  };
+
   return {
     opens,
     table,
     inbox,
     boundaries,
     dispatchers,
+    workerSessions: workerSessionRows,
     get closed() {
       return closed;
     },
@@ -117,12 +137,15 @@ function createStubStorageDomain(): StorageDomainLike & {
       assert.ok(s.tables[INBOX_TABLE_NAME]);
       assert.ok(s.tables[COMPACTION_BOUNDARY_TABLE_NAME]);
       assert.ok(s.tables[DISPATCHER_SESSION_TABLE_NAME]);
+      // Ticket 142: the worker wake table rides the same domain.
+      assert.ok(s.tables[WORKER_SESSION_TABLE_NAME]);
       return {
         table(name: string) {
           if (name === MARKER_TABLE_NAME) return kv;
           if (name === INBOX_TABLE_NAME) return inboxKv;
           if (name === COMPACTION_BOUNDARY_TABLE_NAME) return boundaryKv;
           if (name === DISPATCHER_SESSION_TABLE_NAME) return dispatcherKv;
+          if (name === WORKER_SESSION_TABLE_NAME) return workerSessionKv;
           throw new Error(`unexpected table ${name}`);
         },
         async close() {
@@ -370,5 +393,110 @@ describe("durable marker store over storageDomain", () => {
     assert.throws(() => parse(null));
     assert.throws(() => parse({ sessionId: "" }));
     assert.doesNotThrow(() => parse({ sessionId: "child-1" }));
+    // Ticket 138: the optional spawner is validated when present — a
+    // non-string parent would otherwise read as "no parent" and silently
+    // disable wake-on-send for that row.
+    assert.doesNotThrow(() => parse({ sessionId: "child-1", parentSessionId: "p-1" }));
+    assert.throws(() => parse({ sessionId: "child-1", parentSessionId: 7 }));
+  });
+
+  it("lists every dispatcher mark so the adapter can warm its mirror (ticket 138)", async () => {
+    const sd = createStubStorageDomain();
+    const durability = createStorageDomainDurability(sd);
+
+    assert.deepEqual(await durability.listDispatcherMarks(), []);
+
+    await durability.writeDispatcherMark({ sessionId: "child-1", parentSessionId: "p-1" });
+    await durability.writeDispatcherMark({ sessionId: "child-2" });
+
+    const listed = await durability.listDispatcherMarks();
+    assert.deepEqual(
+      listed.map((mark) => mark.sessionId).sort(),
+      ["child-1", "child-2"],
+    );
+    assert.equal(
+      listed.find((mark) => mark.sessionId === "child-1")?.parentSessionId,
+      "p-1",
+    );
+    assert.equal(sd.opens.length, 1, "the list shares the one open domain");
+  });
+
+  /**
+   * Ticket 142 (owner ruling 2026-10-22 — the children half): the wake
+   * identity of a WORKER session. It lives in the same domain, follows the
+   * `dispatcher_sessions` shape, and differs on ONE point that is the whole
+   * reason it is a separate table: its rows are DELETED when the worker is
+   * terminal or abandoned.
+   */
+  it("declares worker_sessions in the same domain without a version bump (ticket 142)", () => {
+    const spec = markerDomainSpec() as {
+      version: number;
+      tables: Record<string, { valueSchema: { parse(v: unknown): unknown } }>;
+    };
+    // Same rule as tickets 124/130: a new optional table must not bump the
+    // version, or every existing store refuses to open on upgrade.
+    assert.equal(spec.version, 2);
+    assert.ok(spec.tables[WORKER_SESSION_TABLE_NAME]);
+  });
+
+  it("writes, reads, lists, and deletes a worker session row in the SAME domain (ticket 142)", async () => {
+    const sd = createStubStorageDomain();
+    const durability = createStorageDomainDurability(sd);
+
+    // Absent row reads as no mark — a worker session we never spawned.
+    assert.equal(await durability.readWorkerSession("w-1"), undefined);
+
+    await durability.writeWorkerSession({
+      sessionId: "w-1",
+      parentSessionId: "chat-1",
+    });
+    assert.equal(sd.opens.length, 1, "the row shares the one open domain");
+    assert.equal(sd.workerSessions.size, 1);
+
+    const read = await durability.readWorkerSession("w-1");
+    assert.ok(read);
+    assert.equal(read.parentSessionId, "chat-1");
+    // Another id stays unmarked.
+    assert.equal(await durability.readWorkerSession("w-2"), undefined);
+
+    await durability.writeWorkerSession({
+      sessionId: "w-2",
+      parentSessionId: "chat-2",
+    });
+    const listed = await durability.listWorkerSessions();
+    assert.deepEqual(
+      listed.map((row) => row.sessionId).sort(),
+      ["w-1", "w-2"],
+    );
+    assert.equal(sd.opens.length, 1, "the list shares the one open domain");
+
+    // Deleted, not tombstoned: a terminal worker must not be wake-able, and a
+    // re-read after the delete is the pre-spawn answer.
+    await durability.deleteWorkerSession("w-1");
+    assert.equal(await durability.readWorkerSession("w-1"), undefined);
+    assert.deepEqual(
+      (await durability.listWorkerSessions()).map((row) => row.sessionId),
+      ["w-2"],
+    );
+  });
+
+  it("schema parse rejects a malformed worker session row (ticket 142)", () => {
+    const spec = markerDomainSpec() as {
+      tables: Record<string, { valueSchema: { parse(v: unknown): unknown } }>;
+    };
+    const parse = spec.tables[WORKER_SESSION_TABLE_NAME]?.valueSchema.parse;
+    assert.ok(parse);
+    assert.throws(() => parse({}));
+    assert.throws(() => parse(null));
+    assert.throws(() => parse({ sessionId: "" , parentSessionId: "p-1" }));
+    assert.throws(() => parse({ sessionId: "w-1" }));
+    // A non-string (or empty) spawner is rejected rather than read as "no
+    // parent" — a row that cannot be resumed is malformed, not a quiet
+    // downgrade to pre-142 behaviour.
+    assert.throws(() => parse({ sessionId: "w-1", parentSessionId: 7 }));
+    assert.throws(() => parse({ sessionId: "w-1", parentSessionId: "" }));
+    assert.doesNotThrow(() =>
+      parse({ sessionId: "w-1", parentSessionId: "chat-1" }),
+    );
   });
 });

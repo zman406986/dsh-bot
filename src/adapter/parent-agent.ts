@@ -7,6 +7,7 @@ import {
 import { textBlocks } from "./content-blocks.js";
 import type { AdapterContext, AgentLike, CordisDshHost } from "./cordis-dsh-host.js";
 import { WAKE_SOURCE_KIND, wakeUserMessage } from "./wake-copy.js";
+import type { DispatcherOrigin } from "../core/policy/prompts.js";
 
 /**
  * Top-level dispatcher: no parent lineage, delegation depth 0.
@@ -123,9 +124,11 @@ export interface BindDispatcherLifecycleResult {
   /**
    * Ticket 118 / ADR-0025 mitosis: activate a SPAWNED child as a dispatcher.
    *
-   * The ONLY difference from {@link activate} is the missing top-level gate:
+   * The top-level gate is the only REFUSAL that differs from {@link activate}:
    * a spawned dispatcher is a subagent (`origin: 'subagent'`, depth ≥ 1) by
-   * construction, so `not-top-level` would refuse every mitosis child. Every
+   * construction, so `not-top-level` would refuse every mitosis child. The
+   * origin also selects the spawned policy wording (ticket 141) — the child is
+   * told what it is instead of being told it is the user's assistant. Every
    * other step is the same sequence — parent bind, policy inject, lifecycle
    * registration, `onActivated` (which registers that session's scoped tool
    * surface and starts the durability rebuild).
@@ -363,8 +366,18 @@ export function bindDispatcherLifecycle(
    * The one activation sequence both entry points share — TICKET 118:
    * extracted verbatim from `activate` so the spawned path cannot drift from
    * the command path. The ONLY thing the caller decides is the gate.
+   *
+   * Ticket 141: `origin` is the second thing the caller decides, and it only
+   * reaches the policy text. `user` is the command path (`activate`);
+   * `spawned` is this dispatcher's child (`activateSpawnedDispatcher`), which
+   * has no user in its chat and no user-facing delivery, so its policy must
+   * not claim either. Nothing else branches on it.
    */
-  function bindActivation(agent: AgentLike, sessionId: string): void {
+  function bindActivation(
+    agent: AgentLike,
+    sessionId: string,
+    origin: DispatcherOrigin,
+  ): void {
     // ADR-0019: another chat being a dispatcher is not a refusal — each
     // session activates independently.
     sessions.set(sessionId, agent);
@@ -375,7 +388,7 @@ export function bindDispatcherLifecycle(
     host.bindParent(agent, sessionId);
     // ADR-0005: policy is fixed for this session's lifetime.
     if (policyEnabled) {
-      tryInject(agent, assembleSessionPolicy(true));
+      tryInject(agent, assembleSessionPolicy(true, origin));
     }
     onActivated?.(sessionId);
   }
@@ -395,7 +408,7 @@ export function bindDispatcherLifecycle(
       if (sessions.has(sessionId)) {
         return { ok: false, reason: "already-active-here" };
       }
-      bindActivation(agent, sessionId);
+      bindActivation(agent, sessionId, "user");
       return { ok: true };
     },
 
@@ -418,7 +431,7 @@ export function bindDispatcherLifecycle(
       if (sessions.has(sessionId)) {
         return { ok: false, reason: "already-active-here" };
       }
-      bindActivation(agent, sessionId);
+      bindActivation(agent, sessionId, "spawned");
       return { ok: true };
     },
 

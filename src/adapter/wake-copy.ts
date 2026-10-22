@@ -19,6 +19,19 @@ export const WAKE_CUE =
 export const PEER_WAKE_CUE =
   "A peer assistant sent a message. Treat it as another assistant, not the user.";
 
+/**
+ * Ticket 138 (owner ruling 2026-10-22): the payload of the cold-resume call
+ * that wakes a marked dispatcher nobody had re-announced yet.
+ *
+ * It carries NO peer text on purpose. The host's `sendMessage` both resumes
+ * the absent child and opens its turn, so this cue is what that turn sees;
+ * the actual peer message is drained from the wake bus once the child is
+ * live, as its own peer turn (`composeWakeText` → `assemblePeerWakeTurn`).
+ * Sending the text here as well would deliver it twice.
+ */
+export const RESUME_WAKE_CUE =
+  "Your session was resumed because another agent sent you a message. That message is not part of this cue; it arrives as the next turn, from your peer inbox.";
+
 export const PLUGIN_NAME = "multitask-dispatcher";
 
 /**

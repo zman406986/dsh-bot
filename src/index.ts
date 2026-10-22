@@ -31,6 +31,7 @@ export {
   toRegisterableTool,
   wakeUserMessage,
   PEER_WAKE_CUE,
+  RESUME_WAKE_CUE,
   WAKE_CUE,
 } from "./adapter/index.js";
 export type {
@@ -118,6 +119,7 @@ export {
 } from "./core/durability.js";
 export type {
   DurableWorkerMarker,
+  DurableWorkerSession,
   DurabilityPort,
   InMemoryDurability,
   RebuildReport,
@@ -221,6 +223,8 @@ export {
   formatCheckRowLine,
   formatCheckSummary,
   formatElapsedMs,
+  formatDormantSteerNote,
+  formatMessageAgentDormantSteerNote,
   formatSpawnAck,
   formatSpawnDispatcherNote,
   formatSteerNote,

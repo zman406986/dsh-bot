@@ -631,6 +631,13 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     onDispatcherSpawned: (agent, sessionId) => {
       lifecycle.activateSpawnedDispatcher(agent, sessionId);
     },
+    // Ticket 142 (owner ruling 2026-10-22 — children half): the host adopted a
+    // worker session it re-created. Resolve the ticket-59 unknown-state hold
+    // into a live roster record so the worker is visible and stoppable again.
+    // A throwing hook is swallowed inside the host.
+    onWorkerReattached: (workerId, parentSessionId) => {
+      multitaskRef?.reclaimWorker(workerId, parentSessionId);
+    },
   });
   const accessTimeoutMs = config.accessRequestTimeoutMs?.get();
   // Ticket 108: clamped defensively here too — the schema enforces min 0,
@@ -657,6 +664,25 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     // during apply.
     isLiveDispatcherSession: (sessionId) =>
       lifecycle.isDispatcherSession(sessionId),
+    // Ticket 138 (owner ruling 2026-10-22): the DURABLE half of the same
+    // fence. A target this plugin spawned as a dispatcher in an earlier
+    // process carries a `dispatcher_sessions` mark, so a send to it is
+    // ACCEPTED instead of refused — the adapter's wake path then cold-resumes
+    // it (`ctx.subagents.sendMessage`) and delivers the parked turn on
+    // activation. A target with no mark still refuses `unknown-target`
+    // (ticket 70 §2's fence is intact). Synchronous on purpose: the host
+    // keeps a warm mirror of the mark table (warmed on each dispatcher
+    // activation, extended on every in-process write), so the fence never
+    // awaits a store read.
+    isDurablyMarkedDispatcher: (sessionId) =>
+      host.isDurablyMarkedDispatcher(sessionId),
+    // Ticket 142 (owner ruling 2026-10-22 — the CHILDREN half of "bots should
+    // be wake-able"): the durable WORKER wake identity, from the host's warm
+    // mirror of the `worker_sessions` table. A steer aimed at an id with no
+    // roster record is still accepted when this answers — the worker is
+    // dormant, not unknown — and the host's `wakeDormantWorker` cold-resumes
+    // it. An id with no row keeps the shipped `unknown-worker` refusal.
+    findDurableWorker: (workerId) => host.workerSessionMark(workerId),
     // Ticket 115: the await-timeout liveness probe. Worker ids ARE dsh
     // subagent session ids, and `ctx.agents` is the same live-agent registry
     // the host's wake path already resolves (`requestDispatcherWakeup`,
@@ -969,6 +995,21 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     }
     // Ticket 23: prompts sync runs once the rebuild has landed.
     pumpFor(sessionId).sync();
+    // Ticket 138: warm the durable mark mirror for this activation. It runs
+    // HERE — after the rebuild's marker read and behind the generation guard
+    // — so it can never consume a build-time marker read that ticket 90
+    // deliberately parks, and a chain that ends mid-read warms nothing. A
+    // send can only exist once a dispatcher turn is open, which is after this
+    // chain starts, so the fence always sees the warmed mirror. A read
+    // failure is swallowed inside the host: an empty mirror means unmarked
+    // targets refuse exactly as before 138 (fail-closed, never a phantom
+    // accept), and marks written in THIS process are already in the mirror.
+    void host.refreshDispatcherMarks();
+    // Ticket 142: and the WORKER wake mirror beside it, under the same guard
+    // and for the same reasons. A read failure is swallowed inside the host:
+    // an empty mirror means an unmarked id refuses exactly as before 142, and
+    // rows written in THIS process are already in the mirror.
+    void host.refreshWorkerSessionMarks();
     if (notice !== null) {
       // Ticket 57 (D-4): route recovery through the WAKING primitive.
       // `injectNotice` only queues context; the reference re-wakes its parent

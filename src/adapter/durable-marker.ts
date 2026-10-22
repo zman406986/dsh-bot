@@ -3,6 +3,7 @@ import type {
   CompactionBoundaryStore,
   DurableDispatcherMark,
   DurableWorkerMarker,
+  DurableWorkerSession,
   DurabilityPort,
 } from "../core/durability.js";
 
@@ -49,6 +50,21 @@ export const COMPACTION_BOUNDARY_TABLE_NAME = "compaction_boundaries";
  */
 export const DISPATCHER_SESSION_TABLE_NAME = "dispatcher_sessions";
 /**
+ * Ticket 142 (owner ruling 2026-10-22 — the children half): the durable wake
+ * identity of a WORKER session — one row per child this plugin spawned as a
+ * worker, keyed by the worker id (which is the child session id).
+ *
+ * `parentSessionId` is REQUIRED here (unlike the dispatcher mark's optional
+ * one): a row without a spawner could not be cold-resumed, so the schema
+ * rejects it rather than silently reading "this id carries no spawner".
+ *
+ * Rows ARE deleted — on terminal settle, on abort, and when an unknown-state
+ * hold is released. The dispatcher rows are never deleted because a
+ * dispatcher keeps its identity across restarts; a finished worker must not
+ * be resurrected (ticket 04: stop is for good).
+ */
+export const WORKER_SESSION_TABLE_NAME = "worker_sessions";
+/**
  * Ticket 113: the domain gained the `inbox_jobs` table, so the spec bumps
  * from 1 to 2. Existing `worker_markers` rows keep their shape (the new
  * `external` field is optional); the version bump only declares the wider
@@ -63,6 +79,9 @@ export const DISPATCHER_SESSION_TABLE_NAME = "dispatcher_sessions";
  * this repo claims.
  *
  * Ticket 130: `dispatcher_sessions` is added the same way, same reason.
+ *
+ * Ticket 142: `worker_sessions` is added the same way again — no bump, so an
+ * existing store opens with the new table empty.
  */
 export const DOMAIN_VERSION = 2;
 
@@ -257,7 +276,10 @@ const compactionBoundaryValueSchema = {
 
 /**
  * Minimal open-time validation for a dispatcher identity row (ticket 130).
- * The session id is the key AND the only field; a row missing it is malformed.
+ * The session id is the key AND the only required field; a row missing it is
+ * malformed. Ticket 138 adds the optional spawner, so a malformed parent is
+ * rejected instead of being read as "no parent" (which would silently disable
+ * wake-on-send).
  */
 function parseDispatcherMark(value: unknown): DurableDispatcherMark {
   if (typeof value !== "object" || value === null) {
@@ -267,11 +289,41 @@ function parseDispatcherMark(value: unknown): DurableDispatcherMark {
   if (typeof m.sessionId !== "string" || m.sessionId.length === 0) {
     throw new Error("dispatcher mark.sessionId must be a non-empty string");
   }
+  if (
+    m.parentSessionId !== undefined &&
+    typeof m.parentSessionId !== "string"
+  ) {
+    throw new Error("dispatcher mark.parentSessionId must be a string");
+  }
   return value as DurableDispatcherMark;
 }
 
 const dispatcherMarkValueSchema = {
   parse: parseDispatcherMark,
+};
+
+/**
+ * Minimal open-time validation for a worker wake row (ticket 142). BOTH
+ * fields are required: the id is the key a send resolves, and the spawner is
+ * the sender a cold resume needs. A row missing either is malformed — reading
+ * it as "no parent" would silently disable wake-on-send for that worker.
+ */
+function parseWorkerSession(value: unknown): DurableWorkerSession {
+  if (typeof value !== "object" || value === null) {
+    throw new Error("worker session must be an object");
+  }
+  const s = value as Record<string, unknown>;
+  if (typeof s.sessionId !== "string" || s.sessionId.length === 0) {
+    throw new Error("worker session.sessionId must be a non-empty string");
+  }
+  if (typeof s.parentSessionId !== "string" || s.parentSessionId.length === 0) {
+    throw new Error("worker session.parentSessionId must be a non-empty string");
+  }
+  return value as DurableWorkerSession;
+}
+
+const workerSessionValueSchema = {
+  parse: parseWorkerSession,
 };
 
 /** Domain spec handed to `storageDomain.open`. */
@@ -291,6 +343,9 @@ export function markerDomainSpec(): unknown {
       },
       [DISPATCHER_SESSION_TABLE_NAME]: {
         valueSchema: dispatcherMarkValueSchema,
+      },
+      [WORKER_SESSION_TABLE_NAME]: {
+        valueSchema: workerSessionValueSchema,
       },
     },
   };
@@ -317,11 +372,12 @@ export interface StorageDomainDurability
 
 /**
  * Durable marker + inbox checkpoint + compaction boundary + dispatcher
- * identity store over `ctx.storageDomain` (ADR-0006, ticket 113, ticket 124,
- * ticket 130). Open is lazy: the first read/write opens the domain ONCE (all
- * tables share it — a second open of one namespace is not assumed to be
- * safe); later calls reuse it. Marker key = workerId; checkpoint key = jobId;
- * boundary key = sessionId; dispatcher mark key = sessionId. Reads filter by
+ * identity + worker wake identity store over `ctx.storageDomain` (ADR-0006,
+ * ticket 113, ticket 124, ticket 130, ticket 142). Open is lazy: the first
+ * read/write opens the domain ONCE (all tables share it — a second open of
+ * one namespace is not assumed to be safe); later calls reuse it. Marker key
+ * = workerId; checkpoint key = jobId; boundary key = sessionId; dispatcher
+ * mark key = sessionId; worker session key = workerId. Reads filter by
  * parentSessionId at roster scale.
  */
 export function createStorageDomainDurability(
@@ -372,6 +428,16 @@ export function createStorageDomainDurability(
         domain.table(
           DISPATCHER_SESSION_TABLE_NAME,
         ) as unknown as KvTableLike<DurableDispatcherMark>,
+    );
+  }
+
+  function ensureWorkerSessionTable(): Promise<KvTableLike<DurableWorkerSession>> {
+    // Same localized cast as the inbox table (ticket 142).
+    return ensureDomain().then(
+      (domain) =>
+        domain.table(
+          WORKER_SESSION_TABLE_NAME,
+        ) as unknown as KvTableLike<DurableWorkerSession>,
     );
   }
 
@@ -451,6 +517,49 @@ export function createStorageDomainDurability(
     ): Promise<DurableDispatcherMark | undefined> {
       const table = await ensureDispatcherTable();
       return table.get(sessionId);
+    },
+
+    // Ticket 138: the whole mark table, so the adapter can warm its
+    // synchronous "durably known target" set once per activation (the peer
+    // fence is synchronous and cannot await a store read).
+    async listDispatcherMarks(): Promise<readonly DurableDispatcherMark[]> {
+      const table = await ensureDispatcherTable();
+      const out: DurableDispatcherMark[] = [];
+      for (const [, mark] of table.entries()) {
+        out.push(mark);
+      }
+      return out;
+    },
+
+    // Ticket 142: the worker wake identity, in the SAME domain. Keyed by
+    // worker id and DELETED once the worker is terminal or abandoned — see
+    // `WORKER_SESSION_TABLE_NAME`.
+    async writeWorkerSession(session: DurableWorkerSession): Promise<void> {
+      const table = await ensureWorkerSessionTable();
+      await table.put(session.sessionId, session);
+    },
+
+    async readWorkerSession(
+      workerId: string,
+    ): Promise<DurableWorkerSession | undefined> {
+      const table = await ensureWorkerSessionTable();
+      return table.get(workerId);
+    },
+
+    async deleteWorkerSession(workerId: string): Promise<void> {
+      const table = await ensureWorkerSessionTable();
+      await table.delete(workerId);
+    },
+
+    // Ticket 142: the whole table, read once per activation to warm the
+    // adapter's synchronous mirror — same reason as `listDispatcherMarks`.
+    async listWorkerSessions(): Promise<readonly DurableWorkerSession[]> {
+      const table = await ensureWorkerSessionTable();
+      const out: DurableWorkerSession[] = [];
+      for (const [, session] of table.entries()) {
+        out.push(session);
+      }
+      return out;
     },
 
     async dispose(): Promise<void> {

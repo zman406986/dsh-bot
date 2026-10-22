@@ -61,6 +61,19 @@ export class FakeDshHost implements DshHost {
    */
   readonly wakeOrigins: WakeOriginCall[] = [];
   readonly interruptDispatcherCalls: string[] = [];
+  /**
+   * Ticket 142: dormant-worker wakes, in call order. The real adapter parks
+   * the text and cold-resumes the session; the fake records the call and keeps
+   * the mirror below in step, so a core test can assert acceptance and
+   * exactly-once delivery without a host.
+   */
+  readonly dormantWakeCalls: SendMessageCall[] = [];
+  /**
+   * Ticket 142: the fake's copy of the host's synchronous worker mirror,
+   * keyed by worker id → spawner. `rememberWorkerWake` / `forgetWorkerWake`
+   * maintain it exactly as the adapter does.
+   */
+  readonly workerWakes = new Map<string, string>();
 
   #settledCallbacks: Array<(event: SettledEvent) => void> = [];
   #stepBoundaryCallbacks: Array<(workerId: string) => void | Promise<void>> = [];
@@ -101,6 +114,21 @@ export class FakeDshHost implements DshHost {
 
   async sendMessage(workerId: string, message: string): Promise<void> {
     this.sendMessageCalls.push({ workerId, message });
+  }
+
+  /** Ticket 142: the core's wake seam for a dormant, durably marked worker. */
+  async wakeDormantWorker(workerId: string, message: string): Promise<void> {
+    this.dormantWakeCalls.push({ workerId, message });
+  }
+
+  /** Ticket 142: the host mirror a send is fenced against. */
+  rememberWorkerWake(workerId: string, parentSessionId: string): void {
+    this.workerWakes.set(workerId, parentSessionId);
+  }
+
+  /** Ticket 142: a terminal or abandoned worker stops being wake-able. */
+  forgetWorkerWake(workerId: string): void {
+    this.workerWakes.delete(workerId);
   }
 
   onWorkerSettled(cb: (event: SettledEvent) => void): void {
