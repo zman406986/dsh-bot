@@ -38,7 +38,7 @@
  * Ticket 40 binds the capsule/panel intents to ticket 36's verified seams
  * at THIS composition point and nowhere else: the narrow CommandTransport
  * (start = the composer's exact `commands.execute` transaction with
- * `/dispatcher-start` verbatim; stop = the scope-addressed plain-prompt
+ * `/dsh-bot` verbatim; stop = the scope-addressed plain-prompt
  * sink with the locale-keyed conversational phrasing) and the per-row steer
  * prefill seat (`input.for(actx).setDraft`) are built in `mountShellPage`
  * over lazy service sources — the conversation pane and hosted roster panel
@@ -300,7 +300,7 @@ export function applyClientModule(
   // Why both marks are composed: workers are identified by
   // `origin: 'subagent'`, a durable header fact. Dispatchers are identified by
   // the `sessionKind` projection the adapter registers, which folds the
-  // `command/run` + `command/done` pair `/dispatcher-start` already writes —
+  // `command/run` + `command/done` pair `/dsh-bot` already writes —
   // so the identity is durable and needs no event of our own. `agentPreset`
   // is unusable here (every durable header reads "standard").
   ctx.slots.inject(

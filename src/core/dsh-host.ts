@@ -1,5 +1,11 @@
 import type { AccessRequestEvent } from "./access-types.js";
-import type { SettledEvent, SpawnOptions } from "./types.js";
+import type { AgentMessageWakeOrigin } from "./peer-types.js";
+import type {
+  DispatcherSpawnOptions,
+  DispatcherSpawnResult,
+  SettledEvent,
+  SpawnOptions,
+} from "./types.js";
 
 /**
  * The single host boundary the multitask core depends on.
@@ -7,8 +13,29 @@ import type { SettledEvent, SpawnOptions } from "./types.js";
  * tests use a hand-written fake. Core code must not touch `ctx` directly.
  */
 export interface DshHost {
-  /** Non-blocking spawn; resolves with a host-assigned worker id. */
+  /**
+   * Non-blocking spawn; resolves with a host-assigned worker id.
+   *
+   * Ticket 120: while this promise is pending the child is already live and
+   * emits `agent/created` and its first `agent/status: running`. A host that
+   * knows the id up front must call `opts.onWorkerId` with it before those
+   * events can fire, and resolve with that same id — the core cannot
+   * register a worker it has not been told about, and the worker FSM ignores
+   * notices for unknown ids.
+   */
   spawnWorker(prompt: string, opts: SpawnOptions): Promise<string>;
+  /**
+   * Ticket 118 / ADR-0025 mitosis: spawn another DISPATCHER from a bound
+   * dispatcher session; resolves with the child's session id.
+   *
+   * Distinct from `spawnWorker` on purpose: the child is a PEER — it gets no
+   * worker composition, enters no worker roster, carries no stream key, and
+   * is bounded only by the host's `maxDepth` ceiling (`parentDepth + 2`, see
+   * `dispatcherSpawnMaxDepth`) and the 8-active root pool. Host refusals
+   * (e.g. `ACTIVATION_LIMIT_REACHED`) surface as-is; the host adds no cap of
+   * its own (ADR-0025 §Starting bounds).
+   */
+  spawnDispatcher(opts: DispatcherSpawnOptions): Promise<DispatcherSpawnResult>;
   /** Interrupt a running worker. Fire-and-return once the host accepted the stop. */
   interruptWorker(workerId: string): Promise<void>;
   /**
@@ -23,8 +50,21 @@ export interface DshHost {
    * has unwound and the worker is ready for the next step (steer delivery point).
    */
   onStepBoundary(cb: (workerId: string) => void | Promise<void>): void;
-  /** Ask the host to open a dispatcher turn (wake), typically after a settle. */
-  requestDispatcherWakeup(sessionId: string): Promise<void>;
+  /**
+   * Ask the host to open a dispatcher turn (wake), typically after a settle.
+   *
+   * Ticket 116 / ADR-0025: `origin` is an OPTIONAL structured source
+   * override. A peer wake passes `{kind:"agent-message", form:"relay",
+   * senderSessionId}` and the host stamps it as the follow-up message's
+   * `source` instead of the producer-owned plugin kind, so the durable
+   * record says "another agent" — nothing downstream can mistake the turn
+   * for user input, and the text body's "not from the user" heading stays
+   * presentation only. Absent → the shipped plugin source, unchanged.
+   */
+  requestDispatcherWakeup(
+    sessionId: string,
+    origin?: AgentMessageWakeOrigin,
+  ): Promise<void>;
   /**
    * Optional: abandon the current non-user dispatcher turn so a priority
    * peer can take the next one. No-op when the current turn is user-owned

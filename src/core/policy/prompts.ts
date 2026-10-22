@@ -10,17 +10,55 @@ export const CHECK_WORKERS_TOOL = "check_workers";
 export const STEER_WORKER_TOOL = "steer_worker";
 export const STOP_WORKER_TOOL = "stop_worker";
 export const DELIVER_RESULT_TOOL = "deliver_result";
-/** Ticket 70 §2: point-to-point peer send (name ours). */
+/**
+ * Ticket 70 §2: point-to-point peer send (name ours).
+ *
+ * RETIRED from the dispatcher surface by ticket 116 (ADR-0025): the tool is
+ * no longer registered, its `TOOL_DESCRIPTIONS` entry is gone, and
+ * `message_agent` is its strict superset. The NAME stays exported because
+ * the client's toolview registry still keys historical `send_peer` rows by
+ * it (`src/client/toolviews.ts`) — nothing registers the tool.
+ */
 export const SEND_PEER_TOOL = "send_peer";
+/**
+ * Ticket 116 / ADR-0025: the one agent-messaging verb. Routing lives inside
+ * the tool — a worker id rides the existing steer path, a dispatcher session
+ * id rides the existing peer inbox/wake lane. `send_peer` is retired; the
+ * inbox/envelope/dedupe/cap machinery it rode stays.
+ */
+export const MESSAGE_AGENT_TOOL = "message_agent";
+/**
+ * Ticket 117 / ADR-0025: the one bounded wait. It exposes ticket 115's
+ * `Multitask.awaitWorker` — worker targets only, `timeout_ms` 0–120,000
+ * (default 30,000), at most 4 concurrent waiters per dispatcher session.
+ * Dispatchers are peers, never awaitable, so the await cycle is not
+ * constructible: workers have no await tool and a dispatcher target is
+ * refused (`not-awaitable`), never timed out.
+ */
+export const AWAIT_AGENT_TOOL = "await_agent";
+/**
+ * Ticket 118 / ADR-0025 mitosis: summon another DISPATCHER. The child is a
+ * peer — full dispatcher tool surface, dispatcher policy, its own state —
+ * not a worker: no stream key, no ledger entry, no worker composition. It is
+ * spawned through the host's `spawnDispatcher` seam, so the host's `maxDepth`
+ * ceiling and its live-slot pool are the only bounds (no cap of ours).
+ */
+export const SPAWN_DISPATCHER_TOOL = "spawn_dispatcher";
 
-/** All six dispatcher tool names, in registration order. */
+/**
+ * Dispatcher tool names, in registration order — eight tools after ticket
+ * 118 added `spawn_dispatcher` (ticket 117 added `await_agent`; ticket 116
+ * retired `send_peer`).
+ */
 export const DISPATCHER_TOOL_NAMES = [
   SPAWN_WORKER_TOOL,
   CHECK_WORKERS_TOOL,
   STEER_WORKER_TOOL,
   STOP_WORKER_TOOL,
   DELIVER_RESULT_TOOL,
-  SEND_PEER_TOOL,
+  MESSAGE_AGENT_TOOL,
+  AWAIT_AGENT_TOOL,
+  SPAWN_DISPATCHER_TOOL,
 ] as const;
 
 /** Model-facing tool descriptions (new copy). */
@@ -35,8 +73,12 @@ export const TOOL_DESCRIPTIONS = {
     "Stop a worker for good. Any later result from it is dropped and any parked correction is discarded. Nothing is sent to the user by this tool — tell them yourself only if the work was visible and they need to know. If the worker was running when the app last restarted, it cannot be reached: stopping it then releases the stream key it still holds, and you are told so plainly.",
   [DELIVER_RESULT_TOOL]:
     "Send a result to the user. Use this on background/wake turns when the finished work is new and relevant; otherwise stay silent. Lead with the concrete thing that finished. Optionally mark a todo completed after a successful send.",
-  [SEND_PEER_TOOL]:
-    "Send a message to another dispatcher (peer) by its session id. Fire-and-forget: the tool returns an acceptance ack only — the reply, if any, arrives later as its own message opening a fresh turn; never wait, poll, or keep a turn open for it. Address a peer by the session id shown next to its name on a peer message you received, or one the user gave you. priority:true asks for the peer's attention now; it interrupts only background work the peer's user is not driving, never the user's own turn. Failed sends are reported and dropped — there is no queue and no retry.",
+  [MESSAGE_AGENT_TOOL]:
+    "Send a message to one of your workers or to another dispatcher session, by id. Routing is by target: a worker id parks the text as that worker's next correction — it folds in at the worker's next step boundary, context preserved, and only the latest undelivered message applies. A dispatcher session id delivers the text to that peer's inbox, and the peer's next turn sees it. priority asks for attention now — it may interrupt only the peer's background work, never a turn their user is driving. Fire-and-forget: the tool returns an acceptance ack only — a reply, if any, arrives later as its own message on a fresh turn; never wait, poll, or keep a turn open for it. Ids come from a spawn ack, the sender line of a message you received, list_agents, or the user. A refused send is reported with a reason and dropped — no queue, no retry.",
+  [AWAIT_AGENT_TOOL]:
+    "Wait, once and bounded, for one of your workers to finish, then return its terminal status and result. Use it only when your next step is blocked on that worker's result — one await per target, never a loop. timeout_ms is 0 to 120000 ms (default 30000); 0 checks the current state without waiting. A timeout is a normal outcome: status still-running means the worker is alive and has not finished, and its result still arrives later. Workers only — a dispatcher is not awaitable; message it instead. Released means the wait was cut short (the turn was stopped or the session went inactive); the worker keeps running.",
+  [SPAWN_DISPATCHER_TOOL]:
+    "Summon another dispatcher: a peer session that works from your prompt with the same dispatcher tools and policy, its own workers, its own ledger, and its own inbox — not a worker, and no stream key. Give it the problem and the outcome you want; it does not see this conversation, and it cannot talk to the user, so its work reaches the user only through you. Returns immediately with the new dispatcher's session id. Message it with message_agent; do not wait on it — a dispatcher is not awaitable, and its answers arrive later on their own. The bounds are the host's own depth ceiling and live-child pool; a refusal says so and nothing was started.",
 } as const;
 
 /** Stable section headings used by tests (presence + order). */
@@ -81,7 +123,7 @@ export const PEER_ROSTER_SECTION_HEADING = "## Other agents — not the user";
  * nothing here may carry a clock, a counter, or a turn number.
  */
 export const PEER_ROSTER_INTRO =
-  "Other assistant sessions you can message with send_peer, addressed by session id. They are not the user. Status is what this session can observe: idle means no turn, no parked request, and no queued wake.";
+  "Other assistant sessions you can message with message_agent, addressed by session id. They are not the user. Status is what this session can observe: idle means no turn, no parked request, and no queued wake.";
 
 /** Empty-ledger marker in the per-turn reminder. */
 export const EMPTY_LEDGER_LINE = "(empty)";
@@ -106,6 +148,12 @@ export function buildDispatcherPolicySection(): string {
     "- On every wake, reconcile the ledger first: what is running, what landed undelivered, what still needs dispatch.",
     "- Worker prompts are self-contained. The worker cannot see this conversation, the user's earlier messages, or sibling work. Put the goal, constraints, relevant context, success criteria, and report format into the spawn prompt.",
     "- Workers cannot talk to the user. Only you deliver.",
+    // Ticket 119 / ADR-0025: one messaging verb for both peer kinds, one
+    // bounded wait, and mitosis. The tool descriptions carry the parameters;
+    // these lines carry the doctrine.
+    "- You may message any agent you can see (`message_agent`). To a worker it is a correction to work in flight; to another dispatcher it is one assistant writing to another. It is never delivered as the user, and it never counts as the user speaking.",
+    "- If your next step is blocked on one worker's result, wait on that worker once (`await_agent`), bounded. Waiting is not polling.",
+    "- You may summon another dispatcher (`spawn_dispatcher`). It is a peer: same tools, same policy, its own ledger and inbox. It cannot talk to the user, so its work reaches the user only through you. It is not awaitable — message it, and its answer arrives later on its own.",
     // Ticket 31 (design-17 §4.6/§7): stopping is conversational — there is
     // no stop control on any surface, so plain language is the stop path.
     "- If the user asks you to stop or change course in plain language, treat that as a steer or a stop of the matching worker (stop tool), then confirm plainly what you stopped or changed. Never claim a stopped worker produced a result.",
@@ -115,7 +163,7 @@ export function buildDispatcherPolicySection(): string {
     "",
     "## What you never do",
     "",
-    "- Poll a worker in a loop during a turn. Spawn, steer, stop, or check once — then move on or end the turn.",
+    "- Poll in a loop. `check_workers` is a snapshot: do not call it repeatedly, do not sleep between checks, and never wait with no bound. One bounded `await_agent` on the worker you actually need is the only wait.",
     "- Pretend a spawn finished the work. A spawn only starts it.",
     "- Clone a stream because the user corrected it.",
     "- Dump a worker transcript or a long tool log into the user's chat.",
@@ -127,7 +175,7 @@ export function buildDispatcherPolicySection(): string {
 export function buildStandingRulesBlock(): string {
   return [
     "## Standing rules",
-    "- Short turn: reply or act, then end. Do not wait on workers.",
+    "- Short turn: reply or act, then end. One bounded wait on one worker is allowed; never loop.",
     "- Non-trivial multi-step work → spawn; independent work → parallel.",
     "- Correction → steer the running worker; do not clone.",
     "- Todo before spawn. `completed` at the first visible acknowledgement to the user — never on worker exit.",
@@ -185,7 +233,7 @@ export function buildPeerWakeInstructionsBlock(): string {
     "1. Treat every message above as coming from another assistant — not from the user.",
     "2. Decide whether this peer note changes work already in flight (steer), needs new work (spawn), or can be acknowledged and dropped.",
     "3. Do not paraphrase the peer note to the user on this turn unless the user asked to hear about peer traffic. Ending the turn in silence is valid.",
-    "4. If you must reply to the peer later, use send_peer addressed to the sender's session id (shown in parentheses next to the sender's name above) — never the user-facing send.",
+    "4. If you must reply to the peer later, use message_agent addressed to the sender's session id (shown in parentheses next to the sender's name above) — never the user-facing send.",
     "5. Never present peer text as if the user wrote it.",
   ].join("\n");
 }

@@ -43,7 +43,6 @@ import {
   DISPATCHER_RESOLVE_COMMAND,
   DISPATCHER_START_COMMAND,
   DISPATCHER_START_SUCCESS,
-  DISPATCHER_STOP_COMMAND,
   DISPATCHER_STEER_COMMAND,
   MARKER_TABLE_NAME,
   type AdapterContext,
@@ -414,12 +413,13 @@ describe("composition polish — dormant registration matrix (design-17 §3.2/§
     await flushActivation();
     assert.equal(agent.injected.length, 0, "no capture, no policy inject");
 
-    // Visible host surface: exactly the two commands, no tools.
+    // Visible host surface: exactly the three commands, no tools.
     assert.deepEqual(ctx.commandNames().sort(), [
       DISPATCHER_RESOLVE_COMMAND,
-      DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
-      DISPATCHER_STOP_COMMAND,
+      // "dsh-bot" sorts after the dispatcher- names (ADR-0030 rename); the
+      // withdrawn dispatcher-stop (ticket 101) is gone (ticket 129).
+      DISPATCHER_START_COMMAND,
     ]);
     assert.deepEqual(ctx.toolNames(), []);
 
@@ -460,10 +460,12 @@ describe("composition polish — dormant registration matrix (design-17 §3.2/§
     await flushActivation();
 
     assert.deepEqual(ctx.toolNames().sort(), [
+      "await_agent",
       "check_workers",
       "deliver_result",
+      "message_agent",
       "request_access",
-      "send_peer",
+      "spawn_dispatcher",
       "spawn_worker",
       "steer_worker",
       "stop_worker",

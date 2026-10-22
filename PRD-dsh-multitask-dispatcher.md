@@ -72,7 +72,7 @@ This is **not** “more subagents.” It is a **policy plus a contract for wakin
 | S6 | Dispatcher todo list shows multiple `in_progress` streams and is reconciled on every wake. |
 | S7 | ~~No TypeScript file from the reconstruction is imported or vendored into the deliverable.~~ **Voided 2026-09-18 (ADR-0018):** the clean-room identifier grep is no longer a required check before shipping; the no-verbatim copy policy (§3, AGENTS.md) is the operative rule and naming independence is a quality matter. |
 | S8 | Core modules unit-tested without network/LLM (fake wake/steer/complete). |
-| S9 | (Phase 2) Peer send is async fire-and-forget with optional priority interrupt of non-user work. |
+| S9 | (Phase 2) Agent-to-agent messaging is asynchronous with optional priority interrupt of non-user work, **plus one bounded await**: a dispatcher may wait on a named worker for at most 120 s and receives that worker's terminal status and result, or an honest "still running". Workers cannot message or await anything. *(Amended 2026-10-18, human ruling; ADR-0025.)* |
 
 ---
 
@@ -119,6 +119,8 @@ Injected as system / always-on skill. **Amended 2026-09-18 (ADR-0018, supersedes
 - On every wake: **reconcile todos first** (what is running, what has finished, what to dispatch next).
 - Worker prompts are **self-contained**: goal, constraints, relevant context, success criteria, report format.
 - Workers **cannot** message the user; dispatcher always delivers.
+- You may message another dispatcher you can see. It arrives as a message from another assistant, never as the user. You may also create one dispatcher of your own; it is a peer with your tools and policy, not a helper.
+- If your next step truly depends on one worker's result, you may wait on that worker once, for a bounded time. Waiting is not polling: never repeat a check in a loop, and never wait when you could end the turn and be woken by the result. *(Amended 2026-10-18, ADR-0025.)*
 - Internal workings stay invisible to the user: no jargon (no “dispatching an executor”); speak like one busy person.
 
 ### 6.2 Worker contract
@@ -131,7 +133,7 @@ Injected as system / always-on skill. **Amended 2026-09-18 (ADR-0018, supersedes
 | Steer | Injected as a steering prompt; interrupt current step; **preserve** conversation/tool context; do not restart. |
 | Resume (optional) | Follow-up after finish may re-enter same agent id if dsh supports it; still re-include needed context. |
 | Report | Final text is the stream’s report to the dispatcher (structured enough to deliver / act on). |
-| Spawning | Workers are **leaves**: only the dispatcher spawns agents; a worker never spawns sub-workers (ADR-0003). |
+| Spawning | Workers are **leaves**: only a dispatcher spawns agents, and a worker never spawns anything. A dispatcher may spawn a worker or (since 2026-10-18) a dispatcher peer; the bounds on that peer are the host's own depth ceiling and live-child pool, with no cap of ours. (ADR-0003 as amended by ADR-0025.) |
 | Todos | The todo list belongs to the dispatcher alone — never passed into a worker's context (a worker has no user-messaging tool, so it cannot legitimately complete an item); a worker's own list stays empty (ADR-0007). |
 
 ### 6.3 Tools / commands (dispatcher-visible)
@@ -142,7 +144,10 @@ Surface names are **dsh-native**; do not ship Sand tool names.
 |---|---|---|
 | Spawn stream | existing dsh spawn/task with a **worker** agent type | Blank worker; returns worker id + ack; non-blocking |
 | Check | `check_worker` or job status UI + tool | List running workers; detail: elapsed, tool count, recent activity, transcript path |
-| Steer | `message_worker` / dsh followup-interrupt | Inject into running worker |
+| Steer | `steer_worker` / dsh followup-interrupt | Inject into running worker |
+| Message any agent | `message_agent` | Worker → the steer path above; dispatcher → its inbox and wake. Tagged as from another assistant, never the user. *(2026-10-18, ADR-0025)* |
+| Await a worker | `await_agent` | Block this turn on one named worker, ≤120 s; returns its terminal status and result, or "still running". *(2026-10-18, ADR-0025)* |
+| Spawn a dispatcher | `spawn_dispatcher` | One dispatcher peer with the full tool set and dispatcher policy; bounded by the host's depth ceiling and live-child pool. *(2026-10-18, ADR-0025)* |
 | Stop | `stop_worker` | Abort; a result that arrives after the abort is not brought back — late results are dropped, per reference behavior (docs/research/reference-behavior-notes.md) |
 | Todos | existing todo tools | Allow **multiple** `in_progress`; reconcile on wake |
 | Deliver | existing user message tool | Dispatcher → user only |
@@ -155,12 +160,12 @@ Surface names are **dsh-native**; do not ship Sand tool names.
 | Worker completed | Reconcile todo; deliver result; spawn next in that stream if queued |
 | Worker error | Report the true state to user; decide retry / steer / drop |
 | Worker aborted | Close todo as cancelled; tell user if it was visible work |
-| Peer message (Phase 2) | Hidden turn with a `[peer]` marker — copy the idea of the cue, write new wording |
+| Peer message (Phase 2) | Hidden turn whose **structured source** is `agent-message` (sender session id, message id, priority), with a text cue written for us. Never presented as the user. *(Amended 2026-10-18, ADR-0025: provenance is a field, not a marker.)* |
 | External event — opt-in file inbox | Dispatcher wake turn presenting the job prompt as work material; joins the existing coalescing/batching semantics unchanged *(amended 2026-10-02, ticket 111, ADR-0023: docs/adr/0023-file-driven-external-intake.md — first producer of the `external-event` wake source)* |
 
 **Anti-patterns (explicitly out of policy)**
 
-- Polling workers in a busy loop from the dispatcher turn.
+- Polling workers in a busy loop from the dispatcher turn. One bounded `await_agent` call on a named worker is not polling; repeated `check_workers` calls, sleeping between checks, and waiting with no bound are. *(Narrowed 2026-10-18, ADR-0025.)*
 - Opening ack that pretends work finished.
 - Batching all results until the end if user is waiting.
 - Multiple workers for one stream (duplicate spawns for the same goal).
@@ -276,9 +281,11 @@ Only if product needs multi-bot:
 
 | Concern | Spec |
 |---|---|
-| Transport | Async message queue per target agent; fire-and-forget ack |
-| Wake | New hidden turn with peer cue (new wording) |
-| Priority | Can interrupt work that is not from the user; never silently drop the user |
+| Transport | Async message queue per target agent; accept-and-wake ack. Dispatcher → dispatcher is 1:1 only. *(Amended 2026-10-18, ADR-0025.)* |
+| Wake | New hidden turn with a structured `agent-message` source and a peer cue. |
+| Priority | May reclaim a non-user turn; never interrupts a user turn; never counts as user presence. |
+| Join | One bounded await on a **worker** target (≤120 s) returning its terminal status and result. Dispatchers are not awaitable. *(Added 2026-10-18, ADR-0025.)* |
+| Bounds | 8,000 chars/message, 8 accepted messages per sender per 60 s, inbox 64 undelivered. |
 | Storage | Sender outbound + receiver inbound as normal transcript entries |
 | Directory | File or DB of agents: id, name, description |
 | Images | Optional later; text first |
@@ -345,7 +352,7 @@ Dispatcher-facing tools map 1:1 onto core calls; do not leak core internals into
 | Worker agent definition | Headless, self-contained prompt requirement, report format, no user DM |
 | Steer wrapper | “Correction from parent; incorporate; continue from here; do not restart” |
 | Todo tool description | Parallel in_progress; reconcile on wake; completed = first visible acknowledgement to the user (ADR-0018) |
-| Check/message/stop tool descriptions | dsh wording; behavior identical to §6.3 |
+| Check/message/stop/await tool descriptions | dsh wording; behavior identical to §6.3. `check_workers` is a snapshot tool, not a wait loop; `await_agent` is the only wait. |
 
 Deliver as separate files in the product repo (e.g. `prompts/dispatcher.md`). Review for: no Sand phrases, no product-name leaks, bilingual if product requires ZH.
 
@@ -424,6 +431,8 @@ Deliver as separate files in the product repo (e.g. `prompts/dispatcher.md`). Re
 | Wake | Event that starts a new dispatcher turn (user, job, peer) |
 | Delivery | User-visible completion of a todo stream |
 | Stream key | One logical work item shared by todo ↔ worker |
+| Spawned dispatcher | A dispatcher created by another dispatcher. Same tools and policy, its own ledger and inbox, bounded by the host's depth ceiling and live-child pool. |
+| Await | A bounded wait on one named worker for its terminal result. Not polling. |
 
 These are **product concepts**. Implementation names must be chosen independently.
 

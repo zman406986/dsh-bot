@@ -81,9 +81,11 @@ design-17 §4.6/conflict 1).
 to the terminal `aborted` state with "(Stopped before completion. No
 report.)" — no result revival (PRD S3, design-17 §4.6).
 
-This section concerns worker/turn stopping. `/dispatcher-stop` (ticket 101) is a
-**session-binding verb** typed in the stock chat — it deactivates the dispatcher
-binding in that session, not a worker — and is not a control on a surface.
+This section concerns worker/turn stopping. `/dispatcher-stop` (ticket 101) was a
+**session-binding verb** — it deactivated the dispatcher binding in that session,
+not a worker — and was never a control on a surface. The command is withdrawn
+(ADR-0030, human-ruled 2026-10-21; ticket 129): deactivation is implicit only,
+via host disposal of the chat or plugin unload.
 
 The absence is tested structurally (`test/restart-honesty.test.ts`, the test file that checks restart reporting and the
 no-stop guard) so a future edit cannot silently reintroduce a button.
@@ -240,8 +242,8 @@ slots carry our content.
 | Five tool call views | `src/client/toolviews.ts` | **Live** — keyed `tool.call.toolview` entries where dispatcher tool calls happen |
 | Locale dictionary (en + zh, identical key sets) | `src/client/overlay.ts` | **Live** — namespace registration, not layout |
 | Roster wire contract (snapshot v2) | `src/core/roster-snapshot.ts` | **Live** — the adapter-side wire contract |
-| Activation command + presence hint | `src/adapter/activation-command.ts` | **Live** — `/dispatcher-start` in the stock chat |
-| Stop command | `src/adapter/stop-command.ts` | **Live** — `/dispatcher-stop` in the stock chat (ticket 101) |
+| Activation command + presence hint | `src/adapter/activation-command.ts` | **Live** — `/dsh-bot` in the stock chat |
+| Stop command | `src/adapter/stop-command.ts` | **Withdrawn** — ADR-0030 (2026-10-21, ticket 129) removes the command and the file; deactivation is implicit via host disposal or plugin unload |
 | Steer command | `src/adapter/steer-command.ts` | **Live** — `/dispatcher-steer` in the stock chat |
 | Access prompts (Allow / Always allow this session / Deny) | `src/adapter/access-prompt.ts` | **Live** — host approval surfaces |
 | Restart notice | `src/adapter/restart-notice.ts` | **Live** — in-chat text |
@@ -252,7 +254,7 @@ slots carry our content.
 
 Dormant boot registers nothing beyond the two commands and the passive
 host plumbing; the roster, prompts, and tools exist only after an explicit
-`/dispatcher-start` (ADR-0009). Client-side, the default composition registers
+`/dsh-bot` (ADR-0009). Client-side, the default composition registers
 the locale namespace, the keyed toolviews, and the keyed settings card, plus the
 one session-kind glyph licensed by ADR-0024's 2026-10-18 rider — and nothing
 else into dsh's layout: there is no chip, no window, and no presence copy

@@ -40,11 +40,20 @@ import { LOCALE_NAMESPACE } from "./overlay.js";
 export const TOOL_CALL_TOOLVIEW_SLOT = "tool.call.toolview";
 
 /**
- * The wire tool names this face claims, in registration order — all six
- * dispatcher tools. `deliver_result` is included because its call row
- * benefits from an at-a-glance delivered/todo outcome on wake turns
- * (ticket 24 "if it benefits"); `send_peer` (ticket 70) because its row is
- * the user-visible trace of peer traffic on the conversation surface.
+ * The wire tool names this face claims, in registration order — the five
+ * long-standing dispatcher tools plus the retained historical `send_peer`
+ * key. `deliver_result` is included because its call row benefits from an
+ * at-a-glance delivered/todo outcome on wake turns (ticket 24 "if it
+ * benefits"); `send_peer` (ticket 70) because its row is the user-visible
+ * trace of peer traffic on the conversation surface.
+ *
+ * Deliberate lag, recorded rather than hidden: the dispatcher surface has
+ * since grown to eight tools — `message_agent` (ticket 116, which reuses the
+ * `send_peer` key), `await_agent` (ticket 117) and `spawn_dispatcher`
+ * (ticket 118). This face has no row renderer for any of the three, so it
+ * claims none of them by name; their calls fall back to the generic tool
+ * row. Adding renderers is client work, separate from the core tickets that
+ * registered the tools.
  */
 export const TOOLVIEW_TOOL_NAMES: readonly string[] = [
   SPAWN_WORKER_TOOL,

@@ -62,6 +62,47 @@ export interface SpawnOptions {
    * Values never appear here, in the prompt, or in any core log.
    */
   credentialNames?: readonly string[];
+  /**
+   * Ticket 120: called by the host with this worker's id the moment the id is
+   * fixed — SYNCHRONOUSLY, before the child can emit `agent/created` or
+   * `agent/status` (both fire inside `startActivation`). The core registers
+   * its worker record here so the child's first `agent/status: running` is
+   * not ignored as an unknown id.
+   *
+   * Contract: called at most once per spawn, and the host must resolve
+   * `spawnWorker` with the same id. A host that resolves a different id is
+   * followed by the core (the record is re-keyed, status included), never
+   * duplicated. Hosts that cannot commit to an id up front may omit the call;
+   * the record is then created after the spawn resolves, exactly as before.
+   */
+  onWorkerId?: (workerId: string) => void;
+}
+
+/**
+ * Ticket 118 (ADR-0025 mitosis): what the core/host passes to spawn ANOTHER
+ * DISPATCHER. Deliberately not `SpawnOptions`: there is no stream key (a
+ * dispatcher is not a work stream) and no credential list, and the spawned
+ * child is a peer with its own state, not a worker.
+ */
+export interface DispatcherSpawnOptions {
+  /** The spawning dispatcher's session — the authority agent resolves from it. */
+  parentSessionId: string;
+  /** Activation label; the host shows it as the child's title. */
+  title: string;
+  /** Problem and outcome handoff; the child's first user turn. */
+  prompt: string;
+  /**
+   * Cancellation BEFORE publication only (same rule as a worker spawn: once
+   * the activation is live, its signal does nothing). Optional — the host
+   * mints its own controller when a caller supplies none.
+   */
+  signal?: AbortSignal;
+}
+
+/** Host answer for a dispatcher spawn: the child's session id, branded out. */
+export interface DispatcherSpawnResult {
+  /** Child session id — the identity the activation path binds and scopes. */
+  readonly dispatcherId: string;
 }
 
 /** Host → core notification that a worker reached a terminal state. */

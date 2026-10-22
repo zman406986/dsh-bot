@@ -15,12 +15,12 @@
  *
  * ## What marks a dispatcher (mechanism: fold the host's own command log)
  *
- * `/dispatcher-start` is the ONLY activation path today
+ * `/dsh-bot` is the ONLY activation path today
  * (`src/adapter/activation-command.ts`, wired in `src/plugin.ts`). The host
  * command runtime appends a durable, declared pair to the INVOKING session's
  * log before and after the handler runs:
  *
- * - `command/run` with `{ commandId, name: "dispatcher-start", args, source }`
+ * - `command/run` with `{ commandId, name: "dsh-bot", args, source }`
  *   — appended at `dsh-commands/lib/index.js:334`, declared at
  *   `dsh-commands/lib/types/types.d.ts:101`;
  * - `command/done` with `{ commandId, kind: "success" | "error" }` — appended
@@ -33,11 +33,22 @@
  * per-session by construction — the event lands in that session's own log
  * (ADR-0019 keying).
  *
- * `/dispatcher-stop` deactivates through the same command transaction, so
- * its success settlement clears the mark for exactly that session. A refused
- * start (`not-top-level`), a refused stop (not a dispatcher), and a thrown
- * handler all settle `kind: "error"` and leave the prior state untouched —
- * the fold never fabricates a kind.
+ * Rename durability (ADR-0030, 2026-10-21): the command was renamed from
+ * `/dispatcher-start` to `/dsh-bot`. Logs persisted before the rename hold
+ * the literal name `dispatcher-start`, so the fold below matches BOTH the
+ * current name and that legacy name — a restart replay of an old log must
+ * still mark the session as a dispatcher.
+ *
+ * Stop withdrawal durability (ADR-0030, ticket 129): the `/dispatcher-stop`
+ * command is withdrawn — deactivation is now implicit only (host `agent/disposed`
+ * teardown or plugin unload, neither of which writes a command settlement).
+ * The fold below still matches the legacy literal `dispatcher-stop` so a
+ * restart replay of a log persisted before the withdrawal keeps clearing the
+ * mark on its recorded stop settlements; no new stop event can be produced.
+ *
+ * A refused start (`not-top-level`) and a thrown handler settle
+ * `kind: "error"` and leave the prior state untouched — the fold never
+ * fabricates a kind.
  *
  * Fail-closed: a `command/run` alone (host crash before settlement) does NOT
  * mark the session. We only mark when the paired `command/done` says the
@@ -55,17 +66,21 @@
  * ## Durability semantics
  *
  * The mark means "this session was established as a dispatcher and has not
- * been explicitly deactivated". A dsh restart clears the live activation but
- * writes nothing, so the fold still reports the session as a dispatcher; an
- * explicit `/dispatcher-stop` is the durable deactivation. That is the
- * agreed shape of "durable across restart" for this indicator.
+ * been deactivated". A dsh restart clears the live activation but
+ * writes nothing, so the fold still reports the session as a dispatcher;
+ * a legacy `/dispatcher-stop` settlement in a persisted log (the command is
+ * withdrawn since ADR-0030 / ticket 129 — deactivation is implicit now) still
+ * clears it on replay. That is the agreed shape of "durable across restart"
+ * for this indicator.
  *
  * All functions are synchronous and the state is plain JSON, as the unit
  * contract requires (projection-cache persistence precondition).
  */
 
-import { DISPATCHER_START_COMMAND } from "./activation-command.js";
-import { DISPATCHER_STOP_COMMAND } from "./stop-command.js";
+import {
+  DISPATCHER_START_COMMAND,
+  LEGACY_DISPATCHER_START_COMMAND,
+} from "./activation-command.js";
 
 /** The projection key the client reads from `projectionValues`. */
 export const SESSION_KIND_PROJECTION_KEY = "sessionKind";
@@ -81,6 +96,13 @@ export const DISPATCHER_SESSION_KIND = "dispatcher";
 
 /** Client-visible marker value: `"dispatcher"`, or null for everything else. */
 export type DispatcherSessionKind = typeof DISPATCHER_SESSION_KIND;
+
+/**
+ * Persisted-log name of the stop command before ADR-0030 / ticket 129
+ * withdrew it (2026-10-21). No longer a live command — the fold matches this
+ * literal only so replaying an old log still clears the mark.
+ */
+export const LEGACY_DISPATCHER_STOP_COMMAND = "dispatcher-stop";
 
 /**
  * Host fold state. Plain JSON on purpose (the projection cache persists it).
@@ -192,14 +214,26 @@ export function applySessionKindProjection(
     ) {
       return state;
     }
-    if (commandName === DISPATCHER_START_COMMAND) {
+    // Both names mark a start: the current `dsh-bot` and the legacy
+    // `dispatcher-start` held by logs persisted before the ADR-0030 rename
+    // (2026-10-21). Restart replay of an old log must still mark the
+    // session as a dispatcher — the settle step pairs by commandId either
+    // way, so only this start-match needs the dual name.
+    if (
+      commandName === DISPATCHER_START_COMMAND ||
+      commandName === LEGACY_DISPATCHER_START_COMMAND
+    ) {
       if (state.pendingStarts.includes(commandId)) return state;
       return {
         ...state,
         pendingStarts: [...state.pendingStarts, commandId],
       };
     }
-    if (commandName === DISPATCHER_STOP_COMMAND) {
+    // The stop command is withdrawn (ADR-0030, ticket 129) — the fold
+    // matches only the legacy literal held by logs persisted before the
+    // withdrawal, so a restart replay still clears the mark on its recorded
+    // stop settlements. No new stop event can be produced.
+    if (commandName === LEGACY_DISPATCHER_STOP_COMMAND) {
       if (state.pendingStops.includes(commandId)) return state;
       return {
         ...state,

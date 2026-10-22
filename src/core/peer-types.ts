@@ -45,6 +45,24 @@ export interface WorkerReplyOrigin {
   readonly status?: WorkerReplyStatus;
 }
 
+/**
+ * Structured provenance for an agent-caused wake (ticket 116 / ADR-0025).
+ * It mirrors the host's own adjacent-agent source (`dsh-subagent/lib/
+ * index.js:444-449`: `{kind:"agent-message", form:"relay",
+ * senderSessionId}`), so a peer wake's durable message is attributed to
+ * another agent — never to the user and never to the plugin.
+ *
+ * The sender is the registration closure's session id: no tool takes a
+ * `from` argument, so a caller cannot claim another agent's identity. This
+ * field is the authority; the "not from the user" heading is presentation
+ * only and never decides origin.
+ */
+export interface AgentMessageWakeOrigin {
+  readonly kind: "agent-message";
+  readonly form: "relay";
+  readonly senderSessionId: string;
+}
+
 /** One peer message. Immutable after accept. */
 export interface PeerEnvelope {
   /** Sender-assigned unique id. Primary dedupe key. Required. */

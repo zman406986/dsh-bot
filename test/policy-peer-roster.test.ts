@@ -297,7 +297,10 @@ describe("renderPeerRoster — provenance", () => {
     // Same provenance idea as the shipped peer-wake cue.
     assert.ok(PEER_WAKE_SECTION_HEADINGS[0].includes("not from the user"));
     assert.ok(PEER_ROSTER_INTRO.includes("not the user"));
-    assert.ok(PEER_ROSTER_INTRO.includes("send_peer"));
+    // Ticket 119: the retired `send_peer` name must not survive in model-facing
+    // copy — `message_agent` is the one verb (ADR-0025).
+    assert.ok(PEER_ROSTER_INTRO.includes("message_agent"));
+    assert.ok(!PEER_ROSTER_INTRO.includes("send_peer"));
     assert.ok(PEER_ROSTER_INTRO.includes("session id"));
   });
 });

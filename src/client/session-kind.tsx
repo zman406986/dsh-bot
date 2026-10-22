@@ -42,8 +42,10 @@
  * - **Dispatcher:** `projectionValues.sessionKind === 'dispatcher'` — a
  *   projection our own adapter registers (`src/adapter/session-kind-projection.ts`).
  *   It folds the `command/run` + `command/done` pair the host already writes
- *   when `/dispatcher-start` succeeds, so the mark is durable from session
- *   start to an explicit `/dispatcher-stop` and needs no event of our own.
+ *   when `/dsh-bot` succeeds, so the mark is durable from session start and
+ *   needs no event of our own. The withdrawn `/dispatcher-stop` command's
+ *   settlements (ADR-0030) clear the mark only when replaying legacy logs;
+ *   today the mark clears implicitly via host disposal or plugin unload.
  *   (`projectionValues.agentPreset` was the earlier candidate; it is unusable
  *   here — every durable header on this install reads `"standard"` and no
  *   `multitask-dispatcher` preset row exists.)

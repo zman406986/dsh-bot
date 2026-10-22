@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { FakeDshHost } from "../src/core/fake-host.js";
 import { createMultitask, type Multitask } from "../src/core/multitask.js";
-import type { SpawnResult } from "../src/core/types.js";
+import type { SpawnOptions, SpawnResult } from "../src/core/types.js";
 
 function unwrapSpawn(result: SpawnResult): string {
   assert.ok(result.ok, result.ok ? "" : result.detail);
@@ -18,6 +18,43 @@ async function spawn(host: FakeDshHost, multitask: Multitask): Promise<string> {
       prompt: "Do the work.",
     }),
   );
+}
+
+/**
+ * Ticket 120: a host whose child starts DURING the spawn — it announces the
+ * id and then reports the first turn running before `spawnWorker` resolves.
+ * This is the real host's ordering (the status edge fires inside
+ * `startActivation`), reproduced without timing.
+ */
+class FirstTurnDuringSpawnHost extends FakeDshHost {
+  constructor(private readonly multitaskRef: () => Multitask) {
+    super();
+  }
+  override async spawnWorker(
+    prompt: string,
+    opts: SpawnOptions,
+  ): Promise<string> {
+    const workerId = await super.spawnWorker(prompt, opts);
+    // The core must already know this worker here — it registered from the
+    // `onWorkerId` callback `super` invoked before returning.
+    this.multitaskRef().noteTurnStarted(workerId);
+    return workerId;
+  }
+}
+
+/** Ticket 120: a turn starts, then the host refuses the spawn outright. */
+class FailingAfterTurnHost extends FakeDshHost {
+  constructor(private readonly multitaskRef: () => Multitask) {
+    super();
+  }
+  override async spawnWorker(
+    prompt: string,
+    opts: SpawnOptions,
+  ): Promise<string> {
+    const workerId = await super.spawnWorker(prompt, opts);
+    this.multitaskRef().noteTurnStarted(workerId);
+    throw new Error("host refused the spawn");
+  }
 }
 
 describe("worker lifecycle FSM (observable via multitask + fake host)", () => {
@@ -177,5 +214,81 @@ describe("worker lifecycle FSM (observable via multitask + fake host)", () => {
     assert.doesNotThrow(() => multitask.noteSteerReceived("ghost"));
     assert.doesNotThrow(() => multitask.noteSteerInjected("ghost"));
     assert.equal(multitask.getWorker("ghost"), undefined);
+  });
+
+  /**
+   * Ticket 120 (e2e finding s1): the host's child starts inside the spawn, so
+   * its first `running` edge arrives BEFORE `spawnWorker` resolves. The core
+   * must have registered the worker record by then — otherwise the edge is
+   * dropped, the FSM stays `spawned` for the whole first turn, and every
+   * steer/message is refused `not-running`.
+   */
+  it("a first turn that starts inside the spawn still moves the worker to running", async () => {
+    let multitask: Multitask | null = null;
+    const host = new FirstTurnDuringSpawnHost(() => {
+      assert.ok(multitask !== null);
+      return multitask;
+    });
+    multitask = createMultitask(host);
+
+    const workerId = await spawn(host, multitask);
+
+    // `spawned` was created early enough to accept the turn, and the
+    // post-resolve path did not reset it.
+    assert.equal(multitask.getWorker(workerId)?.status, "running");
+    // Still exactly one worker, one spawn — no duplicate registration.
+    assert.deepEqual(
+      multitask.listWorkers("session-1").map((w) => w.workerId),
+      [workerId],
+    );
+    assert.equal(host.spawnCalls.length, 1);
+    // And the first turn is steerable, which is what s1 needed.
+    assert.deepEqual(await multitask.steerWorker(workerId, "correct it"), {
+      ok: true,
+    });
+  });
+
+  it("the linked todo flips to in_progress when that early turn starts", async () => {
+    let multitask: Multitask | null = null;
+    const host = new FirstTurnDuringSpawnHost(() => {
+      assert.ok(multitask !== null);
+      return multitask;
+    });
+    multitask = createMultitask(host);
+    multitask.createTodo({ sessionId: "session-1", id: "todo-1", title: "Linked" });
+
+    const workerId = unwrapSpawn(
+      await multitask.spawnWorker({
+        parentSessionId: "session-1",
+        streamKey: "todo-1",
+        title: "Linked",
+        prompt: "go",
+        todoId: "todo-1",
+      }),
+    );
+
+    assert.equal(multitask.getWorker(workerId)?.todoId, "todo-1");
+    assert.equal(multitask.listTodos("session-1")[0]?.status, "in_progress");
+  });
+
+  it("a failed spawn leaves no worker behind even if a turn started first", async () => {
+    let multitask: Multitask | null = null;
+    const host = new FailingAfterTurnHost(() => {
+      assert.ok(multitask !== null);
+      return multitask;
+    });
+    multitask = createMultitask(host);
+
+    await assert.rejects(
+      multitask.spawnWorker({
+        parentSessionId: "session-1",
+        streamKey: "todo-1",
+        title: "Doomed",
+        prompt: "go",
+      }),
+      /host refused the spawn/,
+    );
+    assert.equal(multitask.getWorker("fake-worker-1"), undefined);
+    assert.deepEqual(multitask.listWorkers("session-1"), []);
   });
 });

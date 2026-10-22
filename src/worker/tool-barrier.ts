@@ -36,6 +36,19 @@ export const WORKER_DENIED_TOOL_CANDIDATES: readonly string[] = [
   // Ticket 70: workers are leaves of the peer tier — the peer-message tool
   // is dispatcher-only (reference conformance, reference-behavior-notes:60).
   "send_peer",
+  // Ticket 116: the unified agent-message verb is dispatcher-only — workers
+  // must never see it. (Ticket 119 keeps its remaining policy/barrier
+  // checkboxes; this single line is all this half adds.)
+  "message_agent",
+  // Ticket 117: the bounded await is dispatcher-only too. Workers are leaves
+  // and have no await tool, which is exactly why `A awaits B awaits A` is not
+  // constructible — the cycle rule depends on this name never reaching a
+  // worker's scope.
+  "await_agent",
+  // Ticket 118: mitosis is dispatcher-only. The worker-leaf rule (ADR-0003,
+  // retained by ADR-0025) says a worker spawns no agent at all, so the
+  // dispatcher-summoning verb must never reach a worker's scope either.
+  "spawn_dispatcher",
 ] as const;
 
 /** Host-agnostic restriction shape (mirrors dsh ToolRestriction.deny). */

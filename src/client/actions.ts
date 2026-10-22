@@ -23,7 +23,7 @@
  *   reaches — identical admission, no second channel. (Ticket 89 note: the
  *   capsule's start button was the transaction's only in-tree caller and
  *   retired with the capsule; the method stays as the verified seam. The
- *   retired client-side `/dispatcher-start` line constant went with it —
+ *   retired client-side `/dsh-bot` line constant went with it —
  *   the HOST-side activation command is `src/adapter`'s, untouched.)
  * - **prompt** — a plain-language message submitted as the user's own turn
  *   through the prompt sink. The command endpoint is deliberately NOT used

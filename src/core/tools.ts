@@ -1,8 +1,15 @@
 /**
- * Dispatcher tool surface: six dsh-native tools mapped 1:1 onto
- * existing Multitask methods (and an injectable user-send for deliver).
- * Handlers stay core-side; the adapter registers them on ctx.tools.
- * FakeDshHost stays green — handlers only call existing core methods.
+ * Dispatcher tool surface: dsh-native tools mapped 1:1 onto existing
+ * Multitask methods (and an injectable user-send for deliver). Eight tools —
+ * `message_agent` is the one agent-messaging verb (`send_peer` is retired,
+ * ticket 116 / ADR-0025), `await_agent` is the one bounded wait over
+ * ticket 115's settle records, and `spawn_dispatcher` is mitosis (ticket 118
+ * / ADR-0025) — the one tool that does NOT go through `Multitask`, because a
+ * dispatcher is a peer, not a work stream. The peer inbox, envelope, dedupe,
+ * cap, and `Multitask.sendPeer` machinery stay, because `message_agent` and
+ * the worker reply channel both ride them. Handlers stay core-side; the
+ * adapter registers them on ctx.tools. FakeDshHost stays green — handlers
+ * only call existing core methods and the injected host seam.
  */
 
 import type { Multitask } from "./multitask.js";
@@ -16,12 +23,15 @@ import {
 import {
   CHECK_WORKERS_TOOL,
   DELIVER_RESULT_TOOL,
-  SEND_PEER_TOOL,
+  MESSAGE_AGENT_TOOL,
   SPAWN_WORKER_TOOL,
   STEER_WORKER_TOOL,
   STOP_WORKER_TOOL,
+  AWAIT_AGENT_TOOL,
+  SPAWN_DISPATCHER_TOOL,
   TOOL_DESCRIPTIONS,
 } from "./policy/prompts.js";
+import { AWAIT_INVALID_TIMEOUT_DETAIL } from "./settle-records.js";
 import {
   isWorkerReplyStatus,
   workerReplySenderLabel,
@@ -32,22 +42,32 @@ import {
 } from "./peer-types.js";
 import {
   formatCheckSummary,
+  formatMessageAgentRateLimited,
+  formatMessageAgentRefusal,
+  formatMessageAgentSteerNote,
   formatPeerSendAck,
-  formatPeerSendRefusal,
   formatSpawnAck,
+  formatSpawnDispatcherNote,
   formatSteerNote,
   formatStopNote,
   formatStopUnknownStateNote,
+  toAwaitAgentToolResult,
   toCheckRow,
+  type AwaitAgentToolResult,
   type CheckWorkersToolResult,
   type DeliverResultToolResult,
-  type SendPeerToolResult,
+  type MessageAgentToolResult,
+  type SpawnDispatcherToolResult,
   type SpawnWorkerToolResult,
   type SteerWorkerToolResult,
   type StopWorkerToolResult,
   type WorkerCheckRow,
 } from "./tool-results.js";
-import type { WorkerSummary } from "./types.js";
+import type {
+  DispatcherSpawnOptions,
+  DispatcherSpawnResult,
+  WorkerSummary,
+} from "./types.js";
 
 /** Structural JSON-Schema-ish parameter node (host-agnostic). */
 export interface ToolParameterNode {
@@ -65,7 +85,19 @@ export interface DispatcherToolDef {
   readonly name: string;
   readonly description: string;
   readonly parameters: ToolParameterNode;
-  readonly execute: (args: Record<string, unknown>) => Promise<unknown>;
+  /**
+   * `exec` is the host tool-exec context (structural). Only `await_agent`
+   * reads it — for `exec.signal`, so a stopped turn releases its wait
+   * (ticket 117). Every other handler ignores the second argument.
+   *
+   * The adapter (`toRegisterableTool`) forwards the host's second argument
+   * (`tool.execute(exec.arguments, exec)`, `dsh-tools/lib/index.js:3406`),
+   * so on live hosts `exec.signal` really is the turn's cancellation signal.
+   */
+  readonly execute: (
+    args: Record<string, unknown>,
+    exec?: unknown,
+  ) => Promise<unknown>;
 }
 
 /**
@@ -171,6 +203,46 @@ export interface DispatcherToolDeps {
    * must never silently become an allow. Posture miss → never called.
    */
   readonly requestDispatchApproval?: DispatchApprovalFn;
+  /**
+   * Ticket 118 / ADR-0025 mitosis: the host's dispatcher-spawn seam. Only
+   * `spawn_dispatcher` reads it; every other handler ignores it.
+   *
+   * Seam status: chunk 2 (this tool) defines the port; the LIVE wiring is
+   * chunk 3's. The plugin must pass
+   * `spawnDispatcher: (opts) => host.spawnDispatcher(opts)` into
+   * `registerDispatcherTools` (the adapter forwards it). Absent → the tool
+   * THROWS, loudly: a registered spawn_dispatcher with no seam would
+   * otherwise report a host refusal that never happened. Visibility stays
+   * the fence (ADR-0019) — this is not a refusal class.
+   */
+  readonly spawnDispatcher?: (
+    opts: DispatcherSpawnOptions,
+  ) => Promise<DispatcherSpawnResult>;
+  /**
+   * Ticket 116: injectable clock for the message_agent rate budget (tests).
+   * Default `Date.now`. The other tools' timestamps are unaffected.
+   */
+  readonly now?: () => number;
+}
+
+/**
+ * Ticket 117: read the turn's abort signal out of the host's tool-exec
+ * context, structurally (no host types, same idiom as
+ * `resolveExecSessionId` in the adapter). Returns `undefined` when the exec
+ * carries no usable signal — the wait then has only its timeout.
+ */
+export function readExecSignal(exec: unknown): AbortSignal | undefined {
+  if (exec === null || typeof exec !== "object") return undefined;
+  const raw = (exec as { signal?: unknown }).signal;
+  if (raw === null || typeof raw !== "object") return undefined;
+  const candidate = raw as { aborted?: unknown; addEventListener?: unknown };
+  if (
+    typeof candidate.aborted !== "boolean" ||
+    typeof candidate.addEventListener !== "function"
+  ) {
+    return undefined;
+  }
+  return raw as AbortSignal;
 }
 
 function requireString(args: Record<string, unknown>, key: string): string {
@@ -283,12 +355,57 @@ export const WORKER_REPLY_STATUSES: readonly WorkerReplyStatus[] = [
 ];
 
 /**
- * Rate bound: 8 accepted replies per worker per rolling 60 s — the same
- * agent-message budget ticket 116 settles for peer traffic. Refusals do not
- * count. The inbox cap (64 undelivered) is the second, independent bound.
+ * Ticket 116: the shared agent-message budget — 8 accepted messages per
+ * SENDER session per rolling 60 s, counted on accept; refusals do not count.
+ * Both agent-message verbs draw on it via {@link createAgentMessageBudget}:
+ * `message_agent` keys the budget by the dispatcher's own session id, and
+ * `reply_to_dispatcher` (ticket 122) keys it by the sending worker's id.
+ * The inbox cap (64 undelivered) is the second, independent bound.
  */
-export const WORKER_REPLY_RATE_LIMIT = 8;
-export const WORKER_REPLY_RATE_WINDOW_MS = 60_000;
+export const MESSAGE_AGENT_RATE_LIMIT = 8;
+export const MESSAGE_AGENT_RATE_WINDOW_MS = 60_000;
+
+/**
+ * Worker-side aliases for the same budget (ticket 122 wording). The limit
+ * and window are one number pair everywhere; keeping these exports stable
+ * preserves the existing pins.
+ */
+export const WORKER_REPLY_RATE_LIMIT = MESSAGE_AGENT_RATE_LIMIT;
+export const WORKER_REPLY_RATE_WINDOW_MS = MESSAGE_AGENT_RATE_WINDOW_MS;
+
+/**
+ * The one rate-budget mechanism both agent-message verbs share (ticket 116).
+ * Counting happens ONLY on accept: a caller checks {@link hasCapacity}
+ * before sending and calls {@link record} only after the send was accepted —
+ * a refusal therefore never consumes budget. Keys are sender identities
+ * (dispatcher session id, or worker id on the worker side); each key holds
+ * its own rolling window of accepted-at timestamps.
+ */
+export interface AgentMessageBudget {
+  /** Whether one more accept fits `senderId`'s rolling window at `atMs`. */
+  hasCapacity(senderId: string, atMs: number): boolean;
+  /** Count one ACCEPTED message at `atMs`. Never call for a refusal. */
+  record(senderId: string, atMs: number): void;
+}
+
+/** Build the shared agent-message rate budget (8 per rolling 60 s). */
+export function createAgentMessageBudget(): AgentMessageBudget {
+  const acceptedAt = new Map<string, number[]>();
+  return {
+    hasCapacity(senderId: string, atMs: number): boolean {
+      const recent = (acceptedAt.get(senderId) ?? []).filter(
+        (accepted) => atMs - accepted < MESSAGE_AGENT_RATE_WINDOW_MS,
+      );
+      acceptedAt.set(senderId, recent);
+      return recent.length < MESSAGE_AGENT_RATE_LIMIT;
+    },
+    record(senderId: string, atMs: number): void {
+      const recent = acceptedAt.get(senderId) ?? [];
+      recent.push(atMs);
+      acceptedAt.set(senderId, recent);
+    },
+  };
+}
 
 /** Model-facing description (new copy). */
 export const REPLY_TO_DISPATCHER_TOOL_DESCRIPTION = [
@@ -349,8 +466,13 @@ export function createWorkerReplyTool(
   const now = deps.now ?? (() => Date.now());
   const newMessageId =
     deps.newMessageId ?? (() => `worker-reply-${crypto.randomUUID()}`);
-  /** workerId → accepted-at timestamps inside the rolling window. */
-  const acceptedAt = new Map<string, number[]>();
+  /**
+   * The worker-side draw on the shared agent-message budget (ticket 116),
+   * keyed by the sending worker's id — the worker's session identity. Same
+   * limit/window and the same count-on-accept semantics as before the
+   * shared mechanism existed; observable behavior is unchanged.
+   */
+  const budget = createAgentMessageBudget();
 
   function refuse(summary: string): WorkerReplyToolResult {
     return { ok: false, summary };
@@ -423,11 +545,7 @@ export function createWorkerReplyTool(
       }
 
       const at = now();
-      const recent = (acceptedAt.get(workerId) ?? []).filter(
-        (accepted) => at - accepted < WORKER_REPLY_RATE_WINDOW_MS,
-      );
-      if (recent.length >= WORKER_REPLY_RATE_LIMIT) {
-        acceptedAt.set(workerId, recent);
+      if (!budget.hasCapacity(workerId, at)) {
         return refuse(
           `rate limit reached: at most ${WORKER_REPLY_RATE_LIMIT} replies per ` +
             `${WORKER_REPLY_RATE_WINDOW_MS / 1000} seconds. Nothing was sent; ` +
@@ -464,8 +582,7 @@ export function createWorkerReplyTool(
         );
       }
 
-      recent.push(at);
-      acceptedAt.set(workerId, recent);
+      budget.record(workerId, at);
       return {
         ok: true,
         message_id: ack.messageId,
@@ -564,13 +681,23 @@ export function registerWorkerLocalTools(
 }
 
 /**
- * Create the six dispatcher tool definitions bound to a Multitask core.
+ * Create the dispatcher tool definitions bound to a Multitask core — the
+ * eight-tool shape (ticket 116 retired `send_peer` for `message_agent`;
+ * ticket 117 added `await_agent`; ticket 118 added `spawn_dispatcher`).
  * Pure enough for unit tests: no ctx, no host types.
  */
 export function createDispatcherTools(
   deps: DispatcherToolDeps,
 ): DispatcherToolDef[] {
   const { multitask, getSessionId } = deps;
+  const nowMs = deps.now ?? (() => Date.now());
+  /**
+   * Ticket 116: this registration's draw on the shared agent-message
+   * budget, keyed by the sender's own session id (the registration closure
+   * IS the session). Both message_agent branches count here; refusals do
+   * not.
+   */
+  const budget = createAgentMessageBudget();
 
   function requireSessionId(): string {
     const sessionId = getSessionId();
@@ -942,45 +1069,52 @@ export function createDispatcherTools(
   };
 
   /**
-   * Ticket 70 §2: point-to-point peer send. The registration closure IS the
-   * session: the sender's identity (`fromAgentId`/`fromName`) is the
-   * dispatcher's OWN session id — there is no `from` argument, so a
-   * dispatcher cannot spoof a sibling. `messageId` is minted here (the
-   * dedupe index stays an internal guarantee, not a model burden) and
-   * `conversationId` defaults to the fenced constant. Fire-and-forget: the
-   * mapped ack reports acceptance into the peer's inbox and lane, nothing
-   * more; failures carry honest refusal copy with no retry affordance.
+   * Ticket 116 / ADR-0025: the ONE agent-messaging verb. Routing lives
+   * inside the tool, keyed off core truth — never an argument:
+   * - a worker id owned by THIS session → the EXISTING steer path
+   *   (`multitask.steerWorker`: single-slot last-wins park, interrupt,
+   *   wrapped send at the next step boundary). No second queue.
+   * - anything else → the existing peer lane (`multitask.sendPeer`), whose
+   *   own fences produce `self-target` / `unknown-target` / `inbox-full`;
+   *   `priority` may reclaim a non-user turn and never interrupts a user
+   *   turn.
+   * A worker id owned by ANOTHER session refuses `unknown-target` — this
+   * session cannot see that worker, and the refusal must not leak that it
+   * exists. Sender identity is the registration closure's session id; there
+   * is no `from` argument. Every accepted send draws on the shared
+   * agent-message budget, checked BEFORE any accept and counted only after
+   * one (refusals never consume budget).
    */
-  const sendPeer: DispatcherToolDef = {
-    name: SEND_PEER_TOOL,
-    description: TOOL_DESCRIPTIONS[SEND_PEER_TOOL],
+  const messageAgent: DispatcherToolDef = {
+    name: MESSAGE_AGENT_TOOL,
+    description: TOOL_DESCRIPTIONS[MESSAGE_AGENT_TOOL],
     parameters: {
       type: "object",
       additionalProperties: false,
       properties: {
-        to_session: {
+        target: {
           type: "string",
           required: true,
           description:
-            "The peer dispatcher's session id — from a peer message you received, or supplied by the user.",
+            "Who the message is for: one of YOUR worker ids (from a spawn ack) or another dispatcher's session id (from a message you received).",
         },
         text: {
           type: "string",
           required: true,
           description:
-            "The message body. Self-contained: the peer does not see this conversation either.",
+            "The message itself. Self-contained — the target does not see this conversation.",
         },
         priority: {
           type: "boolean",
           required: false,
           description:
-            "Request the peer's attention now. Interrupts only the peer's background work — never a turn their user is driving. Default false.",
+            "Dispatcher targets only: ask for attention now. May interrupt only the peer's background work — never a turn their user is driving. Ignored for worker targets (a worker message always folds in at the next step boundary). Default false.",
         },
       },
     },
-    async execute(args): Promise<SendPeerToolResult> {
+    async execute(args): Promise<MessageAgentToolResult> {
       const senderSessionId = requireSessionId();
-      const toSession = requireString(args, "to_session");
+      const target = requireString(args, "target");
       const text = requireString(args, "text");
       const priority = args.priority === undefined ? false : args.priority;
       if (typeof priority !== "boolean") {
@@ -991,45 +1125,295 @@ export function createDispatcherTools(
         };
       }
       if (text.length > SEND_PEER_TEXT_MAX_CHARS) {
-        // U-F inline refusal: name the bound, deliver nothing, queue nothing.
+        // Ticket 116 reuses the peer lane's inline text cap (U-F): refuse
+        // inline, name the bound, deliver nothing, queue nothing.
         return {
           ok: false,
           reason: "invalid-envelope",
-          detail: `text is ${text.length} characters; a peer message is capped at ${SEND_PEER_TEXT_MAX_CHARS} — send a shorter message`,
+          detail: `text is ${text.length} characters; an agent message is capped at ${SEND_PEER_TEXT_MAX_CHARS} — send a shorter message`,
         };
       }
 
-      const messageId = `peer-${crypto.randomUUID()}`;
-      const ack = multitask.sendPeer(toSession, {
-        messageId,
-        fromAgentId: senderSessionId,
-        fromName: senderSessionId,
-        to: { kind: "agent", agentId: toSession },
-        conversationId: PEER_DIRECT_CONVERSATION_ID,
-        text,
-        priority,
-        createdAtMs: Date.now(),
-      });
-
-      if (ack.ok) {
+      const workerRecord = multitask.getWorker(target);
+      if (
+        workerRecord !== undefined &&
+        workerRecord.parentSessionId !== senderSessionId
+      ) {
         return {
-          ok: true,
-          message_id: ack.messageId,
-          to_session: toSession,
-          summary: formatPeerSendAck({
-            toSession,
-            messageId: ack.messageId,
-            priority,
+          ok: false,
+          reason: "unknown-target",
+          detail: formatMessageAgentRefusal({
+            reason: "unknown-target",
+            target,
           }),
         };
       }
+
+      // The budget gates acceptance: past the limit nothing may be parked or
+      // appended, so this check precedes both sends. Identity fences above
+      // run first so a wrong-target refusal never reads as a rate refusal.
+      const at = nowMs();
+      if (!budget.hasCapacity(senderSessionId, at)) {
+        return {
+          ok: false,
+          reason: "rate-limited",
+          detail: formatMessageAgentRateLimited({
+            limit: MESSAGE_AGENT_RATE_LIMIT,
+            windowSeconds: MESSAGE_AGENT_RATE_WINDOW_MS / 1000,
+          }),
+        };
+      }
+
+      const messageId = `agent-${crypto.randomUUID()}`;
+
+      if (workerRecord !== undefined) {
+        // Worker target: the existing steer path, unchanged.
+        const result = await multitask.steerWorker(target, text);
+        if (!result.ok) {
+          // steerWorker refuses not-running for terminal or never-started
+          // workers. unknown-worker here can only be a concurrent removal —
+          // not-running is the honest mapping either way, and nothing was
+          // parked or interrupted.
+          return {
+            ok: false,
+            reason: "not-running",
+            detail: formatMessageAgentRefusal({
+              reason: "not-running",
+              target,
+            }),
+          };
+        }
+        budget.record(senderSessionId, at);
+        return {
+          ok: true,
+          target,
+          delivered_as: "steer",
+          message_id: messageId,
+          note: formatMessageAgentSteerNote(workerRecord.title),
+        };
+      }
+
+      // Dispatcher target: the existing peer inbox and wake lane.
+      const ack = multitask.sendPeer(target, {
+        messageId,
+        fromAgentId: senderSessionId,
+        fromName: senderSessionId,
+        to: { kind: "agent", agentId: target },
+        conversationId: PEER_DIRECT_CONVERSATION_ID,
+        text,
+        priority,
+        createdAtMs: at,
+      });
+      if (!ack.ok) {
+        // Fresh-minted uuid: message-id-reuse cannot occur; if it somehow
+        // did, the envelope itself is the problem — invalid-envelope.
+        if (
+          ack.reason === "invalid-envelope" ||
+          ack.reason === "message-id-reuse"
+        ) {
+          return { ok: false, reason: "invalid-envelope", detail: ack.detail };
+        }
+        return {
+          ok: false,
+          reason: ack.reason,
+          detail: formatMessageAgentRefusal({ reason: ack.reason, target }),
+        };
+      }
+      budget.record(senderSessionId, at);
       return {
-        ok: false,
-        reason: ack.reason,
-        detail:
-          ack.reason === "invalid-envelope"
-            ? ack.detail
-            : formatPeerSendRefusal(ack.reason, toSession),
+        ok: true,
+        target,
+        delivered_as: "peer",
+        message_id: ack.messageId,
+        note: formatPeerSendAck({
+          toSession: target,
+          messageId: ack.messageId,
+          priority,
+        }),
+      };
+    },
+  };
+
+  /**
+   * Ticket 117 / ADR-0025: the ONE bounded wait (`await_agent`).
+   *
+   * It routes into the existing ticket-115 core (`Multitask.awaitWorker` →
+   * `settleRecords.wait`) — no second wait mechanism, no host poll, no
+   * transcript read. The core is camelCase; this handler maps the outcome
+   * onto the ticket's snake_case wire shape at exactly one place
+   * (`toAwaitAgentToolResult`).
+   *
+   * Bounds live in the core (`validateAwaitTimeout`): default 30,000 ms,
+   * 0–120,000 ms, `0` = non-blocking status read, at most 4 concurrent
+   * waiters per session. This handler only rejects a NON-NUMBER argument,
+   * because the core's signature is typed and never receives one.
+   *
+   * `exec.signal` reaches the wait when the caller supplies exec, so a
+   * stopped turn resolves `released`. Session deactivation is already wired
+   * at plugin level (`multitask.cancelWaits(sessionId)` on deactivate,
+   * ticket 115) — reused, not duplicated here.
+   *
+   * Adapter wiring (ticket 117, landed): `toRegisterableTool` forwards the
+   * host's `exec`, so live `exec.signal` reaches this handler; and the
+   * plugin watches the dispatcher's own `session/event` for a STRUCTURED user
+   * prompt and calls `multitask.releaseWaits(sessionId, "user-message")`.
+   */
+  const awaitAgent: DispatcherToolDef = {
+    name: AWAIT_AGENT_TOOL,
+    description: TOOL_DESCRIPTIONS[AWAIT_AGENT_TOOL],
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        target: {
+          type: "string",
+          required: true,
+          description:
+            "Worker id to wait for. One of YOUR workers only — a dispatcher session is not awaitable.",
+        },
+        timeout_ms: {
+          type: "number",
+          required: false,
+          description:
+            "Max wait, 0–120000 ms. 0 returns the current state immediately. Default 30000.",
+        },
+      },
+    },
+    async execute(args, exec): Promise<AwaitAgentToolResult> {
+      const target = requireString(args, "target");
+      // The core's timeout parameter is typed `number | undefined`; a JSON
+      // value of any other type (string, object, boolean) is refused here
+      // instead of being coerced — `"5000"` must never silently become a
+      // default-timeout wait.
+      const timeoutRaw = args.timeout_ms;
+      if (
+        timeoutRaw !== undefined &&
+        timeoutRaw !== null &&
+        typeof timeoutRaw !== "number"
+      ) {
+        return {
+          ok: false,
+          reason: "invalid-timeout",
+          detail: AWAIT_INVALID_TIMEOUT_DETAIL,
+        };
+      }
+      const sessionId = requireSessionId();
+      const outcome = await multitask.awaitWorker(
+        sessionId,
+        target,
+        typeof timeoutRaw === "number" ? timeoutRaw : undefined,
+        readExecSignal(exec),
+      );
+      return toAwaitAgentToolResult(target, outcome);
+    },
+  };
+
+  /**
+   * Ticket 118 / ADR-0025 mitosis: `spawn_dispatcher`.
+   *
+   * Visibility is the fence (ADR-0019): it is registered on the dispatcher
+   * surface only, so workers never see it and no extra execute-time gate is
+   * needed. The parent is the REGISTRATION CLOSURE's session id — there is no
+   * parent argument, exactly like `spawn_worker` and `message_agent`.
+   *
+   * It is NOT routed through `Multitask.spawnWorker`: a dispatcher is not a
+   * work stream. Nothing here touches the worker roster, the stream-key
+   * reservation, the todo ledger, the steer queue, or the durability marker
+   * store. The handler calls the host's `spawnDispatcher` seam and reports
+   * the child session id.
+   *
+   * Refusals are limited to what is real (ADR-0025 forbids any cap of ours):
+   * - `invalid-args` — an empty/whitespace-only title or prompt. Nothing was
+   *   attempted and no host call happened.
+   * - `host-refused` — the host's own spawn error (`ACTIVATION_LIMIT_REACHED`
+   *   from the live-child pool, the `maxDepth` depth refusal, or an unbound
+   *   parent). Its message is passed through verbatim in `detail`; nothing is
+   *   reclassified, re-worded, or capped here.
+   */
+  const spawnDispatcher: DispatcherToolDef = {
+    name: SPAWN_DISPATCHER_TOOL,
+    description: TOOL_DESCRIPTIONS[SPAWN_DISPATCHER_TOOL],
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        title: {
+          type: "string",
+          required: true,
+          description:
+            "Short human title for the summoned dispatcher (3–8 words). The host shows it on the child session.",
+        },
+        prompt: {
+          type: "string",
+          required: true,
+          description:
+            "Problem and outcome handoff: what to own, what done looks like, and what to report back. Self-contained — the new dispatcher does not see this conversation.",
+        },
+      },
+    },
+    async execute(
+      args: Record<string, unknown>,
+      exec?: unknown,
+    ): Promise<SpawnDispatcherToolResult> {
+      // Input refusals are tool results, not throws: the model gets a clean
+      // "nothing was attempted" answer for an empty title or prompt.
+      const titleRaw = args.title;
+      if (typeof titleRaw !== "string" || titleRaw.trim().length === 0) {
+        return {
+          ok: false,
+          reason: "invalid-args",
+          detail: "title is required and must be a non-empty string.",
+        };
+      }
+      const promptRaw = args.prompt;
+      if (typeof promptRaw !== "string" || promptRaw.trim().length === 0) {
+        return {
+          ok: false,
+          reason: "invalid-args",
+          detail: "prompt is required and must be a non-empty string.",
+        };
+      }
+      const title = titleRaw.trim();
+      const prompt = promptRaw.trim();
+      const parentSessionId = requireSessionId();
+
+      const seam = deps.spawnDispatcher;
+      if (seam === undefined) {
+        // A missing seam is a WIRING bug, not a spawn refusal: reporting a
+        // host refusal would claim an attempt that never happened. Chunk 3
+        // wires this from `CordisDshHost.spawnDispatcher`.
+        throw new Error(
+          "spawn_dispatcher is registered but no dispatcher-spawn seam is wired",
+        );
+      }
+      const signal = readExecSignal(exec);
+      let dispatcherId: string;
+      try {
+        const result = await seam({
+          parentSessionId,
+          title,
+          prompt,
+          ...(signal !== undefined ? { signal } : {}),
+        });
+        dispatcherId = result.dispatcherId;
+      } catch (error) {
+        // Honest surfacing: the host's own text, unchanged. No refusal class
+        // is invented and no cap is applied; a host error means the child
+        // was not started.
+        return {
+          ok: false,
+          reason: "host-refused",
+          detail: `the host refused the dispatcher spawn: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        };
+      }
+
+      return {
+        ok: true,
+        dispatcher_id: dispatcherId,
+        title,
+        note: formatSpawnDispatcherNote({ title, dispatcherId }),
       };
     },
   };
@@ -1040,7 +1424,9 @@ export function createDispatcherTools(
     steerWorker,
     stopWorker,
     deliverResult,
-    sendPeer,
+    messageAgent,
+    awaitAgent,
+    spawnDispatcher,
   ];
 }
 

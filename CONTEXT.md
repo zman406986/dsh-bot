@@ -9,7 +9,7 @@ The TypeScript component that owns the dispatcher's policy state — the finite 
 _Avoid_: orchestrator, engine
 
 **Peer agent**:
-An agent identity the dispatcher exchanges messages with asynchronously — distinct from a Worker, which the dispatcher spawns and steers.
+An agent identity the dispatcher exchanges messages with asynchronously — distinct from a Worker, which the dispatcher spawns and steers. Includes a dispatcher another dispatcher created (ADR-0025).
 _Avoid_: bot, teammate
 
 **Worker**:
@@ -20,16 +20,20 @@ _Avoid_: subagent, background agent
 The dispatcher's role: decide whether the work needs a team or one worker, then hand off the problem and the wanted outcome, not the method.
 _Avoid_: orchestrator, manager
 
+**Dispatcher**:
+The main chat agent the user talks to. It may spawn workers and, since 2026-10-18 (ADR-0025), one dispatcher peer at the same conceptual layer; it is the only agent that delivers to the user.
+_Avoid_: orchestrator, coordinator, front desk
+
 **Mitosis**:
 A dispatcher summoning another dispatcher; the summoned one has the full dispatcher tools and policy and is a peer of its creator, not a rank below it (ADR-0025).
 _Avoid_: child agent, sub-dispatcher
 
 **Chatroom**:
-An optional named group a dispatcher can address instead of one agent; 1:1 messaging stays the default (ADR-0026).
+An optional named group a dispatcher can address instead of one agent; 1:1 messaging stays the default (ADR-0026). Not yet implemented (ticket 125).
 _Avoid_: group chat, broadcast channel
 
 **Mid-task reply**:
-A worker's message to its own dispatcher sent before the worker finishes, separate from its final answer; also called RespondToCoordinator (ADR-0028).
+A worker's message to its own dispatcher sent before the worker finishes, separate from its final answer; shipped as the worker-only `reply_to_dispatcher` tool (ADR-0028).
 _Avoid_: partial result, progress ping
 
 **Compaction boundary**:

@@ -10,7 +10,7 @@
  *
  * The chain under test:
  *
- *   real `apply({enabled:true})` → real `/dispatcher-start` activation
+ *   real `apply({enabled:true})` → real `/dsh-bot` activation
  *   → real `spawn_worker` tool → real `request_access` tool
  *   → core parks the ask → the real `/dispatcher-resolve` command → core relay
  *   → the parked tool call settles; answering again is honestly refused.

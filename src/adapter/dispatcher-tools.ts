@@ -1,6 +1,10 @@
 /**
- * Adapter registration of the six dispatcher tools (design-16 §3.8; sixth
- * tool `send_peer` per ticket 70 §2).
+ * Adapter registration of the dispatcher tools (design-16 §3.8; the
+ * eight-tool shape after ticket 116 retired `send_peer` in favour of
+ * `message_agent`, ticket 117 added `await_agent`, and ticket 118 added
+ * `spawn_dispatcher` — every one of them flows through this same path and
+ * needs no per-tool wiring, the shared `presentationMeta` projection already
+ * covers them).
  * ADR-0019: registration addresses a tool surface — the plugin passes the
  * ACTIVATED agent's own scoped `ctx.tools` (per-agent visibility: the model
  * only ever sees its own dispatcher's tools) or, when the agent carries no
@@ -14,6 +18,10 @@
  */
 
 import type { Multitask } from "../core/multitask.js";
+import type {
+  DispatcherSpawnOptions,
+  DispatcherSpawnResult,
+} from "../core/types.js";
 import {
   createDispatcherTools,
   toToolParametersSchema,
@@ -161,7 +169,15 @@ export function toRegisterableTool(
       if (executeOverride !== undefined) {
         return executeOverride(record, exec);
       }
-      return def.execute(record);
+      // Ticket 117: the host invokes a registered tool as
+      // `tool.execute(exec.arguments, exec)` (`dsh-tools/lib/index.js:3406`,
+      // `dispatchToolBody`), where `exec.signal` is the turn's fused
+      // cancellation signal. The default path MUST forward that second
+      // argument: `await_agent` reads it via `readExecSignal` to release its
+      // wait on a stopped turn, and `spawn_dispatcher` forwards it into the
+      // host spawn. Every other handler ignores the parameter, so forwarding
+      // is inert for them.
+      return def.execute(record, exec);
     },
   };
 }
@@ -186,10 +202,23 @@ export interface RegisterDispatcherToolsOptions {
   readonly recentActivity?: RecentActivityFn;
   /** Ticket 61: activity observation moments for the check-row liveness verdict. */
   readonly lastActivityAtMs?: (workerId: string) => number | null;
+  /**
+   * Ticket 118 (chunk 2, seam only): the host's dispatcher-spawn port,
+   * forwarded verbatim into `createDispatcherTools` for `spawn_dispatcher`.
+   *
+   * Wiring status: the LIVE call site (`src/plugin.ts`, chunk 3's file) must
+   * pass `(opts) => host.spawnDispatcher(opts)`. Until it does, the tool is
+   * still registered but throws on execute rather than reporting a host
+   * refusal that never happened — a missing seam is a wiring bug, never a
+   * spawn refusal.
+   */
+  readonly spawnDispatcher?: (
+    opts: DispatcherSpawnOptions,
+  ) => Promise<DispatcherSpawnResult>;
 }
 
 /**
- * Register the six dispatcher tools on the given surface. Returns disposers.
+ * Register the dispatcher tools on the given surface. Returns disposers.
  * No-op (empty list) when `tools` or `register` is unavailable.
  */
 export function registerDispatcherTools(
@@ -210,6 +239,9 @@ export function registerDispatcherTools(
       : {}),
     ...(options.lastActivityAtMs !== undefined
       ? { lastActivityAtMs: options.lastActivityAtMs }
+      : {}),
+    ...(options.spawnDispatcher !== undefined
+      ? { spawnDispatcher: options.spawnDispatcher }
       : {}),
   });
   const disposers: Array<() => void> = [];

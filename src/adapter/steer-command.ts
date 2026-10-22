@@ -6,7 +6,8 @@
  * preserved, last-wins).
  *
  * Registered at apply (flag ON) with an in-handler activation gate, per the
- * dispatcher-start lifecycle pattern (ticket 19): the dormant plugin shows
+ * dsh-bot activation lifecycle pattern (ticket 19; the command was renamed
+ * from /dispatcher-start by ADR-0030): the dormant plugin shows
  * the command, but the handler refuses anything that is not the activated
  * dispatcher chat. The v2 `conversation.input.dock` affordance is deferred
  * (see ticket 22 comments) — offline, the dock's submit wiring cannot be
@@ -42,8 +43,7 @@ export function dispatcherSteerSuccess(workerId: string): string {
 
 /** No dispatcher is active — nothing to steer through. */
 export const DISPATCHER_STEER_NOT_ACTIVE =
-  "No dispatcher is active yet. Run /dispatcher-start in a top-level chat " +
-  "first.";
+  "No dispatcher is active yet. Run /dsh-bot in a top-level chat first.";
 
 /**
  * A dispatcher is active, but not in the chat that invoked the command.
@@ -52,7 +52,7 @@ export const DISPATCHER_STEER_NOT_ACTIVE =
  */
 export const DISPATCHER_STEER_NOT_DISPATCHER =
   "Steering runs in the dispatcher chat. Send /dispatcher-steer from the " +
-  "chat where you ran /dispatcher-start.";
+  "chat where you ran /dsh-bot.";
 
 /** Missing or empty input. */
 export const DISPATCHER_STEER_USAGE =

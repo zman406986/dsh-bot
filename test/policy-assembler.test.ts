@@ -8,16 +8,21 @@ import {
   type WakeNotice,
 } from "../src/core/policy/assembler.js";
 import {
+  AWAIT_AGENT_TOOL,
   CHECK_WORKERS_TOOL,
+  SPAWN_DISPATCHER_TOOL,
   DELIVER_RESULT_TOOL,
   DISPATCHER_TOOL_NAMES,
-  SEND_PEER_TOOL,
+  MESSAGE_AGENT_TOOL,
   SPAWN_WORKER_TOOL,
   STEER_WORKER_TOOL,
   STOP_WORKER_TOOL,
   TOOL_DESCRIPTIONS,
   buildStandingRulesBlock,
   buildWakeInstructionsBlock,
+  buildDispatcherPolicySection,
+  buildPeerWakeInstructionsBlock,
+  PEER_ROSTER_INTRO,
 } from "../src/core/policy/prompts.js";
 import { emptyReportPlaceholder, REPORT_CLAMP_CHARS } from "../src/core/report-clamp.js";
 import {
@@ -230,7 +235,7 @@ describe("wake-turn assembler", () => {
 });
 
 describe("tool descriptions (new copy)", () => {
-  it("covers the six dispatcher tool names", () => {
+  it("covers the dispatcher tool names", () => {
     assert.deepEqual(
       [...DISPATCHER_TOOL_NAMES],
       [
@@ -239,7 +244,9 @@ describe("tool descriptions (new copy)", () => {
         STEER_WORKER_TOOL,
         STOP_WORKER_TOOL,
         DELIVER_RESULT_TOOL,
-        SEND_PEER_TOOL,
+        MESSAGE_AGENT_TOOL,
+        AWAIT_AGENT_TOOL,
+        SPAWN_DISPATCHER_TOOL,
       ],
     );
     for (const name of DISPATCHER_TOOL_NAMES) {
@@ -327,5 +334,143 @@ describe("wake-copy narration guard (ticket 29)", () => {
   it("wake instructions and standing rules carry no machinery tokens", () => {
     assertOrdinaryNarration(buildWakeInstructionsBlock());
     assertOrdinaryNarration(buildStandingRulesBlock());
+  });
+});
+
+/**
+ * Ticket 119 / ADR-0025 (messaging, bounded await, mitosis): the shipped
+ * tools changed the contract, so the model-facing text must name them. Each
+ * pin below holds one doctrine line that would otherwise silently regress to
+ * the pre-116/117/118 wording.
+ */
+describe("dispatcher policy — messaging, bounded await, mitosis (ticket 119)", () => {
+  it("How you work says one verb messages any agent, never as the user", () => {
+    const policy = buildDispatcherPolicySection();
+    assert.ok(
+      policy.includes("You may message any agent you can see"),
+      "the messaging doctrine line is present",
+    );
+    assert.ok(
+      policy.includes(`(\`${MESSAGE_AGENT_TOOL}\`)`),
+      "the line names the tool, so the model learns it exists",
+    );
+    assert.ok(
+      policy.includes("To a worker it is a correction to work in flight"),
+      "the worker target is mapped onto the steer path",
+    );
+    assert.ok(
+      policy.includes("to another dispatcher it is one assistant writing to another"),
+      "the dispatcher target is assistant-to-assistant",
+    );
+    assert.ok(
+      policy.includes("never delivered as the user") &&
+        policy.includes("never counts as the user speaking"),
+      "agent traffic is never user traffic",
+    );
+  });
+
+  it("How you work allows one bounded wait and forbids treating it as polling", () => {
+    const policy = buildDispatcherPolicySection();
+    assert.ok(
+      policy.includes(
+        "If your next step is blocked on one worker's result, wait on that worker once",
+      ),
+      "the bounded-wait line is present",
+    );
+    assert.ok(
+      policy.includes(`(\`${AWAIT_AGENT_TOOL}\`)`),
+      "the line names the tool",
+    );
+    assert.ok(
+      policy.includes("Waiting is not polling."),
+      "the wait is explicitly distinguished from polling",
+    );
+  });
+
+  it("How you work states mitosis, its user-channel gap, and that it is not awaitable", () => {
+    const policy = buildDispatcherPolicySection();
+    assert.ok(
+      policy.includes("You may summon another dispatcher"),
+      "mitosis is taught",
+    );
+    assert.ok(
+      policy.includes(`(\`${SPAWN_DISPATCHER_TOOL}\`)`),
+      "the line names the tool",
+    );
+    assert.ok(
+      policy.includes("It is a peer: same tools, same policy"),
+      "the summoned dispatcher is a peer, not a helper",
+    );
+    assert.ok(
+      policy.includes("It cannot talk to the user, so its work reaches the user only through you."),
+      "the summoned dispatcher has no channel to the user",
+    );
+    assert.ok(
+      policy.includes("It is not awaitable"),
+      "a dispatcher is not awaitable",
+    );
+  });
+
+  it("never-do narrows the poll ban instead of deleting it", () => {
+    const policy = buildDispatcherPolicySection();
+    assert.ok(
+      !policy.includes("Poll a worker in a loop during a turn."),
+      "the absolute per-turn poll ban is replaced, not kept",
+    );
+    assert.ok(
+      policy.includes("Poll in a loop."),
+      "polling in a loop is still forbidden",
+    );
+    assert.ok(
+      policy.includes("`check_workers` is a snapshot"),
+      "the snapshot semantics of check_workers are stated",
+    );
+    assert.ok(
+      policy.includes("One bounded `await_agent` on the worker you actually need is the only wait."),
+      "the one legal wait is named",
+    );
+  });
+
+  it("standing rules replace 'Do not wait on workers' with the bounded wait", () => {
+    const rules = buildStandingRulesBlock();
+    assert.ok(
+      !rules.includes("Do not wait on workers"),
+      "the absolute no-wait rule is gone",
+    );
+    assert.ok(
+      rules.includes(
+        "One bounded wait on one worker is allowed; never loop.",
+      ),
+      "the replacement states the bound and the loop ban",
+    );
+  });
+
+  it("no dispatcher-facing copy still names the retired send_peer", () => {
+    // The name survives only as a deny candidate and a client toolview key;
+    // the model must never read it again (ticket 116 retired it).
+    for (const text of [
+      buildDispatcherPolicySection(),
+      buildStandingRulesBlock(),
+      buildPeerWakeInstructionsBlock(),
+      PEER_ROSTER_INTRO,
+      ...DISPATCHER_TOOL_NAMES.map((name) => TOOL_DESCRIPTIONS[name]),
+    ]) {
+      assert.ok(
+        !text.includes("send_peer"),
+        `retired tool name in model-facing copy: ${text.slice(0, 60)}…`,
+      );
+    }
+  });
+
+  it("the peer wake tail points a reply at message_agent", () => {
+    const peerWake = buildPeerWakeInstructionsBlock();
+    assert.ok(
+      peerWake.includes("use message_agent addressed to the sender's session id"),
+      "a later reply to a peer uses the one messaging verb",
+    );
+    assert.ok(
+      !peerWake.includes("send_peer"),
+      "the retired verb is not the reply path",
+    );
   });
 });

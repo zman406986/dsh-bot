@@ -17,8 +17,10 @@
 //     "match": {                       // optional; absent = matches any request
 //       "systemIncludes": "text",      //   system prompt must contain text
 //       "userIncludes": "text",        //   last user text must contain text
+//       "anyUserIncludes": "text",     //   SOME user text must contain text
 //       "hasToolResult": true,         //   request carries a tool_result block
-//       "toolNames": ["a","b"]         //   ALL named tools must be offered
+//       "toolNames": ["a","b"],        //   ALL named tools must be offered
+//       "toolResultIncludes": "text"   //   some tool_result body contains text
 //     },
 //     "say": "reply text",             // text block (default: "")
 //     "tool": { "name": "x", "input": {} },  // one tool_use block
@@ -26,10 +28,20 @@
 //     "stop": "end_turn",              // stop_reason override
 //     "delayMs": 0,                    // delay before the first SSE event
 //     "chunks": 1,                     // split say into N text_delta events
+//     "capture": { "name": "regex" },  // remember regex group 1 for {{name}}
 //     "error": { "status": 401, "type": "authentication_error", "message": "..." }
 //   }
 // Unmatched steps are consumed in file order (queue semantics). A request that
 // matches no remaining step is answered by MOCK_REPLY (default: a fixed line).
+//
+// Capture and substitution (ticket 120) let a scripted step use a value the
+// real model would have read from the conversation — a spawned worker id, a
+// child dispatcher's session id. `capture` scans this request's full text
+// (system, every message's text, every tool_result body) and stores group 1
+// under the given name; the first value captured for a name wins. Any string
+// in a later step's `tool.input` may then contain `{{name}}`. An unresolved
+// placeholder is a 500, never a literal: a scenario cannot silently pass with
+// `{{workerId}}` as its target.
 //
 // Environment
 // -----------
@@ -61,6 +73,41 @@ if (LOG.length > 0) mkdirSync(dirname(LOG), { recursive: true });
 
 let seq = 0;
 
+/** Values captured from earlier requests, substituted into later step inputs. */
+const captured = new Map();
+
+/** First capture for a name wins; a later step cannot overwrite it silently. */
+function rememberCapture(name, value) {
+  if (!captured.has(name)) captured.set(name, value);
+}
+
+/** Replace every `{{name}}` in a string. Unresolved names throw. */
+function substitute(text, where) {
+  return text.replace(/\{\{([A-Za-z0-9_]+)\}\}/g, (_match, name) => {
+    const value = captured.get(name);
+    if (value === undefined) {
+      throw new Error(
+        `mock-llm: ${where} references {{${name}}} but no earlier step captured it`,
+      );
+    }
+    return value;
+  });
+}
+
+/** Apply substitution to every string inside a tool input. */
+function substituteDeep(value, where) {
+  if (typeof value === "string") return substitute(value, where);
+  if (Array.isArray(value)) return value.map((item) => substituteDeep(item, where));
+  if (value !== null && typeof value === "object") {
+    const out = {};
+    for (const [key, inner] of Object.entries(value)) {
+      out[key] = substituteDeep(inner, where);
+    }
+    return out;
+  }
+  return value;
+}
+
 /** Read and validate the script file (fail loud — a broken script must not look like a pass). */
 function loadScript(path) {
   const raw = JSON.parse(readFileSync(path, 'utf8'));
@@ -83,15 +130,89 @@ function textOf(content) {
     .join('\n');
 }
 
+/**
+ * Full text of one message: text blocks PLUS tool_result bodies (including
+ * nested text blocks). The capture scan reads what the real model would have
+ * read, so a spawn ack's worker id inside a tool_result must be visible.
+ */
+function fullTextOf(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  const parts = [];
+  for (const block of content) {
+    if (block?.type === 'text') parts.push(block.text ?? '');
+    else if (block?.type === 'tool_result') parts.push(fullTextOf(block.content));
+  }
+  return parts.join('\n');
+}
+
+/** Every piece of text one request carries, for capture scanning. */
+function requestText(body) {
+  return [
+    textOf(body.system),
+    ...(body.messages ?? []).map((message) => fullTextOf(message.content)),
+  ].join('\n');
+}
+
+/** Tool names in the request, and whether any tool_result carries text. */
+function toolNamesOf(body) {
+  return new Set((body.tools ?? []).map((tool) => tool.name));
+}
+
+/** Whether some tool_result body in the request contains `needle`. */
+function anyToolResultIncludes(body, needle) {
+  return (body.messages ?? []).some(
+    (message) =>
+      Array.isArray(message.content) &&
+      message.content.some(
+        (block) =>
+          block?.type === 'tool_result' &&
+          fullTextOf(block.content).includes(needle),
+      ),
+  );
+}
+
+/**
+ * Every tool result in the conversation, paired with the tool that produced
+ * it. A scenario asserts on what a tool RETURNED (its model-facing body),
+ * which is observable behaviour — never on internal call counts.
+ */
+function collectToolResults(messages) {
+  const names = new Map();
+  for (const message of messages ?? []) {
+    if (!Array.isArray(message.content)) continue;
+    for (const block of message.content) {
+      if (block?.type === 'tool_use' && typeof block.id === 'string') {
+        names.set(block.id, block.name);
+      }
+    }
+  }
+  const out = [];
+  for (const message of messages ?? []) {
+    if (!Array.isArray(message.content)) continue;
+    for (const block of message.content) {
+      if (block?.type !== 'tool_result') continue;
+      out.push({
+        tool: names.get(block.tool_use_id) ?? null,
+        toolUseId: block.tool_use_id ?? null,
+        text: fullTextOf(block.content),
+      });
+    }
+  }
+  return out;
+}
+
 /** Which script step answers this request, if any. */
 function pickStep(body) {
   const system = textOf(body.system);
-  const last = body.messages?.at(-1);
   const lastUser = [...(body.messages ?? [])]
     .reverse()
     .find((message) => message.role === 'user');
   const userText = textOf(lastUser?.content);
-  const toolNames = new Set((body.tools ?? []).map((tool) => tool.name));
+  const allUserTexts = (body.messages ?? [])
+    .filter((message) => message.role === 'user')
+    .map((message) => fullTextOf(message.content));
+  const toolNames = toolNamesOf(body);
   const hasToolResult = (body.messages ?? []).some(
     (message) =>
       Array.isArray(message.content) &&
@@ -103,15 +224,31 @@ function pickStep(body) {
     const match = step.match ?? {};
     if (match.systemIncludes !== undefined && !system.includes(match.systemIncludes)) continue;
     if (match.userIncludes !== undefined && !userText.includes(match.userIncludes)) continue;
+    if (
+      match.anyUserIncludes !== undefined &&
+      !allUserTexts.some((text) => text.includes(match.anyUserIncludes))
+    ) {
+      continue;
+    }
     if (match.hasToolResult !== undefined && hasToolResult !== match.hasToolResult) continue;
     if (match.toolNames !== undefined && !match.toolNames.every((name) => toolNames.has(name))) continue;
+    if (
+      match.toolResultIncludes !== undefined &&
+      !anyToolResultIncludes(body, match.toolResultIncludes)
+    ) {
+      continue;
+    }
     step.used = true;
     return { step, index };
   }
   return { step: undefined, index: null };
 }
 
-/** Condensed view of the conversation, enough to assert a round trip. */
+/**
+ * Condensed view of the conversation, enough to assert a round trip.
+ * `toolResultTexts` carries what each tool actually RETURNED (the model-facing
+ * bodies), which is where an observable ack, refusal, or await outcome lives.
+ */
 function conversationTail(messages) {
   return (messages ?? []).slice(-4).map((message) => ({
     role: message.role,
@@ -121,6 +258,11 @@ function conversationTail(messages) {
       : [],
     toolResults: Array.isArray(message.content)
       ? message.content.filter((block) => block.type === 'tool_result').map((block) => block.tool_use_id)
+      : [],
+    toolResultTexts: Array.isArray(message.content)
+      ? message.content
+          .filter((block) => block.type === 'tool_result')
+          .map((block) => fullTextOf(block.content))
       : [],
   }));
 }
@@ -255,9 +397,74 @@ const server = createServer((req, res) => {
     const id = `mock-${++seq}`;
     const picked = pickStep(body);
     const step = picked.step ?? {};
+
+    // Capture BEFORE building the reply: this step's match found a value the
+    // script wants to reuse, and its own tool input may already reference an
+    // earlier step's capture.
+    const capturedNow = {};
+    if (step.capture !== undefined) {
+      const haystack = requestText(body);
+      for (const [name, patterns] of Object.entries(step.capture)) {
+        const candidates = Array.isArray(patterns) ? patterns : [patterns];
+        let found;
+        for (const pattern of candidates) {
+          found = new RegExp(pattern).exec(haystack)?.[1];
+          if (found !== undefined && found.length > 0) break;
+        }
+        if (found === undefined || found.length === 0) {
+          // Fail loud: a scenario that expected an id and did not find one
+          // must not continue with an empty target.
+          res.writeHead(500, { 'content-type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              type: 'error',
+              error: {
+                type: 'api_error',
+                message: `mock-llm: step ${picked.index} capture "${name}" did not match this request`,
+              },
+            }),
+          );
+          logRequest({
+            seq,
+            t: new Date().toISOString(),
+            id,
+            path: req.url,
+            scriptStep: picked.index,
+            captureFailed: name,
+          });
+          return;
+        }
+        rememberCapture(name, found);
+        capturedNow[name] = found;
+      }
+    }
+
+    let tool;
+    try {
+      tool =
+        step.tool === undefined
+          ? undefined
+          : {
+              name: step.tool.name,
+              input: substituteDeep(
+                step.tool.input ?? {},
+                `step ${picked.index} tool input`,
+              ),
+            };
+    } catch (error) {
+      res.writeHead(500, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          type: 'error',
+          error: { type: 'api_error', message: String(error?.message ?? error) },
+        }),
+      );
+      return;
+    }
+
     const reply = {
       say: step.say ?? (step.error === undefined && step.tool === undefined ? FALLBACK : ''),
-      tool: step.tool,
+      tool,
       thinking: step.thinking,
       stop: step.stop,
       chunks: step.chunks,
@@ -292,7 +499,12 @@ const server = createServer((req, res) => {
         .map((m) => textOf(m.content)),
       assistantTextTail: assistantBefore.slice(-600),
       conversationTail: conversationTail(body.messages),
+      // Every tool result with the tool that produced it: the scenario phase
+      // asserts on returned bodies (observable), never on internal counters.
+      toolResults: collectToolResults(body.messages),
       scriptStep: picked.index,
+      capturedNow,
+      captured: Object.fromEntries(captured),
       reply: {
         say: (reply.say ?? '').slice(0, 400),
         tool: reply.tool ? { name: reply.tool.name, input: reply.tool.input ?? {} } : null,

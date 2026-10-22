@@ -50,8 +50,7 @@ export function dispatcherResolveSuccess(workerId: string): string {
 
 /** No dispatcher is active — nothing to answer through. */
 export const DISPATCHER_RESOLVE_NOT_ACTIVE =
-  "No dispatcher is active yet. Run /dispatcher-start in a top-level chat " +
-  "first.";
+  "No dispatcher is active yet. Run /dsh-bot in a top-level chat first.";
 
 /**
  * A dispatcher is active, but not in the chat that invoked the command.
@@ -60,7 +59,7 @@ export const DISPATCHER_RESOLVE_NOT_ACTIVE =
  */
 export const DISPATCHER_RESOLVE_NOT_DISPATCHER =
   "Access answers run in the dispatcher chat. Send /dispatcher-resolve " +
-  "from the chat where you ran /dispatcher-start.";
+  "from the chat where you ran /dsh-bot.";
 
 /** Missing or malformed input. */
 export const DISPATCHER_RESOLVE_USAGE =

@@ -18,10 +18,10 @@ import { volatileConfig } from "./support/plugin-config.js";
 import {
   DISPATCHER_RESOLVE_COMMAND,
   DISPATCHER_START_COMMAND,
-  DISPATCHER_STOP_COMMAND,
   DISPATCHER_STEER_COMMAND,
 } from "../src/adapter/index.js";
 import type {
+  ActivationSpecLike,
   AdapterContext,
   AgentLike,
   CommandDefinitionLike,
@@ -48,6 +48,8 @@ function createStubCtx(): AdapterContext & {
   };
   registeredCommands: CommandDefinitionLike[];
   registeredTools: Array<{ name: string }>;
+  /** Ticket 118: every activation spec the fake host's `subagents` received. */
+  activationCalls: ActivationSpecLike[];
   /** Variadic: some buses pass extra args (session/event is two-arg). */
   fire(name: string, ...payloads: unknown[]): void;
   runCommand(inv: { commandId: string; agent: AgentLike }): void;
@@ -56,6 +58,7 @@ function createStubCtx(): AdapterContext & {
   const listeners = new Map<string, Array<(payload: never) => void>>();
   const tables = new Map<string, Map<string, unknown>>();
   const registeredCommands: CommandDefinitionLike[] = [];
+  const activationCalls: ActivationSpecLike[] = [];
   const registeredTools: Array<{ name: string } & {
     execute: (args: unknown, exec?: unknown) => Promise<unknown>;
   }> = [];
@@ -71,6 +74,7 @@ function createStubCtx(): AdapterContext & {
     listeners,
     registeredCommands,
     registeredTools,
+    activationCalls,
     // Cordis effect contract (ticket 44): `execute` runs at apply; a returned
     // function — or each value a generator yields — is the unload disposer.
     // (The old inverted fake collected the passed function itself, which hid
@@ -154,7 +158,8 @@ function createStubCtx(): AdapterContext & {
       void command.handler(inv);
     },
     subagents: {
-      async startActivation() {
+      async startActivation(spec: ActivationSpecLike) {
+        activationCalls.push(spec);
         return { childId: "child-stub", dispose: async () => {} };
       },
       interrupt() {},
@@ -258,7 +263,6 @@ describe("plugin scaffold", () => {
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
       DISPATCHER_RESOLVE_COMMAND,
-      DISPATCHER_STOP_COMMAND,
     ]);
     // Deferred to activation (ticket 19): the tool surface stays stock.
     assert.equal(ctx.registeredTools.length, 0);
@@ -270,7 +274,7 @@ describe("plugin scaffold", () => {
     // The contract-faithful fake runs `execute` at apply exactly like live
     // cordis: a plugin that handed the register DISPOSER to `ctx.effect`
     // would invoke it right here and silently unregister the command — the
-    // live 2026-09-18 re-pass bug (ticket 44). Both commands must still be
+    // live 2026-09-18 re-pass bug (ticket 44). Every command must still be
     // present, and each effect must have contributed exactly one real
     // cleanup (the command registrations + the teardown), so an HMR
     // dispose-all unregisters everything through the collected disposers.
@@ -278,9 +282,8 @@ describe("plugin scaffold", () => {
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
       DISPATCHER_RESOLVE_COMMAND,
-      DISPATCHER_STOP_COMMAND,
     ]);
-    assert.equal(ctx.disposers.length, 5);
+    assert.equal(ctx.disposers.length, 4);
     for (const dispose of [...ctx.disposers]) dispose();
     assert.equal(ctx.registeredCommands.length, 0);
   });
@@ -293,7 +296,9 @@ describe("plugin scaffold", () => {
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await new Promise((resolve) => setImmediate(resolve));
 
-    // Six dispatcher tools (T11 + ticket 70 send_peer) + worker access tool (T13).
+    // Eight dispatcher tools (ticket 116 retired send_peer for message_agent;
+    // ticket 117 added await_agent; ticket 118 added spawn_dispatcher)
+    // + worker access tool (T13).
     const names = ctx.registeredTools.map((t) => t.name);
     for (const tool of [
       "spawn_worker",
@@ -301,7 +306,9 @@ describe("plugin scaffold", () => {
       "steer_worker",
       "stop_worker",
       "deliver_result",
-      "send_peer",
+      "message_agent",
+      "await_agent",
+      "spawn_dispatcher",
       "request_access",
     ]) {
       assert.ok(names.includes(tool), `missing tool: ${tool}`);
@@ -314,7 +321,7 @@ describe("plugin scaffold", () => {
     // Re-activation registers a fresh surface.
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(ctx.registeredTools.length, 7);
+    assert.equal(ctx.registeredTools.length, 9);
   });
 
   it("tool executions route to the registering session (ADR-0019: gate retired)", async () => {
@@ -346,6 +353,42 @@ describe("plugin scaffold", () => {
     assert.equal(ok.ok, true);
   });
 
+  it("spawn_dispatcher reaches the host spawn seam (ticket 118 wiring)", async () => {
+    const ctx = createStubCtx();
+    apply(ctx, volatileConfig({ enabled: true }));
+
+    const agent = createAgent("session-1");
+    ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const spawnDispatcher = ctx.registeredTools.find(
+      (t) => t.name === "spawn_dispatcher",
+    );
+    assert.ok(spawnDispatcher);
+
+    // The activate path bound this agent, so the host resolves the parent and
+    // the tool's closure session id (not any exec argument) is the authority.
+    const result = (await spawnDispatcher.execute(
+      { title: "Child dispatcher", prompt: "Own the other half." },
+      { agent: { session: { id: "session-1" } } },
+    )) as { ok: boolean; dispatcher_id?: string };
+
+    assert.equal(result.ok, true);
+    assert.equal(result.dispatcher_id, "child-stub");
+
+    // The fake host's subagents service is the seam's far side: exactly one
+    // dispatcher activation arrived, with the mitosis request shape.
+    assert.equal(ctx.activationCalls.length, 1);
+    const spec = ctx.activationCalls[0];
+    assert.ok(spec);
+    assert.equal(spec.provider, "spawn");
+    assert.equal(spec.label, "Child dispatcher");
+    assert.equal(spec.delivery, "parent");
+    assert.equal(spec.request.parent.session.id, "session-1");
+    assert.equal(spec.request.maxDepth, 2);
+    assert.equal("agentPreset" in spec, false);
+  });
+
   it("dispose-all (HMR) unregisters the command, tools, and listeners", async () => {
     const ctx = createStubCtx();
     apply(ctx, volatileConfig({ enabled: true }));
@@ -353,7 +396,8 @@ describe("plugin scaffold", () => {
     const agent = createAgent("session-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(ctx.registeredTools.length, 7);
+    // Eight dispatcher tools + the worker access tool.
+    assert.equal(ctx.registeredTools.length, 9);
 
     for (const dispose of ctx.disposers) dispose();
 
@@ -372,7 +416,7 @@ describe("plugin scaffold", () => {
     const agent = createAgent("session-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(ctx.registeredTools.length, 7);
+    assert.equal(ctx.registeredTools.length, 9);
 
     for (const dispose of [...ctx.disposers]) dispose();
     assert.equal(ctx.registeredCommands.length, 0);
@@ -386,14 +430,13 @@ describe("plugin scaffold", () => {
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
       DISPATCHER_RESOLVE_COMMAND,
-      DISPATCHER_STOP_COMMAND,
     ]);
     ctx.runCommand({
       commandId: DISPATCHER_START_COMMAND,
       agent: createAgent("session-2"),
     });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(ctx.registeredTools.length, 7);
+    assert.equal(ctx.registeredTools.length, 9);
   });
 
   it("a firehose tool/call advances the count check_workers shows (ticket 75)", async () => {
@@ -439,6 +482,75 @@ describe("plugin scaffold", () => {
     // Fresh observed activity reads active — the quiet→active flip the
     // count wiring enables (previously the count could never advance).
     assert.equal(value.rows[0]?.liveness, "active");
+  });
+
+  // Ticket 117: the shipped `apply()` wires the user-message early release as
+  // `host.onDispatcherUserMessage` → `multitask.releaseWaits`. The semantic
+  // pins live in `test/adapter-dispatcher-tools.test.ts` (real host
+  // subscription, manual clock); this pin is the wiring's safety net at the
+  // plugin level — a structured user prompt, our own wake, and a peer wake all
+  // flow through the shipped listener without throwing or disturbing the
+  // surface, and a dormant plugin stays inert.
+  it("structured user prompts on the firehose are handled without a throw (ticket 117 wiring)", async () => {
+    const ctx = createStubCtx();
+    apply(ctx, volatileConfig({ enabled: true }));
+
+    // Dormant: the listener exists, nothing is armed, and the delivery is inert.
+    assert.doesNotThrow(() => {
+      ctx.fire("session/event", { id: "session-1" }, {
+        type: "agent/inbox/spliced",
+        data: {
+          target: "next-turn",
+          start: 0,
+          inserted: [
+            {
+              id: "m-1",
+              role: "user",
+              content: [{ type: "text", text: "hi" }],
+              source: { kind: "user" },
+            },
+          ],
+        },
+      });
+    });
+
+    const agent = createAgent("session-1");
+    ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
+    await new Promise((resolve) => setImmediate(resolve));
+    const before = ctx.registeredTools.map((t) => t.name);
+
+    for (const kind of ["user", "plugin:multitask-dispatcher", "agent-message"]) {
+      assert.doesNotThrow(() => {
+        ctx.fire("session/event", { id: "session-1" }, {
+          type: "agent/inbox/spliced",
+          data: {
+            target: "next-turn",
+            start: 0,
+            inserted: [
+              {
+                id: `m-${kind}`,
+                role: "user",
+                content: [{ type: "text", text: "anything" }],
+                source: { kind },
+              },
+            ],
+          },
+        });
+        ctx.fire("session/event", { id: "session-1" }, {
+          type: "user/message",
+          data: {
+            id: `u-${kind}`,
+            role: "user",
+            content: [{ type: "text", text: "anything" }],
+            source: { kind },
+          },
+        });
+      });
+    }
+
+    // Nothing was unregistered and no state changed by observation alone.
+    assert.deepEqual(ctx.registeredTools.map((t) => t.name), before);
+    assert.equal(before.length, 9);
   });
 
   // Ticket 91 negative controls: the shipped registries are fail-loud on a

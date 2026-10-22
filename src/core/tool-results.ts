@@ -9,7 +9,8 @@ import {
   TOOL_RESULT_SUMMARY_MAX_ROWS,
 } from "./report-clamp.js";
 import type { WorkerLiveness } from "./liveness.js";
-import type { WorkerStatus, WorkerSummary } from "./types.js";
+import type { AwaitWorkerOutcome } from "./settle-records.js";
+import type { TerminalWorkerStatus, WorkerStatus, WorkerSummary } from "./types.js";
 
 /** One check row the model sees from `check_workers`. */
 export interface WorkerCheckRow {
@@ -95,32 +96,280 @@ export type DeliverResultToolResult = {
 };
 
 /**
- * Ticket 70 §2: send_peer tool result. The ok branch maps the structural
- * `PeerSendAck` onto an honest fire-and-forget summary: ok means accepted
- * into the target's inbox and wake lane, and nothing more — never user
- * delivery, never a reply, never "the peer read it". Failures carry the
- * ack's reason plus honest refusal copy with NO retry affordance and NO
- * queueing (A4; the conservative U-A reading per ticket 82): a failed send
- * is reported, full stop.
+ * Ticket 118 / ADR-0025 mitosis: `spawn_dispatcher`'s wire result.
+ *
+ * The ok branch is the ticket's exact shape — `dispatcher_id`, `title`, and a
+ * model-facing `note`. The note is the only place the model learns the child
+ * is a PEER (message it, never wait on it); `dispatcher_id` is the address
+ * `message_agent` takes.
+ *
+ * Failures are limited to what is real: `invalid-args` (an empty title or
+ * prompt — nothing was attempted) and `host-refused` (the host's own spawn
+ * error, its text passed through verbatim in `detail`). There is deliberately
+ * no `recursion-limit`, no `dispatcher-cap`, no generation counter and no
+ * spawn budget: ADR-0025 settles that the host's `maxDepth` ceiling and live
+ * child pool are the only bounds.
  */
-export type SendPeerToolResult =
+export type SpawnDispatcherToolResult =
   | {
       readonly ok: true;
+      readonly dispatcher_id: string;
+      readonly title: string;
+      /** Model-facing peer/session note. Not user-visible. */
+      readonly note: string;
+    }
+  | {
+      readonly ok: false;
+      readonly reason: "invalid-args" | "host-refused";
+      readonly detail: string;
+    };
+
+/**
+ * Ticket 118: the `spawn_dispatcher` success note.
+ *
+ * Every claim here is checked against the shipped surface:
+ * - the child is a dispatcher peer with the dispatcher tool set and its own
+ *   workers/ledger/inbox (ADR-0025 decision 4, ADR-0019 scoping);
+ * - `message_agent` takes a dispatcher session id (ticket 116 routing);
+ * - a dispatcher is NOT awaitable — `await_agent` refuses `not-awaitable`
+ *   (ticket 117), so "do not wait on it" is a real constraint, not advice.
+ */
+export function formatSpawnDispatcherNote(input: {
+  title: string;
+  dispatcherId: string;
+}): string {
+  return [
+    `Summoned "${input.title}" as a peer dispatcher (session ${input.dispatcherId}).`,
+    "It runs with the same dispatcher tools and policy as you, its own workers, its own ledger, and its own inbox, and it works from the prompt it was given — it does not see this conversation.",
+    `Message it with message_agent addressed to ${input.dispatcherId}; its answer arrives later as its own message on a fresh turn. It cannot talk to the user, so its work reaches the user only through you.`,
+    "Do not wait on it: a dispatcher is not awaitable (await_agent is workers-only). Tell the user what is underway if they need to know, then end the turn or move to other work.",
+  ].join(" ");
+}
+
+/**
+ * Ticket 116 / ADR-0025: the one agent-messaging verb. The ok branch is the
+ * honest fire-and-forget ack — acceptance into the target's lane only
+ * (`delivered_as` records WHICH lane: the steer path or the peer inbox);
+ * never user delivery, never a reply, never "the agent read it". Failures
+ * carry a closed refusal vocabulary with NO retry affordance and NO
+ * queueing (A4; the conservative U-A reading per ticket 82).
+ */
+export type MessageAgentToolResult =
+  | {
+      readonly ok: true;
+      readonly target: string;
+      /** Which existing lane accepted it: the steer path or the peer inbox. */
+      readonly delivered_as: "steer" | "peer";
       readonly message_id: string;
-      readonly to_session: string;
       /** Model-facing fire-and-forget ack text. Not user-visible. */
+      readonly note: string;
+    }
+  | {
+      readonly ok: false;
+      readonly reason:
+        | "unknown-target"
+        | "self-target"
+        | "not-running"
+        | "inbox-full"
+        | "rate-limited"
+        | "invalid-envelope";
+      readonly detail: string;
+    };
+
+/**
+ * Ticket 116: refusal copy per reason for `message_agent` — a failed send is
+ * reported and dropped (no retry control, no queue). `invalid-envelope` and
+ * `rate-limited` carry their detail inline at the refusal site; the rest are
+ * canned here so the copy stays in one place.
+ */
+export function formatMessageAgentRefusal(input: {
+  reason: "unknown-target" | "self-target" | "not-running" | "inbox-full";
+  target: string;
+}): string {
+  switch (input.reason) {
+    case "unknown-target":
+      return `No agent "${input.target}" — it is not one of your workers and no live dispatcher session carries that id. The message was NOT delivered and was not queued. There is no retry for an agent message.`;
+    case "self-target":
+      return `"${input.target}" is your own session. Messaging yourself is refused — nothing was sent.`;
+    case "not-running":
+      return `Worker "${input.target}" is not running (it may already be done). The message was NOT delivered — there is no retry for a finished worker.`;
+    case "inbox-full":
+      return `"${input.target}" already has a full inbox of undelivered messages. The message was NOT delivered and was not queued.`;
+  }
+}
+
+/** Ticket 116: rate-cap refusal copy (the shared agent-message budget). */
+export function formatMessageAgentRateLimited(input: {
+  limit: number;
+  windowSeconds: number;
+}): string {
+  return (
+    `Agent-message rate limit reached: at most ${input.limit} messages per ` +
+    `${input.windowSeconds} seconds from this session. Nothing was sent and ` +
+    `nothing was queued; batch your next message.`
+  );
+}
+
+/**
+ * Ticket 116: `message_agent` steer-branch success note. The steer path is
+ * unchanged (single-slot last-wins park, interrupt, wrapped send at the next
+ * step boundary) — the copy names those semantics without a restart promise.
+ */
+export function formatMessageAgentSteerNote(title: string): string {
+  return `Message parked for "${title}". It folds in at the worker's next step boundary and the worker continues from where it is — no restart. If you message this worker again before delivery, only the latest message applies.`;
+}
+
+/**
+ * Ticket 117 / ADR-0025: `await_agent`'s wire result. Snake_case on purpose —
+ * the core's {@link AwaitWorkerOutcome} is camelCase, so the tool layer maps
+ * field for field at the single boundary in {@link toAwaitAgentToolResult}.
+ *
+ * Success carries `ok: true` even for a timeout: `still-running` and `gone`
+ * are valid outcomes, not errors. `released` says the WAIT ended early —
+ * `reason` names which racer won (`user-message` waits for adapter wiring;
+ * `stopped` is a turn abort or session deactivation). The worker itself keeps
+ * running in every `released` case.
+ */
+export type AwaitAgentToolResult =
+  | {
+      readonly ok: true;
+      readonly status: "settled";
+      readonly target: string;
+      readonly worker_status: TerminalWorkerStatus;
+      readonly result: string;
+      readonly settled_at_ms: number;
+      readonly waited_ms: number;
+      /** Model-facing summary text. Not user-visible. */
+      readonly summary: string;
+    }
+  | {
+      readonly ok: true;
+      readonly status: "still-running" | "gone";
+      readonly target: string;
+      readonly waited_ms: number;
+      readonly summary: string;
+    }
+  | {
+      readonly ok: true;
+      readonly status: "released";
+      readonly target: string;
+      readonly reason: "user-message" | "stopped";
+      readonly waited_ms: number;
       readonly summary: string;
     }
   | {
       readonly ok: false;
       readonly reason:
-        | "invalid-envelope"
         | "unknown-target"
-        | "inbox-full"
-        | "message-id-reuse"
-        | "self-target";
+        | "self-target"
+        | "not-awaitable"
+        | "too-many-waits"
+        | "invalid-timeout";
       readonly detail: string;
     };
+
+/**
+ * Ticket 117: success copy per await outcome. Short and factual — the model
+ * must know whether it now has the result, whether the worker is still alive,
+ * or whether the wait was cut short (and that the worker was NOT stopped).
+ *
+ * `settled` embeds the result text: the host's render path sends only this
+ * summary block to the model, so "its result is above" would be a lie.
+ */
+export function formatAwaitNote(
+  target: string,
+  outcome:
+    | {
+        readonly status: "settled";
+        readonly workerStatus: TerminalWorkerStatus;
+        readonly result: string;
+      }
+    | { readonly status: "still-running" }
+    | { readonly status: "gone" }
+    | { readonly status: "released"; readonly reason: "user-message" | "stopped" },
+): string {
+  switch (outcome.status) {
+    case "settled":
+      return [
+        `Worker "${target}" settled: ${outcome.workerStatus}.`,
+        outcome.result.length > 0
+          ? `Result:\n${outcome.result}`
+          : "It produced no report text.",
+        outcome.workerStatus === "completed"
+          ? "Continue from this result."
+          : "That is not a successful finish; decide what the user needs to know.",
+      ].join("\n");
+    case "still-running":
+      return `Worker "${target}" is still running — nothing is lost. Its result will arrive later on its own. Do not wait again in this turn; answer or end the turn.`;
+    case "gone":
+      return `No result was recorded for "${target}" and that worker is no longer alive, so its outcome is unknown. Do not wait for it again; tell the user plainly if this work mattered.`;
+    case "released":
+      return outcome.reason === "user-message"
+        ? `The wait on "${target}" was released because the user said something — answer them now. The worker was not stopped and keeps running.`
+        : `The wait on "${target}" was released (the turn was stopped or the session went inactive). The worker was not stopped: it keeps running and its result still arrives later.`;
+  }
+}
+
+/**
+ * Ticket 117: map ticket 115's camelCase core outcome onto `await_agent`'s
+ * snake_case wire result. The ONE place the two naming conventions meet.
+ */
+export function toAwaitAgentToolResult(
+  target: string,
+  outcome: AwaitWorkerOutcome,
+): AwaitAgentToolResult {
+  if (!outcome.ok) {
+    // Ticket 117 copy requirement: a dispatcher target must say to message
+    // it and END THE TURN — it is a refusal about the tool model (the cycle
+    // rule), not a "try again later". Every other refusal keeps the core's
+    // own specific detail.
+    const detail =
+      outcome.reason === "not-awaitable"
+        ? `"${target}" is a dispatcher session, not a worker. Dispatchers are peers and cannot be awaited. Send it a message with message_agent and end the turn — its answer arrives later on its own.`
+        : outcome.detail;
+    return { ok: false, reason: outcome.reason, detail };
+  }
+  switch (outcome.status) {
+    case "settled":
+      return {
+        ok: true,
+        status: "settled",
+        target,
+        worker_status: outcome.workerStatus,
+        result: outcome.result,
+        settled_at_ms: outcome.settledAtMs,
+        waited_ms: outcome.waitedMs,
+        summary: formatAwaitNote(target, {
+          status: "settled",
+          workerStatus: outcome.workerStatus,
+          result: outcome.result,
+        }),
+      };
+    case "still-running":
+    case "gone":
+      return {
+        ok: true,
+        status: outcome.status,
+        target,
+        waited_ms: outcome.waitedMs,
+        summary: formatAwaitNote(target, { status: outcome.status }),
+      };
+    case "released":
+      // `user-message` comes from the adapter's structured dispatcher-session
+      // watch (ticket 117); `stopped` from turn abort or deactivation.
+      return {
+        ok: true,
+        status: "released",
+        target,
+        reason: outcome.reason,
+        waited_ms: outcome.waitedMs,
+        summary: formatAwaitNote(target, {
+          status: "released",
+          reason: outcome.reason,
+        }),
+      };
+  }
+}
 
 /** Format elapsed milliseconds as a short human duration. */
 export function formatElapsedMs(elapsedMs: number): string {
@@ -243,8 +492,10 @@ export function formatStopUnknownStateNote(
 }
 
 /**
- * Ticket 70 §2: send_peer success ack. Acceptance only — the copy must not
- * promise delivery to a person, a reply, or that the peer has read anything.
+ * Peer-lane accept ack, used by `message_agent`'s dispatcher branch
+ * (ticket 70 §2 copy, kept by ticket 116 after `send_peer` retired).
+ * Acceptance only — the copy must not promise delivery to a person, a
+ * reply, or that the peer has read anything.
  */
 export function formatPeerSendAck(input: {
   toSession: string;
@@ -259,28 +510,4 @@ export function formatPeerSendAck(input: {
     "Their next turn will see it. This send carries no reply and waits for nothing — if the peer responds, it arrives later as its own message on a fresh turn. Do not wait, poll, or keep this turn open for it.",
     priorityLine,
   ].join("\n");
-}
-
-/**
- * Ticket 70 §2: honest refusal copy per ack reason. A failed send is
- * reported and dropped — no retry control, no queue (A4 + the conservative
- * U-A reading per ticket 82).
- */
-export function formatPeerSendRefusal(
-  reason: Exclude<
-    Extract<SendPeerToolResult, { ok: false }>["reason"],
-    "invalid-envelope"
-  >,
-  toSession: string,
-): string {
-  switch (reason) {
-    case "unknown-target":
-      return `No live dispatcher session "${toSession}". The message was NOT delivered and was not queued — if the user needs to know, tell them the send failed. There is no retry for a peer send.`;
-    case "self-target":
-      return `Session "${toSession}" is your own session. Sending a peer message to yourself is refused — nothing was sent.`;
-    case "inbox-full":
-      return `Peer session "${toSession}" has a full inbox of undelivered messages. The message was NOT delivered and was not queued.`;
-    case "message-id-reuse":
-      return "That message id was already accepted from you with a different payload. Nothing was sent.";
-  }
 }

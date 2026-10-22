@@ -32,7 +32,13 @@ import {
   type ToolCallPayload,
   type ToolviewModel,
 } from "../src/client/toolviews.js";
-import { DISPATCHER_TOOL_NAMES } from "../src/core/policy/prompts.js";
+import {
+  AWAIT_AGENT_TOOL,
+  DISPATCHER_TOOL_NAMES,
+  MESSAGE_AGENT_TOOL,
+  SEND_PEER_TOOL,
+  SPAWN_DISPATCHER_TOOL,
+} from "../src/core/policy/prompts.js";
 import { ROSTER_STATUS_KEYS } from "../src/core/roster-snapshot.js";
 import type { WorkerStatus } from "../src/core/types.js";
 
@@ -268,9 +274,28 @@ describe("toolview — keyed registrations claim only our wire tool names", () =
     assert.equal(TOOL_CALL_TOOLVIEW_SLOT, "tool.call.toolview");
   });
 
-  it("claims exactly the core dispatcher tool names, nothing invented", () => {
-    assert.deepEqual([...TOOLVIEW_TOOL_NAMES], [...DISPATCHER_TOOL_NAMES]);
+  it("claims the five unchanged dispatcher keys plus the retained historical send_peer key", () => {
+    // Ticket 116 retired send_peer from the tool surface and registered
+    // message_agent in its place. The client face has no message_agent row
+    // renderer yet, so it keeps claiming the send_peer key for historical
+    // rows (src/client/toolviews.ts records the deliberate lag).
+    // Ticket 117 added await_agent to the dispatcher surface; the client
+    // face has no row renderer for it either, and the core chunk that
+    // registered the tool deliberately does not touch src/client. Ticket 118
+    // added spawn_dispatcher with the SAME deliberate lag — no renderer, no
+    // claim. This pin states ALL THREE lags instead of pretending the lists
+    // match.
+    const expected = [...DISPATCHER_TOOL_NAMES]
+      .filter(
+        (name) =>
+          name !== AWAIT_AGENT_TOOL && name !== SPAWN_DISPATCHER_TOOL,
+      )
+      .map((name) => (name === MESSAGE_AGENT_TOOL ? SEND_PEER_TOOL : name));
+    assert.deepEqual([...TOOLVIEW_TOOL_NAMES], expected);
+    // Every claimed name is either a live dispatcher tool or the retained
+    // historical send_peer key.
     for (const name of TOOLVIEW_TOOL_NAMES) {
+      if (name === SEND_PEER_TOOL) continue;
       assert.ok(isDispatcherToolName(name));
     }
   });
@@ -680,7 +705,7 @@ describe("toolview — locale dictionary shape", () => {
 });
 
 describe("toolview — apply() registers one keyed entry per tool via the fake seam", () => {
-  it("registers the five keyed toolview entries; the overlay era is over", () => {
+  it("registers one keyed toolview entry per claimed wire name; the overlay era is over", () => {
     const ctx = createClientCtx();
     apply(ctx);
 

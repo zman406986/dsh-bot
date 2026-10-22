@@ -1,5 +1,6 @@
 export {
   createWorkerAgentDef,
+  dispatcherSpawnMaxDepth,
   WORKER_MAX_DEPTH,
   workerSpawnMaxDepth,
   type WorkerAgentDef,

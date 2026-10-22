@@ -4,11 +4,16 @@
  * Pins the durable dispatcher marker the client reads as
  * `projectionValues.sessionKind`:
  *
- * 1. The fold marks a session ONLY on a SUCCESSFUL `/dispatcher-start`
+ * 1. The fold marks a session ONLY on a SUCCESSFUL `/dsh-bot`
  *    settlement (`command/run` + `command/done`), never on a refused start,
- *    a thrown handler, or an unpaired run.
- * 2. A successful `/dispatcher-stop` clears the mark; a refused stop leaves
- *    it untouched (the fold never fabricates a kind).
+ *    a thrown handler, or an unpaired run. Logs persisted before the
+ *    ADR-0030 rename carry the legacy literal `dispatcher-start`; the fold
+ *    accepts BOTH names so restart replay stays durable across the rename.
+ * 2. A successful legacy `/dispatcher-stop` settlement clears the mark; a
+ *    refused stop leaves it untouched (the fold never fabricates a kind).
+ *    The stop command itself is withdrawn (ADR-0030, ticket 129) — the fold
+ *    matches the persisted legacy literal only, so restart replay of old
+ *    logs still clears the mark.
  * 3. Fold state is per session — the registry keeps one cell per session, so
  *    a second dispatcher session never contaminates the first (ADR-0019).
  * 4. State is plain JSON, so the persisted projection cache can store it and
@@ -24,6 +29,7 @@ import {
   INITIAL_SESSION_KIND_STATE,
   parseDispatcherSessionKind,
   parseSessionKindProjectionState,
+  LEGACY_DISPATCHER_STOP_COMMAND,
   registerSessionKindProjection,
   SESSION_KIND_PROJECTION_DEFINITION,
   SESSION_KIND_PROJECTION_KEY,
@@ -35,8 +41,10 @@ import {
   type SessionProjectionEventLike,
   type SessionProjectionsRegistryLike,
 } from "../src/adapter/session-kind-projection.js";
-import { DISPATCHER_START_COMMAND } from "../src/adapter/activation-command.js";
-import { DISPATCHER_STOP_COMMAND } from "../src/adapter/stop-command.js";
+import {
+  DISPATCHER_START_COMMAND,
+  LEGACY_DISPATCHER_START_COMMAND,
+} from "../src/adapter/activation-command.js";
 
 /** One declared host event as the log carries it (only fields we read). */
 function commandRun(
@@ -115,7 +123,7 @@ function createFakeRegistry(): FakeRegistry {
 }
 
 describe("session-kind projection — fold", () => {
-  it("marks a session only after a SUCCESSFUL dispatcher-start settlement", () => {
+  it("marks a session only after a SUCCESSFUL dsh-bot settlement", () => {
     const started = fold([
       commandRun("cmd-1", DISPATCHER_START_COMMAND),
       commandDone("cmd-1", "success"),
@@ -135,6 +143,30 @@ describe("session-kind projection — fold", () => {
     assert.equal(viewSessionKind(refused), null);
   });
 
+  it("still marks a session from a LEGACY dispatcher-start log (ADR-0030 rename durability)", () => {
+    // The 2026-10-21 rename (ADR-0030) changed the command's NAME only.
+    // Logs persisted before it carry the literal `dispatcher-start`; a
+    // restart replay of such a log must still mark the session as a
+    // dispatcher.
+    const started = fold([
+      commandRun("cmd-1", LEGACY_DISPATCHER_START_COMMAND),
+      commandDone("cmd-1", "success"),
+    ]);
+    assert.equal(viewSessionKind(started), DISPATCHER_SESSION_KIND);
+
+    // The fail-closed rules hold under the legacy name too: an unpaired
+    // run is not a settlement, and a refused start fabricates nothing.
+    const pending = fold([
+      commandRun("cmd-2", LEGACY_DISPATCHER_START_COMMAND),
+    ]);
+    assert.equal(viewSessionKind(pending), null);
+    const refused = fold([
+      commandRun("cmd-3", LEGACY_DISPATCHER_START_COMMAND),
+      commandDone("cmd-3", "error"),
+    ]);
+    assert.equal(viewSessionKind(refused), null);
+  });
+
   it("clears the mark on a successful stop and keeps it on a refused stop", () => {
     const started = fold([
       commandRun("cmd-1", DISPATCHER_START_COMMAND),
@@ -142,7 +174,7 @@ describe("session-kind projection — fold", () => {
     ]);
     const stopped = fold(
       [
-        commandRun("cmd-2", DISPATCHER_STOP_COMMAND),
+        commandRun("cmd-2", LEGACY_DISPATCHER_STOP_COMMAND),
         commandDone("cmd-2", "success"),
       ],
       started,
@@ -152,7 +184,7 @@ describe("session-kind projection — fold", () => {
     // Refused stop ("this chat is not a dispatcher") is `kind: "error"`.
     const refusedStop = fold(
       [
-        commandRun("cmd-3", DISPATCHER_STOP_COMMAND),
+        commandRun("cmd-3", LEGACY_DISPATCHER_STOP_COMMAND),
         commandDone("cmd-3", "error"),
       ],
       started,
@@ -164,7 +196,7 @@ describe("session-kind projection — fold", () => {
     const state = fold([
       commandRun("cmd-1", DISPATCHER_START_COMMAND),
       commandDone("cmd-1", "success"),
-      commandRun("cmd-2", DISPATCHER_STOP_COMMAND),
+      commandRun("cmd-2", LEGACY_DISPATCHER_STOP_COMMAND),
       commandDone("cmd-2", "success"),
       commandRun("cmd-3", DISPATCHER_START_COMMAND),
       commandDone("cmd-3", "success"),
@@ -255,7 +287,7 @@ describe("session-kind projection — sessions do not cross-contaminate", () => 
     assert.equal(registry.snapshot("session-c"), null);
 
     // Stopping B does not clear A.
-    registry.append("session-b", commandRun("b-2", DISPATCHER_STOP_COMMAND));
+    registry.append("session-b", commandRun("b-2", LEGACY_DISPATCHER_STOP_COMMAND));
     registry.append("session-b", commandDone("b-2", "success"));
     assert.equal(registry.snapshot("session-b"), null);
     assert.equal(registry.snapshot("session-a"), DISPATCHER_SESSION_KIND);
@@ -304,7 +336,7 @@ describe("session-kind projection — state durability", () => {
     const restored = parseSessionKindProjectionState(stored);
     const stopped = fold(
       [
-        commandRun("cmd-2", DISPATCHER_STOP_COMMAND),
+        commandRun("cmd-2", LEGACY_DISPATCHER_STOP_COMMAND),
         commandDone("cmd-2", "success"),
       ],
       restored,

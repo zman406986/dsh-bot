@@ -28,7 +28,6 @@ import { volatileConfig } from "./support/plugin-config.js";
 import {
   DISPATCHER_RESOLVE_COMMAND,
   DISPATCHER_START_COMMAND,
-  DISPATCHER_STOP_COMMAND,
   DISPATCHER_STEER_COMMAND,
   MARKER_TABLE_NAME,
   RESTART_DEGRADED_NOTICE,
@@ -1051,33 +1050,31 @@ describe("restart honesty — no-stop guard (design-17 §4.6)", () => {
     }
   });
 
-  // Ticket 101 re-base (2026-09-20, ADR-0021 decision 3): this guard once
-  // forbade ANY stop-shaped command outright. ADR-0021 amends exception U-G
-  // for dispatcher sessions ONLY: `dispatcher-stop` is the sanctioned
-  // session-BINDING deactivation (the floating window's delete affordance
-  // executes it; the dsh chat itself is never disposed from our code). The
-  // guard keeps its full strength where the original ruling lives — worker
-  // turns / the worker runtime (design-17 §4.6, docs/surfaces.md "No stop
-  // control" stand unchanged for those) — so no command OTHER than the
-  // sanctioned one may carry a stop/cancel name, and a worker-turn stop
-  // surface still cannot sneak in.
-  it("the plugin registers no stop/cancel command beyond the sanctioned session deactivation (design-17 §4.6; re-based by ADR-0021 decision 3 — ticket 101)", () => {
+  // Ticket 129 re-base (2026-10-21, ADR-0030): this guard once forbade ANY
+  // stop-shaped command, then an ADR-0021-era re-base exempted the sanctioned
+  // `/dispatcher-stop` (the ticket-101 session-BINDING deactivation). ADR-0030
+  // withdrew that command — the last user-facing deactivation affordance — so
+  // the exemption is gone and the guard is strictly stronger than its
+  // original form: NO stop/cancel-shaped command may be registered at all.
+  // Its original object stands unchanged too: worker turns / the worker
+  // runtime keep no stop control (design-17 §4.6, docs/surfaces.md "No stop
+  // control"); deactivation is implicit only (host disposal or plugin unload).
+  it("the plugin registers no stop/cancel command at all (design-17 §4.6; strengthened by ADR-0030 — ticket 129)", () => {
     const ctx = createRestartCtx();
     pluginApply(ctx, volatileConfig({ enabled: true }));
     const names = ctx.commandNames().sort();
     assert.deepEqual(names, [
       DISPATCHER_RESOLVE_COMMAND,
-      DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
-      DISPATCHER_STOP_COMMAND,
+      // "dsh-bot" sorts after the dispatcher- names (ADR-0030 rename); the
+      // withdrawn dispatcher-stop (ticket 101) is gone (ticket 129).
+      DISPATCHER_START_COMMAND,
     ]);
-    const offenders = names.filter(
-      (name) => /stop|cancel/i.test(name) && name !== DISPATCHER_STOP_COMMAND,
-    );
+    const offenders = names.filter((name) => /stop|cancel/i.test(name));
     assert.deepEqual(
       offenders,
       [],
-      "no stop/cancel command beyond dispatcher-stop may be registered",
+      "no stop/cancel-shaped command may be registered (ADR-0030 withdrew the last one)",
     );
   });
 });

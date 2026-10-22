@@ -95,6 +95,23 @@ export type ActivationOutcome =
       readonly reason: "not-top-level" | "already-active-here" | "unbound";
     };
 
+/**
+ * Result of {@link BindDispatcherLifecycleResult.activateSpawnedDispatcher}
+ * (ticket 118, ADR-0025 mitosis). Deliberately NOT {@link ActivationOutcome}:
+ * there is no `not-top-level` arm, because a spawned dispatcher is a subagent
+ * by construction and the top-level gate is exactly what must not apply to it.
+ *
+ * `session-mismatch` is a wiring guard, not a cap: the passed session id must
+ * be the child agent's own session id, or every per-session map (parent
+ * binding, tool disposers, wake state) would key the wrong session.
+ */
+export type SpawnedActivationOutcome =
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      readonly reason: "already-active-here" | "unbound" | "session-mismatch";
+    };
+
 export interface BindDispatcherLifecycleResult {
   /**
    * Activate this chat as a dispatcher (ADR-0009): bind its parent,
@@ -103,6 +120,26 @@ export interface BindDispatcherLifecycleResult {
    * chat succeeds; each dispatcher session owns its own surface and state.
    */
   activate(agent: AgentLike): ActivationOutcome;
+  /**
+   * Ticket 118 / ADR-0025 mitosis: activate a SPAWNED child as a dispatcher.
+   *
+   * The ONLY difference from {@link activate} is the missing top-level gate:
+   * a spawned dispatcher is a subagent (`origin: 'subagent'`, depth ≥ 1) by
+   * construction, so `not-top-level` would refuse every mitosis child. Every
+   * other step is the same sequence — parent bind, policy inject, lifecycle
+   * registration, `onActivated` (which registers that session's scoped tool
+   * surface and starts the durability rebuild).
+   *
+   * `activate()` itself stays unchanged for user chats (ADR-0009: a child
+   * chat can never be turned into a dispatcher by a command).
+   *
+   * Idempotent-refusing per session, like `activate`. `session-mismatch`
+   * guards the keying: `sessionId` must equal `String(agent.session.id)`.
+   */
+  activateSpawnedDispatcher(
+    agent: AgentLike,
+    sessionId: string,
+  ): SpawnedActivationOutcome;
   /**
    * Best-effort one-shot **waking** delivery into ONE activated dispatcher
    * chat (ticket 57, register D-4): opens a recovery turn rather than
@@ -322,6 +359,27 @@ export function bindDispatcherLifecycle(
     }),
   );
 
+  /**
+   * The one activation sequence both entry points share — TICKET 118:
+   * extracted verbatim from `activate` so the spawned path cannot drift from
+   * the command path. The ONLY thing the caller decides is the gate.
+   */
+  function bindActivation(agent: AgentLike, sessionId: string): void {
+    // ADR-0019: another chat being a dispatcher is not a refusal — each
+    // session activates independently.
+    sessions.set(sessionId, agent);
+    // Ticket 90 (F2): stamp THIS activation before anything observes it
+    // (`onActivated` starts the rebuild chain that captures the value).
+    activationSeq += 1;
+    generations.set(sessionId, activationSeq);
+    host.bindParent(agent, sessionId);
+    // ADR-0005: policy is fixed for this session's lifetime.
+    if (policyEnabled) {
+      tryInject(agent, assembleSessionPolicy(true));
+    }
+    onActivated?.(sessionId);
+  }
+
   return {
     activate(agent: AgentLike): ActivationOutcome {
       // HMR/unload safety: a torn-down lifecycle never re-binds.
@@ -337,19 +395,30 @@ export function bindDispatcherLifecycle(
       if (sessions.has(sessionId)) {
         return { ok: false, reason: "already-active-here" };
       }
-      // ADR-0019: another chat being a dispatcher is not a refusal — each
-      // session activates independently.
-      sessions.set(sessionId, agent);
-      // Ticket 90 (F2): stamp THIS activation before anything observes it
-      // (`onActivated` starts the rebuild chain that captures the value).
-      activationSeq += 1;
-      generations.set(sessionId, activationSeq);
-      host.bindParent(agent, sessionId);
-      // ADR-0005: policy is fixed for this session's lifetime.
-      if (policyEnabled) {
-        tryInject(agent, assembleSessionPolicy(true));
+      bindActivation(agent, sessionId);
+      return { ok: true };
+    },
+
+    /**
+     * Ticket 118 / ADR-0025: the spawned-dispatcher path. Identical to
+     * {@link activate} minus the top-level gate — the child is a subagent by
+     * construction. `session-mismatch` is a keying guard, not a refusal
+     * category a caller can earn by using the feature correctly.
+     */
+    activateSpawnedDispatcher(
+      agent: AgentLike,
+      sessionId: string,
+    ): SpawnedActivationOutcome {
+      if (unbound) {
+        return { ok: false, reason: "unbound" };
       }
-      onActivated?.(sessionId);
+      if (String(agent.session.id) !== sessionId) {
+        return { ok: false, reason: "session-mismatch" };
+      }
+      if (sessions.has(sessionId)) {
+        return { ok: false, reason: "already-active-here" };
+      }
+      bindActivation(agent, sessionId);
       return { ok: true };
     },
 

@@ -54,7 +54,9 @@ function createScopedStub(options?: {
       "steer_worker",
       "stop_worker",
       "deliver_result",
-      "send_peer",
+      "message_agent",
+      "await_agent",
+      "spawn_dispatcher",
       "read",
     ]
   ).map((name) => ({ name }));
@@ -100,7 +102,7 @@ describe("globalToolNames", () => {
     const names = globalToolNames(ctx, agent);
     assert.ok(names.has("spawn_worker"), "the agent-plane tool is visible");
     assert.ok(names.has("request_access"), "the context-global tool is visible too");
-    assert.equal(names.size, 12);
+    assert.equal(names.size, 14);
   });
 
   it("reads the context-global layer alone without a scope", () => {
@@ -158,7 +160,9 @@ describe("applyWorkerComposition", () => {
       "steer_worker",
       "stop_worker",
       "deliver_result",
-      "send_peer",
+      "message_agent",
+      "await_agent",
+      "spawn_dispatcher",
     ]);
     // Work tools survive.
     assert.ok(!restrictions[0]?.deny?.includes("read"));

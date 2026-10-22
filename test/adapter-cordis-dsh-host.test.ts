@@ -72,11 +72,24 @@ function createStubCtx() {
     { name: "steer_worker" },
     { name: "stop_worker" },
     { name: "deliver_result" },
-    { name: "send_peer" },
+    { name: "message_agent" },
+    { name: "await_agent" },
+    { name: "spawn_dispatcher" },
     { name: "read" },
   ];
 
   const agents = new Map<string, AgentLike>();
+
+  /**
+   * Ticket 120: runs INSIDE `startActivation`, after `agent/created` and
+   * before the call resolves — exactly where the real host lets the child
+   * emit its first `agent/status: running`. The race test drives the status
+   * edge from here, which is what makes it deterministic rather than timing
+   * dependent.
+   */
+  const activationSeams = {
+    duringActivation: null as null | ((childId: string) => void | Promise<void>),
+  };
 
   const ctx: AdapterContext & {
     fire(name: string, ...payloads: unknown[]): void;
@@ -86,6 +99,7 @@ function createStubCtx() {
     sendMessageCalls: RecordedCall[];
     followupCalls: unknown[];
     jobListCalls: unknown[];
+    activationSeams: typeof activationSeams;
     composedChildren: Array<{
       childId: string;
       sections: string[];
@@ -100,6 +114,7 @@ function createStubCtx() {
     sendMessageCalls,
     followupCalls,
     jobListCalls,
+    activationSeams,
     composedChildren,
     fire(name: string, ...payloads: unknown[]) {
       for (const cb of listeners.get(name) ?? []) {
@@ -123,7 +138,10 @@ function createStubCtx() {
     subagents: {
       async startActivation(spec: ActivationSpecLike): Promise<ActivationLike> {
         startActivationCalls.push(spec as unknown as RecordedCall);
-        const childId = `child-${nextChild++}`;
+        // Ticket 120: a reserved child id is honoured exactly like the real
+        // host's local backend (it either uses the id or refuses the spawn).
+        const childId =
+          spec.childId !== undefined ? String(spec.childId) : `child-${nextChild++}`;
         // The host creates the child inside this call and announces it on
         // `agent/created` before its first turn; the adapter's composition
         // must land there.
@@ -175,6 +193,9 @@ function createStubCtx() {
           },
           source: "startup",
         });
+        // Ticket 120: the real host lets the child run here — its first
+        // `agent/status: running` lands BEFORE this promise resolves.
+        await activationSeams.duringActivation?.(childId);
         return {
           childId,
           messageId: `msg-${childId}`,
@@ -373,12 +394,19 @@ describe("CordisDshHost spawn / interrupt / send", () => {
       title: "Thing",
     });
 
-    assert.equal(workerId, "child-1");
-    assert.equal(host.owns("child-1"), true);
-    assert.equal(host.workerIdOf("child-1"), "child-1");
+    // Ticket 120: the id is RESERVED before the spawn and passed as
+    // `spec.childId`, so the worker id is the reserved id — no longer a
+    // host-minted `child-N` this adapter only learns after the await.
+    assert.equal(typeof workerId, "string");
+    assert.notEqual(workerId, "");
+    assert.equal(host.owns(workerId), true);
+    assert.equal(host.workerIdOf(workerId), workerId);
     assert.equal(ctx.startActivationCalls.length, 1);
     const spec = ctx.startActivationCalls[0] as unknown as ActivationSpecLike;
     assert.equal(spec.provider, SPAWN_PROVIDER);
+    // The reservation IS the spec id — that is what makes the child
+    // recognisable while it is still emitting events.
+    assert.equal(String(spec.childId), workerId);
     assert.equal(spec.label, "Thing");
     // 0.2.1: the completion notice reaches the model through `parent`.
     assert.equal(spec.delivery, "parent");
@@ -412,7 +440,8 @@ describe("CordisDshHost spawn / interrupt / send", () => {
       title: "Thing",
     });
 
-    assert.equal(workerId, "child-1");
+    assert.equal(typeof workerId, "string");
+    assert.notEqual(workerId, "");
     const spec = ctx.startActivationCalls[0] as unknown as ActivationSpecLike;
 
     // 0.2.1: persona and toolFilter are not request fields at all, and no
@@ -457,7 +486,9 @@ describe("CordisDshHost spawn / interrupt / send", () => {
           "steer_worker",
           "stop_worker",
           "deliver_result",
-          "send_peer",
+          "message_agent",
+          "await_agent",
+          "spawn_dispatcher",
         ],
       },
     ]);
@@ -475,7 +506,8 @@ describe("CordisDshHost spawn / interrupt / send", () => {
     });
     assert.deepEqual(ctx.disposedWorkerIds, []);
     host.dispose();
-    assert.deepEqual(ctx.disposedWorkerIds, ["child-1"]);
+    // The reserved id is the activation this host owns and disposes.
+    assert.equal(ctx.disposedWorkerIds.length, 1);
   });
 
   it("listGlobalToolNames is empty when tools service is absent", () => {
@@ -502,18 +534,18 @@ describe("CordisDshHost spawn / interrupt / send", () => {
     const host = createCordisDshHost(ctx);
     const parent = createAgent("disp-1");
     host.bindParent(parent, "disp-1");
-    await host.spawnWorker("x", {
+    const workerId = await host.spawnWorker("x", {
       parentSessionId: "disp-1",
       streamKey: "s",
       title: "t",
     });
-    await host.interruptWorker("child-1");
+    await host.interruptWorker(workerId);
     assert.equal(ctx.interruptCalls.length, 1);
     const call = ctx.interruptCalls[0] as {
       targetSessionId: string;
       authority: { kind: string; agent: AgentLike };
     };
-    assert.equal(call.targetSessionId, "child-1");
+    assert.equal(call.targetSessionId, workerId);
     assert.equal(call.authority.kind, "ancestor");
     assert.equal(call.authority.agent, parent);
   });
@@ -523,18 +555,18 @@ describe("CordisDshHost spawn / interrupt / send", () => {
     const host = createCordisDshHost(ctx);
     const parent = createAgent("disp-1");
     host.bindParent(parent, "disp-1");
-    await host.spawnWorker("x", {
+    const workerId = await host.spawnWorker("x", {
       parentSessionId: "disp-1",
       streamKey: "s",
       title: "t",
     });
-    await host.sendMessage("child-1", "steer this");
+    await host.sendMessage(workerId, "steer this");
     assert.equal(ctx.sendMessageCalls.length, 1);
     const call = ctx.sendMessageCalls[0] as {
       targetId: string;
       content: Array<{ type: string; text: string }>;
     };
-    assert.equal(call.targetId, "child-1");
+    assert.equal(call.targetId, workerId);
     assert.equal(call.content.length, 1);
     assert.equal(call.content[0]?.text, "steer this");
   });
@@ -546,51 +578,51 @@ describe("CordisDshHost settle and step boundary", () => {
     const host = createCordisDshHost(ctx);
     const parent = createAgent("disp-1");
     host.bindParent(parent, "disp-1");
-    await host.spawnWorker("x", {
+    const workerId = await host.spawnWorker("x", {
       parentSessionId: "disp-1",
       streamKey: "s",
       title: "t",
     });
-    return { ctx, host, parent };
+    return { ctx, host, parent, workerId };
   }
 
   it("subagent/end completed → SettledEvent completed with joined report", async () => {
-    const { ctx, host } = await spawnOne();
+    const { ctx, host, workerId } = await spawnOne();
     const events: SettledEvent[] = [];
     host.onWorkerSettled((e) => events.push(e));
 
     ctx.fire("subagent/end", {
-      id: "child-1",
+      id: workerId,
       stopReason: "completed",
       lastAssistantMessage: [{ type: "text", text: "All done." }],
     });
 
     assert.equal(events.length, 1);
-    assert.equal(events[0]?.workerId, "child-1");
+    assert.equal(events[0]?.workerId, workerId);
     assert.equal(events[0]?.status, "completed");
     assert.equal(events[0]?.report, "All done.");
-    assert.equal(events[0]?.transcriptRef, "child-1");
+    assert.equal(events[0]?.transcriptRef, workerId);
   });
 
   it("maps max-tokens and refusal to error", async () => {
-    const { ctx, host } = await spawnOne();
+    const { ctx, host, workerId } = await spawnOne();
     const events: SettledEvent[] = [];
     host.onWorkerSettled((e) => events.push(e));
 
-    ctx.fire("subagent/end", { id: "child-1", stopReason: "max-tokens" });
-    ctx.fire("subagent/end", { id: "child-1", stopReason: "refusal" });
+    ctx.fire("subagent/end", { id: workerId, stopReason: "max-tokens" });
+    ctx.fire("subagent/end", { id: workerId, stopReason: "refusal" });
     assert.equal(events.length, 2);
     assert.equal(events[0]?.status, "error");
     assert.equal(events[1]?.status, "error");
   });
 
   it("empty completed settle uses the placeholder; error keeps message; abort invents nothing", async () => {
-    const { ctx, host } = await spawnOne();
+    const { ctx, host, workerId } = await spawnOne();
     const events: SettledEvent[] = [];
     host.onWorkerSettled((e) => events.push(e));
 
     ctx.fire("subagent/end", {
-      id: "child-1",
+      id: workerId,
       stopReason: "completed",
       lastAssistantMessage: [],
     });
@@ -599,7 +631,7 @@ describe("CordisDshHost settle and step boundary", () => {
     // Core drops late settles after abort; adapter still must not invent a report.
     const abortHost = createCordisDshHost(ctx);
     abortHost.bindParent(createAgent("disp-2"), "disp-2");
-    await abortHost.spawnWorker("x", {
+    const abortWorkerId = await abortHost.spawnWorker("x", {
       parentSessionId: "disp-2",
       streamKey: "s2",
       title: "t2",
@@ -607,7 +639,7 @@ describe("CordisDshHost settle and step boundary", () => {
     const abortEvents: SettledEvent[] = [];
     abortHost.onWorkerSettled((e) => abortEvents.push(e));
     ctx.fire("subagent/end", {
-      id: "child-2",
+      id: abortWorkerId,
       stopReason: "aborted",
       lastAssistantMessage: undefined,
     });
@@ -624,13 +656,13 @@ describe("CordisDshHost settle and step boundary", () => {
   });
 
   it("emitStepBoundary notifies subscribers", async () => {
-    const { host } = await spawnOne();
+    const { host, workerId } = await spawnOne();
     const seen: string[] = [];
     host.onStepBoundary((id) => {
       seen.push(id);
     });
-    host.emitStepBoundary("child-1");
-    assert.deepEqual(seen, ["child-1"]);
+    host.emitStepBoundary(workerId);
+    assert.deepEqual(seen, [workerId]);
   });
 });
 
@@ -639,24 +671,24 @@ describe("CordisDshHost recentResult — deliverables excerpt source (ticket 41)
     const ctx = createStubCtx();
     const host = createCordisDshHost(ctx);
     host.bindParent(createAgent("disp-1"), "disp-1");
-    await host.spawnWorker("x", {
+    const workerId = await host.spawnWorker("x", {
       parentSessionId: "disp-1",
       streamKey: "s",
       title: "t",
     });
-    return { ctx, host };
+    return { ctx, host, workerId };
   }
 
   it("a completed settle leaves a bounded excerpt visible before core observers run", async () => {
-    const { ctx, host } = await settleOne();
+    const { ctx, host, workerId } = await settleOne();
     let excerptDuringSettle: unknown = "not-read";
     host.onWorkerSettled(() => {
       // The projection reads the seat from inside the settle-triggered
       // roster publish — it must already see the text here.
-      excerptDuringSettle = host.recentResult("child-1");
+      excerptDuringSettle = host.recentResult(workerId);
     });
     ctx.fire("subagent/end", {
-      id: "child-1",
+      id: workerId,
       stopReason: "completed",
       lastAssistantMessage: [{ type: "text", text: "All done." }],
     });
@@ -669,39 +701,39 @@ describe("CordisDshHost recentResult — deliverables excerpt source (ticket 41)
       typeof (excerptDuringSettle as { settledAtMs: number } | null)?.settledAtMs,
       "number",
     );
-    assert.equal(host.recentResult("child-1")?.text, "All done.");
+    assert.equal(host.recentResult(workerId)?.text, "All done.");
   });
 
   it("clamps an over-long report to the excerpt bound; empty abort leaves null", async () => {
-    const { ctx, host } = await settleOne();
+    const { ctx, host, workerId } = await settleOne();
     ctx.fire("subagent/end", {
-      id: "child-1",
+      id: workerId,
       stopReason: "completed",
       lastAssistantMessage: [
         { type: "text", text: "y".repeat(RECENT_RESULT_EXCERPT_CHARS + 1_000) },
       ],
     });
-    const clamped = host.recentResult("child-1");
+    const clamped = host.recentResult(workerId);
     assert.equal(clamped?.text.length, RECENT_RESULT_EXCERPT_CHARS);
     assert.ok(clamped?.text.endsWith("…"));
 
     // An aborted worker with no text invents nothing.
-    await host.spawnWorker("x", {
+    const abortWorkerId = await host.spawnWorker("x", {
       parentSessionId: "disp-1",
       streamKey: "s2",
       title: "t2",
     });
     ctx.fire("subagent/end", {
-      id: "child-2",
+      id: abortWorkerId,
       stopReason: "aborted",
       lastAssistantMessage: undefined,
     });
-    assert.equal(host.recentResult("child-2"), null);
+    assert.equal(host.recentResult(abortWorkerId), null);
     assert.equal(host.recentResult("never-settled"), null);
   });
 
   it("unknown children never gain an excerpt; dispose clears the map", async () => {
-    const { ctx, host } = await settleOne();
+    const { ctx, host, workerId } = await settleOne();
     ctx.fire("subagent/end", {
       id: "not-ours",
       stopReason: "completed",
@@ -710,13 +742,13 @@ describe("CordisDshHost recentResult — deliverables excerpt source (ticket 41)
     assert.equal(host.recentResult("not-ours"), null);
 
     ctx.fire("subagent/end", {
-      id: "child-1",
+      id: workerId,
       stopReason: "completed",
       lastAssistantMessage: [{ type: "text", text: "real" }],
     });
-    assert.notEqual(host.recentResult("child-1"), null);
+    assert.notEqual(host.recentResult(workerId), null);
     host.dispose();
-    assert.equal(host.recentResult("child-1"), null);
+    assert.equal(host.recentResult(workerId), null);
   });
 });
 
@@ -896,6 +928,219 @@ describe("bindDispatcherLifecycle", () => {
       reason: "unbound",
     });
     assert.equal(host.hasParent(), false);
+  });
+});
+
+/**
+ * Ticket 120 (e2e finding s1) — the worker's FIRST status edge is emitted
+ * inside `startActivation`, before `spawnWorker` resolves.
+ *
+ * The real host runs the child during the spawn: `agent/created` and the
+ * first `agent/status: running` both land before `startActivation` returns.
+ * The old adapter registered the worker only AFTER the await, so
+ * `workerIdOf(...)` answered `undefined` for that exact edge, the plugin's
+ * status handler dropped it, and the FSM never left `spawned` — the whole
+ * first turn was un-steerable and `check_workers` under-reported.
+ *
+ * These tests drive the edge from inside the spawn, so the ordering is
+ * encoded rather than assumed; nothing sleeps.
+ */
+describe("ticket 120: the first worker status edge precedes spawn registration", () => {
+  /** Wire the shipped trio: real host + real core + the real lifecycle. */
+  function wire() {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const multitask = createMultitask(host);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
+    const parent = createAgent("disp-1");
+    ctx.bindAgent(parent);
+    assert.deepEqual(lifecycle.activate(parent), { ok: true });
+    return { ctx, host, multitask, lifecycle, parent };
+  }
+
+  it("a `running` edge emitted inside startActivation reaches the FSM: spawned → running", async () => {
+    const { ctx, host, multitask } = wire();
+    let statusAtSpawn: string | undefined;
+    let sawRunningEdge = false;
+
+    ctx.activationSeams.duringActivation = (childId) => {
+      // Exactly what the real child emits 1 ms after `subagent/start`.
+      ctx.fire("agent/status", {
+        agent: { session: { id: childId, header: { parentSession: "disp-1" } }, followup() {} },
+        status: "running",
+      });
+      sawRunningEdge = true;
+      statusAtSpawn = multitask.getWorker(childId)?.status;
+    };
+
+    const spawn = await multitask.spawnWorker({
+      parentSessionId: "disp-1",
+      streamKey: "s1",
+      title: "T",
+      prompt: "go",
+    });
+    assert.ok(spawn.ok);
+    if (!spawn.ok) return;
+
+    assert.equal(sawRunningEdge, true, "the edge really fired during the spawn");
+    // The fix, directly: the worker is already `running` when the spawn
+    // RESOLVES — it was `spawned` (or absent) before.
+    assert.equal(statusAtSpawn, "running", "status applies before the spawn resolves");
+    assert.equal(multitask.getWorker(spawn.workerId)?.status, "running");
+    // The same id in both registries — no second, phantom entry.
+    assert.equal(host.workerIdOf(spawn.workerId), spawn.workerId);
+    assert.equal(multitask.listWorkers("disp-1").length, 1);
+  });
+
+  it("the first-turn worker accepts a steer and message_agent — the s1 refusal is gone", async () => {
+    const { ctx, multitask } = wire();
+    ctx.activationSeams.duringActivation = (childId) => {
+      ctx.fire("agent/status", {
+        agent: { session: { id: childId, header: { parentSession: "disp-1" } }, followup() {} },
+        status: "running",
+      });
+    };
+
+    const spawn = await multitask.spawnWorker({
+      parentSessionId: "disp-1",
+      streamKey: "s1",
+      title: "S1 draftsman",
+      prompt: "go",
+    });
+    assert.ok(spawn.ok);
+    if (!spawn.ok) return;
+
+    // The exact refusal the e2e harness recorded: "is not running".
+    const steer = await multitask.steerWorker(spawn.workerId, "use the other format");
+    assert.deepEqual(steer, { ok: true });
+    assert.equal(multitask.getWorker(spawn.workerId)?.status, "steering");
+  });
+
+  it("one running edge yields exactly one turn-started — no double count, no drop", async () => {
+    const { ctx, multitask } = wire();
+    multitask.createTodo({ sessionId: "disp-1", id: "t-1", title: "Linked" });
+    let recordDuringSpawn: unknown = null;
+    let statusAfterSecondEdge: string | undefined;
+
+    ctx.activationSeams.duringActivation = (childId) => {
+      const child = {
+        session: { id: childId, header: { parentSession: "disp-1" } },
+        followup() {},
+      };
+      ctx.fire("agent/status", { agent: child, status: "running" });
+      recordDuringSpawn = multitask.getWorker(childId);
+      // Emitting the SAME edge again (a re-announcement) must be a no-op on
+      // the FSM: `turn-started` is only legal out of `spawned`.
+      ctx.fire("agent/status", { agent: child, status: "running" });
+      statusAfterSecondEdge = multitask.getWorker(childId)?.status;
+    };
+
+    const spawn = await multitask.spawnWorker({
+      parentSessionId: "disp-1",
+      streamKey: "s1",
+      title: "T",
+      prompt: "go",
+      todoId: "t-1",
+    });
+    assert.ok(spawn.ok);
+    if (!spawn.ok) return;
+
+    assert.equal(statusAfterSecondEdge, "running", "a repeat edge neither resets nor doubles");
+    assert.equal(multitask.getWorker(spawn.workerId)?.status, "running");
+    // The SAME record object across both edges and the resolution — the
+    // reservation is not re-registered into a second, fresh `spawned` row.
+    assert.equal(multitask.getWorker(spawn.workerId), recordDuringSpawn);
+    // The linked todo advanced at the first turn.
+    assert.equal(multitask.listTodos("disp-1")[0]?.status, "in_progress");
+    // No duplicate roster rows from the reservation + resolution pair.
+    assert.equal(multitask.listWorkers("disp-1").length, 1);
+  });
+
+  it("a settled worker still refuses steering — the fix does not weaken the FSM", async () => {
+    const { ctx, multitask } = wire();
+    ctx.activationSeams.duringActivation = (childId) => {
+      ctx.fire("agent/status", {
+        agent: { session: { id: childId, header: { parentSession: "disp-1" } }, followup() {} },
+        status: "running",
+      });
+    };
+    const spawn = await multitask.spawnWorker({
+      parentSessionId: "disp-1",
+      streamKey: "s1",
+      title: "T",
+      prompt: "go",
+    });
+    assert.ok(spawn.ok);
+    if (!spawn.ok) return;
+    assert.equal(multitask.getWorker(spawn.workerId)?.status, "running");
+
+    ctx.fire("subagent/end", {
+      id: spawn.workerId,
+      stopReason: "completed",
+      lastAssistantMessage: [{ type: "text", text: "done" }],
+    });
+    assert.equal(multitask.getWorker(spawn.workerId)?.status, "completed");
+    const steer = await multitask.steerWorker(spawn.workerId, "too late");
+    assert.ok(!steer.ok);
+    if (steer.ok) return;
+    assert.equal(steer.reason, "not-running");
+  });
+
+  it("a spawn that never starts is still `spawned` and refuses steering", async () => {
+    const { multitask } = wire();
+    // No activation seam: the child emitted no status edge.
+    const spawn = await multitask.spawnWorker({
+      parentSessionId: "disp-1",
+      streamKey: "s1",
+      title: "T",
+      prompt: "go",
+    });
+    assert.ok(spawn.ok);
+    if (!spawn.ok) return;
+
+    assert.equal(multitask.getWorker(spawn.workerId)?.status, "spawned");
+    const steer = await multitask.steerWorker(spawn.workerId, "nope");
+    assert.ok(!steer.ok);
+    if (steer.ok) return;
+    assert.equal(steer.reason, "not-running");
+  });
+
+  it("a failed spawn leaves neither registry holding the reservation", async () => {
+    const { ctx, host, multitask } = wire();
+    // The edge lands, then the host refuses the spawn: no worker survives.
+    let emittedId: string | null = null;
+    ctx.activationSeams.duringActivation = (childId) => {
+      emittedId = childId;
+      ctx.fire("agent/status", {
+        agent: { session: { id: childId, header: { parentSession: "disp-1" } }, followup() {} },
+        status: "running",
+      });
+      throw new Error("startActivation refused after the child ran");
+    };
+
+    await assert.rejects(
+      multitask.spawnWorker({
+        parentSessionId: "disp-1",
+        streamKey: "s1",
+        title: "T",
+        prompt: "go",
+      }),
+      /refused after the child ran/,
+    );
+
+    assert.ok(emittedId !== null);
+    assert.equal(multitask.getWorker(String(emittedId)), undefined);
+    assert.equal(multitask.listWorkers("disp-1").length, 0);
+    assert.equal(host.owns(String(emittedId)), false);
+    // The stream key is free again — the failed spawn holds nothing.
+    ctx.activationSeams.duringActivation = null;
+    const retry = await multitask.spawnWorker({
+      parentSessionId: "disp-1",
+      streamKey: "s1",
+      title: "T",
+      prompt: "go",
+    });
+    assert.ok(retry.ok);
   });
 });
 

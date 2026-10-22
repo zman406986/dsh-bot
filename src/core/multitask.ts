@@ -58,6 +58,18 @@ import {
   type RebuildReport,
   type UnknownStateWorker,
 } from "./durability.js";
+import { clampReport } from "./report-clamp.js";
+import {
+  createSettleRecords,
+  resolveAwaitTarget,
+  validateAwaitTimeout,
+  type AwaitWorkerHooks,
+  type AwaitReleasedReason,
+  type AwaitWorkerOutcome,
+  type AwaitWorkerRefusal,
+  type SettleRecord,
+  type SettleRecords,
+} from "./settle-records.js";
 
 /** A drained wake plus the reconcile report for that wake. */
 export interface DrainedWake {
@@ -159,6 +171,17 @@ export interface MultitaskWakeOptions {
   readonly onDegraded?: (info: WakeBusDegradedInfo) => void;
 }
 
+/**
+ * Ticket 115: await-waiter knobs (clock and scheduler seams), mirroring the
+ * access-relay option shape.
+ */
+export interface MultitaskAwaitOptions {
+  /** Injectable clock for tests. */
+  readonly now?: () => number;
+  /** Injectable one-shot scheduler for tests. Returns a cancel function. */
+  readonly schedule?: (fn: () => void, ms: number) => () => void;
+}
+
 /** Optional ports the multitask core depends on beyond the host. */
 export interface MultitaskOptions {
   /**
@@ -213,6 +236,15 @@ export interface MultitaskOptions {
    * its own write failures honestly.
    */
   readonly onInboxJobResolved?: (resolution: InboxJobResolution) => void;
+  /** Await-waiter configuration (ticket 115; test seams). */
+  readonly awaits?: MultitaskAwaitOptions;
+  /**
+   * Ticket 115: adapter-side liveness probe for await timeouts, wired to
+   * `ctx.agents.get(id) !== undefined`. It is checked ONCE, at timeout, when
+   * no settle record exists — never on a timer. False means the worker's
+   * agent is gone with no recorded result: the wait reports `gone`.
+   */
+  readonly isAgentAlive?: (workerId: string) => boolean;
 }
 
 /**
@@ -389,6 +421,60 @@ export interface Multitask {
    * outlive their session — clearance rides `clearSessionAccessPolicy`.
    */
   readonly reviewPosture: ReviewPostureTable;
+  /**
+   * Ticket 115: per-target settle records — a bounded ring of 64 terminal
+   * worker results per parent session, written by the settle path BEFORE the
+   * settle wake is enqueued, so a wait racing the wake still sees the record.
+   * In-memory only (ADR-0012: a restart loses results, reported plainly,
+   * never replayed). `awaitWorker` (second half of ticket 115) reads this;
+   * exposed for tests and the await layer.
+   */
+  readonly settleRecords: SettleRecords;
+  /**
+   * Ticket 115: release every active await waiter of one dispatcher session —
+   * each resolves `released` and its timer is cancelled. Wire this to session
+   * deactivation (adapter-side) so no waiter or timer outlives a deactivated
+   * dispatcher. Records are not cleared: deactivation is not a restart.
+   */
+  cancelWaits(sessionId: string): void;
+  /**
+   * Ticket 117: release one dispatcher session's await waiters with an
+   * explicit reason, each timer cancelled. The adapter calls this with
+   * `"user-message"` when a REAL user prompt is observed on that session's own
+   * `session/event` stream (structured `source.kind`, never text) — the user
+   * is never held behind a running await. The awaited workers are NOT stopped
+   * and records are untouched; other sessions' waiters keep waiting.
+   *
+   * Same race-set slot as `cancelWaits`: first racer wins. A session with no
+   * waiters is a no-op.
+   */
+  releaseWaits(sessionId: string, reason: AwaitReleasedReason): void;
+  /**
+   * Ticket 115: bounded wait on one of the calling dispatcher session's own
+   * workers, reading the per-target settle record (never the host, never a
+   * transcript). A record present at call time settles immediately — so
+   * `timeoutMs: 0` is a non-blocking status read — and a record arriving
+   * during the wait wins the race over the timeout timer and the abort
+   * signal. `undefined` timeout takes the 30,000 ms default; the valid range
+   * is 0–120,000 ms. On timeout the outcome is `still-running`, or `gone`
+   * when the `isAgentAlive` port reports the worker's agent dead (consulted
+   * once, at the timeout, never on a timer).
+   *
+   * Refusals (never throw): `invalid-timeout` (outside 0–120,000 or
+   * non-finite), `self-target` (the target is the calling session itself),
+   * `not-awaitable` (the target is a live dispatcher session — dispatchers
+   * are peers; message it instead), `unknown-target` (no such worker of this
+   * session, or the worker belongs to another session), and `too-many-waits`
+   * (a fifth concurrent waiter in one session). `hooks` is reserved —
+   * ticket 115 defines no hooks (see {@link AwaitWorkerHooks}).
+   */
+  awaitWorker(
+    parentSessionId: string,
+    workerId: string,
+    timeoutMs: number | undefined,
+    signal?: AbortSignal,
+    hooks?: AwaitWorkerHooks,
+  ): Promise<AwaitWorkerOutcome>;
 }
 
 export function createMultitask(
@@ -451,8 +537,11 @@ export function createMultitask(
     ...(wakeOptions?.onDegraded !== undefined
       ? { onDegraded: wakeOptions.onDegraded }
       : {}),
-    onDeliver: (sessionId) => {
-      void host.requestDispatcherWakeup(sessionId);
+    onDeliver: (sessionId, origin) => {
+      // Ticket 116: a peer wake carries structured provenance, so the host
+      // stamps an `agent-message` source on the follow-up instead of the
+      // plugin kind. Absent origin → the shipped plugin source, unchanged.
+      void host.requestDispatcherWakeup(sessionId, origin);
     },
     onInterrupt: (sessionId) => {
       // Soft-fallback hosts may omit the seam — priority still becomes
@@ -471,6 +560,17 @@ export function createMultitask(
     },
   });
   const accessPolicy: AccessPolicyTable = createAccessPolicyTable();
+  // Ticket 115: per-target settle records + bounded await waiters. Knobs
+  // flow through like the access seams — conditionally spread so an unset
+  // option stays truly absent.
+  const awaits = options?.awaits;
+  const settleRecords: SettleRecords = createSettleRecords({
+    ...(awaits?.now !== undefined ? { now: awaits.now } : {}),
+    ...(awaits?.schedule !== undefined ? { schedule: awaits.schedule } : {}),
+    ...(options?.isAgentAlive !== undefined
+      ? { isAgentAlive: options.isAgentAlive }
+      : {}),
+  });
   // Ticket 69 (chunk A): the review posture is composed AFTER the consent
   // table at this lookupPolicy wiring — consent (allow or deny) wins; only
   // a consent "ask" miss falls through to the posture; a posture miss is
@@ -698,6 +798,18 @@ export function createMultitask(
         );
       }
     }
+    // Ticket 115: the settle record is written BEFORE the wake is enqueued,
+    // so a wait that races the wake still sees the record. Additive
+    // bookkeeping read off this exact path — wake composition and ordering
+    // are untouched.
+    settleRecords.record(record.parentSessionId, {
+      workerId: event.workerId,
+      status: event.status,
+      resultText: clampReport(event.report, {
+        transcriptRef: record.transcriptRef,
+      }),
+      settledAtMs: Date.now(),
+    });
     // One enqueue per accepted settle; the bus batches and routes the wake.
     // The ledger is never included — workers and host never see todos (ADR-0007).
     wakeBus.enqueueWorkerSettled({
@@ -784,43 +896,125 @@ export function createMultitask(
               `whose state is unknown since the restart; resolve that worker (or use a new stream key) before re-dispatching onto this stream`,
           };
         }
-        const workerId = await host.spawnWorker(request.prompt, {
-          parentSessionId: request.parentSessionId,
-          streamKey: request.streamKey,
-          title: request.title,
-          ...(request.credentialNames !== undefined
-            ? { credentialNames: request.credentialNames }
-            : {}),
-        });
-        const record: WorkerRecord = {
-          workerId,
-          parentSessionId: request.parentSessionId,
-          streamKey: request.streamKey,
-          title: request.title,
-          status: "spawned",
-          startedAtMs: Date.now(),
-          toolCallCount: 0,
-          transcriptRef: null,
-          todoId: request.todoId ?? null,
-          // Fresh obligation: the settle wake is its first delivery chance, so
-          // no redrive has been spent yet (ticket 58).
-          redriveAttempts: 0,
+        // Ticket 120: the record must exist BEFORE the child can emit its
+        // first `agent/status: running`, which the host delivers from inside
+        // `startActivation` — i.e. before `host.spawnWorker` resolves. The
+        // host commits its id through `onWorkerId` and the record lands there.
+        //
+        // `register` is the ONE place a worker record is created for this
+        // spawn. It runs from the callback, or (for a host that commits no id
+        // up front) from the post-resolve path below — never both for one id,
+        // so an early `running` edge can never be overwritten by a second
+        // `spawned` record.
+        //
+        // The todo↔worker link stays in the post-resolve path: it is not
+        // needed for the FSM or for `noteTurnStarted` (which reads the
+        // record's own `todoId`), and a failed spawn must leave the ledger
+        // untouched.
+        let announcedId: string | null = null;
+        const register = (id: string): void => {
+          if (id === "" || announcedId !== null) return;
+          announcedId = id;
+          workers.set(id, {
+            workerId: id,
+            parentSessionId: request.parentSessionId,
+            streamKey: request.streamKey,
+            title: request.title,
+            status: "spawned",
+            startedAtMs: Date.now(),
+            toolCallCount: 0,
+            transcriptRef: null,
+            todoId: request.todoId ?? null,
+            // Fresh obligation: the settle wake is its first delivery chance,
+            // so no redrive has been spent yet (ticket 58).
+            redriveAttempts: 0,
+          });
+          // NOTE: `liveByStreamKey` is deliberately NOT set here. Ticket 109's
+          // in-flight reservation already guards the concurrent-spawn window
+          // and is what the duplicate check must keep reporting ("spawn in
+          // flight", not "already has a running worker"). The FSM does not
+          // read that map; only the terminal transition does, and the
+          // post-resolve path re-checks for a settle that won the race.
         };
-        workers.set(workerId, record);
-        liveByStreamKey.set(streamKeyId, workerId);
-        // Structural todo↔worker link at spawn (ADR-0007). Status stays pending
-        // until the worker starts (noteTurnStarted).
-        if (request.todoId !== undefined) {
-          todoLedger.linkWorker(
-            request.todoId,
-            workerId,
-            request.streamKey,
+        /**
+         * Undo a registration whose spawn then failed: no worker, no roster
+         * row, no stream-key hold. The previous code created none of these
+         * before the spawn resolved; a reserved id must not change that.
+         */
+        const unregister = (): void => {
+          if (announcedId === null) return;
+          const id = announcedId;
+          announcedId = null;
+          workers.delete(id);
+          if (liveByStreamKey.get(streamKeyId) === id) {
+            liveByStreamKey.delete(streamKeyId);
+          }
+        };
+        let workerId: string;
+        try {
+          workerId = await host.spawnWorker(request.prompt, {
+            parentSessionId: request.parentSessionId,
+            streamKey: request.streamKey,
+            title: request.title,
+            ...(request.credentialNames !== undefined
+              ? { credentialNames: request.credentialNames }
+              : {}),
+            // Ticket 120: the host calls this the moment the worker id is fixed
+            // — before the child can emit `agent/created` or its first
+            // `agent/status: running` (both fire inside `startActivation`).
+            onWorkerId: register,
+          });
+        } catch (error) {
+          unregister();
+          throw error;
+        }
+        // Hosts that commit no id up front land here; the state is exactly the
+        // pre-120 one (nothing could have been observed before this point).
+        register(workerId);
+        if (announcedId !== null && announcedId !== workerId) {
+          // A host that announced one id and resolved another must not leave
+          // the announced record behind as a phantom on the roster. Not
+          // reachable through the documented contract; handled because a
+          // live child exists and a throw here would report a failed spawn
+          // for work that is running.
+          const announced = announcedId;
+          const moved = workers.get(announced);
+          workers.delete(announced);
+          if (moved !== undefined) {
+            workers.set(workerId, { ...moved, workerId });
+          }
+          if (liveByStreamKey.get(streamKeyId) === announced) {
+            liveByStreamKey.set(streamKeyId, workerId);
+          }
+          announcedId = workerId;
+        }
+        const record = workers.get(workerId);
+        if (record === undefined) {
+          throw new Error(
+            `CordisDshHost: spawn resolved without a registered worker (${workerId})`,
           );
+        }
+        // Structural todo↔worker link at spawn (ADR-0007). Status stays
+        // pending until the worker starts (noteTurnStarted), unless that
+        // already happened while the spawn was in flight.
+        if (request.todoId !== undefined) {
+          todoLedger.linkWorker(request.todoId, workerId, request.streamKey);
+        }
+        // The stream key is held for a LIVE worker only. A worker that
+        // settled while the spawn was in flight has already run the terminal
+        // path (which could not see the mapping yet), so it must not take the
+        // key now — the same outcome the pre-120 ordering had.
+        if (!isTerminalStatus(record.status)) {
+          liveByStreamKey.set(streamKeyId, workerId);
         }
         // Obligation marker (ADR-0006): minimum-to-reconstruct, written at
         // spawn through the host storage seam. Awaited so the marker exists
         // before the spawn resolves. Ticket 113: the inbox origin rides the
         // marker so a rebuild can re-create the ledger link with it.
+        //
+        // The status comes from the CURRENT record: an early `running` edge
+        // may already have advanced it while the spawn was in flight, and a
+        // live snapshot still holds the stream key across a restart.
         if (durability !== undefined) {
           await Promise.resolve(
             durability.writeWorkerMarker(
@@ -1320,12 +1514,50 @@ export function createMultitask(
     },
     accessPolicy,
     reviewPosture,
+    settleRecords,
+    cancelWaits(sessionId: string): void {
+      settleRecords.cancelWaits(sessionId);
+    },
+    releaseWaits(sessionId: string, reason: AwaitReleasedReason): void {
+      settleRecords.releaseWaits(sessionId, reason);
+    },
+    async awaitWorker(
+      parentSessionId: string,
+      workerId: string,
+      timeoutMs: number | undefined,
+      signal?: AbortSignal,
+      _hooks?: AwaitWorkerHooks,
+    ): Promise<AwaitWorkerOutcome> {
+      // Order per ticket: bounds first, then the target resolution order
+      // (self → own roster → live dispatcher → unknown), then the wait.
+      const timeout = validateAwaitTimeout(timeoutMs);
+      if (!timeout.ok) return timeout;
+      const target = resolveAwaitTarget({
+        callerSessionId: parentSessionId,
+        targetId: workerId,
+        getWorker: (id) => workers.get(id),
+        ...(isLiveDispatcherSession !== undefined
+          ? { isLiveDispatcherSession }
+          : {}),
+      });
+      if (target.kind === "refused") return target.outcome;
+      return settleRecords.wait(
+        parentSessionId,
+        workerId,
+        timeout.timeoutMs,
+        signal,
+      );
+    },
   };
 }
 
 export type {
   AccessDecision,
   AccessTicket,
+  AwaitWorkerHooks,
+  AwaitReleasedReason,
+  AwaitWorkerOutcome,
+  AwaitWorkerRefusal,
   CreateTodoInput,
   PeerEnvelope,
   PeerInbox,
@@ -1333,6 +1565,8 @@ export type {
   PeerSendAck,
   ReconcileReport,
   ReviewPostureTable,
+  SettleRecord,
+  SettleRecords,
   SpawnRequest,
   SpawnResult,
   SteerResult,

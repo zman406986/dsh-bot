@@ -1,6 +1,6 @@
 // dev/e2e-mock.mjs — offline end-to-end harness: scripted model + real dsh process.
 //
-// Three phases, reported separately so a blocker in one never masquerades as
+// Phases, reported separately so a blocker in one never masquerades as
 // success in another:
 //
 //   mock      Protocol self-test against dev/mock-llm.mjs directly (no dsh):
@@ -9,24 +9,35 @@
 //             DSH_HOME. Proves: mock serves the real provider protocol, dsh boots
 //             with DEEPSEEK_BASE_URL, a task is sent, a scripted reply comes back.
 //   dispatch  Real `dsh --profile web --patch dev/cordis.web.patch.yml`, a session
-//             opened through the host's own RPC, /dispatcher-start, one task, and
+//             opened through the host's own RPC, /dsh-bot, one task, and
 //             a wait for the dispatcher tools (spawn_worker) to reach the mock.
 //             Runs only when the plugin actually mounts on the installed dsh.
+//   s1..s4    The ticket-120 messaging / await / mitosis scenarios. One boot
+//             each, plugin loaded from SOURCE (`--import tsx` +
+//             dev/cordis.src.patch.yml) because lib/ is a build artifact and
+//             this harness never builds. Every assertion reads observable
+//             behaviour from the mock's request log: what a tool RETURNED,
+//             what the next turn saw, and which turn a message arrived on.
 //
 // Every child gets a kill timer ARMED AT LAUNCH (taskkill /T /F on Windows).
-// Every wait is bounded. Cleanup runs in `finally` and is verified with tasklist.
+// Every wait is bounded. Cleanup runs in `finally` and is verified with tasklist
+// against the launched PID *and* image name, so a recycled PID cannot fake a leak.
 //
 // Usage:
-//   node dev/e2e-mock.mjs [--out <dir>] [--timeout-ms <n>] [--skip dispatch]
+//   node dev/e2e-mock.mjs [--out <dir>] [--timeout-ms <n>] [--skip <names>]
+//                         [--only <names>] [--self-check]
 //
-// Exit code 0 means the harness itself works (mock + boot phases pass and every
-// process is dead). The dispatcher phase reports separately: `pass`, `blocked`
-// (with the exact host error), or `fail`.
+// `--only s1,s4` runs just those phases; `--skip mock,boot,dispatch,s1` runs
+// everything else. `--self-check` runs only the cleanup identity matcher's
+// regression cases (no processes, no evidence) and exits. Exit code 0 means
+// every phase that ran passed and every process the harness launched is dead. The dispatcher smoke phase keeps its
+// separate `pass` / `blocked` / `fail` verdict and does not gate the exit code
+// (as before); the scenario phases DO gate it.
 
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { zstdDecompressSync } from 'node:zlib';
 
@@ -34,6 +45,10 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, '..');
 const MOCK = join(HERE, 'mock-llm.mjs');
 const OVERLAY = join(HERE, 'cordis.web.patch.yml');
+// Ticket 120: the scenario phases load the plugin from SOURCE, so they exercise
+// the current tree without a build (`lib/` is a git-ignored build artifact and
+// this harness is not allowed to build).
+const SRC_OVERLAY = join(HERE, 'cordis.src.patch.yml');
 const DIAGNOSTICS_OVERLAY = join(HERE, 'e2e-diagnostics.patch.yml');
 
 // ── arguments and evidence root ──────────────────────────────────────────────
@@ -45,6 +60,10 @@ function argValue(name, fallback) {
 
 const RUN_TIMEOUT_MS = Number(argValue('--timeout-ms', '180000'));
 const SKIP = new Set(argValue('--skip', '').split(',').filter(Boolean));
+const ONLY = new Set(argValue('--only', '').split(',').filter(Boolean));
+// `--self-check` exercises the cleanup identity matcher alone: no dsh, no mock,
+// no evidence directory. It is the regression guard for the recycled-PID defect.
+const SELF_CHECK = process.argv.includes('--self-check');
 const OUT = resolve(
   argValue('--out', join(REPO, '.scratch', 'testing', '2026-10-18-mock-llm', timestampSlug())),
 );
@@ -54,6 +73,13 @@ function timestampSlug() {
   const now = new Date();
   const pad = (value) => String(value).padStart(2, '0');
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+}
+
+// `--self-check` runs the cleanup identity matcher alone and exits: no dsh, no
+// mock, no evidence directory, no process launch.
+if (SELF_CHECK) {
+  selfCheckProcessIdentity();
+  process.exit(process.exitCode ?? 0);
 }
 
 mkdirSync(OUT, { recursive: true });
@@ -129,6 +155,72 @@ function pipeToFile(child, logPath) {
   child.stderr?.on('data', push);
 }
 
+// ── cleanup identity check (PID alone is not identity) ───────────────────────
+
+/**
+ * Parse `tasklist /FO CSV /NH` output into `{ image, pid }` rows. Header and
+ * filter echoes, and the "no tasks match" notice, carry no quoted image+pid
+ * pair and are dropped — so "no row" reliably means "not running".
+ */
+function parseTasklistCsv(stdout) {
+  return String(stdout ?? '')
+    .split(/\r?\n/)
+    .map((line) => {
+      const fields = line.match(/"([^"]*)"/g);
+      if (fields === null || fields.length < 2) return null;
+      const image = fields[0].slice(1, -1).trim();
+      const pid = fields[1].slice(1, -1).trim();
+      if (image.length === 0 || !/^\d+$/.test(pid)) return null;
+      return { image, pid: Number(pid) };
+    })
+    .filter((row) => row !== null);
+}
+
+/**
+ * Is the process we LAUNCHED still running? Requires the PID *and* the image
+ * name captured at launch. Windows recycles PIDs: a former run saw `taskkill`
+ * free 22628 and `backgroundTaskHost.exe` receive that same PID 35 s later, so
+ * a PID-only match reported a leak that did not exist. A recycled PID owned by
+ * a different executable is not our process — but when the expected image is
+ * unknown we fall back to PID-only, so a real leak is still reported loudly.
+ */
+function launchedProcessAlive(pid, expectedImage, tasklistCsv) {
+  const wantPid = Number(pid);
+  const wantImage = String(expectedImage ?? '').toLowerCase();
+  return parseTasklistCsv(tasklistCsv).some((row) => {
+    if (row.pid !== wantPid) return false;
+    return wantImage === '' || row.image.toLowerCase() === wantImage;
+  });
+}
+
+/** Regression guard for the cleanup matcher; run with `--self-check`. */
+function selfCheckProcessIdentity() {
+  const row = (image, pid) => `"${image}","${pid}","Console","1","10,000 K"`;
+  const cases = [
+    { name: 'empty tasklist output is not alive', actual: launchedProcessAlive(22628, 'node.exe', ''), expect: false },
+    { name: 'the launched PID + image is alive', actual: launchedProcessAlive(22628, 'node.exe', row('node.exe', 22628)), expect: true },
+    {
+      name: 'a recycled PID owned by another image is not a leak',
+      actual: launchedProcessAlive(22628, 'node.exe', row('backgroundTaskHost.exe', 22628)),
+      expect: false,
+    },
+    { name: 'image name compares case-insensitively', actual: launchedProcessAlive(22628, 'node.exe', row('NODE.EXE', 22628)), expect: true },
+    { name: 'a different PID is not alive', actual: launchedProcessAlive(22628, 'node.exe', row('node.exe', 12262)), expect: false },
+    { name: 'the PID is a whole field, not a substring', actual: launchedProcessAlive(2262, 'node.exe', row('node.exe', 12262)), expect: false },
+    {
+      name: 'an unknown expected image falls back to PID-only (loud)',
+      actual: launchedProcessAlive(22628, undefined, row('anything.exe', 22628)),
+      expect: true,
+    },
+  ];
+  const failed = cases.filter((entry) => entry.actual !== entry.expect);
+  for (const entry of cases) {
+    console.log(`  ${entry.actual === entry.expect ? 'PASS' : 'FAIL'} [self-check] ${entry.name}`);
+  }
+  console.log(`self-check: ${failed.length === 0 ? 'PASS' : 'FAIL'} (${cases.length - failed.length}/${cases.length})`);
+  process.exitCode = failed.length === 0 ? 0 : 1;
+}
+
 /**
  * Spawn a detached child, arm its hard kill timer IMMEDIATELY, and record the
  * handle. `timeoutMs` is the backstop, not the primary cleanup path.
@@ -143,6 +235,9 @@ function launch(label, command, args, options, { timeoutMs = RUN_TIMEOUT_MS, log
   const entry = {
     label,
     pid: child.pid,
+    // Identity, not just the PID: Windows recycles PIDs, so cleanup must know
+    // which executable this PID belonged to at launch.
+    image: basename(command),
     command,
     args,
     startedAt: new Date().toISOString(),
@@ -583,15 +678,15 @@ async function phaseDispatch(scriptFile) {
 
     const commands = await listCommands(api, sessionId);
     phase.commands = commands;
-    assert('dispatch', 'plugin commands are registered', commands.includes('dispatcher-start'), { count: commands.length });
+    assert('dispatch', 'plugin commands are registered', commands.includes('dsh-bot'), { count: commands.length });
 
     const activation = await rpc(api, 'commands/execute', {
       agentId: sessionId,
-      line: '/dispatcher-start',
+      line: '/dsh-bot',
       submittedAttachments: [],
     });
     phase.activation = activation?.result ?? null;
-    assert('dispatch', '/dispatcher-start reports success', activation?.result?.kind === 'success', phase.activation);
+    assert('dispatch', '/dsh-bot reports success', activation?.result?.kind === 'success', phase.activation);
 
     // The GUI's own model picker issues this call; a fresh session has no
     // installed selection and a prompt without one drives no turn on 0.2.1.
@@ -678,6 +773,774 @@ async function phaseDispatch(scriptFile) {
   evidence.phases.dispatch = phase;
 }
 
+/** Assertions made while a phase runs; the phase status is derived from these. */
+function assertionsFor(phase) {
+  return evidence.assertions.filter((entry) => entry.phase === phase);
+}
+
+/** `pass` only when at least one assertion ran and every one of them passed. */
+function statusFrom(phase) {
+  const ran = assertionsFor(phase);
+  if (ran.length === 0) return 'fail';
+  return ran.every((entry) => entry.passed) ? 'pass' : 'fail';
+}
+
+// ── ticket 120: messaging / await / mitosis scenarios ────────────────────────
+//
+// Every scenario boots ONE real dsh web process against the mock, activates a
+// dispatcher through the host's own RPC (`/dsh-bot`), and then drives it with a
+// script whose steps are matched against what the conversation actually
+// contains. Assertions read the mock's request log: a tool's returned body,
+// what the next request saw, and which request (turn) carried it. Nothing
+// asserts on plugin-internal counters, and nothing calls plugin internals.
+
+/** Start one mock + one real dsh web, plugin loaded from the named overlay. */
+async function bootRuntime({ label, scriptFile, reply, overlay, tsx }) {
+  const home = join(OUT, `${label}-home`);
+  mkdirSync(home, { recursive: true });
+  const mock = await startMock({
+    label: `mock-${label}`,
+    logPath: join(OUT, `${label}-mock.log`),
+    scriptFile,
+    reply,
+  });
+  const bootLog = join(OUT, `${label}-dsh.log`);
+  const args = [
+    // `--import tsx` only for the source overlay: dsh runs TS modules with
+    // their `.ts` specifiers preserved, so Node needs a loader.
+    ...(tsx ? ['--import', 'tsx'] : []),
+    dshEntry().bin,
+    '--profile',
+    'web',
+    '--patch',
+    overlay,
+    // Harness-only: forwards the host logger to stderr so a failed turn is
+    // diagnosable. Applied after the plugin overlay.
+    '--patch',
+    DIAGNOSTICS_OVERLAY,
+    '--no-open',
+    '--port',
+    String(await freePort()),
+  ];
+  const dsh = launch(`dsh-${label}`, process.execPath, args, { cwd: REPO, env: mockOnlyEnv(mock.base, home) }, { logPath: bootLog, timeoutMs: RUN_TIMEOUT_MS });
+  return { mock, dsh, bootLog };
+}
+
+/** Open a chat, activate the dispatcher in it, and pick the mock model. */
+async function openDispatcher(bootLog, dsh) {
+  const webUrl = await waitFor(
+    'dsh web boot line',
+    () => (existsSync(bootLog) ? parseWebUrl(readFileSync(bootLog, 'utf8')) : null),
+    90000,
+    { watch: [dsh] },
+  );
+  const api = await connect(webUrl);
+  const session = await rpc(api, 'session/create', { request: { cwd: REPO.replaceAll('\\', '/') } });
+  const sessionId = session.sessionId;
+  await rpc(api, 'commands/execute', { agentId: sessionId, line: '/dsh-bot', submittedAttachments: [] });
+  // The GUI's own model picker issues this call; a fresh session has no
+  // installed selection and a prompt without one drives no turn on 0.2.1.
+  await rpc(api, 'session/selectModel', {
+    request: { sessionId, provider: 'deepseek-official', model: 'deepseek-flash' },
+  });
+  return { api, sessionId, webUrl };
+}
+
+/** Send one real user message (the host records it with source.kind "user"). */
+async function sendUserMessage(api, sessionId, text) {
+  return rpc(api, 'session/prompt', {
+    request: {
+      requestId: crypto.randomUUID(),
+      sessionId,
+      mode: 'queue',
+      content: [{ type: 'text', text }],
+    },
+  });
+}
+
+/** Requests the mock served for one session id, in arrival order. */
+function sessionRequests(mock, sessionId) {
+  return readRequests(mock.requestLog).filter((entry) => entry.sessionId === sessionId);
+}
+
+/** Every request the mock served, in arrival order (all sessions). */
+function allRequests(mock) {
+  return readRequests(mock.requestLog);
+}
+
+/** Wait for ANY request (any session) that satisfies a predicate. */
+function waitForAnyRequest(mock, label, predicate, timeoutMs, watch) {
+  return waitFor(
+    label,
+    () => allRequests(mock).find(predicate) ?? null,
+    timeoutMs,
+    { watch, intervalMs: 250 },
+  );
+}
+
+/** What one tool RETURNED in a request (model-facing bodies), by tool name. */
+function toolResultTexts(entry, toolName) {
+  return (entry.toolResults ?? []).filter((result) => result.tool === toolName).map((result) => result.text);
+}
+
+/**
+ * User messages the model can actually READ: non-empty text blocks only.
+ *
+ * The host delivers every tool_result as a user-role message with no text
+ * block, so counting raw user messages would count tool steps. Kept as a
+ * recorded fact for future scenarios: it is NOT a valid "same turn" proxy
+ * either, because the host's own `subagent-settled` notice is an extra
+ * user-role message WITH text inside one turn (ticket 120 s2, observed 1 → 2).
+ */
+function readableUserTexts(entry) {
+  return (entry.userTextsAll ?? []).filter((text) => text.trim().length > 0);
+}
+
+/** Wait for a request on a session that satisfies a predicate. */
+function waitForRequest(mock, sessionId, label, predicate, timeoutMs, watch) {
+  return waitFor(
+    label,
+    () => sessionRequests(mock, sessionId).find(predicate) ?? null,
+    timeoutMs,
+    { watch, intervalMs: 250 },
+  );
+}
+
+/**
+ * Wait for the request that CARRIES a tool's returned body. The request that
+ * issued the call and the request that carries its result are different
+ * model turns; a scenario must read the latter.
+ */
+function waitForToolResult(mock, sessionId, toolName, label, timeoutMs, watch, extra = () => true) {
+  return waitForRequest(
+    mock,
+    sessionId,
+    label,
+    (entry) => toolResultTexts(entry, toolName).length > 0 && extra(entry),
+    timeoutMs,
+    watch,
+  );
+}
+
+const SCENARIO_TIMEOUT_MS = 120000;
+
+/**
+ * Ticket 120 scenario 1 — dispatcher messages a RUNNING worker; the worker's
+ * next step reflects the correction (the steer path end to end, including the
+ * step-boundary send).
+ *
+ * Observable assertions:
+ * - the `message_agent` tool returned the steer ack ("Message parked for …");
+ * - a LATER worker turn at the mock carries `[Parent correction]` and the exact
+ *   correction text — i.e. the worker's next step saw it;
+ * - the worker's turn that saw the correction is a different turn from the one
+ *   the correction was parked against (the step-boundary send, not a restart).
+ */
+async function scenario1() {
+  record('phase', { message: 's1 — message a running worker (steer end to end)' });
+  const scriptFile = join(OUT, 's1-script.json');
+  writeFileSync(
+    scriptFile,
+    JSON.stringify(
+      [
+        {
+          // The dispatcher's first move: start a worker that takes a while.
+          match: { anyUserIncludes: 's1-start', toolNames: ['spawn_worker'] },
+          say: 's1-spawn',
+          tool: {
+            name: 'spawn_worker',
+            input: {
+              stream_key: 's1-stream',
+              title: 'S1 draftsman',
+              prompt: 's1-worker-brief: produce a draft.',
+            },
+          },
+        },
+        {
+          // The worker's FIRST step is slow on purpose: it must still be
+          // running when the correction is parked.
+          match: { systemIncludes: 'delegated worker', anyUserIncludes: 's1-worker-brief' },
+          say: 'worker-draft-v1',
+          delayMs: 20000,
+        },
+        {
+          // The dispatcher's continuation after the spawn ack. The delay puts
+          // the steer well inside the worker's first step, so "the worker is
+          // running" is not a race in this scenario.
+          match: { toolResultIncludes: 'in the background (worker', toolNames: ['message_agent'] },
+          say: 's1-steer',
+          delayMs: 6000,
+          capture: { workerId: ['in the background \\(worker ([^,\\s]+), stream '] },
+          tool: {
+            name: 'message_agent',
+            input: { target: '{{workerId}}', text: 's1-correction-marker: use the other format instead.' },
+          },
+        },
+        {
+          // The worker's NEXT step is opened by the step-boundary send.
+          match: { systemIncludes: 'delegated worker', anyUserIncludes: 's1-correction-marker' },
+          say: 'worker-final-v2',
+        },
+        {
+          match: { anyUserIncludes: 'worker-final-v2', toolNames: ['check_workers'] },
+          say: 's1-dispatcher-done',
+        },
+      ],
+      null,
+      2,
+    ),
+  );
+
+  const { mock, dsh, bootLog } = await bootRuntime({ label: 's1', scriptFile, reply: 's1-fallback', overlay: SRC_OVERLAY, tsx: true });
+  const phase = { status: 'fail', scenario: 's1', mock: mock.base };
+  try {
+    const { api, sessionId } = await openDispatcher(bootLog, dsh);
+    phase.sessionId = sessionId;
+    await sendUserMessage(api, sessionId, 's1-start');
+
+    // Read the ACK from the request that carries the tool result, not from the
+    // request that issued the call (they are different model turns).
+    const steerResultRequest = await waitForToolResult(
+      mock,
+      sessionId,
+      'message_agent',
+      'the message_agent result to reach the model',
+      SCENARIO_TIMEOUT_MS,
+      [dsh, mock.entry],
+    );
+    const steerResult = toolResultTexts(steerResultRequest, 'message_agent').at(-1) ?? '';
+    phase.steerAck = steerResult.slice(0, 240);
+    const steerAccepted = steerResult.includes('Message parked for "S1 draftsman"');
+    assert('s1', 'message_agent returned the steer ack (correction parked)', steerAccepted, { returned: phase.steerAck });
+    if (!steerAccepted) {
+      // FIXED in ticket 120 (2026-10-22): the worker is registered before the
+      // child can emit its first `agent/status: running`, so the FSM leaves
+      // `spawned` and this lane accepts the steer. The branch is kept as a
+      // diagnostic: if it ever fires again, the failure is the old race or a
+      // new one in the same seam, and the assertions below stay real.
+      phase.blocker = 'steer refused: worker status never left "spawned" (regressed?)';
+    }
+
+    // The correction lands on the WORKER's session, so the search must span
+    // every session: filtering by the dispatcher's id here made the predicate
+    // unsatisfiable (no request is both the dispatcher session and a worker
+    // turn). That bug was masked while s1 failed earlier, at the steer ack.
+    const corrected = await waitForAnyRequest(
+      mock,
+      'the worker turn that saw the correction',
+      (entry) =>
+        (entry.systemFull ?? '').includes('delegated worker') &&
+        (entry.userTextsAll ?? []).some((text) => text.includes('s1-correction-marker')) &&
+        (entry.userTextsAll ?? []).some((text) => text.includes('[Parent correction]')),
+      // Bounded well below the scenario budget: when the steer is refused the
+      // correction can never arrive, and a long wait would only hide that.
+      30000,
+      [dsh, mock.entry],
+    ).catch(() => null);
+    phase.correctionSeenAtMock = corrected !== null;
+    assert('s1', 'the worker\'s NEXT step carries [Parent correction] and the exact text', corrected !== null);
+
+    const workerTurns = allRequests(mock).filter((entry) => (entry.systemFull ?? '').includes('delegated worker'));
+    phase.workerTurns = workerTurns.length;
+    // Compare by the log's own identity field, not by object reference:
+    // `waitForAnyRequest` and `workerTurns` are two separate JSONL parses, so
+    // `indexOf(object)` could never match.
+    const correctedSeq = corrected === null ? null : corrected.seq;
+    const correctedIndex =
+      correctedSeq === null
+        ? -1
+        : workerTurns.findIndex((entry) => entry.seq === correctedSeq);
+    phase.correctedWorkerTurnIndex = correctedIndex;
+    assert(
+      's1',
+      'the correction was folded into a later worker turn, not a restart',
+      corrected !== null && correctedIndex > 0,
+      { workerTurns: phase.workerTurns, correctedIndex },
+    );
+
+    const finalWorkerTurn = readRequests(mock.requestLog).find((entry) => (entry.reply?.say ?? '').includes('worker-final-v2')) ?? null;
+    assert('s1', 'the worker finished on the corrected instruction', finalWorkerTurn !== null);
+    phase.status = statusFrom(phase.scenario);
+  } catch (error) {
+    phase.error = String(error?.message ?? error);
+    const log = existsSync(bootLog) ? readFileSync(bootLog, 'utf8') : '';
+    phase.diagnostics = diagnosticsFrom(log);
+  } finally {
+    killTree(dsh.pid);
+    killTree(mock.entry.pid);
+  }
+  evidence.phases.s1 = phase;
+  return phase;
+}
+
+/**
+ * Ticket 120 scenario 2 — a dispatcher `await_agent`s a slow worker and
+ * receives its result IN THE SAME TURN.
+ *
+ * Observable assertions:
+ * - the `await_agent` tool returned `settled` with the worker's report text;
+ * - the request that carried that result has the SAME number of user messages
+ *   as the request that issued the call — no new turn opened in between;
+ * - the worker's report marker is that result.
+ */
+async function scenario2() {
+  record('phase', { message: 's2 — await_agent returns the result in the same turn' });
+  const scriptFile = join(OUT, 's2-script.json');
+  writeFileSync(
+    scriptFile,
+    JSON.stringify(
+      [
+        {
+          match: { anyUserIncludes: 's2-start', toolNames: ['spawn_worker'] },
+          say: 's2-spawn',
+          tool: {
+            name: 'spawn_worker',
+            input: {
+              stream_key: 's2-stream',
+              title: 'S2 slow worker',
+              prompt: 's2-worker-brief: take a moment, then report.',
+            },
+          },
+        },
+        {
+          match: { systemIncludes: 'delegated worker', anyUserIncludes: 's2-worker-brief' },
+          say: 's2-worker-result-marker',
+          delayMs: 4000,
+        },
+        {
+          match: { toolResultIncludes: 'in the background (worker', toolNames: ['await_agent'] },
+          say: 's2-awaiting',
+          capture: { workerId: ['in the background \\(worker ([^,\\s]+), stream '] },
+          tool: { name: 'await_agent', input: { target: '{{workerId}}', timeout_ms: 60000 } },
+        },
+        {
+          match: { toolResultIncludes: 'settled: completed' },
+          say: 's2-await-done',
+        },
+      ],
+      null,
+      2,
+    ),
+  );
+
+  const { mock, dsh, bootLog } = await bootRuntime({ label: 's2', scriptFile, reply: 's2-fallback', overlay: SRC_OVERLAY, tsx: true });
+  const phase = { status: 'fail', scenario: 's2', mock: mock.base };
+  try {
+    const { api, sessionId } = await openDispatcher(bootLog, dsh);
+    phase.sessionId = sessionId;
+    await sendUserMessage(api, sessionId, 's2-start');
+
+    const awaitCall = await waitForRequest(
+      mock,
+      sessionId,
+      'the dispatcher to call await_agent',
+      (entry) => entry.reply?.tool?.name === 'await_agent',
+      SCENARIO_TIMEOUT_MS,
+      [dsh, mock.entry],
+    );
+    const awaitResultRequest = await waitForRequest(
+      mock,
+      sessionId,
+      'the await_agent result to reach the model',
+      (entry) => toolResultTexts(entry, 'await_agent').length > 0,
+      SCENARIO_TIMEOUT_MS,
+      [dsh, mock.entry],
+    );
+    const awaitResult = toolResultTexts(awaitResultRequest, 'await_agent').at(-1) ?? '';
+    phase.awaitResult = awaitResult.slice(0, 400);
+    assert('s2', 'await_agent returned the settled worker', awaitResult.includes('settled: completed'), { returned: phase.awaitResult });
+    assert('s2', 'the returned result IS the worker\'s report', awaitResult.includes('s2-worker-result-marker'));
+
+    const userMessagesAtCall = readableUserTexts(awaitCall).length;
+    const userMessagesAtResult = readableUserTexts(awaitResultRequest).length;
+    phase.userMessages = { atCall: userMessagesAtCall, atResult: userMessagesAtResult };
+    // "Same turn" is asserted by what the TOOL RETURNED (the settled result
+    // above) plus the absence of any intervening dispatcher request: if the
+    // wait had timed out, the tool would have answered `still-running` and the
+    // report would only arrive later on a wake turn. Counting user messages is
+    // NOT a valid proxy — the host delivers its own `subagent-settled` notice
+    // as an extra user-role message inside the SAME turn (observed: 1 → 2).
+    // Identify requests by `seq` (stable across log reads) and by SERVICE SESSION:
+    // an intervening dispatcher turn would show up as a dispatcher-session
+    // request between the call and the result.
+    const between = sessionRequests(mock, sessionId).filter(
+      (entry) => entry.seq > awaitCall.seq && entry.seq < awaitResultRequest.seq,
+    );
+    phase.interveningDispatcherRequests = between.length;
+    assert(
+      's2',
+      'the tool call itself returned it — no intervening dispatcher request',
+      awaitResultRequest.seq === awaitCall.seq + 1 || between.length === 0,
+      { callSeq: awaitCall.seq, resultSeq: awaitResultRequest.seq, between: between.length },
+    );
+    assert(
+      's2',
+      'the dispatcher continued that turn after the result',
+      awaitResultRequest.seq > awaitCall.seq && (awaitResultRequest.reply?.say ?? '').includes('s2-await-done'),
+      { callSeq: awaitCall.seq, resultSeq: awaitResultRequest.seq },
+    );
+
+    phase.status = statusFrom(phase.scenario);
+  } catch (error) {
+    phase.error = String(error?.message ?? error);
+    const log = existsSync(bootLog) ? readFileSync(bootLog, 'utf8') : '';
+    phase.diagnostics = diagnosticsFrom(log);
+  } finally {
+    killTree(dsh.pid);
+    killTree(mock.entry.pid);
+  }
+  evidence.phases.s2 = phase;
+  return phase;
+}
+
+/**
+ * Ticket 120 scenario 3 — a dispatcher spawns a CHILD DISPATCHER; the child
+ * spawns a worker; the child's result arrives at the creator as a peer message
+ * on a later turn.
+ *
+ * The child addresses its creator by the session id from its OWN peer roster
+ * (`## Other agents — not the user`), which is how a real model would learn it.
+ * Observable assertions:
+ * - `spawn_dispatcher` returned a dispatcher id and the "peer dispatcher" note;
+ * - the child session is a real dispatcher (spawn_dispatcher + await_agent on
+ *   its tool surface) and its brief reached it;
+ * - the child spawned a worker and that worker ran;
+ * - a LATER creator turn carries the peer-message heading and the child's text;
+ * - the child's send was accepted for the creator's session.
+ */
+async function scenario3() {
+  record('phase', { message: 's3 — spawn_dispatcher child reports back as a peer message' });
+  const scriptFile = join(OUT, 's3-script.json');
+  writeFileSync(
+    scriptFile,
+    JSON.stringify(
+      [
+        {
+          match: { anyUserIncludes: 's3-start', toolNames: ['spawn_dispatcher'] },
+          say: 's3-summon',
+          tool: {
+            name: 'spawn_dispatcher',
+            input: { title: 'Mitosis child', prompt: 's3-child-brief: own the slice and report back.' },
+          },
+        },
+        {
+          match: { toolResultIncludes: 'as a peer dispatcher' },
+          say: 's3-creator-ack',
+        },
+        {
+          // The child dispatcher's first turn: its brief is its only unique text.
+          match: { anyUserIncludes: 's3-child-brief', toolNames: ['spawn_dispatcher'] },
+          say: 's3-child-spawn',
+          tool: {
+            name: 'spawn_worker',
+            input: { stream_key: 's3-stream', title: 'S3 child worker', prompt: 's3-worker-brief: produce the slice.' },
+          },
+        },
+        {
+          match: { systemIncludes: 'delegated worker', anyUserIncludes: 's3-worker-brief' },
+          say: 's3-worker-result-marker',
+        },
+        {
+          // The child's settle wake for its worker. It answers its creator,
+          // addressed by the creator's id from the child's own peer roster.
+          match: { anyUserIncludes: 's3-worker-result-marker', toolNames: ['message_agent'] },
+          say: 's3-child-message',
+          capture: {
+            creatorId: ['## Other agents — not the user[\\s\\S]{0,800}?(session-[0-9a-f-]{20,})'],
+          },
+          tool: {
+            name: 'message_agent',
+            input: { target: '{{creatorId}}', text: 's3-child-report: the slice is done — s3-worker-result-marker.' },
+          },
+        },
+        {
+          match: { toolResultIncludes: 'Accepted for peer session' },
+          say: 's3-child-done',
+        },
+        {
+          match: { anyUserIncludes: 's3-child-report' },
+          say: 's3-creator-got-report',
+        },
+      ],
+      null,
+      2,
+    ),
+  );
+
+  const { mock, dsh, bootLog } = await bootRuntime({ label: 's3', scriptFile, reply: 's3-fallback', overlay: SRC_OVERLAY, tsx: true });
+  const phase = { status: 'fail', scenario: 's3', mock: mock.base };
+  try {
+    const { api, sessionId: creatorId } = await openDispatcher(bootLog, dsh);
+    phase.creatorId = creatorId;
+    await sendUserMessage(api, creatorId, 's3-start');
+
+    // The ACK lives in the request that CARRIES the tool result (seq 3), not
+    // in the request that issued the call (seq 1).
+    const summonResultRequest = await waitForToolResult(
+      mock,
+      creatorId,
+      'spawn_dispatcher',
+      'the spawn_dispatcher result to reach the model',
+      SCENARIO_TIMEOUT_MS,
+      [dsh, mock.entry],
+    );
+    const summonAck = toolResultTexts(summonResultRequest, 'spawn_dispatcher').at(-1) ?? '';
+    phase.summonAck = summonAck.slice(0, 300);
+    assert('s3', 'spawn_dispatcher returned a peer dispatcher id', /as a peer dispatcher \(session [^)]+\)/.test(summonAck), { returned: phase.summonAck });
+
+    // The ack names the child as `(session <id>)`; the id is a bare uuid.
+    const childId = /as a peer dispatcher \(session ([^)\s]+)\)/.exec(summonAck)?.[1] ?? null;
+    phase.childId = childId;
+    assert('s3', 'the returned child id is a session id', childId !== null, { childId });
+
+    const childRequest = childId === null ? null : await waitForRequest(
+      mock,
+      childId,
+      'the child dispatcher\'s first turn',
+      (entry) => (entry.userTextsAll ?? []).some((text) => text.includes('s3-child-brief')),
+      SCENARIO_TIMEOUT_MS,
+      [dsh, mock.entry],
+    ).catch(() => null);
+    phase.childToolCount = childRequest?.toolNames?.length ?? 0;
+    assert(
+      's3',
+      'the child is a dispatcher (its own surface offers spawn_dispatcher and await_agent)',
+      childRequest !== null &&
+        (childRequest.toolNames ?? []).includes('spawn_dispatcher') &&
+        (childRequest.toolNames ?? []).includes('await_agent'),
+      { toolCount: phase.childToolCount },
+    );
+    assert(
+      's3',
+      'the child received its brief (it does not see the creator conversation)',
+      childRequest !== null && (childRequest.userTextsAll ?? []).some((text) => text.includes('s3-child-brief')),
+    );
+
+    // The child's spawn ack lands before its worker's first request; wait for
+    // the worker turn rather than reading the log once (a single read can race
+    // the mock's append).
+    const workerRequest = await waitFor(
+      'the child\'s worker to reach the mock',
+      () =>
+        readRequests(mock.requestLog).find(
+          (entry) =>
+            (entry.systemFull ?? '').includes('delegated worker') &&
+            (entry.userTextsAll ?? []).some((text) => text.includes('s3-worker-brief')),
+        ) ?? null,
+      30000,
+      { watch: [dsh, mock.entry] },
+    ).catch(() => null);
+    assert('s3', 'the child spawned a worker and it ran', workerRequest !== null);
+
+    const childSendResultRequest = childId === null ? null : await waitForToolResult(
+      mock,
+      childId,
+      'message_agent',
+      'the child\'s message_agent result to reach the model',
+      SCENARIO_TIMEOUT_MS,
+      [dsh, mock.entry],
+    ).catch(() => null);
+    const childSendResult =
+      childSendResultRequest === null ? '' : toolResultTexts(childSendResultRequest, 'message_agent').at(-1) ?? '';
+    phase.childSendResult = childSendResult.slice(0, 240);
+    assert(
+      's3',
+      'the child addressed its creator by the roster session id and the send was accepted',
+      childSendResult.includes(`Accepted for peer session ${creatorId}`),
+      { returned: phase.childSendResult },
+    );
+
+    const peerTurn = await waitForRequest(
+      mock,
+      creatorId,
+      'the peer message to reach the creator on a later turn',
+      (entry) =>
+        (entry.userTextsAll ?? []).some((text) => text.includes('s3-child-report')) &&
+        (entry.userTextsAll ?? []).some((text) => text.includes('Peer message — not from the user')),
+      SCENARIO_TIMEOUT_MS,
+      [dsh, mock.entry],
+    );
+    phase.peerTurnSeq = peerTurn.seq;
+    phase.summonSeq = summonResultRequest.seq;
+    assert(
+      's3',
+      'the child\'s report arrived on a LATER turn as a peer message (not as the user)',
+      peerTurn.seq > summonResultRequest.seq,
+      { summonSeq: summonResultRequest.seq, peerSeq: peerTurn.seq },
+    );
+
+    phase.status = statusFrom(phase.scenario);
+  } catch (error) {
+    phase.error = String(error?.message ?? error);
+    const log = existsSync(bootLog) ? readFileSync(bootLog, 'utf8') : '';
+    phase.diagnostics = diagnosticsFrom(log);
+  } finally {
+    killTree(dsh.pid);
+    killTree(mock.entry.pid);
+  }
+  evidence.phases.s3 = phase;
+  return phase;
+}
+
+/**
+ * Ticket 120 scenario 4 — a real USER message during `await_agent` releases
+ * the wait promptly (PRD S1).
+ *
+ * The user message is sent through the host's own `session/prompt` RPC, so it
+ * carries `source.kind: "user"` exactly as the GUI's composer does. Nothing
+ * calls `releaseWaits` directly: the assertion is that the shipped trigger —
+ * host `session/event` → plugin release — actually fires.
+ *
+ * Observable assertions:
+ * - the `await_agent` tool returned `released` with the USER-MESSAGE copy
+ *   ("was released because the user said something"), not the stopped copy;
+ * - it returned well before the worker settled and far below the 120 s cap;
+ * - the dispatcher produced a reply in that same turn;
+ * - the worker kept running and its result still arrived later.
+ */
+async function scenario4() {
+  record('phase', { message: 's4 — a user message releases the await (PRD S1)' });
+  const scriptFile = join(OUT, 's4-script.json');
+  writeFileSync(
+    scriptFile,
+    JSON.stringify(
+      [
+        {
+          match: { anyUserIncludes: 's4-start', toolNames: ['spawn_worker'] },
+          say: 's4-spawn',
+          tool: {
+            name: 'spawn_worker',
+            input: {
+              stream_key: 's4-stream',
+              title: 'S4 slow worker',
+              prompt: 's4-worker-brief: finish much later.',
+            },
+          },
+        },
+        {
+          match: { systemIncludes: 'delegated worker', anyUserIncludes: 's4-worker-brief' },
+          say: 's4-worker-late-result',
+          delayMs: 25000,
+        },
+        {
+          match: { toolResultIncludes: 'in the background (worker', toolNames: ['await_agent'] },
+          say: 's4-awaiting',
+          capture: { workerId: ['in the background \\(worker ([^,\\s]+), stream '] },
+          tool: { name: 'await_agent', input: { target: '{{workerId}}', timeout_ms: 120000 } },
+        },
+        {
+          match: { toolResultIncludes: 'was released because the user said something' },
+          say: 's4-reply-after-release',
+        },
+        {
+          match: { anyUserIncludes: 's4-user-interrupt' },
+          say: 's4-answered-the-user',
+        },
+        {
+          match: { anyUserIncludes: 's4-worker-late-result', toolNames: ['check_workers'] },
+          say: 's4-late-result-arrived',
+        },
+      ],
+      null,
+      2,
+    ),
+  );
+
+  const { mock, dsh, bootLog } = await bootRuntime({ label: 's4', scriptFile, reply: 's4-fallback', overlay: SRC_OVERLAY, tsx: true });
+  const phase = { status: 'fail', scenario: 's4', mock: mock.base };
+  try {
+    const { api, sessionId } = await openDispatcher(bootLog, dsh);
+    phase.sessionId = sessionId;
+    await sendUserMessage(api, sessionId, 's4-start');
+
+    const awaitCall = await waitForRequest(
+      mock,
+      sessionId,
+      'the dispatcher to enter await_agent',
+      (entry) => entry.reply?.tool?.name === 'await_agent',
+      SCENARIO_TIMEOUT_MS,
+      [dsh, mock.entry],
+    );
+    phase.awaitStartedAt = awaitCall.t;
+
+    // The real user message, exactly as the GUI composer sends it.
+    record('prompt', { message: 's4: user message during the await' });
+    await sendUserMessage(api, sessionId, 's4-user-interrupt: stop waiting and answer me.');
+
+    const releasedRequest = await waitForRequest(
+      mock,
+      sessionId,
+      'the released await result to reach the model',
+      (entry) => toolResultTexts(entry, 'await_agent').length > 0,
+      30000,
+      [dsh, mock.entry],
+    );
+    const released = toolResultTexts(releasedRequest, 'await_agent').at(-1) ?? '';
+    phase.awaitResult = released.slice(0, 400);
+    assert(
+      's4',
+      'the wait was released with the USER-MESSAGE reason (not stopped)',
+      released.includes('was released because the user said something'),
+      { returned: phase.awaitResult },
+    );
+    assert('s4', 'the worker was reported as still running, not stopped', released.includes('worker was not stopped and keeps running'));
+
+    const waitedMs = Date.parse(releasedRequest.t) - Date.parse(awaitCall.t);
+    phase.waitedMs = waitedMs;
+    assert('s4', 'it returned promptly — far below the 120 s cap', waitedMs < 15000, { waitedMs });
+
+    const settledRequest = readRequests(mock.requestLog).find((entry) =>
+      (entry.userTextsAll ?? []).some((text) => text.includes('s4-worker-late-result')),
+    );
+    phase.workerSettledBeforeRelease = settledRequest !== undefined && Date.parse(settledRequest.t) < Date.parse(releasedRequest.t);
+    assert(
+      's4',
+      'the release came BEFORE the worker settled (it was the user, not the settle, that ended the wait)',
+      !phase.workerSettledBeforeRelease,
+      { waitedMs, workerSettleSeen: settledRequest !== undefined },
+    );
+
+    // The turn continued and answered: the reply the mock scripted AFTER the
+    // released result is the assistant's answer in that same turn.
+    assert(
+      's4',
+      'the dispatcher still replied in that turn',
+      (releasedRequest.reply?.say ?? '').includes('s4-reply-after-release'),
+      { reply: (releasedRequest.reply?.say ?? '').slice(0, 120) },
+    );
+
+    // The worker was not stopped: its late result still arrives on a later turn.
+    const lateResultTurn = await waitForRequest(
+      mock,
+      sessionId,
+      'the released worker\'s late result to arrive anyway',
+      (entry) => (entry.userTextsAll ?? []).some((text) => text.includes('s4-worker-late-result')) && entry.seq > releasedRequest.seq,
+      60000,
+      [dsh, mock.entry],
+    ).catch(() => null);
+    phase.lateResultArrived = lateResultTurn !== null;
+    assert('s4', 'the released worker kept running and its result arrived later', lateResultTurn !== null);
+
+    phase.status = statusFrom(phase.scenario);
+  } catch (error) {
+    phase.error = String(error?.message ?? error);
+    const log = existsSync(bootLog) ? readFileSync(bootLog, 'utf8') : '';
+    phase.diagnostics = diagnosticsFrom(log);
+  } finally {
+    killTree(dsh.pid);
+    killTree(mock.entry.pid);
+  }
+  evidence.phases.s4 = phase;
+  return phase;
+}
+
+const SCENARIOS = {
+  s1: scenario1,
+  s2: scenario2,
+  s3: scenario3,
+  s4: scenario4,
+};
+
 // ── main ─────────────────────────────────────────────────────────────────────
 
 function writeDispatcherScript(path) {
@@ -701,6 +1564,12 @@ function writeDispatcherScript(path) {
   );
 }
 
+/** Whether a phase name should run: `--only` narrows, `--skip` subtracts. */
+function shouldRun(name) {
+  if (ONLY.size > 0) return ONLY.has(name);
+  return !SKIP.has(name);
+}
+
 let failure;
 try {
   const dsh = dshEntry();
@@ -709,12 +1578,17 @@ try {
 
   if (!existsSync(OVERLAY)) throw new Error(`missing ${OVERLAY}`);
 
-  if (!SKIP.has('mock')) await phaseMock();
-  if (!SKIP.has('boot')) await phaseBoot();
-  if (!SKIP.has('dispatch')) {
+  if (shouldRun('mock')) await phaseMock();
+  if (shouldRun('boot')) await phaseBoot();
+  if (shouldRun('dispatch')) {
     const scriptFile = join(OUT, 'script.json');
     writeDispatcherScript(scriptFile);
     await phaseDispatch(scriptFile);
+  }
+  for (const [name, run] of Object.entries(SCENARIOS)) {
+    if (!shouldRun(name)) continue;
+    if (!existsSync(SRC_OVERLAY)) throw new Error(`missing ${SRC_OVERLAY}`);
+    await run();
   }
 } catch (error) {
   failure = error;
@@ -730,32 +1604,45 @@ try {
       encoding: 'utf8',
       windowsHide: true,
     });
-    // Match the PID as a whole CSV field, not a substring: tasklist echoes the
-    // filter line and neighbouring PIDs share digit runs, so `includes` reports
-    // a dead process as alive.
-    const pids = (check.stdout ?? '')
-      .split(/\r?\n/)
-      .map((line) => line.split(',')[1]?.replaceAll('"', '').trim())
-      .filter((value) => value !== undefined);
-    if (pids.includes(String(entry.pid))) alive.push({ label: entry.label, pid: entry.pid });
+    // Identity, not PID alone: Windows recycles PIDs, so a recycled PID now
+    // owned by another executable is not our leak (see launchedProcessAlive).
+    if (launchedProcessAlive(entry.pid, entry.image, check.stdout)) {
+      alive.push({ label: entry.label, pid: entry.pid, expectedImage: entry.image });
+    }
   }
-  evidence.processCheck = { launched: children.map(({ label, pid }) => ({ label, pid })), aliveAfterCleanup: alive };
+  evidence.processCheck = { launched: children.map(({ label, pid, image }) => ({ label, pid, image })), aliveAfterCleanup: alive };
   assert('cleanup', 'every process the harness launched is dead', alive.length === 0, alive);
 
+  // A phase that was not selected contributes nothing — neither pass nor fail.
   const harnessOk =
-    evidence.phases.mock?.status === 'pass' &&
-    evidence.phases.boot?.status === 'pass' &&
+    (evidence.phases.mock === undefined || evidence.phases.mock.status === 'pass') &&
+    (evidence.phases.boot === undefined || evidence.phases.boot.status === 'pass') &&
     alive.length === 0;
   const dispatchStatus = evidence.phases.dispatch?.status ?? 'skipped';
-  evidence.ok = harnessOk;
+  // Ticket 120: every scenario that RAN must pass. A phase that was not
+  // selected is `undefined`, which must not read as a failure.
+  const scenarioStatuses = Object.fromEntries(
+    Object.keys(SCENARIOS)
+      .filter((name) => evidence.phases[name] !== undefined)
+      .map((name) => [name, evidence.phases[name].status]),
+  );
+  const scenariosOk = Object.values(scenarioStatuses).every((status) => status === 'pass');
+  evidence.ok = harnessOk && scenariosOk;
   evidence.dispatchStatus = dispatchStatus;
+  evidence.scenarioStatuses = scenarioStatuses;
   evidence.finishedAt = new Date().toISOString();
 
   writeFileSync(join(OUT, 'result.json'), `${JSON.stringify(evidence, null, 2)}\n`, 'utf8');
   console.log('');
   console.log(`harness: ${harnessOk ? 'PASS' : 'FAIL'} (mock + real dsh boot + cleanup)`);
   console.log(`dispatcher e2e: ${dispatchStatus}${evidence.phases.dispatch?.blockedBy ? ` — blocked: ${evidence.phases.dispatch.blockedBy}` : ''}`);
+  const ran = Object.entries(scenarioStatuses);
+  if (ran.length > 0) {
+    console.log(`scenarios: ${ran.map(([name, status]) => `${name}=${status}`).join(' ')}`);
+  } else {
+    console.log('scenarios: (none selected)');
+  }
   console.log(`evidence: ${join(OUT, 'result.json')}`);
   if (failure !== undefined) console.error(failure.message);
-  process.exitCode = harnessOk ? 0 : 1;
+  process.exitCode = evidence.ok ? 0 : 1;
 }

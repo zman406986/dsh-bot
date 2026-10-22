@@ -1,6 +1,6 @@
 # 114 — Upgrade dsh to 0.2.x and return the dispatcher UI to the e773ef8 native-dsh posture (keep later functional changes)
 
-**Status:** open (execution in progress — the gates are filled in by the owner/implementer)
+**Status:** resolved
 **Labels:** ready-for-agent
 **Blocked by:** none for the version upgrade and the offline analysis. The client revert may not merge until the records step in §Conflicts surfaced is recorded (authority stack: only a human directive outranks an accepted ADR).
 **Related:** ADR-0014 (client bundle materialization — pinned to 0.1.5-rc.1, carries the standing drift rule "re-verify on dsh upgrades"), ADR-0015 (browser-test route — pinned to 0.1.5-rc.1, same drift rule), ADR-0019 (**verified against 0.1.5-rc.2**), ADR-0021 + ADR-0022 (the floating window and capsule this ticket reverses — see §Conflicts surfaced), ticket 99 (commit `e773ef8` is its resolution), tickets 100, 102, 103, 105, 106, 107 (the UI work being reverted), tickets 101, 108, 113 (functional changes that must survive).
@@ -30,43 +30,45 @@ The two goals are independent in code but share one verification lane: the post-
 
 ### Goal 1 — upgrade the global harness and re-verify the plugin
 
-- [ ] Record the before state: global CLI version, profile-tree `@deepseek-ai/*` versions (the tree that boots), and the profile names in use (`web`, `multitask`).
-- [ ] Upgrade the global package to the registry latest (currently `0.2.0-rc.2`). Do not invent an update procedure: document the command that worked in this ticket, because the repo has none today.
-- [ ] Refresh/verify the profile package tree so the booted `@deepseek-ai/*` set is the same version as the CLI. Record which tree the smoke test measured.
-- [ ] Re-verify every seam this plugin calls against the new tree, and record the verdict per seam:
+- [x] Recorded before state: global CLI `0.1.5-rc.1`, profile tree mixed (`dsh` 0.1.5-rc.1, `dsh-*` 0.1.5-rc.2), profiles `web` + `multitask` — §Verified state at filing, snapshotted in `.scratch/testing/2026-10-18-dsh-upgrade/` (`versions.txt`, `profile-package-jsons.txt`, `profiles-tree.txt`).
+- [x] Upgraded. Command that worked: `npm install -g @deepseek-ai/dsh@<version>` (plain; the `--prefer-offline` attempt died ETARGET on a stale npm cache). 0.2.0-rc.2 installed first, then the owner retargeted mid-run to `0.2.1-rc.2` (dist-tag `next`). Every command logged under `.scratch/testing/2026-10-18-dsh-upgrade/` (`upgrade-3b-install-no-prefer-offline.log`, `upgrade-10-install-0.2.1-rc.2.log`); summary `UPGRADE-RESULT.md`. The profile junction tree needed a manual repair — 0.2.x has no relink command (264 junction ops, 0 failures: `upgrade-6c-repair-apply.log`, `upgrade-13-repair-0.2.1.log`, `junctions-after-repair.txt`).
+- [x] Booted tree verified = the global payload at 0.2.1-rc.2: 0.2.x resolves installation packages in memory (`dsh-app-boot`) and every profile junction points into the global payload (548 junctions, 0 dangling at audit depths 4 and 6). The live lanes measured that tree: `dsh --profile web` on 0.2.1-rc.2 (`.scratch/testing/2026-10-19-browser-pass-4/RESULT.md`) and headless + web-profile e2e (`.scratch/testing/2026-10-18-port-server/e2e-4.log`).
+- [x] Re-verified every seam this plugin calls against the new tree; the verdict per seam is the table in the 2026-10-21 comment below:
   - client bundle materialization (`dsh.client` manifest, `inject` walking, `immediately` rules — ADR-0014);
   - client services: `ctx.slots` (list/keyed/single conflict rules), `ctx.locale`, `ctx.settingsScope`, `ctx.remote.commands`, `ctx.sessions`, `ctx.conversation`;
   - host services: `subagents.startContinuable` / `interrupt` / `sendMessage`, `agents.get`, `agent.followup` / `inject`, `tools.register` + `tools.restrict`, `storageDomain`, `commands.register`, `settings.installSection`, `webServer.register`, and the host events used by the adapter (`subagent/end`, `session/event`, `agent/status`, `agent/disposed`);
   - the launcher route used by browser tests (`dsh --profile web --patch ...`, port/served-page shape — ADR-0015).
-- [ ] Fix fallout. Keep fixes minimal and cite the new `file:line` evidence in the code comment that made the old claim.
-- [ ] Re-stamp version claims that moved. Research notes are evidence, never rulings: do not rewrite findings, add dated version stamps. ADR bodies stay untouched; the dated convention is a note on the ADR's status line or an entry in the ticket comment (see `docs/adr/README.md` precedent).
-- [ ] Record the after state (same fields as the before state) in the table below.
+- [x] Fallout ported to 0.2.1 only (owner scope change; no 0.2.0 shims — `.scratch/repo-analysis/2026-10-18-dsh-0.2.1-forward-compat.md`): `startContinuable` → `startActivation` (`src/adapter/cordis-dsh-host.ts:195,847` at 6c4c522), `persona`/`toolFilter` → the worker preset export, settings service → the volatile-Config pattern (`src/adapter/settings-section.ts:12-14`), settings card re-keyed to `plugins.row.config` (`src/client/index.ts:280`).
+- [x] Version claims re-stamped as dated entries in the 2026-10-21 comment below (this item's own alternative to status-line notes; ADR bodies and `docs/research/` untouched).
+- [x] After state recorded in the table below.
 
 ### Goal 2 — return `src/client/` to the `e773ef8` posture, keeping later functional work
 
-- [ ] Remove the floating-window and launcher posture from the default composition:
+- [x] Remove the floating-window and launcher posture from the default composition:
   - `src/client/index.ts`: drop the `SHELL_OVERLAY_SLOT` inject (`:528-538`), the `launcherOverlayRegistration` import (`:101`), the floating-window store/window composition (`:523`, imports `:168-172`), and the window-related comments/helpers. What remains must be exactly `e773ef8`'s shape: locale effect, toolview inject, settings-card inject.
   - `src/client/overlay.ts`: remove `LAUNCHER_ENTRY_ID` (`:52`), `LAUNCHER_OVERLAY_ORDER` (`:61`), `launcherOverlayRegistration` (`:105`), and every launcher/capsule/window copy key. Keep the settings-card field keys and the en+zh key-set lockstep.
   - Delete `src/client/floating-window.tsx` and `src/client/floating-window-store.ts`, and `test/client-floating-window.test.ts`.
   - Remove window/launcher/capsule references from `src/client/shell.tsx` and `src/client/shell-store.ts` that exist only to feed the window (the shell surfaces themselves stay — see next item).
-- [ ] **Keep, do not revert, the functional changes from tickets 101, 108, and 113:**
+  - Done at 6c4c522: `floating-window.tsx` (655 ln) and `floating-window-store.ts` (612 ln) deleted; the composition registers exactly four injects — toolview (`src/client/index.ts:251`), plugins-row settings card (`:280`), worker + dispatcher session-kind glyphs (`:306-329`, the ADR-0024 rider/addendum via ticket 123); no `shell.overlay` inject, no launcher identifiers in code (only the deletion note at `src/client/shell-mount.ts:57`); `overlay.ts` net −144 lines.
+- [x] **Keep, do not revert, the functional changes from tickets 101, 108, and 113:**
   - 101: `DISPATCHER_START_LINE` / `DISPATCHER_STOP_LINE` (`src/client/actions.ts`), the add picker + delete arming in `shell-store.ts`, the add/delete seats in `shell.tsx` and `src/client/index.ts`. They stay in the tree as unmounted wiring, exactly as `mountShellPage` was at `e773ef8`.
   - 108: `wakeCoalesceWindowMs` in the settings card (schema is host-side, untouched).
   - 113: `inboxEnabled`, `inboxDir`, `inboxRescanIntervalMs` in the settings card, including the `string` field kind in `settings-card.tsx` and its `parseString`/`formatString` support in `settings-card-store.ts`.
-- [ ] **Keep the ticket-102b fix.** Commit `fd6947d` added the nested `"remote.commands"` inject entry (`src/client/index.ts:222`), which the 101 seats' command transport needs. `e773ef8` predates it. A literal `git checkout e773ef8 -- src/client` re-breaks command delivery, so the revert must be selective.
-- [ ] Re-base the tests that pin the retired posture. The pins that exist only to assert the window/launcher/capsule go with the code; the pins for preserved features stay and are re-based to the e773ef8 posture (the "renders NOTHING into dsh's layout" pin from ticket 99 is the template). Expected touch set: `client-face-scaffold`, `client-roster-panel`, `client-shell-mount`, `client-shell-seat-composition`, `client-toolviews`, `client-wrapper-shell`, `client-theme-tokens`, `composition-polish`, `coexistence`, `restart-honesty`, `approval-feed-composition`, `client-session-management`.
-- [ ] Reconcile `docs/surfaces.md`. It already describes the retired capsule as live and cites files that no longer exist (`src/client/capsule.tsx`, `describeCapsuleFooter`, `test/client-capsule-composition.test.ts`). Make it state the current posture: stock dsh primary, no layout registration, shell surfaces retained as unmounted machinery.
-- [ ] Record the disposition of ticket 106's right-click close menu (not in the preserve list). If it stays, it is unreachable without a mount; if it goes, say so. Do not leave it half-wired.
+  - Kept at 6c4c522: `mountShellPage` + the shell-mount contracts retained as unmounted machinery (`src/client/index.ts:34-45`); the card carries 8 fields including `wakeCoalesceWindowMs`, `inboxEnabled`, `inboxDir`, `inboxRescanIntervalMs` (`src/client/settings-card-store.ts:231`).
+- [x] **Keep the ticket-102b fix.** Commit `fd6947d` added the nested `"remote.commands"` inject entry (`src/client/index.ts:222`), which the 101 seats' command transport needs. `e773ef8` predates it. A literal `git checkout e773ef8 -- src/client` re-breaks command delivery, so the revert must be selective. Survives: `"remote.commands"` is in the module inject at `src/client/index.ts:146` at 6c4c522.
+- [x] Re-base the tests that pin the retired posture. The pins that exist only to assert the window/launcher/capsule go with the code; the pins for preserved features stay and are re-based to the e773ef8 posture (the "renders NOTHING into dsh's layout" pin from ticket 99 is the template). Expected touch set: `client-face-scaffold`, `client-roster-panel`, `client-shell-mount`, `client-shell-seat-composition`, `client-toolviews`, `client-wrapper-shell`, `client-theme-tokens`, `composition-polish`, `coexistence`, `restart-honesty`, `approval-feed-composition`, `client-session-management`. Done: `test/client-floating-window.test.ts` (2,363 ln) and `test/client-session-management.test.ts` (450 ln) deleted; the rest of the touch set re-based; the revert lane ran 1,214 tests / 299 suites / 0 fail (`.scratch/testing/2026-10-18-ui-revert/test-1.log`).
+- [x] Reconcile `docs/surfaces.md`. It already describes the retired capsule as live and cites files that no longer exist (`src/client/capsule.tsx`, `describeCapsuleFooter`, `test/client-capsule-composition.test.ts`). Make it state the current posture: stock dsh primary, no layout registration, shell surfaces retained as unmounted machinery. Reconciled 2026-10-18 — its status header records the correction (see the ticket comment of that date). Residual: its session-kind glyph line still reads "ruled, not yet implemented" while the marks shipped in this lane; updating that line is ticket 123's record.
+- [x] Record the disposition of ticket 106's right-click close menu (not in the preserve list). If it stays, it is unreachable without a mount; if it goes, say so. Do not leave it half-wired. Disposition: the menu went with the floating window (no context-menu code in `src/client/` at 6c4c522); the host-side `/dispatcher-stop` transport stays retained (`src/adapter/stop-command.ts:39`), unreachable by design under ADR-0024's UI-chrome-only reversal; the follow-up direction is being settled in working-tree tickets 128/129 + ADR-0030 (uncommitted 2026-10-21, another lane).
 
 ## Acceptance criteria
 
-- [ ] `npm run typecheck` is green (both tsconfigs).
-- [ ] `npm test` is green (offline, no dsh, no LLM). Record the before/after pass/suite counts; a count drop is expected where window tests are deleted and must be accounted for file by file.
-- [ ] `npm run lint:docs` is green (doc-lint 0 findings; issue index and ADR index fresh).
-- [ ] `npm run build` and `npm run build:client` succeed. Build artifacts (`lib/`, `client/`) are git-ignored and are not committed.
-- [ ] `src/client/` contains no floating-window, launcher, or capsule code: no `floating-window*` files, no `launcherOverlayRegistration` / `LAUNCHER_ENTRY_ID` / `LAUNCHER_OVERLAY_ORDER`, no window CSS or window copy keys, no `SHELL_OVERLAY_SLOT` inject in the composition.
-- [ ] The settings card still exposes the wake-coalescing field and all three file-inbox fields, and the schema↔card parity test passes.
-- [ ] The ticket records the dsh version before and after, and which package tree (global or profile) each reading came from.
+- [x] `npm run typecheck` is green (both tsconfigs). Green on the revert lane (`.scratch/testing/2026-10-18-ui-revert/typecheck-final.log`), on the 0.2.1 client port (`.scratch/testing/2026-10-18-port-client/port.log`, exit 0), and at the merge incl. the vendor build (6c4c522 message).
+- [x] `npm test` is green (offline, no dsh, no LLM). Record the before/after pass/suite counts; a count drop is expected where window tests are deleted and must be accounted for file by file. Before (base 1f5ae26): 1,284 tests / 318 suites / 1,280 pass / 4 fail — the 4 are the inbox-watcher failures, proven pre-existing by a scratch-worktree rerun at the base (recorded in `Issue-tracker/open/126-racoons-integration.md`, commit 74743a4; logs `.scratch/testing/2026-10-18-prechange-baseline/test-run2.log`, `.scratch/testing/2026-10-18-inbox-watcher-fix/`). After the revert: 1,214 / 299 / 0. Final at the merge 6c4c522: 1,352 / 332 / 0 (`.scratch/testing/2026-10-20-lane-merge/test-post-merge-final.log`). Drop accounted file by file: `client-floating-window.test.ts` and `client-session-management.test.ts` deleted, every other touch-set file re-based; the net growth over the baseline is slices 116–126.
+- [x] `npm run lint:docs` is green (doc-lint 0 findings; issue index and ADR index fresh). Green on the revert lane (`.scratch/testing/2026-10-18-ui-revert/lint-docs.log`: 0 findings, index 7 rows, ADR 24) and at the merge (6c4c522 message: index 20 rows, ADR 29); re-run at this record pass — result in the 2026-10-21 comment.
+- [x] `npm run build` and `npm run build:client` succeed. Build artifacts (`lib/`, `client/`) are git-ignored and are not committed. Succeeded on the revert lane (`.scratch/testing/2026-10-18-ui-revert/build.log`, `build-client.log`); the merge build includes vendor.
+- [x] `src/client/` contains no floating-window, launcher, or capsule code: no `floating-window*` files, no `launcherOverlayRegistration` / `LAUNCHER_ENTRY_ID` / `LAUNCHER_OVERLAY_ORDER`, no window CSS or window copy keys, no `SHELL_OVERLAY_SLOT` inject in the composition. Verified at 6c4c522: no floating-window files in `src/client/`; the only launcher-name occurrences are the deletion note at `src/client/shell-mount.ts:57` and historical comments (`index.ts:366`); the only `ctx.slots.inject` calls are `index.ts:251/280/306/317`.
+- [x] The settings card still exposes the wake-coalescing field and all three file-inbox fields, and the schema↔card parity test passes. Eight fields at `src/client/settings-card-store.ts:231` (enabled, accessRequestTimeoutMs, wakeCoalesceWindowMs, inboxEnabled, racoonsEnabled, inboxDir, inboxRescanIntervalMs, microcompactEnabled); the parity pin is green in the final suite.
+- [x] The ticket records the dsh version before and after, and which package tree (global or profile) each reading came from. Table below.
 
 ## Version record
 
@@ -74,11 +76,11 @@ Replace the `TBD` cells as the work lands. Do not delete the before row.
 
 | What | Before (2026-10-18) | After |
 |---|---|---|
-| `dsh --version` (global CLI) | `0.1.5-rc.1` | TBD |
-| Global `@deepseek-ai/dsh` package | `0.1.5-rc.1` | TBD |
-| Profile tree `@deepseek-ai/dsh` (booted) | `0.1.5-rc.1` | TBD |
-| Profile tree `@deepseek-ai/dsh-*` (renderer, locale, modules, tools, agent) | `0.1.5-rc.2` (mixed with the CLI above) | TBD |
-| Registry latest at upgrade time | `0.2.0-rc.2` | TBD |
+| `dsh --version` (global CLI) | `0.1.5-rc.1` | `0.2.1-rc.2` |
+| Global `@deepseek-ai/dsh` package | `0.1.5-rc.1` | `0.2.1-rc.2` (`npm ls -g --depth=0`; `UPGRADE-RESULT.md`) |
+| Profile tree `@deepseek-ai/dsh` (booted) | `0.1.5-rc.1` | `0.2.1-rc.2` — booted from the global payload via in-memory resolution; the profile junctions were repointed into it (548, 0 dangling), so the old pnpm-managed profile copy no longer exists |
+| Profile tree `@deepseek-ai/dsh-*` (renderer, locale, modules, tools, agent) | `0.1.5-rc.2` (mixed with the CLI above) | `0.2.1-rc.2` — every payload `@deepseek-ai/dsh-*` moved 0.1.5-rc.2 → 0.2.1-rc.2 (304 packages; `final-payload-versions.txt`) |
+| Registry latest at upgrade time | `0.2.0-rc.2` | `latest` stayed `0.2.0-rc.2`; the owner retargeted to dist-tag `next` = `0.2.1-rc.2` mid-run (`upgrade-9-retarget-check.log`) |
 
 ## Non-goals
 
@@ -173,3 +175,44 @@ The six open questions in `docs/research/dispatcher-peer-memory-indicators-desig
 Also relevant to the 0.2.1 port: `agentPreset` no longer discriminates our workers (the worker preset row was removed and children inherit the parent's preset), and a spawned worker now inherits host compaction from the deployment preset. Both facts are recorded in the ADRs and change what "worker preset" means in this ticket's re-verification list.
 
 Ticket files 115–125 record the implementation slices and the remaining rulings. Nothing in this comment changes this ticket's own gates.
+
+### 2026-10-21 — execution gates recorded; ticket resolved (scribe)
+
+Both goals landed. The revert + 0.2.1 port checkpoint is `1cc2dfd` (2026-10-20 23:59); the lane merged as `6c4c522` (2026-10-21 00:17) with the final gates in its message: lint:docs clean (ticket index 20 rows, ADR index 29 rows), typecheck green incl. the vendor build, tests 1,352/332/0 — log `.scratch/testing/2026-10-20-lane-merge/test-post-merge-final.log`. The upgrade evidence is `.scratch/testing/2026-10-18-dsh-upgrade/` (`UPGRADE-RESULT.md` is the summary; every command has its own log); the revert-gate evidence is `.scratch/testing/2026-10-18-ui-revert/`; the live lane is `.scratch/testing/2026-10-19-browser-pass-4/` (`RESULT.md`: PASS — boot on 0.2.1-rc.2 with the mock LLM, kill timer, no real key). All `file:line` citations above and below are pinned to 6c4c522.
+
+**Seam re-verification verdicts** (evidence: `.scratch/repo-analysis/2026-10-18-dsh-upgrade-0.2.x.md` = the 0.1.5→0.2.x tarball diff, `2026-10-18-dsh-0.2.1-forward-compat.md` = the port design, browser-pass-4, port-server `e2e-4.log`):
+
+| Seam | Verdict | Evidence |
+|---|---|---|
+| Client bundle materialization (ADR-0014) | PASS, unchanged | diff study §5.1; plugin `client.js` served live (browser-pass-4 check 1) |
+| `ctx.slots`, `ctx.locale` | PASS, unchanged | diff study §5.4; toolview + glyph injects render live (browser-pass-4) |
+| `ctx.settingsScope` | REMOVED in 0.2.x — ported away | diff study §5.2; card now edits the Config form via `plugins.row.config` (`src/client/index.ts:280`; contract lines in `.scratch/testing/2026-10-18-port-client/port.log`) |
+| `ctx.remote.commands` | PASS, unchanged | diff study §5.4; `/dispatcher-start` executes live (e2e-4.log; browser-pass-4 check 3); nested inject retained (`index.ts:146`) |
+| `ctx.sessions`, `ctx.conversation` | PASS | exercised by every client boot — a missing face fails the inject; live renders in browser-pass-4 |
+| `subagents.startContinuable` | REMOVED in 0.2.1 — ported to `startActivation` | diff study §4.1; port at `src/adapter/cordis-dsh-host.ts:195,847`; `spawn_worker` fires from a real turn (browser-pass-4 check 7) |
+| `subagents.sendMessage` / `interrupt` | PASS, preserved | diff study §4.1 preserved list |
+| `agents.get`, `agent.followup` / `inject` | PASS, unchanged | diff study §4.4 |
+| `tools.register` + `restrict` | PASS | diff study §4.5; scoped counts live: dispatcher 38 / worker 25 (browser-pass-4 checks 8; e2e-4.log) |
+| `storageDomain` | **No dedicated re-verification evidence** — not covered by either diff study; offline-pinned only (durability + inbox dedupe tests in the green suite); no live probe | — |
+| `commands.register` | PASS | 10 plugin commands registered on a real 0.2.1 boot (e2e-4.log) |
+| `settings.installSection` | REMOVED in 0.2.x — replaced by the volatile-Config pattern | diff study §4.2; `src/adapter/settings-section.ts:12-14` |
+| `webServer.register` | Not called by this plugin — no `webServer` reference in `src/` at 6c4c522; nothing to re-verify | — |
+| Host events `subagent/end`, `session/event` | PASS, payloads unchanged | diff study §4.1 |
+| Host events `agent/status`, `agent/disposed` | PRESENT at 0.2.1 | forward-compat note lines 58, 447-448 (`runtime-types.d.ts:240,252`); it also records a host-side `agent/disposed listener threw` warning observed in the port lane (line 592) |
+| Browser-test launcher route (ADR-0015) | PASS | invocation verdicts table (diff study §8); live `dsh --profile web --patch` boots (browser-pass-4 `url.txt`, `dsh-web.log`) |
+
+**Dated version re-stamps** (2026-10-18 measurements; ADR status lines deliberately untouched — this entry is the record, per Goal 1's "or an entry in the ticket comment"):
+
+- **ADR-0014** (client bundle materialization): re-verified against **dsh 0.2.1-rc.2**. Was pinned to 0.1.5-rc.1.
+- **ADR-0015** (browser-test launcher route): re-verified against **dsh 0.2.1-rc.2**. Was pinned to 0.1.5-rc.1.
+- **ADR-0019** (per-dispatcher scoped tools): re-verified against **dsh 0.2.1-rc.2**. Was verified against 0.1.5-rc.2.
+- `docs/research/` bodies untouched (evidence, never rewritten); the 0.2.x findings live in the dated `.scratch/repo-analysis/2026-10-18-*` notes.
+
+**Recorded honestly as lacking evidence (no numbers invented):**
+
+1. The settings card is ported and offline-pinned (contract citations from the 0.2.1 tree in `port.log`), but no browser pass opened the real Plugins page — its live rendering on 0.2.1 is unproven.
+2. `storageDomain`: see the table — offline pins only.
+3. `docs/surfaces.md`'s session-kind line still reads "ruled, not yet implemented" although the marks shipped in this lane; correcting it belongs to ticket 123's record (docs/ edits are outside this ticket's lane).
+4. The working tree at record time carries another lane's uncommitted work (tickets 128/129, ADR-0030, `dsh-bot` rename edits in `src/`) — noted as a pointer only; this ticket's citations are all commit-pinned.
+
+All seven acceptance criteria are met with the evidence above, so the ticket is resolved and moves to `resolved/`.

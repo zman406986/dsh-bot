@@ -2,7 +2,7 @@
 
 # Open ticket index
 
-Generated from `Issue-tracker/open/*.md` — 20 open tickets. The row set is owned by the folder, so a ticket that moves cannot leave a stale row behind (ticket 96). Titles and labels mirror each ticket's own lines.
+Generated from `Issue-tracker/open/*.md` — 14 open tickets. The row set is owned by the folder, so a ticket that moves cannot leave a stale row behind (ticket 96). Titles and labels mirror each ticket's own lines.
 
 | # | Ticket | Title | Status | Labels |
 |---|---|---|---|---|
@@ -12,17 +12,11 @@ Generated from `Issue-tracker/open/*.md` — 20 open tickets. The row set is own
 | 110 | [110-worker-activity-ring-wake-digest](open/110-worker-activity-ring-wake-digest.md) | Bounded worker-activity ring + inline wake digest | open | ready-for-agent |
 | 112 | [112-wake-bus-disposal-wiring](open/112-wake-bus-disposal-wiring.md) | Wire wake-bus disposal into plugin teardown (plus dead-field cleanup) | open | ready-for-agent |
 | 113 | [113-implement-file-inbox-per-adr-0023](open/113-implement-file-inbox-per-adr-0023.md) | Implement file inbox per ADR-0023 | open | ready-for-agent |
-| 114 | [114-upgrade-dsh-0-2-x-and-revert-ui-to-native-posture](open/114-upgrade-dsh-0-2-x-and-revert-ui-to-native-posture.md) | Upgrade dsh to 0.2.x and return the dispatcher UI to the e773ef8 native-dsh posture (keep later functional changes) | open | ready-for-agent |
-| 115 | [115-settle-records-and-await-worker-core](open/115-settle-records-and-await-worker-core.md) | Per-target settle records + `Multitask.awaitWorker` (no tool yet) | open | ready-for-agent |
-| 116 | [116-message-agent-provenance-retire-send-peer](open/116-message-agent-provenance-retire-send-peer.md) | `message_agent` tool + routing + structured provenance; retire `send_peer` | open | ready-for-agent |
-| 117 | [117-await-agent-tool](open/117-await-agent-tool.md) | `await_agent` tool | open | ready-for-agent |
-| 118 | [118-spawn-dispatcher-activation-path](open/118-spawn-dispatcher-activation-path.md) | `spawn_dispatcher` + spawned-dispatcher activation path | open | ready-for-agent |
-| 119 | [119-policy-prd-context-barrier-amendments](open/119-policy-prd-context-barrier-amendments.md) | Policy, PRD, CONTEXT, worker barrier, and ADR row for the dispatcher peer model | open | ready-for-agent |
-| 120 | [120-mock-llm-e2e-messaging-await-mitosis](open/120-mock-llm-e2e-messaging-await-mitosis.md) | Mock-LLM end-to-end coverage for messaging, await, and mitosis | open | ready-for-agent |
-| 121 | [121-peer-awareness-roster-push](open/121-peer-awareness-roster-push.md) | Peer awareness: tail-pushed roster with liveness | open | ready-for-agent |
-| 122 | [122-respond-to-coordinator-peer-lane](open/122-respond-to-coordinator-peer-lane.md) | Worker mid-task reply channel (`RespondToCoordinator`) on the peer wake lane | open | ready-for-agent |
 | 123 | [123-session-kind-indicators](open/123-session-kind-indicators.md) | Session-kind indicators: dispatcher glyph in the sidebar, worker marker in the conversation header | open | needs-triage |
-| 124 | [124-microcompact-boundary-marker](open/124-microcompact-boundary-marker.md) | Microcompact + compaction boundary marker (deterministic, no model call) | open | ready-for-agent |
 | 125 | [125-chatroom-broadcasting](open/125-chatroom-broadcasting.md) | Chatroom broadcasting: optional named room a dispatcher can address | open | ready-for-agent |
 | 126 | [126-racoons-integration](open/126-racoons-integration.md) | Add the RACOONS M1 integration | open | ready-for-human |
 | 127 | [127-racoons-desktop-launcher](open/127-racoons-desktop-launcher.md) | Add the RACOONS desktop launcher | open | ready-for-human |
+| 130 | [130-spawned-dispatcher-no-durable-identity](open/130-spawned-dispatcher-no-durable-identity.md) | A spawned dispatcher has no durable identity: a restart turns it back into a plain subagent | open | needs-triage |
+| 131 | [131-second-level-dispatcher-spawn-admitted](open/131-second-level-dispatcher-spawn-admitted.md) | Second-level dispatcher spawn is admitted: the host depth ceiling never refuses a mitosis hop | open | needs-triage |
+| 132 | [132-policy-resolve-access-tool-does-not-exist](open/132-policy-resolve-access-tool-does-not-exist.md) | The access policy tells the model to call `resolve_access`, a tool that does not exist | open | needs-triage |
+| 133 | [133-policy-workers-panel-does-not-exist](open/133-policy-workers-panel-does-not-exist.md) | Dispatcher policy says progress shows in "the workers panel", which no longer exists | open | needs-triage |

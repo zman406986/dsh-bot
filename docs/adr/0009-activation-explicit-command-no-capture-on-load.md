@@ -1,6 +1,6 @@
 # Activation is an explicit user command; the plugin no longer captures the primary chat on load
 
-**Status:** accepted
+**Status:** accepted — **2026-10-21 note (0030):** the explicit-activation command's NAME is now `dsh-bot` (was `dispatcher-start`), human-ruled, recorded in 0030; the substance — explicit command activation, no capture on load — stands; the 2026-09-18 retraction note below is a historical record and is untouched
 
 The dispatcher is **not** bound to any chat when the plugin loads. With the feature flag ON the plugin boots **dormant and stock**: the only visible affordance is a host slash command (`dispatcher-start`, `dispatcher-` prefixed namespace). Running that command in a top-level chat **activates** the dispatcher for that session — the live Agent is bound into the host's single parent slot and the session policy is injected once. There is **no deactivate command**: activation is once per session, "off" means the session ended, and workers already spawned run to completion.
 

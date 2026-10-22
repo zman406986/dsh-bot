@@ -15,8 +15,17 @@ import type {
 } from "./cordis-dsh-host.js";
 import type { ActivationOutcome } from "./parent-agent.js";
 
-/** Globally unique host command name (`dispatcher-` prefix, design-16 §5). */
-export const DISPATCHER_START_COMMAND = "dispatcher-start";
+/**
+ * Globally unique host command name. The constant NAME is retained public
+ * barrel API; the VALUE is `dsh-bot` by the human's 2026-10-21 ruling
+ * (ADR-0030), so the historical `dispatcher-` prefix convention
+ * (design-16 §5) is intentionally broken here — the human's chosen name
+ * governs.
+ */
+export const DISPATCHER_START_COMMAND = "dsh-bot";
+
+/** Legacy persisted-log name of this command before the ADR-0030 rename. */
+export const LEGACY_DISPATCHER_START_COMMAND = "dispatcher-start";
 
 /** Command menu description. */
 export const DISPATCHER_START_DESCRIPTION =
@@ -95,7 +104,7 @@ export function activationResultCopy(
   }
 }
 
-/** Build the `dispatcher-start` command definition. */
+/** Build the `dsh-bot` command definition (name: {@link DISPATCHER_START_COMMAND}). */
 export function createDispatcherStartCommand(options: RegisterDispatcherStartCommandOptions): CommandDefinitionLike {
   return {
     name: DISPATCHER_START_COMMAND,

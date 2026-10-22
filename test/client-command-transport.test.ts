@@ -86,7 +86,7 @@ describe("posture — session lifecycle only, never worker/turn management", () 
       }),
       sessions: () => undefined,
     });
-    assert.deepEqual(await transport.sendCommand("s-1", "/dispatcher-start"), {
+    assert.deepEqual(await transport.sendCommand("s-1", "/dsh-bot"), {
       kind: "no-channel",
     });
   });
@@ -97,7 +97,7 @@ describe("posture — session lifecycle only, never worker/turn management", () 
       sessions: () => undefined,
     });
     await assert.doesNotReject(async () => {
-      const result = await transport.sendCommand("s-1", "/dispatcher-stop");
+      const result = await transport.sendCommand("s-1", "/dispatcher-resolve");
       assert.deepEqual(result, { kind: "no-channel" });
       await drain();
     });

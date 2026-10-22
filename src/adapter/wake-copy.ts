@@ -1,4 +1,5 @@
 import { textBlocks, type ContentBlock } from "./content-blocks.js";
+import type { AgentMessageWakeOrigin } from "../core/peer-types.js";
 
 /**
  * New copy only — short cue that background work is ready.
@@ -32,6 +33,20 @@ export const PLUGIN_NAME = "multitask-dispatcher";
 export const WAKE_SOURCE_KIND = `plugin:${PLUGIN_NAME}`;
 
 /**
+ * Ticket 116 / ADR-0025: structured provenance for a wake opened by another
+ * agent. One declaration lives in core (`peer-types.ts`) so the wake bus,
+ * the host port, and this message builder cannot drift; this alias exists
+ * for the adapter-facing name.
+ *
+ * The shape is the host's own adjacent-agent source
+ * (`dsh-subagent/lib/index.js:444-449`), admitted by the v4 source rules
+ * (`dsh-session-format-v3-to-v4/lib/index.js:70` lists `agent-message` as a
+ * released producer kind). It replaces the plugin kind on such a wake, so
+ * the durable record — not the heading — says where the turn came from.
+ */
+export type WakeMessageSource = AgentMessageWakeOrigin;
+
+/**
  * Structural UserMessage for `Agent.followup`.
  * Mirrors the installed `dsh-llm` shape without importing host packages.
  * Omitting `form` is valid — undeclared context is the documented default.
@@ -42,20 +57,37 @@ export interface WakeUserMessage {
   readonly content: ContentBlock[];
   readonly source: {
     readonly kind: string;
+    readonly form?: string;
+    readonly senderSessionId?: string;
   };
 }
 
 let wakeMessageSeq = 0;
 
-/** Build the wake follow-up message. Fresh id per call. */
-export function wakeUserMessage(text: string = WAKE_CUE): WakeUserMessage {
+/**
+ * Build the wake follow-up message. Fresh id per call.
+ *
+ * `source` (ticket 116) is an optional override: a peer wake passes the
+ * structured `agent-message` origin so the turn is attributed to its sender
+ * agent, while a settle/plugin wake keeps the producer-owned plugin kind.
+ * `text` stays presentation only — nothing derives origin from it.
+ */
+export function wakeUserMessage(
+  text: string = WAKE_CUE,
+  source?: WakeMessageSource,
+): WakeUserMessage {
   wakeMessageSeq += 1;
   return {
     id: `multitask-wake-${Date.now()}-${wakeMessageSeq}`,
     role: "user",
     content: textBlocks(text),
-    source: {
-      kind: WAKE_SOURCE_KIND,
-    },
+    source:
+      source !== undefined
+        ? {
+            kind: source.kind,
+            form: source.form,
+            senderSessionId: source.senderSessionId,
+          }
+        : { kind: WAKE_SOURCE_KIND },
   };
 }

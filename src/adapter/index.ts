@@ -109,11 +109,13 @@ export {
 } from "./inbox-watcher.js";
 export {
   createCordisDshHost,
+  dispatcherUserMessageSession,
   listGlobalToolNames,
   mapStopReason,
   normalizeSettleReport,
   normalizeWorkerReport,
   SPAWN_PROVIDER,
+  USER_MESSAGE_SOURCE_KIND,
   type ActivationLike,
   type ActivationSpecLike,
   type AdapterContext,
@@ -128,12 +130,17 @@ export {
   type ToolsLike,
   type WorkerAgentDef,
 } from "./cordis-dsh-host.js";
+export type {
+  DispatcherSpawnOptions,
+  DispatcherSpawnResult,
+} from "../core/types.js";
 export {
   bindDispatcherLifecycle,
   isTopLevel,
   type ActivationOutcome,
   type BindDispatcherLifecycleOptions,
   type BindDispatcherLifecycleResult,
+  type SpawnedActivationOutcome,
 } from "./parent-agent.js";
 export {
   applySessionKindProjection,
@@ -186,16 +193,6 @@ export {
   type WorkerAccessToolDeps,
 } from "./worker-access-tool.js";
 export {
-  createDispatcherStopCommand,
-  DISPATCHER_STOP_COMMAND,
-  DISPATCHER_STOP_DESCRIPTION,
-  DISPATCHER_STOP_NOT_DISPATCHER,
-  DISPATCHER_STOP_SUCCESS,
-  DISPATCHER_STOP_UNRESOLVED,
-  registerDispatcherStopCommand,
-  type RegisterDispatcherStopCommandOptions,
-} from "./stop-command.js";
-export {
   createDispatcherSteerCommand,
   DISPATCHER_STEER_COMMAND,
   DISPATCHER_STEER_DESCRIPTION,
@@ -235,5 +232,6 @@ export {
   PEER_WAKE_CUE,
   WAKE_CUE,
   wakeUserMessage,
+  type WakeMessageSource,
   type WakeUserMessage,
 } from "./wake-copy.js";

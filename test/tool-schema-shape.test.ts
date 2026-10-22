@@ -119,7 +119,7 @@ function createCaptureCtx(): AdapterContext & {
   } as AdapterContext & { registered: RegisterableTool[] };
 }
 
-function registerFiveTools(): RegisterableTool[] {
+function registerAllDispatcherTools(): RegisterableTool[] {
   const ctx = createCaptureCtx();
   const host = new FakeDshHost();
   const multitask = createMultitask(host);
@@ -148,8 +148,8 @@ describe("tool schema shape — provider-valid JSON Schema (ticket 45)", () => {
     );
   });
 
-  it("all five serialized dispatcher tool schemas are structurally valid", () => {
-    const tools = registerFiveTools();
+  it("all eight serialized dispatcher tool schemas are structurally valid", () => {
+    const tools = registerAllDispatcherTools();
     assert.deepEqual(
       tools.map((tool) => tool.name),
       [...DISPATCHER_TOOL_NAMES],
@@ -160,7 +160,7 @@ describe("tool schema shape — provider-valid JSON Schema (ticket 45)", () => {
   });
 
   it("required flags become the parent object's required array", () => {
-    const tools = registerFiveTools();
+    const tools = registerAllDispatcherTools();
     const byName = new Map(tools.map((tool) => [tool.name, tool]));
 
     const spawn = byName.get("spawn_worker")?.parameters as Record<
@@ -196,7 +196,7 @@ describe("tool schema shape — provider-valid JSON Schema (ticket 45)", () => {
   });
 
   it("no property schema carries a required key; optionality preserved", () => {
-    const tools = registerFiveTools();
+    const tools = registerAllDispatcherTools();
     const deliver = tools.find(
       (tool) => tool.name === "deliver_result",
     )?.parameters as {

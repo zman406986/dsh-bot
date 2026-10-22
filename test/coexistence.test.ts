@@ -35,7 +35,6 @@ import {
   DISPATCHER_START_COMMAND,
   DISPATCHER_START_SUCCESS,
   DISPATCHER_STEER_COMMAND,
-  DISPATCHER_STOP_COMMAND,
   type AdapterContext,
   type AgentLike,
   type CommandDefinitionLike,
@@ -787,9 +786,9 @@ describe("coexistence — host face: fail-loud claims (Findings 1 and 2)", () =>
     // Commands: ours `dispatcher-`-prefixed (design-16 §5), foreign's its own.
     assert.deepEqual(ctx.commandNames().sort(), [
       DISPATCHER_RESOLVE_COMMAND,
-      DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
-      DISPATCHER_STOP_COMMAND,
+      // "dsh-bot" sorts after the dispatcher- names (ADR-0030 rename).
+      DISPATCHER_START_COMMAND,
       FOREIGN.command,
     ]);
 
@@ -932,9 +931,9 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
     // The dormant affordances are exactly the `dispatcher-` commands.
     assert.deepEqual(ctx.commandNames().sort(), [
       DISPATCHER_RESOLVE_COMMAND,
-      DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
-      DISPATCHER_STOP_COMMAND,
+      // "dsh-bot" sorts after the dispatcher- names (ADR-0030 rename).
+      DISPATCHER_START_COMMAND,
       FOREIGN.command,
     ]);
   });
@@ -956,13 +955,16 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
       await new Promise((resolve) => setImmediate(resolve));
     }
 
-    // Seven dispatcher tools alongside the foreign tool — no clobbering.
+    // The dispatcher surface (eight tools since ticket 118 + request_access)
+    // alongside the foreign tool — no clobbering.
     assert.deepEqual(ctx.toolNames().sort(), [
+      "await_agent",
       "check_workers",
       "deliver_result",
       FOREIGN.tool,
+      "message_agent",
       "request_access",
-      "send_peer",
+      "spawn_dispatcher",
       "spawn_worker",
       "steer_worker",
       "stop_worker",
@@ -1003,7 +1005,7 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
     );
     const agent = createAgent("s-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
-    assert.equal(ctx.toolNames().length, 8); // seven ours + one foreign
+    assert.equal(ctx.toolNames().length, 10); // nine ours + one foreign
 
     // HMR: dispose ONLY the dispatcher fiber.
     dispatcherFiber.dispose();
@@ -1043,9 +1045,9 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
     foreignFiber.dispose();
     assert.deepEqual(ctx.commandNames().sort(), [
       DISPATCHER_RESOLVE_COMMAND,
-      DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
-      DISPATCHER_STOP_COMMAND,
+      // "dsh-bot" sorts after the dispatcher- names (ADR-0030 rename).
+      DISPATCHER_START_COMMAND,
     ]);
     assert.ok(ctx.hasSettingsNamespace("multitask-dispatcher") === false);
     assert.equal(ctx.hasSettingsNamespace(FOREIGN.settingsNs), false);
@@ -1056,7 +1058,7 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
       ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent }),
       { kind: "success", text: DISPATCHER_START_SUCCESS },
     );
-    assert.equal(ctx.toolNames().length, 7);
+    assert.equal(ctx.toolNames().length, 9);
   });
 });
 

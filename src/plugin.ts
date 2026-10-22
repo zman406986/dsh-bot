@@ -25,7 +25,6 @@ import {
   registerDispatcherResolveCommand,
   registerDispatcherStartCommand,
   registerDispatcherSteerCommand,
-  registerDispatcherStopCommand,
   registerDispatcherTools,
   registerSessionKindProjection,
   registerMicrocompact,
@@ -45,6 +44,7 @@ import {
   type AccessPromptPump,
   type AdapterContext,
   type CordisDshHost,
+  type DispatcherSpawnOptions,
   type SessionProjectionChildLike,
   type StorageDomainDurability,
   type TokenMeterLike,
@@ -432,7 +432,8 @@ export function composeWakeText(
  * - Disabled path returns early: stock dsh — no core, no command, no tools,
  *   no policy, no wake handling.
  * - Enabled path boots dormant: stock experience plus the passive core/host
- *   plumbing and the `dispatcher-start` command. The six dispatcher tools
+ *   plumbing and the `dsh-bot` command (renamed from `dispatcher-start` by
+ *   ADR-0030, 2026-10-21). The six dispatcher tools
  *   and request_access register only when a session activates, and the
  *   primary chat is never captured on load.
  */
@@ -450,11 +451,13 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   // Ticket 123: the session-kind projection — the durable host-side marker
   // the client reads as `projectionValues.sessionKind`. It folds the host's
   // OWN declared command log (`command/run` + `command/done` for
-  // `/dispatcher-start` / `/dispatcher-stop`; dsh-commands
-  // `lib/index.js:334/:341`), so nothing is appended by us and no event kind
-  // is invented. Per-session by construction: the pair lands in the invoking
-  // session's log only (ADR-0019). Registration is an effect on the calling
-  // fiber, so unloading this plugin removes the key.
+  // `/dsh-bot`; dsh-commands `lib/index.js:334/:341`), so nothing is
+  // appended by us and no event kind is invented. `/dispatcher-stop` is
+  // withdrawn (ADR-0030, ticket 129 removed the command) — the projection
+  // still matches the legacy literal so persisted pre-rename logs keep
+  // marking their sessions. Per-session by construction: the pair lands in
+  // the invoking session's log only (ADR-0019). Registration is an effect
+  // on the calling fiber, so unloading this plugin removes the key.
   registerSessionKindProjection(ctx);
 
   const markers: StorageDomainDurability = createStorageDomainDurability(
@@ -617,6 +620,17 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
         },
       });
     },
+    // Ticket 118 chunk 3 / ADR-0025: the spawned-dispatcher activation path.
+    // The host fires this once per successful `spawnDispatcher` — from the
+    // child's `agent/created` (before its first turn), or from `ctx.agents`
+    // after the spawn resolves when the host announced nothing. It routes
+    // into the SAME lifecycle map as a command activation, minus the
+    // top-level gate: the child is a subagent by construction. `lifecycle` is
+    // assigned below; this closure only runs once a spawn happens, never
+    // during apply (same rule as `pumpFor`).
+    onDispatcherSpawned: (agent, sessionId) => {
+      lifecycle.activateSpawnedDispatcher(agent, sessionId);
+    },
   });
   const accessTimeoutMs = config.accessRequestTimeoutMs?.get();
   // Ticket 108: clamped defensively here too — the schema enforces min 0,
@@ -643,6 +657,12 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     // during apply.
     isLiveDispatcherSession: (sessionId) =>
       lifecycle.isDispatcherSession(sessionId),
+    // Ticket 115: the await-timeout liveness probe. Worker ids ARE dsh
+    // subagent session ids, and `ctx.agents` is the same live-agent registry
+    // the host's wake path already resolves (`requestDispatcherWakeup`,
+    // cordis-dsh-host.ts). Consulted once, at the timeout, only when no
+    // settle record exists — never on a timer.
+    isAgentAlive: (workerId) => ctx.agents.get(workerId) !== undefined,
     // Ticket 113: the reply writer — the core decides WHEN (terminal paths),
     // this owns HOW (job-dir files; the core never touches the filesystem).
     onInboxJobResolved: writeInboxResolution,
@@ -655,6 +675,20 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   // test-only before, structurally stuck at 0). Same subscription as the
   // activity phrase — no new seam, no polling.
   host.onWorkerToolCall((workerId) => multitask.noteToolCall(workerId));
+
+  // Ticket 117: the user-message early release. The host's existing
+  // `session/event` subscription now reports STRUCTURED user prompts (a
+  // `UserMessage` whose `source.kind === "user"`, on either the inbox splice
+  // the host commits synchronously inside `Agent.send`/`followup`/`steer` or
+  // the `user/message` committed at a turn's pre-step); text is never read.
+  // A release here means the user spoke while a dispatcher turn sits inside
+  // `await_agent` — the wait ends `released` / `user-message` instead of
+  // holding the chat for up to 120 s. `releaseWaits` is a no-op for a session
+  // with no waiters, so every dispatcher session's events can flow through
+  // unconditionally; the core scopes the release to the watching session.
+  host.onDispatcherUserMessage((sessionId) => {
+    multitask.releaseWaits(sessionId, "user-message");
+  });
 
   // Access-request prompt pumps (ticket 23, design-16 §4.4; ADR-0019
   // per-session): surfaces a dispatcher session's pending asks through the
@@ -746,7 +780,7 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   // Activation lifecycle (ticket 19, ADR-0009; per session per ADR-0019):
   // boot dormant and stock. Nothing is captured on load or on
   // agent/session-start — the dispatcher exists in a chat only after the
-  // explicit dispatcher-start command fires there (once per session, never
+  // explicit dsh-bot command fires there (once per session, never
   // toggled off while running).
   //
   // Per-session dispatcher tool surface (ADR-0019 keying table): the five
@@ -760,6 +794,16 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   // sessions: acquired at the first activation, released when the last one
   // ends.
   const sessionToolDisposers = new Map<string, Array<() => void>>();
+  /**
+   * Ticket 118 chunk 3: sessions that actually ACQUIRED the global
+   * `request_access` tool. The refcount is shared, so the release side must be
+   * paired with a real acquisition: a registration that threw before
+   * `acquireGlobalAccessTool()` leaves this session out of the holder set, and
+   * its later deactivation must not decrement somebody else's hold. In the
+   * success path the session is always in the set, so deactivation behaves
+   * exactly as before.
+   */
+  const accessToolHoldersBySession = new Set<string>();
   let globalAccessDisposer: (() => void) | null = null;
   let accessToolHolders = 0;
 
@@ -809,6 +853,17 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     globalAccessDisposer = null;
   };
 
+  /**
+   * Ticket 118 chunk 3: release only a hold THIS session actually took. A
+   * registration that threw on the scoped surface never reached
+   * `acquireGlobalAccessTool`, and decrementing anyway would drop a sibling
+   * dispatcher's `request_access` while it is still live.
+   */
+  const releaseGlobalAccessToolForSession = (sessionId: string): void => {
+    if (!accessToolHoldersBySession.delete(sessionId)) return;
+    releaseGlobalAccessTool();
+  };
+
   const activateToolSurface = (sessionId: string): void => {
     if (sessionToolDisposers.has(sessionId)) return;
     const agent = host.parentAgentOf(sessionId);
@@ -830,6 +885,13 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       // `ctx.approval` and THIS session's activated Agent (its doc comment
       // carries the contract and the L3 remainder).
       requestDispatchApproval: dispatchApprovalSeamFor(ctx, host, sessionId),
+      // Ticket 118 / ADR-0025 mitosis: the host's dispatcher-spawn seam —
+      // what `spawn_dispatcher` calls. Without it the registered tool THROWS
+      // at execute (a missing seam is a wiring bug, never a host refusal).
+      // The parent is the closure's session id; the host resolves its bound
+      // Agent and applies the depth ceiling (parent depth + 2).
+      spawnDispatcher: (opts: DispatcherSpawnOptions) =>
+        host.spawnDispatcher(opts),
     };
     // ADR-0019: register through the activated agent's own scoped context
     // (`agent.ctx.tools` — the host's per-agent scope seam). Agents without
@@ -842,6 +904,7 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
         ? registerDispatcherTools({ ctx: { tools: scopedTools }, ...toolDeps })
         : registerDispatcherTools({ ctx, ...toolDeps });
     acquireGlobalAccessTool();
+    accessToolHoldersBySession.add(sessionId);
     sessionToolDisposers.set(sessionId, disposers);
   };
 
@@ -855,7 +918,7 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       }
       sessionToolDisposers.delete(sessionId);
     }
-    releaseGlobalAccessTool();
+    releaseGlobalAccessToolForSession(sessionId);
   };
 
   const deactivateAllToolSurfaces = (): void => {
@@ -951,6 +1014,12 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       // — clear that session's rows here so no "always" leaks into a later
       // session (and never a sibling's).
       multitask.clearSessionAccessPolicy(sessionId);
+      // Ticket 115: this session's await waiters end here — each resolves
+      // `released` and its timeout timer is cancelled, so no waiter or timer
+      // outlives a deactivated dispatcher. Settle records stay: deactivation
+      // is not a restart. Plugin unload reaches this too — `unbind`
+      // deactivates each session through the same path.
+      multitask.cancelWaits(sessionId);
       // Ticket 23: prompts belong to their session — abandon this session's
       // outstanding ones. Their tickets keep the armed relay timeouts
       // (ADR-0008 deny-by-default); nothing waits indefinitely.
@@ -1214,14 +1283,14 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       activeSessionId: () => lifecycle.dispatcherSessionId(),
       activate: (agent) => lifecycle.activate(agent),
     });
-  }, "multitask-dispatcher: dispatcher-start command");
+  }, "multitask-dispatcher: dsh-bot command");
 
   // Steer input command (ticket 22, design-16 §4.3): same lifecycle pattern
-  // as dispatcher-start — registered dormant, the handler gates on the
+  // as dsh-bot — registered dormant, the handler gates on the
   // INVOKING chat's own dispatcher activation (ADR-0019: a set of active
   // sessions, not one slot) and routes into the existing core steer queue
   // path (`Multitask.steerWorker`, shared with the steer_worker tool).
-  // Same generator-effect shape as dispatcher-start (ticket 44).
+  // Same generator-effect shape as dsh-bot (ticket 44).
   ctx.effect(function* () {
     yield registerDispatcherSteerCommand({
       ctx,
@@ -1261,26 +1330,6 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       isWildcardTarget: isWildcardAccessTarget,
     });
   }, "multitask-dispatcher: dispatcher-resolve command");
-
-  // Session deactivation command (ticket 101, ADR-0021 decision 3): the
-  // delete TRANSPORT the floating window's per-row affordance executes
-  // through the composer's own command transaction (the resolve command's
-  // pattern). The handler gates on the INVOKING chat's own activation and
-  // routes into `lifecycle.deactivate` — the SAME `deactivateSession`
-  // sequence the host `agent/disposed` listener runs (registry drop, parent
-  // unbind, `onDeactivated`: tool surface, access-policy rows, prompts, and
-  // the roster mirror for THAT session only; ADR-0019 keying). Delete never
-  // disposes the dsh chat itself — the binding is off, the chat stays, and
-  // `/dispatcher-start` re-activates it. Worker-turn stopping stays excluded
-  // (the U-G amendment is for dispatcher sessions ONLY; `stop_worker` stays
-  // agent-facing).
-  ctx.effect(function* () {
-    yield registerDispatcherStopCommand({
-      ctx,
-      activeSessionIds: () => lifecycle.dispatcherSessionIds(),
-      deactivate: (sessionId) => lifecycle.deactivate(sessionId),
-    });
-  }, "multitask-dispatcher: dispatcher-stop command");
 
   // Ticket 23: when the core parks a pending access ask, present it through
   // the prompt seam. The core's own onAccessRequest handler was registered

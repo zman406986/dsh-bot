@@ -18,8 +18,12 @@ import {
   WORKER_DENIED_TOOL_CANDIDATES,
 } from "../src/worker/tool-barrier.js";
 import {
+  AWAIT_AGENT_TOOL,
   CHECK_WORKERS_TOOL,
+  SPAWN_DISPATCHER_TOOL,
   DELIVER_RESULT_TOOL,
+  DISPATCHER_TOOL_NAMES,
+  MESSAGE_AGENT_TOOL,
   SEND_PEER_TOOL,
   SPAWN_WORKER_TOOL,
   STEER_WORKER_TOOL,
@@ -87,21 +91,30 @@ describe("worker tool barrier", () => {
       "stop_worker",
       "deliver_result",
       "send_peer",
+      "message_agent",
+      "await_agent",
+      "spawn_dispatcher",
     ]) {
       assert.ok(names.has(required), `missing deny candidate: ${required}`);
     }
   });
 
-  it("denies the six registered dispatcher tools on the spawned worker filter", () => {
+  it("denies the eight registered dispatcher tools on the spawned worker filter", () => {
     const dispatcherTools = [
       SPAWN_WORKER_TOOL,
       CHECK_WORKERS_TOOL,
       STEER_WORKER_TOOL,
       STOP_WORKER_TOOL,
       DELIVER_RESULT_TOOL,
-      SEND_PEER_TOOL,
+      MESSAGE_AGENT_TOOL,
+      AWAIT_AGENT_TOOL,
+      SPAWN_DISPATCHER_TOOL,
     ];
-    const known = new Set([...dispatcherTools, "bash"]);
+    // The declared surface, tool for tool (ticket 116 retired send_peer,
+    // which stays a deny candidate above; ticket 117 added await_agent;
+    // ticket 118 added spawn_dispatcher).
+    assert.deepEqual([...dispatcherTools], [...DISPATCHER_TOOL_NAMES]);
+    const known = new Set([...dispatcherTools, SEND_PEER_TOOL, "bash"]);
     const filter = createWorkerAgentDef().resolveToolFilter(known);
     for (const name of dispatcherTools) {
       assert.ok(
@@ -109,7 +122,33 @@ describe("worker tool barrier", () => {
         `worker can still resolve dispatcher tool: ${name}`,
       );
     }
+    // The retired name stays denied too — a historical row must never become
+    // visible on a worker surface.
+    assert.ok(filter.deny.includes(SEND_PEER_TOOL));
     assert.ok(!filter.deny.includes("bash"));
+  });
+
+  // Ticket 119: the durable form of the rule above. Derived from the declared
+  // surface rather than a hand-kept list, so a ninth dispatcher tool cannot
+  // ship without a matching deny candidate — the failure mode is a
+  // dispatcher-only verb silently reaching a worker.
+  it("every declared dispatcher tool is a deny candidate (structural, not a list)", () => {
+    const candidates = new Set(WORKER_DENIED_TOOL_CANDIDATES);
+    for (const name of DISPATCHER_TOOL_NAMES) {
+      assert.ok(
+        candidates.has(name),
+        `dispatcher tool missing from the worker deny candidates: ${name}`,
+      );
+    }
+    // The retired verb keeps its deny entry even though nothing registers it:
+    // a historical row must never become visible on a worker.
+    assert.ok(candidates.has(SEND_PEER_TOOL));
+    // And nothing dispatcher-only is missing from the intersection path.
+    const known = new Set([...DISPATCHER_TOOL_NAMES, SEND_PEER_TOOL]);
+    const deny = new Set(buildWorkerToolFilter(known).deny);
+    for (const name of known) {
+      assert.ok(deny.has(name), `worker filter leaks dispatcher tool: ${name}`);
+    }
   });
 });
 

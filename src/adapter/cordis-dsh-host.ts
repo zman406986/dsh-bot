@@ -1,10 +1,16 @@
 import type { DshHost } from "../core/dsh-host.js";
 import type { DurabilityPort } from "../core/durability.js";
 import type { AccessRequestEvent } from "../core/access-types.js";
+import type { AgentMessageWakeOrigin } from "../core/peer-types.js";
+import { randomUUID } from "node:crypto";
 import { clampActivity, clampRecentResultExcerpt } from "../core/report-clamp.js";
 import type { UserQuestionsLike } from "./access-prompt.js";
 import type { HostApprovalServiceLike } from "./dispatch-approval.js";
 import type { SettledEvent, SpawnOptions, TerminalWorkerStatus } from "../core/types.js";
+import type {
+  DispatcherSpawnOptions,
+  DispatcherSpawnResult,
+} from "../core/types.js";
 import type { RosterRecentResultSource } from "../core/roster-snapshot.js";
 import {
   normalizeWorkerErrorReport,
@@ -12,6 +18,7 @@ import {
 } from "../worker/report.js";
 import {
   WORKER_MAX_DEPTH,
+  dispatcherSpawnMaxDepth,
   workerSpawnMaxDepth,
   type WorkerAgentDef,
 } from "../worker/agent-def.js";
@@ -74,6 +81,15 @@ export interface ActivationLike {
 export interface ActivationSpecLike {
   readonly provider: string;
   readonly label: string;
+  /**
+   * Caller-reserved durable child session id (local backends only —
+   * `SubagentActivationSpec & { childId }`). Ticket 118 uses it for the
+   * DISPATCHER spawn: minting the id up front is what lets `agent/created`
+   * recognise that exact child without a per-parent counter, which is the
+   * race the per-parent `pendingSpawns` counter cannot express. The host
+   * refuses a reserved id that is already live or persisted
+   * (`DUPLICATE_CHILD`), exactly as it would for its own minted id.
+   */
   readonly childId?: unknown;
   readonly request: {
     readonly prompt: ContentBlock[];
@@ -82,7 +98,8 @@ export interface ActivationSpecLike {
      * Ticket 83: the CHILD'S ABSOLUTE delegation-depth ceiling. The host's
      * `resolveChildDepth` refuses the spawn when `parentDepth + 1 > maxDepth`
      * — it is NOT the worker's own budget. Derive with
-     * `workerSpawnMaxDepth`; never send `WORKER_MAX_DEPTH` (0) here raw.
+     * `workerSpawnMaxDepth` for a worker hop, `dispatcherSpawnMaxDepth` for a
+     * dispatcher hop; never send `WORKER_MAX_DEPTH` (0) here raw.
      */
     readonly maxDepth?: number;
   };
@@ -230,6 +247,25 @@ export interface CordisDshHostOptions {
    * definitions are registered on the child's own scope at `agent/created`.
    */
   workerLocalTools?: (workerSessionId: unknown) => readonly unknown[];
+  /**
+   * Ticket 118 (ADR-0025 mitosis): activate a freshly spawned DISPATCHER
+   * child — bind it as a parent, register its own scoped tool surface, inject
+   * the dispatcher policy, add it to the lifecycle registry without the
+   * top-level gate, and start its durability rebuild.
+   *
+   * Called EXACTLY ONCE per successful `spawnDispatcher`, and — when the host
+   * announces the child — from the `agent/created` serial listener, i.e. the
+   * last moment its own scope can take registrations before its first turn
+   * (the same seam the worker composition uses). A host or stub that fires no
+   * `agent/created` gets the call right after `startActivation` resolves
+   * instead; in that case the child's first turn may already be open, so a
+   * tool surface registered here may miss it (recorded limit, not hidden).
+   *
+   * The adapter passes the exact live child Agent and its session id. It
+   * never inspects the outcome — activation failure must not turn a
+   * successful spawn into a host error.
+   */
+  onDispatcherSpawned?: (agent: AgentLike, sessionId: string) => void;
 }
 /**
  * Live `DshHost` over Cordis dsh services.
@@ -253,6 +289,22 @@ export interface CordisDshHost extends DshHost {
    * access prompts resolve their agent from the session they serve).
    */
   parentAgentOf(sessionId: string): AgentLike | undefined;
+  /**
+   * Ticket 118 (ADR-0025 mitosis): spawn ANOTHER DISPATCHER from a bound
+   * dispatcher session, returning the host-assigned child session id.
+   *
+   * Deliberately NOT `spawnWorker`: the child is a peer, so this path
+   * - does not mark a pending spawn (no worker composition at
+   *   `agent/created` — the child inherits the parent's full composition),
+   * - does not enter the `workers` registry (it is not a work stream and
+   *   no dispatcher-sized cap of ours exists), and
+   * - passes no `agentPreset` (none exists in `ActivationSpecLike`).
+   *
+   * The only bounds are the host's: `maxDepth` (derived with
+   * `dispatcherSpawnMaxDepth`, parent depth + 2) and the 8-active root pool.
+   * Host errors surface unchanged — no refusal class is invented here.
+   */
+  spawnDispatcher(opts: DispatcherSpawnOptions): Promise<DispatcherSpawnResult>;
   /** Live job snapshots for the check surface. Process-local; not durable. */
   listLiveJobs(callerSessionId?: string): readonly JobSnapshotLike[];
   /** Durable markers (ADR-0006). */
@@ -297,6 +349,29 @@ export interface CordisDshHost extends DshHost {
    */
   onWorkerToolCall(cb: (workerId: string) => void): void;
   /**
+   * Ticket 117: subscribe to STRUCTURED user-message observations on any
+   * session (never text). Fired once per real user prompt the host records,
+   * with the session it landed on.
+   *
+   * What this watches, verified against `dsh@0.2.1-rc.2`:
+   * - `agent/inbox/spliced` (`dsh-agent-loop/lib/index.js:180-207`) — the
+   *   commit `Agent.send`/`followup`/`steer` performs SYNCHRONOUSLY
+   *   (`:800-814`), so a message user typed while a tool call is blocked
+   *   reaches this listener immediately. Its `inserted` entries are the
+   *   `UserMessage`s, carrying `source.kind`.
+   * - `user/message` — the same message committed at a turn's pre-step
+   *   (`dsh-agent-loop/lib/index.js:1069-1073`); only relevant when a wait
+   *   spans a turn boundary.
+   *
+   * Admitted source kinds: `"user"` only — the host's real human prompt
+   * (`dsh-api-session-controller/lib/types/index.js:3225`, also every slash
+   * command that steers user input, `dsh-plan-mode`). Explicitly NOT our own
+   * `plugin:multitask-dispatcher` wakes, NOT `agent-message` peer wakes, NOT
+   * `runtime-context`/`system-prompt`/`model` bookkeeping. The text is never
+   * inspected, so no wording can forge or suppress a release.
+   */
+  onDispatcherUserMessage(cb: (sessionId: string) => void): void;
+  /**
    * Ticket 41: the bounded settle-report excerpt observed for an owned
    * worker when it settled (adapter-side projection of the same
    * `subagent/end` event the core receives), or `null` when nothing honest
@@ -336,6 +411,76 @@ export interface SessionEventLike {
 /** Session handle carried as the first `session/event` argument. */
 export interface SessionRefLike {
   readonly id?: unknown;
+}
+
+/**
+ * Ticket 117: the message source kind of a real human prompt on
+ * `dsh@0.2.1-rc.2`. Every host producer of human-authored input stamps
+ * exactly this (`dsh-api-session-controller/lib/types/index.js:3225`,
+ * `dsh-acp/lib/index.js:835`, `dsh-plan-mode/lib/index.js:221`,
+ * `dsh-command-goal/lib/index.js:105`). Our own wakes use
+ * `plugin:multitask-dispatcher` and peer wakes `agent-message`, so the
+ * filter cannot mistake host background traffic for the user.
+ */
+export const USER_MESSAGE_SOURCE_KIND = "user";
+
+/** Whether one structural message records a real user prompt by source. */
+function isUserSourcedMessage(message: unknown): boolean {
+  if (typeof message !== "object" || message === null) return false;
+  const record = message as {
+    readonly role?: unknown;
+    readonly source?: { readonly kind?: unknown } | null;
+  };
+  if (record.role !== "user") return false;
+  if (typeof record.source !== "object" || record.source === null) return false;
+  return record.source.kind === USER_MESSAGE_SOURCE_KIND;
+}
+
+/**
+ * Ticket 117: the session id when ONE committed `session/event` reports a
+ * real user-authored message, otherwise null. Structured only — no text is
+ * read, no heading is matched, so copy can neither forge nor suppress a
+ * release.
+ *
+ * Two event types count, both host-authored (`dsh@0.2.1-rc.2`):
+ * - `agent/inbox/spliced` — the durable inbox mutation `Agent.send`/
+ *   `followup`/`steer` commits synchronously inside the send call
+ *   (`dsh-agent-loop/lib/index.js:180-207`, sinks at `:800-814`). This is
+ *   the one that fires while a tool call is blocked, i.e. during an await.
+ *   Only `inserted` entries count: they are the messages the caller supplied,
+ *   while `removedCount`/`outcome` describe queue management.
+ * - `user/message` — the same message committed at a turn's pre-step
+ *   (`dsh-agent-loop/lib/index.js:1069-1073`). It arrives after a wait has
+ *   already ended in the common case, so it is a secondary, harmless catch
+ *   for a wait that spans a turn boundary.
+ *
+ * Explicit non-matches, by source: our `plugin:multitask-dispatcher` wakes,
+ * `agent-message` peer sends, `runtime-context`/`system-prompt` context, and
+ * `model`/`tool` traffic.
+ */
+export function dispatcherUserMessageSession(
+  sessionRef: unknown,
+  event: unknown,
+): string | null {
+  if (typeof event !== "object" || event === null) return null;
+  const record = event as { readonly type?: unknown; readonly data?: unknown };
+  const data = record.data;
+  if (typeof data !== "object" || data === null) return null;
+
+  let userAuthored = false;
+  if (record.type === "agent/inbox/spliced") {
+    const inserted = (data as { readonly inserted?: unknown }).inserted;
+    userAuthored =
+      Array.isArray(inserted) && inserted.some(isUserSourcedMessage);
+  } else if (record.type === "user/message") {
+    userAuthored = isUserSourcedMessage(data);
+  }
+  if (!userAuthored) return null;
+
+  if (typeof sessionRef !== "object" || sessionRef === null) return null;
+  const sessionId = (sessionRef as SessionRefLike).id;
+  if (sessionId === undefined || sessionId === null) return null;
+  return String(sessionId);
 }
 
 /**
@@ -511,6 +656,7 @@ export function createCordisDshHost(
   const markers = options?.markers;
   const composeWakeText = options?.composeWakeText;
   const workerLocalTools = options?.workerLocalTools;
+  const onDispatcherSpawned = options?.onDispatcherSpawned;
 
   /**
    * The child's mid-task reply tool (ticket 122). Null when the plugin did not
@@ -545,12 +691,41 @@ export function createCordisDshHost(
    * `subagent` tool, whose child must not receive the worker composition).
    */
   const pendingSpawns = new Map<string, number>();
+  /**
+   * Ticket 118 chunk 3: child ids this host RESERVED for a dispatcher spawn,
+   * recorded before `startActivation` is called. A reserved id is the exact
+   * answer to the `agent/created` identification problem that `pendingSpawns`
+   * cannot give: `spawnDispatcher` mints the id and passes it as
+   * `spec.childId`, so the listener matches this child by IDENTITY, never by
+   * a counter shared with concurrent worker spawns from the same parent.
+   *
+   * The window is therefore closed in both directions:
+   * - a dispatcher child announced while a worker spawn is in flight is
+   *   activated as a dispatcher and never receives the worker composition;
+   * - a worker child announced while a dispatcher spawn is in flight cannot
+   *   match a reserved id, so it still takes the normal `pendingSpawns` path.
+   *
+   * Entries are removed in `spawnDispatcher`'s `finally`, so a stale id can
+   * never mislabel a later child. `dispatcherActivated` is the durable half of
+   * the same answer — every child this host ever activated as a dispatcher —
+   * so an announcement that arrives AFTER the spawn resolved still cannot be
+   * composed as a worker. Its cardinality matches the `workers` map (which
+   * also lives for the process), and dispatcher spawns are bounded by the
+   * host's own live-child pool, so it is not a leak this adapter invents.
+   */
+  const reservedDispatcherIds = new Set<string>();
+  const dispatcherActivated = new Set<string>();
   const settledCallbacks: Array<(event: SettledEvent) => void> = [];
   const stepBoundaryCallbacks: Array<(workerId: string) => void | Promise<void>> = [];
   const accessRequestCallbacks: Array<(event: AccessRequestEvent) => void> = [];
   // Ticket 75: firehose-observed tool calls on owned workers, fanned out to
   // subscribers (the plugin wires the core's noteToolCall onto this).
   const toolCallCallbacks: Array<(workerId: string) => void> = [];
+  // Ticket 117: structured user-message observations on ANY session, fanned
+  // out to subscribers (the plugin wires `multitask.releaseWaits` onto this).
+  // The observation is the SAME `session/event` subscription below — no new
+  // host seam, no polling, no timers.
+  const userMessageCallbacks: Array<(sessionId: string) => void> = [];
   // Ticket 29: per-worker activity phrases, projected from the host
   // `session/event` firehose. Pure subscription — no polling, no timers.
   // Ticket 61: each entry carries its observation moment (host clock at
@@ -578,6 +753,35 @@ export function createCordisDshHost(
   // the core stores no report text and no second transcript exists.
   const workerResults = new Map<string, RosterRecentResultSource>();
   let wakeMissingLogged = false;
+
+  /**
+   * Shared wake-turn mechanics (ticket 116). `origin` is the optional
+   * structured source override: a peer wake passes the `agent-message`
+   * shape, everything else keeps the producer-owned plugin kind. The
+   * composed text is never consulted for origin.
+   */
+  function openWakeTurn(
+    sessionId: string,
+    origin?: AgentMessageWakeOrigin,
+  ): void {
+    const agent = ctx.agents.get(sessionId);
+    if (agent === undefined) {
+      if (!wakeMissingLogged) {
+        wakeMissingLogged = true;
+        // Unknown session: no-op. Never throw into the wake bus.
+      }
+      return;
+    }
+    let text: string | null = null;
+    if (composeWakeText !== undefined) {
+      try {
+        text = composeWakeText(sessionId);
+      } catch {
+        text = null;
+      }
+    }
+    agent.followup(wakeUserMessage(text ?? undefined, origin));
+  }
 
   function ownsSession(agentSessionId: string): string | undefined {
     return workers.has(agentSessionId) ? agentSessionId : undefined;
@@ -623,6 +827,18 @@ export function createCordisDshHost(
     const [sessionRef, rawEvent] = args as unknown as [unknown, unknown];
     const event = rawEvent as SessionEventLike | null;
     if (typeof event !== "object" || event === null) return;
+    // Ticket 117: a real user prompt on ANY session releases that session's
+    // await waiters. Read BEFORE the worker-only filter below, because the
+    // dispatcher session is never an owned worker — the filter would drop it.
+    // Structured source only; the text is never inspected.
+    if (userMessageCallbacks.length > 0) {
+      const userId = dispatcherUserMessageSession(sessionRef, event);
+      if (userId !== null) {
+        for (const cb of [...userMessageCallbacks]) {
+          cb(userId);
+        }
+      }
+    }
     if (event.type !== "tool/call") return;
     const session = sessionRef as SessionRefLike | null;
     if (typeof session !== "object" || session === null) return;
@@ -641,16 +857,56 @@ export function createCordisDshHost(
   });
 
   /**
-   * Worker composition for a child we are about to publish.
+   * Ticket 118 chunk 3: the one activation call per spawned dispatcher,
+   * deduplicated by session id so the `agent/created` listener and the
+   * post-`startActivation` fallback can never both activate the same child.
+   *
+   * Failure policy: the hook is the PLUGIN's step (bind parent, scoped tool
+   * surface, policy, lifecycle, rebuild) and must not turn a spawn the host
+   * already accepted into a host refusal — the model would be told nothing
+   * started while a live child exists. A throw is therefore logged honestly
+   * and the child stays live but inert; `dispatcherActivated` still records
+   * the attempt so neither path retries it.
+   */
+  function activateSpawnedDispatcher(
+    childAgent: AgentLike,
+    sessionId: string,
+  ): void {
+    if (onDispatcherSpawned === undefined) return;
+    if (dispatcherActivated.has(sessionId)) return;
+    dispatcherActivated.add(sessionId);
+    try {
+      onDispatcherSpawned(childAgent, sessionId);
+    } catch (error) {
+      try {
+        console.warn(
+          `[multitask-dispatcher] spawned dispatcher ${sessionId} could not be activated:`,
+          error,
+        );
+      } catch {
+        // A broken console must not break the spawn either.
+      }
+    }
+  }
+
+  /**
+   * Worker composition for a child we are about to publish, plus (ticket
+   * 118) dispatcher activation for a child WE reserved.
    *
    * `agent/created` is the last moment a child's own scope can take
    * registrations before its first turn: the loop holds queued input until
    * every serial listener returns. Registering here — rather than through a
    * named Agent Preset — keeps the composition identical on every boot route
    * and needs no preset registry.
+   *
+   * Dispatcher child vs worker child is decided by IDENTITY (the reserved
+   * `childId`), never by the per-parent `pendingSpawns` counter: the counter
+   * cannot tell two concurrently spawned children of one parent apart, so a
+   * dispatcher spawn racing a worker spawn used to be composable as a worker
+   * (chunk 1's recorded limit). With the reservation, the dispatcher child is
+   * matched by id and returns before the counter is even read.
    */
   const offAgentCreated = ctx.on("agent/created", (payload: never) => {
-    if (workerAgentDef === undefined) return;
     const record = payload as {
       agent?: {
         session?: { header?: { parentSession?: unknown }; id?: unknown };
@@ -661,6 +917,18 @@ export function createCordisDshHost(
     if (child === undefined) return;
     const parentSessionId = String(child.session?.header?.parentSession ?? "");
     if (parentSessionId === "") return;
+    const childSessionId = String(child.session?.id ?? "");
+    if (
+      childSessionId !== "" &&
+      (reservedDispatcherIds.has(childSessionId) ||
+        dispatcherActivated.has(childSessionId))
+    ) {
+      // Ticket 118: the child of our `spawnDispatcher` call — a dispatcher
+      // peer, never a worker. No composition, no barrier, no registry entry.
+      activateSpawnedDispatcher(child as AgentLike, childSessionId);
+      return;
+    }
+    if (workerAgentDef === undefined) return;
     if ((pendingSpawns.get(parentSessionId) ?? 0) === 0) return;
     if (typeof child.ctx !== "object" || child.ctx === null) return;
     applyWorkerComposition(
@@ -759,6 +1027,10 @@ export function createCordisDshHost(
       toolCallCallbacks.push(cb);
     },
 
+    onDispatcherUserMessage(cb: (sessionId: string) => void): void {
+      userMessageCallbacks.push(cb);
+    },
+
     recentResult(workerId: string): RosterRecentResultSource | null {
       return workerResults.get(workerId) ?? null;
     },
@@ -836,6 +1108,33 @@ export function createCordisDshHost(
         // Child's absolute ceiling: parent depth + 1 hop + leaf budget.
         maxDepth,
       };
+      // Ticket 120: RESERVE the child id before the spawn, exactly as
+      // `spawnDispatcher` does (ticket 118) and for the same reason — the
+      // child is already live inside `startActivation`.
+      //
+      // The host mints the id when the spec carries none, so a worker spawn
+      // used to learn its own id only when `startActivation` RESOLVED. By
+      // then the child had already emitted `agent/created` and its first
+      // `agent/status: running`, and the plugin's status handler called
+      // `workerIdOf(...)` on an id this host had not registered yet: it got
+      // `undefined` and dropped the event. There is one `running` edge per
+      // turn, so `multitask.noteTurnStarted` never ran and the worker FSM sat
+      // at `spawned` for the whole first turn — `steer_worker`/`message_agent`
+      // refused `not-running` and `check_workers` under-reported.
+      //
+      // Reserving the id fixes that at the right layer: this registry answers
+      // `workerIdOf` and becomes TRUE (the child exists, under this exact
+      // id) before the child can emit anything. Passed as `spec.childId`, so
+      // the host either creates the child under this id or refuses the
+      // spawn — no other id can ever come back.
+      const reservedChildId = randomUUID();
+      // Registered here, not after the await: `owns`/`workerIdOf` are what
+      // the status and settle listeners consult, and the child is live the
+      // moment `startActivation` is entered.
+      workers.set(reservedChildId, {
+        parentSessionId: opts.parentSessionId,
+        agentSessionId: reservedChildId,
+      });
       // Mark the in-flight spawn BEFORE it starts: `agent/created` fires
       // inside `startActivation`, and that listener is what composes the child.
       pendingSpawns.set(
@@ -844,13 +1143,23 @@ export function createCordisDshHost(
       );
       let activation: ActivationLike;
       try {
+        // The core registers its own record through this callback BEFORE the
+        // child can emit its first status edge (ticket 120). Both registries
+        // must be truthful at the same moment.
+        opts.onWorkerId?.(reservedChildId);
         activation = await ctx.subagents.startActivation({
           provider: SPAWN_PROVIDER,
           label: opts.title,
+          childId: reservedChildId,
           request,
           signal: controller.signal,
           delivery: "parent",
         });
+      } catch (error) {
+        // The spawn was refused or aborted before publication: no child
+        // exists, so neither registry may keep the reservation.
+        workers.delete(reservedChildId);
+        throw error;
       } finally {
         const remaining = (pendingSpawns.get(opts.parentSessionId) ?? 1) - 1;
         if (remaining <= 0) pendingSpawns.delete(opts.parentSessionId);
@@ -858,13 +1167,124 @@ export function createCordisDshHost(
       }
       // workerId === child SessionId. Brand erased at the boundary.
       const workerId = String(activation.childId);
-      workers.set(workerId, {
-        parentSessionId: opts.parentSessionId,
-        agentSessionId: workerId,
-      });
+      if (workerId !== reservedChildId) {
+        // The host minted its own id despite the reservation. Keep the
+        // registry truthful: move the entry, never leave the reservation
+        // behind as a phantom worker.
+        workers.delete(reservedChildId);
+        workers.set(workerId, {
+          parentSessionId: opts.parentSessionId,
+          agentSessionId: workerId,
+        });
+      }
       spawnControllers.set(workerId, controller);
       workerActivations.set(workerId, activation);
       return workerId;
+    },
+
+    /**
+     * Ticket 118 (ADR-0025 mitosis): spawn another DISPATCHER from a bound
+     * dispatcher session, then hand the child to the activation path. Across
+     * the two chunks this is the whole "mitosis" seam: chunk 1 built the
+     * spawn, chunk 3 (this one) adds the reservation that identifies the
+     * child and the single `onDispatcherSpawned` call that turns it into a
+     * real dispatcher (bind, scoped tools, policy, lifecycle, rebuild).
+     *
+     * Three deliberate differences from `spawnWorker`:
+     * - the child id is RESERVED here and passed as `spec.childId`, not left
+     *   to the host. That is what closes chunk 1's recorded race:
+     *   `pendingSpawns` is keyed per parent and cannot tell two children of
+     *   one parent apart, so while a worker spawn from the same parent was in
+     *   flight the `agent/created` listener could compose the dispatcher
+     *   child as a worker. With a reserved id the listener matches by
+     *   IDENTITY — a dispatcher child returns before the counter is read, and
+     *   a worker child can never match a reserved id. The host refuses a
+     *   reserved id that is already live or persisted (`DUPLICATE_CHILD`),
+     *   exactly as for its own minted id.
+     * - NO `pendingSpawns` bump and NO `workers` registry entry: the child is
+     *   a peer, not a work stream, so the firehose/settle subscriptions
+     *   ignore it.
+     * - NO `agentPreset` in the spec: the child joins the parent's
+     *   composition, which is exactly what "full tool set" means here.
+     *
+     * Depth: `dispatcherSpawnMaxDepth` gives the child an ABSOLUTE ceiling of
+     * parent depth + 2 — one hop for the child dispatcher, one for the
+     * workers it will spawn. Sending +1 would admit the child and then refuse
+     * every one of its workers.
+     *
+     * Activation hook: `onDispatcherSpawned` runs from the `agent/created`
+     * listener — the last moment the child's own scope can take
+     * registrations before its first turn. When the host announces nothing
+     * (a stub), the post-resolve fallback below makes the same single call
+     * from `ctx.agents.get(childId)`; a child absent from that registry is
+     * left live but inactive, which is the honest degraded shape because no
+     * Agent object exists to bind.
+     *
+     * Host errors propagate unchanged: `ACTIVATION_LIMIT_REACHED` arrives as
+     * a rejection of `startActivation` (the 8-active root pool) and
+     * `SubagentDepthError` as the host's own throw. No wrapper, no invented
+     * refusal class, no cap of ours (ADR-0025 §Starting bounds).
+     */
+    async spawnDispatcher(
+      opts: DispatcherSpawnOptions,
+    ): Promise<DispatcherSpawnResult> {
+      // ADR-0019: the authority agent is the SPAWNING dispatcher's own
+      // session, resolved exactly as `spawnWorker` does.
+      const parent = parents.get(opts.parentSessionId);
+      if (parent === undefined) {
+        throw new Error(
+          `CordisDshHost: no parent agent bound for session ${opts.parentSessionId}; cannot spawn a dispatcher before that dispatcher activation`,
+        );
+      }
+      const controller = new AbortController();
+      const signal = opts.signal ?? controller.signal;
+      // A child dispatcher of a depth-N parent lands at N+1. Its own workers
+      // land at N+2, so the ceiling admitted here must reach N+2. The `?? 0`
+      // fallback mirrors `spawnWorker`: a bound parent is assumed top-level
+      // only when its header carries no depth.
+      const parentDelegationDepth = parent.session.header?.delegationDepth ?? 0;
+      const maxDepth = dispatcherSpawnMaxDepth(parentDelegationDepth);
+      // Ticket 118 chunk 3: reserve the child id BEFORE the spawn. The
+      // `agent/created` listener fires inside `startActivation` — awaited
+      // before it resolves on the installed host — so identity is the only
+      // correlation available while the spawn is in flight.
+      const reservedChildId = randomUUID();
+      reservedDispatcherIds.add(reservedChildId);
+      try {
+        const activation = await ctx.subagents.startActivation({
+          provider: SPAWN_PROVIDER,
+          label: opts.title,
+          childId: reservedChildId,
+          // No `agentPreset` field exists on the spec — omitting it is
+          // automatic and is the mitosis requirement.
+          request: {
+            prompt: textBlocks(opts.prompt),
+            parent,
+            // Child's absolute ceiling: parent depth + 1 hop + its own worker hop.
+            maxDepth,
+          },
+          signal,
+          delivery: "parent",
+        });
+        // The child session id IS the dispatcher identity the activation path
+        // binds. Brand erased at the boundary; normally it equals the
+        // reservation, and a host that minted its own id is still handled.
+        const dispatcherId = String(activation.childId);
+        // Fallback for a host that announced no `agent/created` (or announced
+        // it under a different id). Deduplicated inside the helper, so a host
+        // that DID announce the child is not activated twice.
+        const childAgent = ctx.agents.get(dispatcherId);
+        if (childAgent !== undefined) {
+          activateSpawnedDispatcher(childAgent, dispatcherId);
+        }
+        // Bounded memory: the reservation is dropped in `finally`, and the
+        // activation record stays so a LATE `agent/created` for this child is
+        // still recognised as a dispatcher instead of falling through to the
+        // worker composition.
+        return { dispatcherId };
+      } finally {
+        reservedDispatcherIds.delete(reservedChildId);
+      }
     },
 
     async interruptWorker(workerId: string): Promise<void> {
@@ -904,24 +1324,20 @@ export function createCordisDshHost(
       stepBoundaryCallbacks.push(cb);
     },
 
-    async requestDispatcherWakeup(sessionId: string): Promise<void> {
-      const agent = ctx.agents.get(sessionId);
-      if (agent === undefined) {
-        if (!wakeMissingLogged) {
-          wakeMissingLogged = true;
-          // Unknown session: no-op. Never throw into the wake bus.
-        }
-        return;
-      }
-      let text: string | null = null;
-      if (composeWakeText !== undefined) {
-        try {
-          text = composeWakeText(sessionId);
-        } catch {
-          text = null;
-        }
-      }
-      agent.followup(wakeUserMessage(text ?? undefined));
+    /**
+     * Ticket 116 / ADR-0025: `origin` is the optional structured source
+     * override for a wake caused by another agent. Turn mechanics are
+     * identical (`followup` + composed text); only the follow-up message's
+     * `source` changes, from our producer-owned plugin kind to
+     * `{kind:"agent-message", form:"relay", senderSessionId}`. The text
+     * heading stays presentation only — nothing here derives origin from
+     * it.
+     */
+    async requestDispatcherWakeup(
+      sessionId: string,
+      origin?: AgentMessageWakeOrigin,
+    ): Promise<void> {
+      openWakeTurn(sessionId, origin);
     },
 
     /**
@@ -939,6 +1355,8 @@ export function createCordisDshHost(
       offSessionEvent();
       offAgentCreated();
       pendingSpawns.clear();
+      reservedDispatcherIds.clear();
+      dispatcherActivated.clear();
       // Abort covers spawns still pre-publication; a published worker ignores
       // its start signal, so it is released through its activation instead.
       for (const controller of spawnControllers.values()) {
@@ -956,6 +1374,7 @@ export function createCordisDshHost(
       stepBoundaryCallbacks.length = 0;
       accessRequestCallbacks.length = 0;
       toolCallCallbacks.length = 0;
+      userMessageCallbacks.length = 0;
       parents.clear();
     },
   };

@@ -14,6 +14,7 @@ export {
   DISPATCHER_START_NOT_TOP_LEVEL,
   DISPATCHER_START_SUCCESS,
   DISPATCHER_START_UNRESOLVED,
+  dispatcherUserMessageSession,
   isTopLevel,
   listGlobalToolNames,
   mapStopReason,
@@ -49,6 +50,7 @@ export type {
   RegisterDispatcherStartCommandOptions,
   RegisterDispatcherToolsOptions,
   RegisterableTool,
+  SpawnedActivationOutcome,
   StorageDomainDurability,
   StorageDomainLike,
   TextBlock,
@@ -60,6 +62,7 @@ export {
   buildWorkerSystemPrompt,
   buildWorkerToolFilter,
   createWorkerAgentDef,
+  dispatcherSpawnMaxDepth,
   EMPTY_WORKER_ERROR_REPORT,
   EMPTY_WORKER_REPORT_PLACEHOLDER,
   normalizeWorkerErrorReport,
@@ -71,7 +74,7 @@ export {
 export type { WorkerToolFilter } from "./worker/index.js";
 export type { DshHost } from "./core/dsh-host.js";
 export { FakeDshHost } from "./core/fake-host.js";
-export type { SendMessageCall, SpawnCall } from "./core/fake-host.js";
+export type { DispatcherSpawnCall, SendMessageCall, SpawnCall } from "./core/fake-host.js";
 export { createMultitask } from "./core/multitask.js";
 export type {
   DrainedWake,
@@ -138,6 +141,7 @@ export {
   toPeerNotice,
 } from "./core/peer-types.js";
 export type {
+  AgentMessageWakeOrigin,
   PeerEnvelope,
   PeerNotice,
   PeerSendAck,
@@ -177,6 +181,8 @@ export { applyEvent, canTransition } from "./core/worker-fsm.js";
 export type { WorkerEvent } from "./core/worker-fsm.js";
 export { isTerminalStatus } from "./core/types.js";
 export type {
+  DispatcherSpawnOptions,
+  DispatcherSpawnResult,
   SettledEvent,
   SpawnOptions,
   SpawnRequest,
@@ -211,18 +217,23 @@ export type {
   WorkerLivenessInput,
 } from "./core/liveness.js";
 export {
+  formatAwaitNote,
   formatCheckRowLine,
   formatCheckSummary,
   formatElapsedMs,
   formatSpawnAck,
+  formatSpawnDispatcherNote,
   formatSteerNote,
   formatStopNote,
   formatStopUnknownStateNote,
+  toAwaitAgentToolResult,
   toCheckRow,
 } from "./core/tool-results.js";
 export type {
+  AwaitAgentToolResult,
   CheckWorkersToolResult,
   DeliverResultToolResult,
+  SpawnDispatcherToolResult,
   SpawnWorkerToolResult,
   SteerWorkerToolResult,
   StopWorkerToolResult,
@@ -239,6 +250,7 @@ export {
 export type { WakeNotice } from "./core/policy/assembler.js";
 export {
   ACCESS_SECTION_HEADING,
+  AWAIT_AGENT_TOOL,
   buildAccessPolicyBlock,
   buildDispatcherPolicySection,
   buildPeerWakeInstructionsBlock,
@@ -246,6 +258,7 @@ export {
   DELIVER_RESULT_TOOL,
   DISPATCHER_TOOL_NAMES,
   PEER_WAKE_SECTION_HEADINGS,
+  SPAWN_DISPATCHER_TOOL,
   SPAWN_WORKER_TOOL,
   STEER_WORKER_TOOL,
   STOP_WORKER_TOOL,
@@ -255,6 +268,7 @@ export {
   buildTurnReminderForSession,
   createDispatcherTools,
   createWorkerLocalToolDefs,
+  readExecSignal,
   toToolParametersSchema,
 } from "./core/tools.js";
 export type {

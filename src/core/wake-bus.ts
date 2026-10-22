@@ -2,7 +2,7 @@ import type {
   AccessNotice,
   AccessRequestNotice,
 } from "./access-types.js";
-import type { PeerNotice } from "./peer-types.js";
+import type { AgentMessageWakeOrigin, PeerNotice } from "./peer-types.js";
 import type { TerminalWorkerStatus } from "./types.js";
 
 /**
@@ -56,6 +56,14 @@ export interface ExternalJobNotice {
   readonly jobDir: string;
 }
 
+/**
+ * Structured provenance for a wake that was caused by another agent
+ * (ticket 116 / ADR-0025). The shape is the host's own adjacent-agent
+ * source (`dsh-subagent/lib/index.js:444-449`). Re-exported from
+ * `peer-types` so the peer envelope and the wake share one declaration.
+ */
+export type { AgentMessageWakeOrigin };
+
 /** A wake ready for a dispatcher session. */
 export interface WakeEvent {
   readonly sessionId: string;
@@ -70,6 +78,12 @@ export interface WakeEvent {
    * Never mixed into a worker-settled wake.
    */
   readonly peerMessages?: readonly PeerNotice[];
+  /**
+   * Ticket 116: structured origin for an agent-caused wake. Present on peer
+   * wakes; absent on user and background wakes (which keep the plugin
+   * source). Presentation text never decides this field.
+   */
+  readonly messageOrigin?: AgentMessageWakeOrigin;
   /**
    * Ticket 113: external intake jobs for this wake. Background-rank —
    * they join the settled/access batch lane, never a peer wake.
@@ -236,8 +250,13 @@ export interface WakeBusDegradedInfo {
 }
 
 export interface WakeBusOptions {
-  /** Called when a background/peer wake is ready; the host should open a turn. */
-  onDeliver: (sessionId: string) => void;
+  /**
+   * Called when a background/peer wake is ready; the host should open a
+   * turn. Ticket 116: `origin` is the wake's STRUCTURED provenance when the
+   * wake was caused by another agent (a peer wake). The host stamps it on
+   * the follow-up message's source; it is never re-derived from text.
+   */
+  onDeliver: (sessionId: string, origin?: AgentMessageWakeOrigin) => void;
   /**
    * Called when a priority peer must abort a live non-user dispatcher
    * turn. Soft-fallback hosts may no-op; the ready peer wake still wins
@@ -479,11 +498,29 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
     onDeliver(sessionId);
   }
 
-  /** Build a peer wake from a FIFO of notices. */
+  /**
+   * Build a peer wake from a FIFO of notices (ticket 116).
+   *
+   * `messageOrigin` is the STRUCTURED provenance: every peer wake carries
+   * `{kind:"agent-message", form:"relay", senderSessionId}` so the host
+   * stamps the same source on the durable follow-up message — never the
+   * plugin kind, and never anything that reads as the user. The sender is
+   * the notice that opened the wake (`peerMessages[0]`; for the priority
+   * lane that is the triggering notice, since it is put first), filled from
+   * `fromAgentId` — which the sending tool derives from its registration
+   * closure, never from text.
+   *
+   * A flush that batched notices from several senders is attributed at the
+   * TURN level to its opening sender: the durable follow-up is one message
+   * and can carry one sender. Each notice keeps its own `fromAgentId` and
+   * the rendered body names every sender, so nothing is hidden — the source
+   * field answers "which agent opened this turn", not "every agent in it".
+   */
   function makePeerWake(
     sessionId: string,
     peerMessages: readonly PeerNotice[],
   ): WakeEvent {
+    const opener = peerMessages[0];
     return {
       sessionId,
       source: "peer",
@@ -491,6 +528,15 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
       accessRequests: [],
       accessNotices: [],
       peerMessages,
+      ...(opener !== undefined
+        ? {
+            messageOrigin: {
+              kind: "agent-message" as const,
+              form: "relay" as const,
+              senderSessionId: opener.fromAgentId,
+            },
+          }
+        : {}),
     };
   }
 
@@ -503,17 +549,19 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
     if (state.priorityPeers.length > 0) {
       const peerMessages = state.priorityPeers;
       state.priorityPeers = [];
-      state.ready = makePeerWake(sessionId, peerMessages);
+      const wake = makePeerWake(sessionId, peerMessages);
+      state.ready = wake;
       state.pendingOwner = "peer";
-      onDeliver(sessionId);
+      onDeliver(sessionId, wake.messageOrigin);
       return;
     }
     if (state.normalPeers.length > 0) {
       const peerMessages = state.normalPeers;
       state.normalPeers = [];
-      state.ready = makePeerWake(sessionId, peerMessages);
+      const wake = makePeerWake(sessionId, peerMessages);
+      state.ready = wake;
       state.pendingOwner = "peer";
-      onDeliver(sessionId);
+      onDeliver(sessionId, wake.messageOrigin);
       return;
     }
     // Real background content first — it subsumes an owed redrive, because
@@ -683,7 +731,7 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
         if (effectivePriority) {
           becomeReadyPriorityPeer(input.sessionId, state, notice);
           onInterrupt?.(input.sessionId);
-          onDeliver(input.sessionId);
+          onDeliver(input.sessionId, state.ready?.messageOrigin);
         } else {
           state.normalPeers.push(notice);
         }
@@ -703,7 +751,7 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
           becomeReadyPriorityPeer(input.sessionId, state, notice);
           // Host may already have been notified for the reclaimed batch;
           // re-notify so it can drain the replacement peer wake.
-          onDeliver(input.sessionId);
+          onDeliver(input.sessionId, state.ready?.messageOrigin);
         } else {
           // Separate turns: do not join a settled/peer ready wake.
           state.normalPeers.push(notice);

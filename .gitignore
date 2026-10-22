@@ -16,6 +16,13 @@ opencode.json
 # session content; NEVER commit (operator rule 2026-09-20). Evidence lives in the
 # repo from now on, never in new Desktop folders.
 .scratch/testing/
+# Ad-hoc research/process material: overnight notes, ADR drafts, repo analysis.
+# Working files, never deliverables — the rulings live in docs/adr and tickets.
+.scratch/_overnight-*/
+.scratch/adr-drafts/
+.scratch/repo-analysis/
+# Team-leader dispatch ledger (the skill says delete it when the job ends).
+.team-leader-ledger.md
 
 # Build and dependencies
 node_modules/

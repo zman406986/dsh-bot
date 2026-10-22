@@ -21,7 +21,6 @@ import {
   DISPATCHER_RESOLVE_COMMAND,
   DISPATCHER_START_COMMAND,
   DISPATCHER_STEER_COMMAND,
-  DISPATCHER_STOP_COMMAND,
   DISPATCHER_STEER_DESCRIPTION,
   DISPATCHER_STEER_INPUT_HINT,
   DISPATCHER_STEER_NOT_ACTIVE,
@@ -271,14 +270,15 @@ describe("steer command — flag matrix and registration", () => {
     assert.deepEqual(ctx.commandNames(), []);
   });
 
-  it("flag ON registers dispatcher-start and dispatcher-steer exactly once", () => {
+  it("flag ON registers dsh-bot and dispatcher-steer exactly once", () => {
     const ctx = createFullCtx();
     apply(ctx, volatileConfig({ enabled: true }));
     assert.deepEqual(ctx.commandNames(), [
       DISPATCHER_RESOLVE_COMMAND,
-      DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
-      DISPATCHER_STOP_COMMAND,
+      // "dsh-bot" sorts after the dispatcher- names (ADR-0030 rename); the
+      // withdrawn dispatcher-stop (ticket 101) is gone (ticket 129).
+      DISPATCHER_START_COMMAND,
     ]);
 
     const steer = ctx.command(DISPATCHER_STEER_COMMAND);
@@ -293,9 +293,9 @@ describe("steer command — flag matrix and registration", () => {
     void ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     assert.deepEqual(ctx.commandNames(), [
       DISPATCHER_RESOLVE_COMMAND,
-      DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
-      DISPATCHER_STOP_COMMAND,
+      // "dsh-bot" sorts after the dispatcher- names (ADR-0030 rename).
+      DISPATCHER_START_COMMAND,
     ]);
   });
 
@@ -547,9 +547,9 @@ describe("steer command — HMR reversal", () => {
     await activateWithRunningWorker(ctx);
     assert.deepEqual(ctx.commandNames(), [
       DISPATCHER_RESOLVE_COMMAND,
-      DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
-      DISPATCHER_STOP_COMMAND,
+      // "dsh-bot" sorts after the dispatcher- names (ADR-0030 rename).
+      DISPATCHER_START_COMMAND,
     ]);
 
     for (const dispose of [...ctx.disposers]) {
