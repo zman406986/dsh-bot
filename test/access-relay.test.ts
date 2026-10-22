@@ -895,6 +895,152 @@ describe("access relay — standalone unit (no multitask)", () => {
   });
 });
 
+describe("access relay — dispose (ticket 137)", () => {
+  /** Standalone relay with manual scheduling and recorded effects. */
+  function createHarness() {
+    const scheduler = createManualScheduler();
+    const delivered: string[] = [];
+    const resolved: string[] = [];
+    const wakes: string[] = [];
+    const relay = createAccessRelay({
+      timeoutMs: 10,
+      schedule: scheduler.schedule,
+      lookupPolicy: () => "ask",
+      deliver: (workerId, message) => {
+        delivered.push(message);
+        void workerId;
+      },
+      wakeForAsk: (n) => wakes.push(n.workerId),
+      onResolved: (notice) => resolved.push(notice.workerId),
+    });
+    return { relay, scheduler, delivered, resolved, wakes };
+  }
+
+  it("control: with no dispose the parked timer denies and notifies", () => {
+    const { relay, scheduler, delivered, resolved } = createHarness();
+    relay.noteRequest(accessEvent("w1"), "session-1");
+    assert.deepEqual(scheduler.cancelled, []);
+    scheduler.runAll();
+    assert.equal(delivered.length, 1);
+    assert.deepEqual(resolved, ["w1"]);
+  });
+
+  it("dispose cancels every parked timer and no callback delivers or notifies", () => {
+    const { relay, scheduler, delivered, resolved } = createHarness();
+    relay.noteRequest(accessEvent("w1"), "session-1");
+    relay.noteRequest(accessEvent("w2"), "session-2");
+
+    relay.dispose();
+
+    assert.equal(scheduler.scheduled.length, 2);
+    assert.deepEqual(scheduler.cancelled, [0, 1], "both parked timers cancelled");
+    assert.equal(relay.listPending().length, 0, "every ticket is dropped");
+
+    // A host scheduler that ignores its cancel still fires the old callback;
+    // the closed relay must make it inert.
+    scheduler.runAll();
+    assert.equal(delivered.length, 0);
+    assert.equal(resolved.length, 0);
+  });
+
+  it("after dispose, resolve/clear/noteRequest are no-ops and arm nothing", () => {
+    const { relay, scheduler, delivered, resolved, wakes } = createHarness();
+    relay.dispose();
+
+    assert.equal(relay.resolve("w1", { kind: "allow" }), false);
+    assert.doesNotThrow(() => relay.clear("w1"));
+    relay.noteRequest(accessEvent("w1"), "session-1");
+
+    assert.equal(scheduler.scheduled.length, 0, "no new timer after close");
+    assert.equal(wakes.length, 0, "no user wake after close");
+    assert.equal(relay.listPending().length, 0);
+    assert.equal(delivered.length, 0);
+    assert.equal(resolved.length, 0);
+  });
+
+  it("dispose is idempotent and safe with nothing parked", () => {
+    const { relay, scheduler } = createHarness();
+    assert.doesNotThrow(() => {
+      relay.dispose();
+      relay.dispose();
+    });
+    assert.equal(scheduler.cancelled.length, 0);
+  });
+});
+
+describe("access relay — core teardown cancels parked asks (ticket 137)", () => {
+  /** Park one ask on a fresh core and return everything the assertions read. */
+  async function parkAsk(host: FakeDshHost) {
+    const scheduler = createManualScheduler();
+    const multitask = createMultitask(host, {
+      access: { timeoutMs: 50, schedule: scheduler.schedule },
+    });
+    const workerId = await spawnRunning(
+      multitask,
+      "session-1",
+      "todo-1",
+      "Parked ask",
+    );
+    host.fireAccessRequest(accessEvent(workerId));
+    assert.equal(scheduler.scheduled.length, 1);
+    assert.equal(multitask.listPendingAccess("session-1").length, 1);
+    // The park itself woke the parent and queued one batch carrying the ask.
+    // Drain it and clear the wake log, so both arms below measure only what
+    // the parked deny timer causes (a notice would then open a FRESH wake).
+    assert.deepEqual(host.wakeCalls, ["session-1"], "the park wakes the parent");
+    const parkWake = multitask.drainWake("session-1");
+    assert.equal(parkWake?.wake.accessRequests.length, 1);
+    host.wakeCalls.length = 0;
+    return { scheduler, multitask, workerId };
+  }
+
+  it("control: without dispose the parked timer denies and wakes", async () => {
+    const host = new FakeDshHost();
+    const { scheduler, multitask } = await parkAsk(host);
+
+    scheduler.runAll();
+
+    assert.equal(host.sendMessageCalls.length, 1, "the deny is delivered");
+    assert.deepEqual(host.wakeCalls, ["session-1"], "the deny notice wakes");
+    assert.equal(multitask.listPendingAccess("session-1").length, 0);
+    const wake = multitask.drainWake("session-1");
+    assert.equal(wake?.wake.accessNotices.length, 1, "the deny notice is queued");
+  });
+
+  it("multitask.dispose() cancels the parked deny: no delivery, no wake", async () => {
+    const host = new FakeDshHost();
+    const { scheduler, multitask } = await parkAsk(host);
+
+    multitask.dispose();
+    assert.deepEqual(scheduler.cancelled, [0], "the parked timer is cancelled");
+    assert.equal(multitask.listPendingAccess("session-1").length, 0);
+
+    // A scheduler that ignores the cancel still fires the old callback — the
+    // closed relay makes it inert, and no notice reaches the disposed bus.
+    scheduler.runAll();
+
+    assert.equal(host.sendMessageCalls.length, 0, "no sendMessage after teardown");
+    assert.deepEqual(host.wakeCalls, [], "no wake after teardown");
+    assert.equal(multitask.drainWake("session-1"), undefined, "nothing enqueued");
+  });
+
+  it("dispose is idempotent and a later resolve is a no-op", async () => {
+    const host = new FakeDshHost();
+    const { multitask, workerId } = await parkAsk(host);
+
+    assert.doesNotThrow(() => {
+      multitask.dispose();
+      multitask.dispose();
+    });
+    assert.equal(
+      multitask.resolveAccess(workerId, { kind: "allow" }),
+      false,
+      "a resolve after teardown delivers nothing",
+    );
+    assert.equal(host.sendMessageCalls.length, 0);
+  });
+});
+
 describe("wake bus — access enqueue (bus-level)", () => {
   it("enqueueAccessRequest on an idle session flushes one wake", () => {
     const ids: string[] = [];

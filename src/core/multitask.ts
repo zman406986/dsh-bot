@@ -161,8 +161,6 @@ export interface MultitaskWakeOptions {
    * share one per-session drain per window.
    */
   readonly coalesceWindowMs?: number;
-  /** Injectable clock for tests. */
-  readonly now?: () => number;
   /** Injectable one-shot scheduler for tests. Returns a cancel function. */
   readonly schedule?: (fn: () => void, ms: number) => () => void;
   /** Consecutive coalesced-drain failures before degraded immediate mode. */
@@ -379,6 +377,16 @@ export interface Multitask {
    */
   readonly wakeBus: WakeBus;
   /**
+   * Release this core's timers on teardown: the access relay's parked deny
+   * timeouts first (ticket 137 — they enqueue onto the bus from outside, so
+   * they must be gone before the bus is disarmed), then the wake bus's armed
+   * coalescing window (ticket 112 — a stale timer that still fires is a
+   * generation-checked no-op, so no wake can reach a host that is being
+   * disposed). Pending wake data is untouched — delivery was always the
+   * caller's business. Idempotent.
+   */
+  dispose(): void;
+  /**
    * Fire-and-forget peer accept (ticket 14; fences ticket 70 §2). Returns a
    * structural ack only — never a reply. Newly accepted envelopes join the
    * priority or normal lane by the 1:1 priority flag; delivery is wake-bus +
@@ -527,7 +535,6 @@ export function createMultitask(
     ...(wakeOptions?.coalesceWindowMs !== undefined
       ? { coalesceWindowMs: wakeOptions.coalesceWindowMs }
       : {}),
-    ...(wakeOptions?.now !== undefined ? { now: wakeOptions.now } : {}),
     ...(wakeOptions?.schedule !== undefined
       ? { schedule: wakeOptions.schedule }
       : {}),
@@ -1445,6 +1452,17 @@ export function createMultitask(
     },
 
     wakeBus,
+    dispose(): void {
+      // Ticket 112: teardown reaches the bus so a pending coalesced drain
+      // can never open a turn on a host that is going away.
+      // Ticket 137: the access relay owns one timer per parked ask (the
+      // deny-on-timeout), so it is disposed FIRST — its `onResolved` enqueues
+      // onto this bus from outside, and a late fire must never re-arm a
+      // window on a bus that was already disarmed. Both calls are idempotent,
+      // so a repeated teardown is safe.
+      accessRelay.dispose();
+      wakeBus.dispose();
+    },
     todos: todoLedger,
     sendPeer(sessionId: string, envelope: PeerEnvelope): PeerSendAck {
       // Ticket 70 §2 fences, BEFORE the inbox (whose lazy per-session state

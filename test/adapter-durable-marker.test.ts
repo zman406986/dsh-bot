@@ -7,6 +7,7 @@ import {
   MARKER_TABLE_NAME,
   INBOX_TABLE_NAME,
   COMPACTION_BOUNDARY_TABLE_NAME,
+  DISPATCHER_SESSION_TABLE_NAME,
   type DomainLike,
   type KvTableLike,
   type StorageDomainLike,
@@ -14,6 +15,7 @@ import {
 } from "../src/adapter/durable-marker.js";
 import type {
   CompactionBoundary,
+  DurableDispatcherMark,
   DurableWorkerMarker,
 } from "../src/core/durability.js";
 
@@ -22,11 +24,13 @@ function createStubStorageDomain(): StorageDomainLike & {
   table: Map<string, DurableWorkerMarker>;
   inbox: Map<string, InboxJobCheckpoint>;
   boundaries: Map<string, CompactionBoundary>;
+  dispatchers: Map<string, DurableDispatcherMark>;
   closed: boolean;
 } {
   const table = new Map<string, DurableWorkerMarker>();
   const inbox = new Map<string, InboxJobCheckpoint>();
   const boundaries = new Map<string, CompactionBoundary>();
+  const dispatchers = new Map<string, DurableDispatcherMark>();
   const opens: unknown[] = [];
   let closed = false;
 
@@ -75,11 +79,27 @@ function createStubStorageDomain(): StorageDomainLike & {
     },
   };
 
+  const dispatcherKv: KvTableLike<DurableDispatcherMark> = {
+    get(key: string) {
+      return dispatchers.get(key);
+    },
+    entries() {
+      return dispatchers.entries();
+    },
+    async put(key: string, value: DurableDispatcherMark) {
+      dispatchers.set(key, { ...value });
+    },
+    async delete(key: string) {
+      return dispatchers.delete(key);
+    },
+  };
+
   return {
     opens,
     table,
     inbox,
     boundaries,
+    dispatchers,
     get closed() {
       return closed;
     },
@@ -96,11 +116,13 @@ function createStubStorageDomain(): StorageDomainLike & {
       assert.ok(s.tables[MARKER_TABLE_NAME]);
       assert.ok(s.tables[INBOX_TABLE_NAME]);
       assert.ok(s.tables[COMPACTION_BOUNDARY_TABLE_NAME]);
+      assert.ok(s.tables[DISPATCHER_SESSION_TABLE_NAME]);
       return {
         table(name: string) {
           if (name === MARKER_TABLE_NAME) return kv;
           if (name === INBOX_TABLE_NAME) return inboxKv;
           if (name === COMPACTION_BOUNDARY_TABLE_NAME) return boundaryKv;
+          if (name === DISPATCHER_SESSION_TABLE_NAME) return dispatcherKv;
           throw new Error(`unexpected table ${name}`);
         },
         async close() {
@@ -305,5 +327,48 @@ describe("durable marker store over storageDomain", () => {
     assert.equal(sd.closed, true);
     await assert.rejects(() => durability.writeWorkerMarker(marker()));
     await assert.rejects(() => durability.inbox.record(checkpoint()));
+  });
+
+  it("declares the dispatcher_sessions table without a version bump (ticket 130)", () => {
+    const spec = markerDomainSpec() as {
+      version: number;
+      tables: Record<string, { valueSchema: { parse(v: unknown): unknown } }>;
+    };
+    // Same rule as ticket 124: a new optional table must not bump the
+    // version, or every existing store refuses to open on upgrade.
+    assert.equal(spec.version, 2);
+    assert.ok(spec.tables[DISPATCHER_SESSION_TABLE_NAME]);
+  });
+
+  it("writes and reads a dispatcher mark in the SAME domain (ticket 130)", async () => {
+    const sd = createStubStorageDomain();
+    const durability = createStorageDomainDurability(sd);
+
+    // Absent table entry reads as no mark — a session that was never spawned
+    // as a dispatcher.
+    assert.equal(await durability.readDispatcherMark("child-1"), undefined);
+
+    await durability.writeDispatcherMark({ sessionId: "child-1" });
+    assert.equal(sd.opens.length, 1, "the mark shares the one open domain");
+    assert.equal(sd.dispatchers.size, 1);
+
+    const read = await durability.readDispatcherMark("child-1");
+    assert.ok(read);
+    assert.equal(read.sessionId, "child-1");
+    // Other sessions stay unmarked.
+    assert.equal(await durability.readDispatcherMark("child-2"), undefined);
+  });
+
+  it("schema parse rejects a malformed dispatcher mark (ticket 130)", () => {
+    const spec = markerDomainSpec() as {
+      tables: Record<string, { valueSchema: { parse(v: unknown): unknown } }>;
+    };
+    const parse =
+      spec.tables[DISPATCHER_SESSION_TABLE_NAME]?.valueSchema.parse;
+    assert.ok(parse);
+    assert.throws(() => parse({}));
+    assert.throws(() => parse(null));
+    assert.throws(() => parse({ sessionId: "" }));
+    assert.doesNotThrow(() => parse({ sessionId: "child-1" }));
   });
 });

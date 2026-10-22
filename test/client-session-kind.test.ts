@@ -5,21 +5,23 @@
  *
  * 1. **Kind resolution is a pure function over client-visible session
  *    facts.** Workers are `origin === 'subagent'` (durable header, ADR-0027
- *    §Settled 5); dispatchers would be
- *    `projectionValues.agentPreset === 'multitask-dispatcher'` (ADR-0027
- *    §Settled 4, conditional); everything else — including a missing or
- *    malformed row — is `normal`, which renders nothing.
+ *    §Settled 5); dispatchers are
+ *    `projectionValues.sessionKind === 'dispatcher'` (the adapter's own
+ *    projection, `src/adapter/session-kind-projection.ts`); everything else —
+ *    including a missing or malformed row — is `normal`, which renders
+ *    nothing.
  * 2. **Glyph rendering is fail-closed.** A worker glyph renders one marked
  *    span on a subagent session and `null` everywhere else; a dispatcher
  *    glyph mirrors that; a missing `sessionId`/`useSessions` renders `null`
- *    without calling a hook.
- * 3. **The composition is exactly ONE additive header entry.** The sidebar
- *    `sidebar.session.row.leading` seat is NOT composed, because no durable
- *    dispatcher identity exists on dsh 0.2.1-rc.2 today (verified: no
- *    `multitask-dispatcher` preset row in `dsh --profile web|multitask
- *    --dump-config`; every durable session header carries
- *    `"agentPreset":"standard"`). Shipping a glyph that can never fire would
- *    mislabel nothing but claim a capability that does not exist.
+ *    without calling a hook. The worker factory stays exported as retained
+ *    machinery even though no seat composes it (see claim 3).
+ * 3. **The composition is exactly ONE additive entry, and it is the SIDEBAR
+ *    one.** ADR-0024's 2026-10-18 rider permits "exactly one additional
+ *    additive registration, and it is this one ... no other slot is licensed
+ *    by this rider", so `apply` registers only the
+ *    `sidebar.session.row.leading` dispatcher cell. The worker marker in the
+ *    conversation header is declined (ticket 123 §B, 2026-10-22) and is NOT
+ *    composed — the seat needs a fresh dated human ruling extending the rider.
  *
  * Rendering is jsdom + react-dom (the established `test/client-*.test.ts`
  * idiom). Everything is offline (S8): no network, no LLM, no live seam.
@@ -63,16 +65,12 @@ import {
   DISPATCHER_GLYPH,
   DISPATCHER_GLYPH_ENTRY_ID,
   DISPATCHER_GLYPH_ORDER,
-  HEADER_ACTIONS_SLOT,
   SESSION_KIND_COPY_KEYS,
   SIDEBAR_LEADING_SLOT,
   WORKER_GLYPH,
-  WORKER_GLYPH_ENTRY_ID,
-  WORKER_GLYPH_ORDER,
   createSessionKindGlyph,
   dispatcherGlyphRegistration,
   resolveSessionKind,
-  workerGlyphRegistration,
   type SessionsSnapshotLike,
   type UseSessionsLike,
 } from "../src/client/session-kind.js";
@@ -187,20 +185,6 @@ describe("session-kind — pure resolution", () => {
 });
 
 describe("session-kind — registration contracts", () => {
-  it("the worker glyph is an additive LIST entry in the header actions band", () => {
-    const registration = workerGlyphRegistration();
-    assert.deepEqual(registration, {
-      name: HEADER_ACTIONS_SLOT,
-      id: WORKER_GLYPH_ENTRY_ID,
-      order: WORKER_GLYPH_ORDER,
-      locale: LOCALE_NAMESPACE,
-    });
-    // List entries are keyed by `id`; no identity-axis collision with the
-    // stock `subagent-catalog` (order 10) or `job-list` (order 20).
-    assert.ok(registration.order < 10);
-    assert.notEqual(registration.id, "subagent-catalog");
-  });
-
   it("the dispatcher cell contract targets the sidebar leading slot, higher than the stock schedule mark", () => {
     const registration = dispatcherGlyphRegistration();
     assert.deepEqual(registration, {
@@ -215,11 +199,25 @@ describe("session-kind — registration contracts", () => {
     assert.ok(registration.order > 10);
   });
 
+  it("no worker/header registration exists — that seat is not licensed", async () => {
+    const sessionKind = await import("../src/client/session-kind.js");
+    assert.equal(
+      "workerGlyphRegistration" in sessionKind,
+      false,
+      "the header registration is gone, not merely uncomposed",
+    );
+    // The glyph itself and the worker copy stay: they are retained machinery
+    // for a future ruling, not live surface.
+    assert.equal(typeof sessionKind.WORKER_GLYPH, "string");
+    assert.equal(
+      sessionKind.SESSION_KIND_COPY_KEYS.worker,
+      "indicator.worker",
+    );
+  });
+
   it("the two glyphs and entry ids are distinct and plugin-prefixed", () => {
     assert.notEqual(DISPATCHER_GLYPH, WORKER_GLYPH);
-    assert.notEqual(DISPATCHER_GLYPH_ENTRY_ID, WORKER_GLYPH_ENTRY_ID);
     assert.match(DISPATCHER_GLYPH_ENTRY_ID, /^multitask-dispatcher-/);
-    assert.match(WORKER_GLYPH_ENTRY_ID, /^multitask-dispatcher-/);
   });
 
   it("the glyph labels exist in both locale faces", () => {
@@ -420,21 +418,10 @@ function createCompositionCtx() {
 }
 
 describe("session-kind — the default composition", () => {
-  it("registers the worker header entry and the dispatcher sidebar cell", () => {
+  it("registers exactly ONE entry: the dispatcher sidebar cell", () => {
     const ctx = createCompositionCtx();
     apply(ctx);
 
-    const header = ctx.injects.find(
-      (record) => record.parent === HEADER_ACTIONS_SLOT,
-    );
-    assert.ok(header, "the worker glyph injects into the header actions band");
-    assert.equal(header.entries.length, 1);
-    assert.deepEqual(header.entries[0]?.options, workerGlyphRegistration());
-    assert.equal(typeof header.entries[0]?.component, "function");
-
-    // The dispatcher identity is real now: the adapter's `sessionKind`
-    // projection marks an activated dispatcher durably, so the sidebar cell
-    // carries a glyph that can actually fire.
     const sidebar = ctx.injects.find(
       (record) => record.parent === SIDEBAR_LEADING_SLOT,
     );
@@ -442,27 +429,41 @@ describe("session-kind — the default composition", () => {
     assert.equal(sidebar.entries.length, 1);
     assert.deepEqual(sidebar.entries[0]?.options, dispatcherGlyphRegistration());
     assert.equal(typeof sidebar.entries[0]?.component, "function");
+
+    // ADR-0024's rider licenses exactly one additive registration; the
+    // worker header marker is declined (ticket 123 §B) and must not appear.
+    assert.equal(
+      ctx.injects.some(
+        (record) => record.parent === "conversation.session.header.actions",
+      ),
+      false,
+      "no header-actions inject: the seat is not licensed",
+    );
   });
 
-  it("the composed component is bound to the worker kind and the locale seat", async () => {
+  it("the composed component is bound to the dispatcher kind and the locale seat", async () => {
     const ctx = createCompositionCtx();
     apply(ctx);
-    const header = ctx.injects.find(
-      (record) => record.parent === HEADER_ACTIONS_SLOT,
+    const sidebar = ctx.injects.find(
+      (record) => record.parent === SIDEBAR_LEADING_SLOT,
     );
-    const component = header?.entries[0]?.component as
+    const component = sidebar?.entries[0]?.component as
       | ((props: unknown) => unknown)
       | undefined;
     assert.ok(component);
 
     const store = fakeUseSessions(
       snapshot({
+        "s-disp": {
+          projectionValues: { sessionKind: DISPATCHER_PROJECTION_VALUE },
+        },
         "s-worker": { origin: "subagent" },
         "s-plain": { projectionValues: { sessionKind: null } },
       }),
     );
     for (const [sessionId, expected] of [
-      ["s-worker", true],
+      ["s-disp", true],
+      ["s-worker", false],
       ["s-plain", false],
     ] as const) {
       const mounted = await mount(
@@ -471,7 +472,9 @@ describe("session-kind — the default composition", () => {
           useSessions: store.useSessions,
         }),
       );
-      const mark = mounted.container.querySelector('[data-session-kind="worker"]');
+      const mark = mounted.container.querySelector(
+        '[data-session-kind="dispatcher"]',
+      );
       assert.equal(mark !== null, expected, `session ${sessionId}`);
       await mounted.unmount();
     }

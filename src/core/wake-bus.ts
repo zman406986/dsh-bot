@@ -237,9 +237,10 @@ interface SessionWakeState {
   /**
    * Ticket 108: the pending coalescing window for this session, or null.
    * At most ONE timer per session; enqueues inside the window join the
-   * batch instead of arming another timer.
+   * batch instead of arming another timer. Only the cancel handle is kept
+   * (ticket 112: a stored due-time was never read).
    */
-  coalescing: { cancel: () => void; dueAtMs: number } | null;
+  coalescing: { cancel: () => void } | null;
 }
 
 export interface WakeBusDegradedInfo {
@@ -275,8 +276,6 @@ export interface WakeBusOptions {
    * hold). Never applies while the session is mid-turn.
    */
   coalesceWindowMs?: number;
-  /** Injectable clock for tests. Defaults to Date.now. */
-  now?: () => number;
   /**
    * Schedule a one-shot timeout. Returns a cancel function.
    * Default uses setTimeout. Tests inject a manual scheduler — no real
@@ -349,7 +348,6 @@ function defaultSchedule(fn: () => void, ms: number): () => void {
 export function createWakeBus(options: WakeBusOptions): WakeBus {
   const { onDeliver, onInterrupt, onDrain } = options;
   const coalesceWindowMs = options.coalesceWindowMs ?? 0;
-  const now = options.now ?? Date.now;
   const schedule = options.schedule ?? defaultSchedule;
   const coalesceFailBudget =
     options.coalesceFailBudget ?? DEFAULT_COALESCE_FAIL_BUDGET;
@@ -406,7 +404,6 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
   ): void {
     if (state.coalescing !== null) return;
     const gen = generation;
-    const dueAtMs = now() + coalesceWindowMs;
     const cancel = schedule(() => {
       // Stale timer: dispose/rebuild bumped the generation — no-op.
       if (gen !== generation) return;
@@ -417,7 +414,7 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
       if (current.busy) return;
       runCoalescedDrain(sessionId, current);
     }, coalesceWindowMs);
-    state.coalescing = { cancel, dueAtMs };
+    state.coalescing = { cancel };
   }
 
   /** Cancel a pending window without delivering it. */

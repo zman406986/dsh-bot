@@ -1351,8 +1351,8 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   // existed, while collecting nothing for unload.)
   // With it, unload/HMR truly reverses every activation: unbind (which
   // deactivates EACH session — its tool surface, its policy rows, its
-  // prompts), sweep any remainder, dispose the host, release the marker
-  // domain.
+  // prompts), sweep any remainder, dispose the core's timers (access relay
+  // then wake bus), dispose the host, release the marker domain.
   ctx.effect(
     () => () => {
       lifecycle.unbind();
@@ -1360,11 +1360,22 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       // Ticket 30 + ADR-0019: on unload every session-scope row goes —
       // no "always" can outlive the plugin that consented to it.
       multitask.clearSessionAccessPolicy();
-      // Ticket 23: abandon any remaining outstanding prompts on unload/HMR;
-      // the relay timeouts still deny their asks (ADR-0008).
+      // Ticket 23: abandon any remaining outstanding prompts on unload/HMR.
+      // Ticket 137: the pump sweep runs BEFORE the relay is closed, so an
+      // answer already in flight from a prompt lands (or is dropped as
+      // expired) while the relay still accepts it; any later resolve is a
+      // no-op once the relay is closed.
       for (const pump of accessPumps.values()) {
         pump.reset();
       }
+      // Ticket 112/137: disarm every core-owned timer BEFORE the host goes
+      // away. `Multitask.dispose()` clears the access relay's parked deny
+      // timeouts first (ticket 137 — a late fire would call `onResolved`
+      // and re-arm a coalescing window on a disposed bus), then the wake
+      // bus (ticket 112 — a window armed at unload must never open a turn
+      // on a host that is being disposed). Idempotent, so a repeated
+      // teardown is safe.
+      multitask.dispose();
       host.dispose();
       void markers.dispose();
     },

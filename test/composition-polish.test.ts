@@ -320,10 +320,11 @@ async function seedMarkers(
 
 describe("composition polish — activation copy (design-17 §7)", () => {
   it("appends the presence hint to the success copy exactly once, using the exact draft string", () => {
-    // design-17 §7 `activation.presence-hint`, en — the sanctioned source.
+    // design-17 §7 `activation.presence-hint`, en — the sanctioned source as
+    // amended by ticket 134 (the panel claim removed under ADR-0024).
     assert.equal(
       ACTIVATION_PRESENCE_HINT,
-      "The Workers panel shows live progress; results arrive in this chat as they finish.",
+      "The dispatcher reports progress as it works; results arrive in this chat as they finish.",
     );
     assert.ok(
       DISPATCHER_START_SUCCESS.endsWith(ACTIVATION_PRESENCE_HINT),
@@ -371,17 +372,19 @@ describe("composition polish — activation copy (design-17 §7)", () => {
     assert.equal(typeof zh, "string");
     assert.notEqual(zh, "");
     assert.notEqual(zh, ACTIVATION_PRESENCE_HINT);
-    // design-17 §7 zh draft, verbatim.
+    // design-17 §7 zh draft, as amended by ticket 134 (panel claim removed).
     assert.equal(
       zh,
-      "“工作者”面板会显示实时进度；结果完成后会直接送达本聊天。",
+      "调度器会在工作中随时汇报进度；结果完成后会直接送达本聊天。",
     );
     // The en face stays ASCII copy: no accidental zh bleed in the en string.
     assert.doesNotMatch(ACTIVATION_PRESENCE_HINT, /[\u4e00-\u9fff]/);
   });
 
   it("does not promise a push surface: the hint names the pull surface only", () => {
-    assert.match(ACTIVATION_PRESENCE_HINT, /Workers panel/);
+    // Ticket 134 / ADR-0024: no panel of ours is mounted in the native-dsh
+    // posture, so the hint must not name one.
+    assert.doesNotMatch(ACTIVATION_PRESENCE_HINT, /panel/i);
     assert.match(ACTIVATION_PRESENCE_HINT, /this chat/);
     for (const forbidden of [
       "notify",

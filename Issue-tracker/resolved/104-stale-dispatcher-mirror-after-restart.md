@@ -1,7 +1,7 @@
 # 104 — Stale dispatcher mirror after restart: a deactivated session still renders as a killable dispatcher row
 
-**Status:** open
-**Labels:** needs-triage
+**Status:** resolved
+**Labels:** needs-triage (kept as filed; the closure is recorded in the Resolution section, not a label move)
 **Related:** 102 (resolved — the same "visible but inert" family, in the summon/kill direction), ADR-0010 (mirror honesty — the presence/mirror posture this finding tests), ADR-0021 (the floating window and the add/delete ruling)
 
 ## Problem
@@ -24,11 +24,11 @@ Evidence (in-repo, git-ignored under `.scratch/testing/2026-09-21-live-102-103/l
 
 ## What to do
 
-- [ ] Reproduce it live first (read `read-before-running-live-and-browser-tests.md` before anything live; kill timers mandatory at launch; send only trivial tasks; testing artifacts under `.scratch/testing/<yyyy-mm-dd>-<slug>/`, created before the session starts — never on the Desktop): activate a dispatcher in a throwaway chat, restart the host, and confirm whether the row still renders as a dispatcher (with `状态不可用`) and whether the host refuses `/dispatcher-stop` on it. Record the roster `data-dispatcher` state on both sides of the restart. Diagnose-first, in the same spirit as ticket 102 — the explanation must come before any fix is selected.
-- [ ] Establish whether the **persisted setting** is the right source of truth for the row's dispatcher flag, versus the **live binding**. Cite the read path (the roster mirror feed and the settings namespace backing it) and state which surface is authoritative for the row's `data-dispatcher` after a restart.
-- [ ] Decide whether the fix is **display-honesty** (do not present a non-live session as a dispatcher row / do not offer the affordance where the host will refuse), **mirror authority** (make the persisted source agree with live binding state across a restart), or **both**.
-- [ ] Pin the outcome offline in the existing rendered suites (`test/client-floating-window.test.ts`, `test/client-session-management.test.ts`): the rendered roster state and the affordance-gating rule, as source-text and/or rendered pins in the established style.
-- [ ] If the answer is a change to mirror authority semantics, that is a design decision touching the recorded honesty posture (`ADR-0010`) — propose an ADR first and do not implement until signed (the authority stack puts accepted ADRs above this ticket).
+- [x] **N/A — obsolete.** No live reproduction is possible: the surface that rendered the row (floating window / shell sidebar) is not composed, the mirror channel that carried `dispatcher=true` is gone, and the command the row offered (`/dispatcher-stop`) is withdrawn. See the resolution below.
+- [x] **N/A — obsolete.** The persisted-setting source no longer exists. `roster.*` keys have no writer and no live reader; a hard restart now persists dispatcher identity through the `sessionKind` projection cache, not through the settings document.
+- [x] **N/A — obsolete.** Neither candidate is needed: the row cannot be drawn, so display-honesty has nothing to gate, and there is no mirror authority left to reconcile.
+- [x] **N/A — obsolete.** The named suites (`test/client-floating-window.test.ts`, `test/client-session-management.test.ts`) no longer exist in the tree; they went with the floating window under ADR-0024.
+- [x] **N/A — obsolete.** No mirror-authority change is proposed, so no ADR is needed.
 
 ## Constraints
 
@@ -79,3 +79,55 @@ That key names the exact session the lane measured: `obs-c3-execute-response.jso
 **Adjacent observation for the human (same asymmetry, inside this ticket, not a separate one).** Because the offer gate is the mirror and the refusal gate is the live set, a user can be OFFERED a delete whose refusal the UI does not surface: `sendCommand` classifies the outcome from the promise alone (`src/client/actions.ts:253-257` — `undefined` → `unresolved`, anything else → `executed`), so the host's inner `kind:"error"` refusal body is never inspected, and the seats' only handling of a non-`executed` outcome is a console-only `reportCommandFailure` (`src/client/index.ts:884-905`, comment: "no UI, no copy, no state, no new result kinds"); the row does not flip. Measured: `obs-c2-delete-wire-FINAL.json` recorded 30 poll cycles after the two-press confirm on the stale row with `rosterDispatcher: "true"` / `deletePresent: true` throughout, alongside `commandsExecuteFromClicks: true` — the click reached the host and the UI showed no trace of the refusal. Whatever is decided above, whether a refused command should become visible to the user is a question this finding raises and does not answer.
 
 **Labels/status unchanged.** `Status: open`, `Labels: needs-triage`; file not moved. This is deliberately human-gated: the diagnosis is recorded so the posture decision can be made on evidence, not to authorise a fix.
+
+## Resolution — 2026-10-22 (retriage)
+
+**Closed as obsolete.** The mechanism this ticket diagnosed has been removed from the tree, and no live path can reproduce the symptom it describes. The owner has authorised the team to close stale tickets with a recorded rationale; this is that record.
+
+### 1. The blamed mechanism is gone
+
+The settings-document roster mirror is deleted, not merely disabled. `src/adapter/roster-channel.ts` is now 28 lines: the header (lines 1–9) states the reason — *"The settings-document channel that wrote these keys is gone: 0.2.1's settings service rejects undeclared keys (`Config field "roster" is not volatile`) and has no scope-registration API."* What survives is key grammar only:
+
+- `ROSTER_SESSION_KEY_PREFIX = "roster."` (`:12`), `rosterSessionKey` (`:15-17`), `sessionOfRosterKey` (`:24-28`).
+
+The functions this ticket's diagnosis cited by line — the merged-document write, the `writtenSessions` set, `clearSession`, `clearAllSessions`, `attach` — are all absent. Nothing in the adapter, the plugin, or the core writes a `roster` or `roster.<sessionId>` key any more. `SETTINGS_NAMESPACE` (`src/adapter/settings-section.ts:18`) is now an 18-line file whose header records the same 0.2.1 limit; `Config` (`src/plugin.ts:71-...`) declares ten `.volatile()` fields, none of them `roster`.
+
+### 2. Who still reads `roster.*` today
+
+Only dead code paths, and only one of them is in `src/`:
+
+| Reader | Live? |
+|---|---|
+| `sessionMirrorsFromChannelValue` / `createShellMirrorFeed` (`src/client/shell-mirror-feed.ts:52-124`) — the only `src/` consumer of `sessionOfRosterKey` | **No.** `createShellMirrorFeed` is constructed once at `src/client/index.ts:228` and its `applyChannelValue` has **zero** call sites in `src/` (verified by grep; the built bundle `client/index.js` also has zero). Nothing can feed it. |
+| `RosterStore.applyChannelValue` (`src/client/roster-store.ts:122-140`) | **No.** The client settings-scope watch that rode it is gone (`src/client/index.ts:215-219`: *"dsh 0.2.1 removed the client settings-scope service this watch rode"*). |
+| `test/shell-mirror-feed.test.ts`, `test/approval-feed-composition.test.ts`, `test/roster-snapshot.test.ts` | Tests only — they drive the retained machinery directly as offline pins, not a live channel. |
+
+`rosterSessionKey` / `ROSTER_SESSION_KEY_PREFIX` / `sessionOfRosterKey` are re-exported from `src/adapter/index.ts:173-177` but have no production caller outside that barrel.
+
+A legacy document survives on disk outside the repo, `C:\Users\TZhen\.dsh\settings.yaml.imported` (mtime 2026-09-22), still carrying the non-null `roster.session-650bc552-…` row the 2026-09-21 diagnosis identified. It is inert: nothing reads that file, and the live `settings.yaml` no longer exists. Its residue is evidence of the old mechanism, not a live input.
+
+### 3. What feeds the sidebar glyph after a restart
+
+The glyph is fed by the **`sessionKind` projection** (`src/adapter/session-kind-projection.ts`), registered at `src/plugin.ts:461`, read client-side at `src/client/session-kind.tsx:145-158` (`projectionValues.sessionKind === "dispatcher"`).
+
+Its persistence is host-owned and **per-session**, not a settings document: the host's projection registry checkpoints the unit's plain-JSON state (`stateVersion = 1`), and the fold re-derives `active` from the session's own durable `command/run` + `command/done` log pair for `/dsh-bot` (`src/adapter/session-kind-projection.ts:204-272`). After a restart the mark survives for a session that was activated and did not record a stop settlement — which is the *documented and intended* durability semantics (`:66-74`: *"The mark means 'this session was established as a dispatcher and has not been deactivated'"*).
+
+That is an important distinction from ticket 104's symptom: this mark is drawn as a **16px sidebar glyph**, not as a killable roster row with a delete affordance. It carries no command surface, and the session it marks is still the session that was activated. It is also load-bearing for the opposite direction — it is what stops a restart from silently demoting a dispatcher (the gap ticket 130 records for spawned dispatchers).
+
+### 4. Can the original symptom still occur?
+
+**No.** Every link in the chain is gone:
+
+1. **The row surface is not composed.** ADR-0024 withdrew the floating window, launcher, and capsule; `src/client/floating-window*` does not exist. `mountShellPage` (`src/client/index.ts:423`) — which draws the rows carrying `data-dispatcher` (`src/client/shell.tsx:245`) — is exported but **never called** in `src/`; `ClientModuleComposition.mounts` stays empty by construction (`src/client/index.ts:171-179`). The only three `ctx.slots.inject` calls in the composition are the toolviews, the settings card, and the one sidebar glyph (`:252`, `:281`, `:307`).
+2. **The kill affordance is gone from the code.** `src/client/shell.tsx` (419 lines) contains no delete/stop control: the only two `<button>` elements are row-select (`:241-249`) and copy-session-id (`:307-314`). Grep for `data-delete-id`, `shellDeletePress`, `SHELL_DELETE_CONFIRM_MS`, `onDelete` across `src/` returns nothing.
+3. **The command the row offered is withdrawn.** `src/adapter/stop-command.ts` does not exist; ADR-0030 removed `/dispatcher-stop`, and `test/restart-honesty.test.ts:1062-1079` pins that no stop/cancel-shaped command is registered at all. The refusal text this ticket quotes can no longer be produced, because the command that produced it is gone.
+4. **The stale flag's source is gone.** With no writer, no `roster.<id>` key can be created, so no stale non-null mirror can survive a restart even if a future surface re-reads the family.
+5. **The freshness/flag divergence this ticket documented** (`test/client-wrapper-shell.test.ts:488`, "The dispatcher flag is NOT freshness-dependent") remains true of the retained store, but it is now a property of unmounted machinery with no data source — not a reachable UI state.
+
+ADR-0027 (peer roster pushed at the prompt tail) is unrelated to this ticket's symptom: it governs prompt text for peer awareness, never a client roster row or a dispatcher flag.
+
+**Verification performed (read-only, no live run):** the greps and file reads cited above, plus a read-only look at the leftover `settings.yaml.imported`. No host was started, no network used. The two suites named in the task were run and pass: `test/restart-honesty.test.ts` 18 pass / 0 fail (5 suites), `test/session-kind-projection.test.ts` 16 pass / 0 fail (4 suites).
+
+**Residual, already owned elsewhere:** dispatcher identity across a restart is a live question, but not this one — ticket 130 owns the spawned-dispatcher case (a spawned child carries no durable mark and demotes to a plain subagent after restart), and ticket 118 owns the reduced-shape record until a channel returns. This ticket's concern was a *false positive* row that could be clicked; that row cannot be drawn.
+
+**Labels/status:** `Status: resolved`; file moved to `Issue-tracker/resolved/`. No `src/` or `test/` change was made, so nothing else moved.

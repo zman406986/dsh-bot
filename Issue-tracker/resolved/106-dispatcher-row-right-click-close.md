@@ -2,7 +2,7 @@
 
 **Status:** resolved
 **Labels:** ready-for-agent
-**Related:** 101 (resolved — add/delete dispatcher sessions; the delete seat this rides), 104 (open — stale-mirror honesty; right-clicking a stale row may hit a host refusal), 102 (resolved — row-actions discoverability), ADR-0021 decision 3 (add/delete = deactivate the binding), ADR-0010 (mirror honesty)
+**Related:** 101 (resolved — add/delete dispatcher sessions; the delete seat this rides), 104 (resolved 2026-10-22 as obsolete — the settings-mirror channel and the row surface are both gone; the stale-row caveat noted here no longer applies), 102 (resolved — row-actions discoverability), ADR-0021 decision 3 (add/delete = deactivate the binding), ADR-0010 (mirror honesty)
 
 ## Problem
 

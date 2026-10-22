@@ -35,7 +35,29 @@ function createAgent(id: string): AgentLike {
   };
 }
 
-function createStubCtx(): AdapterContext & {
+/**
+ * Ticket 112: a dispatcher agent that records what reached it, so a test can
+ * assert whether a wake opened a turn (through `followup`) — before or after
+ * teardown.
+ */
+function createRecordingAgent(
+  id: string,
+): AgentLike & { readonly followups: unknown[] } {
+  const followups: unknown[] = [];
+  return {
+    session: { id, header: { parentSession: null, delegationDepth: 0 } },
+    followup(message: unknown) {
+      followups.push(message);
+    },
+    inject() {},
+    followups,
+  };
+}
+
+function createStubCtx(options?: {
+  /** Ticket 112: agents `ctx.agents.get` resolves (wake delivery target). */
+  agentsById?: ReadonlyMap<string, AgentLike>;
+}): AdapterContext & {
   effect: (execute: () => unknown, label?: string) => unknown;
   inject: (
     services: readonly string[],
@@ -168,8 +190,8 @@ function createStubCtx(): AdapterContext & {
       },
     },
     agents: {
-      get() {
-        return undefined;
+      get(id: unknown) {
+        return options?.agentsById?.get(String(id));
       },
     },
     jobs: {
@@ -551,6 +573,146 @@ describe("plugin scaffold", () => {
     // Nothing was unregistered and no state changed by observation alone.
     assert.deepEqual(ctx.registeredTools.map((t) => t.name), before);
     assert.equal(before.length, 9);
+  });
+
+  // Ticket 112: plugin teardown must disarm the wake bus. Under the ticket-108
+  // coalescing window a settle arms a timer that would later open a turn
+  // through the host. Teardown now calls `multitask.dispose()` before
+  // `host.dispose()`, so the armed timer is cancelled and a stale one that
+  // still fires is a generation-checked no-op. The control case (no teardown)
+  // proves the timer really does wake the agent — otherwise the assertion
+  // below would pass for the wrong reason.
+  it("plugin teardown cancels a pending coalesced wake timer (ticket 112)", async (t) => {
+    const agent = createRecordingAgent("session-1");
+    const agentsById = new Map<string, AgentLike>([["session-1", agent]]);
+
+    /** Spawn one worker and settle it with the window armed. */
+    const armWake = async (
+      ctx: ReturnType<typeof createStubCtx>,
+    ): Promise<void> => {
+      apply(
+        ctx,
+        volatileConfig({ enabled: true, wakeCoalesceWindowMs: 50 }),
+      );
+      ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const spawn = ctx.registeredTools.find((tool) => tool.name === "spawn_worker");
+      assert.ok(spawn);
+      const spawned = (await spawn.execute(
+        { stream_key: "s", title: "T", prompt: "P" },
+        { agent: { session: { id: "session-1" } } },
+      )) as { ok: boolean; worker_id?: string };
+      assert.equal(spawned.ok, true);
+
+      ctx.fire("subagent/end", {
+        id: spawned.worker_id,
+        stopReason: "completed",
+        lastAssistantMessage: [{ type: "text", text: "done" }],
+      });
+    };
+
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+
+    // Control: the same setup without teardown does wake the agent once the
+    // window elapses — the manual scheduler has a timer to fire.
+    const controlCtx = createStubCtx({ agentsById });
+    await armWake(controlCtx);
+    assert.equal(agent.followups.length, 0, "nothing before the window");
+    t.mock.timers.tick(50);
+    assert.equal(agent.followups.length, 1, "the window opened the turn");
+    for (const dispose of controlCtx.disposers) dispose();
+    agent.followups.length = 0;
+
+    // Teardown runs the collected effect cleanups, then the window elapses.
+    const ctx = createStubCtx({ agentsById });
+    await armWake(ctx);
+    assert.equal(agent.followups.length, 0);
+    for (const dispose of ctx.disposers) dispose();
+    t.mock.timers.tick(50);
+    assert.equal(
+      agent.followups.length,
+      0,
+      "no wake may open a turn after plugin teardown",
+    );
+  });
+
+  // Ticket 137: plugin teardown must also cancel the access relay's parked
+  // deny timers. Before the fix, a parked ask's `setTimeout` survived unload,
+  // fired later, delivered into a disposed host, and called `onResolved` →
+  // `wakeBus.enqueueAccessNotice` — which bypasses the bus's generation bump
+  // because the call arrives from outside. The control arm (no teardown)
+  // proves the timer really does deny and wake, so the teardown assertion
+  // cannot pass for the wrong reason.
+  it("plugin teardown cancels a parked access deny timer (ticket 137)", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+
+    const agent = createRecordingAgent("session-1");
+    const agentsById = new Map<string, AgentLike>([["session-1", agent]]);
+
+    /** Activate, spawn a worker, park one real access ask, count effects. */
+    const parkAsk = async (ctx: ReturnType<typeof createStubCtx>) => {
+      apply(
+        ctx,
+        volatileConfig({ enabled: true, accessRequestTimeoutMs: 50 }),
+      );
+      ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const spawn = ctx.registeredTools.find((tool) => tool.name === "spawn_worker");
+      assert.ok(spawn);
+      const spawned = (await spawn.execute(
+        { stream_key: "s", title: "T", prompt: "P" },
+        { agent: { session: { id: "session-1" } } },
+      )) as { ok: boolean; worker_id?: string };
+      assert.equal(spawned.ok, true);
+      const workerId = spawned.worker_id;
+      assert.ok(workerId);
+
+      const sent: string[] = [];
+      ctx.subagents.sendMessage = async () => {
+        sent.push("send");
+        return "msg-stub";
+      };
+
+      const requestAccess = ctx.registeredTools.find(
+        (tool) => tool.name === "request_access",
+      );
+      assert.ok(requestAccess);
+      // The tool parks until the ask settles (ticket 69); the promise is
+      // deliberately not awaited — the relay's timer is the subject here.
+      void requestAccess.execute(
+        { class: "tool", target: "write_file", reason: "need write" },
+        { agent: { session: { id: workerId } } },
+      );
+
+      // The park itself wakes the dispatcher once; reset so the assertion
+      // reads only what the deny timer causes.
+      assert.equal(agent.followups.length, 1, "the park wakes the parent");
+      agent.followups.length = 0;
+      return { sent };
+    };
+
+    // Control: no teardown — the parked timer denies, delivers, and wakes.
+    const controlCtx = createStubCtx({ agentsById });
+    const control = await parkAsk(controlCtx);
+    t.mock.timers.tick(50);
+    assert.equal(control.sent.length, 1, "the timeout deny is delivered");
+    assert.equal(agent.followups.length, 1, "the deny notice wakes the parent");
+    for (const dispose of controlCtx.disposers) dispose();
+    agent.followups.length = 0;
+
+    // Teardown: the same parked ask, then the collected cleanups run.
+    const ctx = createStubCtx({ agentsById });
+    const teardown = await parkAsk(ctx);
+    for (const dispose of ctx.disposers) dispose();
+    t.mock.timers.tick(50);
+    assert.equal(teardown.sent.length, 0, "no delivery after plugin teardown");
+    assert.equal(
+      agent.followups.length,
+      0,
+      "no access wake may open a turn after plugin teardown",
+    );
   });
 
   // Ticket 91 negative controls: the shipped registries are fail-loud on a

@@ -33,8 +33,10 @@ export const DISPATCHER_START_DESCRIPTION =
 
 /**
  * Presence hint appended to the activation success copy (ticket 32,
- * design-17 §7 `activation.presence-hint`). It tells the user where presence
- * lives — the app-wide Workers panel — and sets the delivery expectation:
+ * design-17 §7 `activation.presence-hint`; panel claim removed by ticket
+ * 134). It tells the user where progress lives — the dispatcher's own
+ * narration in this chat, the only live route in the native-dsh posture
+ * (ADR-0024; `docs/surfaces.md:29-31`) — and sets the delivery expectation:
  * results arrive as ordinary chat turns, never as a notification (no push
  * seam exists; design-17 §4.8). Appended exactly once
  * ({@link DISPATCHER_START_SUCCESS}); the client locale dictionary carries
@@ -42,8 +44,8 @@ export const DISPATCHER_START_DESCRIPTION =
  * `test/composition-polish.test.ts` asserts the two stay in lockstep.
  */
 export const ACTIVATION_PRESENCE_HINT =
-  "The Workers panel shows live progress; results arrive in this chat as " +
-  "they finish.";
+  "The dispatcher reports progress as it works; results arrive in this chat " +
+  "as they finish.";
 
 /** Success copy shown in the activated chat. */
 export const DISPATCHER_START_SUCCESS =

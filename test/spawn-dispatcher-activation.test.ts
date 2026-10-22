@@ -26,7 +26,11 @@
  * 6. The `pendingSpawns` race is closed: a dispatcher spawn racing a worker
  *    spawn from the SAME parent composes the worker and activates the
  *    dispatcher — matched by reserved identity, never by the shared counter.
- * 7. Identity probe: a spawned child carries NO durable dispatcher mark.
+ * 7. Identity probe on the HOST's own facts: no `agentPreset` mark, no
+ *    `sessionKind` — nothing there says "dispatcher".
+ * 8. Ticket 130: a spawned dispatcher DOES carry our own durable mark, and a
+ *    cold-resumed child is re-activated from it — role, scoped surface, and
+ *    policy — exactly once, while an unmarked child stays a plain subagent.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -42,6 +46,7 @@ import {
   type ToolsLike,
 } from "../src/adapter/index.js";
 import { resolveSessionKind } from "../src/client/session-kind.js";
+import { DISPATCHER_SESSION_TABLE_NAME } from "../src/adapter/durable-marker.js";
 import { SPAWN_DISPATCHER_TOOL } from "../src/core/policy/prompts.js";
 import { WORKER_PERSONA_SECTION } from "../src/worker/preset.js";
 
@@ -178,6 +183,14 @@ interface StubChild {
 }
 
 /**
+ * The storage tables of one simulated process. Held OUTSIDE the plugin so a
+ * second `createActivationCtx` can share them: that is how a restart is
+ * modelled — the durable store survives, the in-memory host/plugin state does
+ * not (ticket 130).
+ */
+type StorageTables = Map<string, Map<string, unknown>>;
+
+/**
  * Structural ctx stub. `startActivation` announces the child on
  * `agent/created` the way the installed host does — inside the call, before
  * it resolves — with the child's header carrying the parent's id and
@@ -188,7 +201,7 @@ interface StubChild {
  * how the race test interleaves a worker spawn and a dispatcher spawn from
  * one parent.
  */
-function createActivationCtx() {
+function createActivationCtx(storage: StorageTables = new Map()) {
   const listeners = new Map<string, Array<(payload: never) => void>>();
   const commands = new Map<string, CommandDefinitionLike>();
   const globalTools = new Map<string, ScopedTool>();
@@ -349,7 +362,7 @@ function createActivationCtx() {
     jobs: { list: () => [] },
     storageDomain: {
       async open() {
-        const tables = new Map<string, Map<string, unknown>>();
+        const tables = storage;
         return {
           table(name: string) {
             let table = tables.get(name);
@@ -833,7 +846,7 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     assert.deepEqual(ctx.globalToolNames(), []);
   });
 
-  it("identity probe: the spawned child carries no durable dispatcher mark (reduced shape)", async () => {
+  it("identity probe: the HOST's own facts carry no dispatcher mark (reduced shape)", async () => {
     const ctx = createActivationCtx();
     apply(ctx, volatileConfig({ enabled: true }));
     const creator = createScopedAgent("chat-1", { agentPreset: "standard" });
@@ -867,13 +880,167 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     assert.equal(resolveSessionKind(projected), "worker");
     assert.notEqual(resolveSessionKind(projected), "dispatcher");
 
-    // The only dispatcher signal for this session is the in-memory lifecycle
-    // registry (`isDispatcherSession`), which is not durable: after a restart
-    // the child is a plain subagent until its creator summons it again.
+    // None of the HOST's own facts says "dispatcher". Ticket 130 adds OUR own
+    // durable mark (see the cases below) — it is not derived from any field
+    // above, which is why this probe stays pinned: no marker was invented out
+    // of the host's vocabulary.
     const stillLive = await callScoped(creator, "await_agent", {
       target: child.id,
       timeout_ms: 0,
     });
     assert.equal(stillLive.reason, "not-awaitable");
+  });
+
+  /**
+   * Ticket 130 — the IDENTITY half: a spawned dispatcher writes our own
+   * durable mark, and a cold resume re-activates the child from it.
+   *
+   * A restart is modelled exactly as `test/durable-roster.test.ts` does it:
+   * the STORAGE TABLES survive, the in-memory host + plugin state is thrown
+   * away and a fresh `apply()` runs over a fresh ctx. Anything the plugin
+   * remembers in-process is therefore gone; only the store can carry the
+   * identity forward.
+   */
+  const DISPATCHER_SESSIONS_TABLE = DISPATCHER_SESSION_TABLE_NAME;
+
+  async function readMarks(
+    storage: StorageTables,
+  ): Promise<Map<string, unknown>> {
+    return new Map(storage.get(DISPATCHER_SESSIONS_TABLE) ?? []);
+  }
+
+  it("writes a durable dispatcher mark at spawn, keyed by the child session id (ticket 130)", async () => {
+    const storage: StorageTables = new Map();
+    const ctx = createActivationCtx(storage);
+    apply(ctx, volatileConfig({ enabled: true }));
+    const creator = createScopedAgent("chat-1");
+    await activateDispatcher(ctx, creator);
+
+    assert.equal(storage.get(DISPATCHER_SESSIONS_TABLE), undefined);
+
+    const spawned = await spawnPeer(creator);
+    const dispatcherId = String(spawned.dispatcher_id);
+
+    const marks = await readMarks(storage);
+    assert.deepEqual([...marks.keys()], [dispatcherId]);
+    assert.equal(
+      (marks.get(dispatcherId) as { sessionId?: string }).sessionId,
+      dispatcherId,
+    );
+  });
+
+  it("a cold-resumed child marked as a dispatcher is re-activated: role, 8 scoped tools, one policy inject (ticket 130)", async () => {
+    const storage: StorageTables = new Map();
+    const first = createActivationCtx(storage);
+    apply(first, volatileConfig({ enabled: true }));
+    const creator = createScopedAgent("chat-1");
+    await activateDispatcher(first, creator);
+    const spawned = await spawnPeer(creator);
+    const dispatcherId = String(spawned.dispatcher_id);
+    const depth = (first.children[0] as StubChild).agent.session.header
+      ?.delegationDepth;
+
+    // ── process restart ────────────────────────────────────────────────
+    // A NEW plugin instance and a NEW host over the SAME storage tables. The
+    // child is re-announced by the host as a resumed session — the shape the
+    // installed host emits for a cold-resumed continuable child.
+    const second = createActivationCtx(storage);
+    apply(second, volatileConfig({ enabled: true }));
+    const resumedChild = createScopedAgent(dispatcherId, {
+      topLevel: false,
+      // The persisted depth, untouched by this ticket: nothing recomputes it.
+      depth: depth ?? 1,
+      parentSessionId: "chat-1",
+      agentPreset: "standard",
+    });
+    second.agentsById.set(dispatcherId, resumedChild);
+
+    second.fire("agent/created", {
+      agent: resumedChild,
+      source: "resume",
+    });
+    await drain();
+
+    // Role: the session is a live dispatcher again — the core's peer fence
+    // and its await classification both say so.
+    const creatorTwo = createScopedAgent("chat-2");
+    await activateDispatcher(second, creatorTwo);
+    const awaited = await callScoped(creatorTwo, "await_agent", {
+      target: dispatcherId,
+      timeout_ms: 0,
+    });
+    assert.equal(awaited.reason, "not-awaitable", JSON.stringify(awaited));
+
+    // Tool surface: the eight dispatcher tools re-registered in the CHILD's
+    // own scope.
+    assert.deepEqual(
+      resumedChild.scopedTools.names().sort(),
+      DISPATCHER_TOOL_SET,
+    );
+    // Policy: injected exactly once.
+    const policyInjects = resumedChild.injected
+      .map(textOf)
+      .filter((text) => text.includes("# Multitask dispatcher"));
+    assert.equal(policyInjects.length, 1);
+    // Depth untouched: the resumed header keeps its persisted value.
+    assert.equal(
+      resumedChild.session.header?.delegationDepth,
+      depth ?? 1,
+    );
+  });
+
+  it("a second resume of the same child does not double-register tools or double-inject policy (ticket 130)", async () => {
+    const storage: StorageTables = new Map();
+    const first = createActivationCtx(storage);
+    apply(first, volatileConfig({ enabled: true }));
+    const creator = createScopedAgent("chat-1");
+    await activateDispatcher(first, creator);
+    const spawned = await spawnPeer(creator);
+    const dispatcherId = String(spawned.dispatcher_id);
+
+    const second = createActivationCtx(storage);
+    apply(second, volatileConfig({ enabled: true }));
+    const resumedChild = createScopedAgent(dispatcherId, {
+      topLevel: false,
+      parentSessionId: "chat-1",
+      agentPreset: "standard",
+    });
+    second.agentsById.set(dispatcherId, resumedChild);
+
+    second.fire("agent/created", { agent: resumedChild, source: "resume" });
+    await drain();
+    assert.equal(resumedChild.scopedTools.names().length, 8);
+    assert.equal(resumedChild.injected.length, 1);
+
+    // A second resume of the SAME session in the SAME process: still one
+    // surface, still one policy. The scoped registry would throw on a
+    // duplicate name, so a double registration could not pass silently.
+    second.fire("agent/created", { agent: resumedChild, source: "resume" });
+    await drain();
+    assert.deepEqual(
+      resumedChild.scopedTools.names().sort(),
+      DISPATCHER_TOOL_SET,
+    );
+    assert.equal(resumedChild.injected.length, 1);
+  });
+
+  it("a resumed child with no dispatcher mark stays a plain subagent (ticket 130)", async () => {
+    const storage: StorageTables = new Map();
+    const ctx = createActivationCtx(storage);
+    apply(ctx, volatileConfig({ enabled: true }));
+
+    // Never spawned by us: no mark, no reservation, nothing durable.
+    const plainChild = createScopedAgent("plain-child", {
+      topLevel: false,
+      parentSessionId: "chat-1",
+      agentPreset: "standard",
+    });
+    ctx.agentsById.set("plain-child", plainChild);
+
+    ctx.fire("agent/created", { agent: plainChild, source: "resume" });
+    await drain();
+
+    assert.deepEqual(plainChild.scopedTools.names(), []);
+    assert.equal(plainChild.injected.length, 0);
   });
 });

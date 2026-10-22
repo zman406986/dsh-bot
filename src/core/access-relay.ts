@@ -183,6 +183,13 @@ export interface AccessRelay {
   /** Drop tickets for a worker (stop/settle). Cancels any armed timeout. */
   clear(workerId: string): void;
   listPending(parentSessionId?: string): readonly AccessTicket[];
+  /**
+   * Release every parked ask (plugin unload/HMR teardown, ticket 137):
+   * cancels all armed deny timers and closes the relay. After this call
+   * `noteRequest`, `resolve` and `clear` are no-ops — no timer is armed,
+   * nothing is delivered, and `onResolved` is never called again. Idempotent.
+   */
+  dispose(): void;
 }
 
 interface LiveTicket {
@@ -244,6 +251,13 @@ export function createAccessRelay(options: AccessRelayOptions): AccessRelay {
 
   /** workerId → live pending ticket. One slot per worker. */
   const byWorker = new Map<string, LiveTicket>();
+  /**
+   * Ticket 137: set by dispose(). Once closed, nothing arms a timer, delivers
+   * a decision, or surfaces a notice — a scheduled callback that still fires
+   * (a host scheduler that ignores its cancel) checks this first, the same
+   * stale-generation discipline the wake bus uses.
+   */
+  let closed = false;
 
   async function deliverDecision(
     workerId: string,
@@ -265,6 +279,10 @@ export function createAccessRelay(options: AccessRelayOptions): AccessRelay {
     workerId: string,
     decision: AccessDecision,
   ): boolean {
+    // Ticket 137: a closed relay never delivers or notifies. Every ticket was
+    // dropped by dispose(), so this is mostly belt-and-braces for a scheduler
+    // whose cancel was ignored.
+    if (closed) return false;
     const live = byWorker.get(workerId);
     if (live === undefined) return false;
     byWorker.delete(workerId);
@@ -289,6 +307,9 @@ export function createAccessRelay(options: AccessRelayOptions): AccessRelay {
 
   return {
     noteRequest(event: AccessRequestEvent, parentSessionId: string): void {
+      // Ticket 137: a closed relay is inert — teardown already dropped every
+      // parked ask, so a late host event must not park a new one.
+      if (closed) return;
       // One outstanding ask per worker — refuse / ignore a second.
       if (byWorker.has(event.workerId)) return;
       if (!isWorkerLive(event.workerId)) return;
@@ -358,6 +379,19 @@ export function createAccessRelay(options: AccessRelayOptions): AccessRelay {
       const all = [...byWorker.values()].map((live) => live.ticket);
       if (parentSessionId === undefined) return all;
       return all.filter((t) => t.parentSessionId === parentSessionId);
+    },
+
+    dispose(): void {
+      // Ticket 137: plugin unload/HMR. Cancel every parked deny timer and drop
+      // the tickets; the `closed` flag makes a timer that still fires (a
+      // scheduler ignoring its cancel) a no-op, so no `onResolved` reaches a
+      // disposed wake bus and no delivery lands on a disposed host.
+      // Idempotent: the second call finds an empty map and re-sets the flag.
+      closed = true;
+      for (const live of byWorker.values()) {
+        live.cancelTimeout();
+      }
+      byWorker.clear();
     },
   };
 }

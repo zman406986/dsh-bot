@@ -49,7 +49,7 @@ _Amended 2026-09-19 (ADR-0018, master rule):_ the reference is imitated **in its
 _Avoid_: parity, feature match
 
 **Multitask profile**:
-_Amended 2026-09-19 (ADR-0018):_ the flag this term described is **voided** — no dispatcher mode, feature flag, or kill switch; the dispatcher is always-on, and the wrapper window / expanded surface *is* the dispatcher. The term survives only where a dsh profile remains the deployment unit for the plugin. _(Formerly: the dedicated dsh profile where the dispatcher shipped enabled and stock/default off; the profile as the flag's home, ADR-0005.)_
+_Amended 2026-09-19 (ADR-0018):_ the flag this term described is **voided** — no dispatcher mode, feature flag, or kill switch; the dispatcher is always-on, and the wrapper window / expanded surface *was* the dispatcher at that time (the wrapper window was withdrawn by ADR-0024, 2026-10-18 — stock dsh is now the only UI). The term survives only where a dsh profile remains the deployment unit for the plugin. _(Formerly: the dedicated dsh profile where the dispatcher shipped enabled and stock/default off; the profile as the flag's home, ADR-0005.)_
 _Avoid_: mode, setting, flag
 
 **dsh profile**:

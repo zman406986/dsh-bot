@@ -890,6 +890,90 @@ export function createCordisDshHost(
   }
 
   /**
+   * Ticket 130: record the child's dispatcher identity durably.
+   *
+   * Called once per successful `spawnDispatcher`, after `startActivation`
+   * resolved (before that there is no session id to key on). Never deleted —
+   * deactivation also runs on plugin unload, so a delete would wipe the mark
+   * at every restart; the table grows and that is accepted.
+   *
+   * A store that omits the optional seam (pre-130 doubles) is a no-op, and a
+   * failing write is logged rather than surfaced: the host already accepted
+   * the spawn, so a marker problem must never read as a host refusal. The
+   * lost mark is the accepted crash window, one step wider.
+   */
+  async function writeDispatcherMark(sessionId: string): Promise<void> {
+    const store = markers;
+    if (store === undefined || store.writeDispatcherMark === undefined) return;
+    try {
+      await store.writeDispatcherMark({ sessionId });
+    } catch (error) {
+      try {
+        console.warn(
+          `[multitask-dispatcher] dispatcher mark for ${sessionId} could not be written:`,
+          error,
+        );
+      } catch {
+        // A broken console must not break the spawn either.
+      }
+    }
+  }
+
+  /**
+   * Ticket 130: re-activate a child that carries a DURABLE dispatcher mark.
+   *
+   * A spawned dispatcher's only other identity is this process's in-memory
+   * registry, which dies with the process. The mark was written at spawn, so
+   * a cold-resumed child (or one the host re-announces) is recognised here and
+   * routed into the SAME activation path the spawn hook uses: role, scoped
+   * tool surface, and policy injection all come back.
+   *
+   * The store read may be asynchronous while this listener must return
+   * synchronously, so the activation lands as soon as the read resolves —
+   * the same residual limit the no-announcement fallback already documents.
+   * Idempotency is the activation helper's: `dispatcherActivated` is checked
+   * synchronously, so a second resume never double-registers tools or
+   * double-injects policy.
+   *
+   * Residual limit, stated: if the SAME parent has a worker spawn in flight
+   * when a marked child is announced, the worker composition can land in the
+   * one-microtask window before the mark is read. The mark still re-activates
+   * the child, so its dispatcher role comes back (with the worker persona and
+   * reply tool alongside). At boot no spawn is in flight, so a cold resume
+   * does not hit this window.
+   *
+   * Nothing here deletes the mark (deactivation also runs on plugin unload,
+   * so a delete would wipe it at every restart) and nothing recomputes the
+   * child's `delegationDepth` — the resumed session keeps its persisted one.
+   */
+  function resumeMarkedDispatcher(
+    childAgent: AgentLike,
+    sessionId: string,
+  ): void {
+    const store = markers;
+    if (store === undefined || store.readDispatcherMark === undefined) return;
+    if (dispatcherActivated.has(sessionId)) return;
+    void Promise.resolve()
+      .then(() => store.readDispatcherMark?.(sessionId))
+      .then((mark) => {
+        if (mark === undefined) return;
+        activateSpawnedDispatcher(childAgent, sessionId);
+      })
+      .catch((error) => {
+        // A marker-store failure must not break the host's create path; the
+        // child simply stays an ordinary subagent, exactly as before 130.
+        try {
+          console.warn(
+            `[multitask-dispatcher] dispatcher mark for ${sessionId} could not be read:`,
+            error,
+          );
+        } catch {
+          // A broken console must not break the create path either.
+        }
+      });
+  }
+
+  /**
    * Worker composition for a child we are about to publish, plus (ticket
    * 118) dispatcher activation for a child WE reserved.
    *
@@ -905,6 +989,12 @@ export function createCordisDshHost(
    * dispatcher spawn racing a worker spawn used to be composable as a worker
    * (chunk 1's recorded limit). With the reservation, the dispatcher child is
    * matched by id and returns before the counter is even read.
+   *
+   * Ticket 130: BEFORE the reservation is consulted, the child's durable
+   * dispatcher mark is read. A child that was spawned as a dispatcher in an
+   * earlier process carries no reservation and no activation record here, and
+   * without this check it would fall through to the worker path (or to
+   * nothing) and degrade to a plain subagent.
    */
   const offAgentCreated = ctx.on("agent/created", (payload: never) => {
     const record = payload as {
@@ -918,6 +1008,11 @@ export function createCordisDshHost(
     const parentSessionId = String(child.session?.header?.parentSession ?? "");
     if (parentSessionId === "") return;
     const childSessionId = String(child.session?.id ?? "");
+    // Ticket 130: durable identity first — a resumed dispatcher is matched by
+    // its mark, not by anything this process remembers.
+    if (childSessionId !== "") {
+      resumeMarkedDispatcher(child as AgentLike, childSessionId);
+    }
     if (
       childSessionId !== "" &&
       (reservedDispatcherIds.has(childSessionId) ||
@@ -1272,11 +1367,21 @@ export function createCordisDshHost(
         const dispatcherId = String(activation.childId);
         // Fallback for a host that announced no `agent/created` (or announced
         // it under a different id). Deduplicated inside the helper, so a host
-        // that DID announce the child is not activated twice.
+        // that DID announce the child is not activated twice. It runs BEFORE
+        // the mark write so a slow store never delays a child's activation.
         const childAgent = ctx.agents.get(dispatcherId);
         if (childAgent !== undefined) {
           activateSpawnedDispatcher(childAgent, dispatcherId);
         }
+        // Ticket 130: the child is durable from here on. Written AFTER the
+        // spawn resolved — there is no session id to key on before that — and
+        // never deleted: deactivation also runs on plugin unload, so a delete
+        // would wipe every mark at each restart. The table grows; accepted. A
+        // crash between the spawn and this write simply loses the mark (the
+        // accepted window). A marker-store failure is logged and swallowed —
+        // the host already accepted the spawn, so it must never read as a
+        // host refusal.
+        await writeDispatcherMark(dispatcherId);
         // Bounded memory: the reservation is dropped in `finally`, and the
         // activation record stays so a LATE `agent/created` for this child is
         // still recognised as a dispatcher instead of falling through to the

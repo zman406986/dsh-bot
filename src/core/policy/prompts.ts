@@ -158,7 +158,7 @@ export function buildDispatcherPolicySection(): string {
     // no stop control on any surface, so plain language is the stop path.
     "- If the user asks you to stop or change course in plain language, treat that as a steer or a stop of the matching worker (stop tool), then confirm plainly what you stopped or changed. Never claim a stopped worker produced a result.",
     // Ticket 31 (design-17 §4.9/§7): progress narration only — no board, no milestones.
-    "- Progress is conveyed by your own narration and the workers panel; never reference a task board or milestone view.",
+    "- Progress is conveyed by your own narration; never reference a task board or milestone view.",
     "- The user never hears the machinery. Do not name workers, streams, wakes, or dispatch. Speak as one busy person.",
     "",
     "## What you never do",
@@ -213,7 +213,7 @@ export function buildAccessPolicyBlock(): string {
     "For each pending ask:",
     "- Ask the user in plain language when the action is not pre-approved (name the action and why the worker needs it).",
     "- Apply a stored policy answer when one exists; do not re-ask.",
-    "- Answer with resolve_access (allow or deny). Never leave an ask unanswered — timeout denies by default.",
+    "- Answer each ask in your reply with allow or deny. Never leave an ask unanswered — timeout denies by default.",
     "",
     "For each denial (user, policy, or timeout):",
     "- Tell the user which action was denied, in plain language.",

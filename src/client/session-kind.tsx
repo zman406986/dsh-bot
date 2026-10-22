@@ -7,30 +7,34 @@
  *
  * ## Where each kind can be marked (verified against dsh 0.2.1-rc.2)
  *
+ * - **Only the sidebar leading cell is licensed.** ADR-0024's 2026-10-18
+ *   rider permits "exactly one additional additive registration, and it is
+ *   this one ... no other slot is licensed by this rider". That one seat is
+ *   `sidebar.session.row.leading`.
  * - **Workers are not sidebar rows.** Subagent sessions carry the durable
  *   header flag `origin: 'subagent'` (`dsh-subagent/lib/index.js:354`) and
  *   the stock sidebar drops them (`dsh-client-ui-workspace/lib/client.js:965`).
- *   `sidebar.session.row.leading` therefore never mounts for a worker.
- * - **The worker's one visible seat is the conversation header.** The header
- *   renders its actions band for every non-blank session
- *   (`dsh-client-ui-conversation/lib/client.js:18033` inside `!hideChrome`),
- *   so a worker opened on its own conversation can carry a marker there.
- * - **`conversation.session.header.lineage` is NOT a safe seat.** It is a
- *   `single` slot (`dsh-client-ui-conversation/lib/types/client/contract/slots.d.ts:225`)
- *   and the stock `dsh-client-ui-subagent` package registers an
- *   unconditional entry into it at the default priority 0
- *   (`dsh-client-ui-subagent/lib/client.js:978-982`). The shipped SlotCore
- *   throws on a same-priority second registration and renders the LOWEST
- *   priority first, so a second entry would either throw or displace the
- *   stock breadcrumb renderer. This module therefore uses the title-adjacent
- *   **list** seat `conversation.session.header.actions` — additive by `id`,
- *   with stock precedent (`subagent-catalog` at order 10,
- *   `dsh-client-ui-subagent/lib/client.js:983-988`; `job-list` at order 20,
- *   `dsh-client-ui-jobs/lib/client.js:627-632`).
+ *   `sidebar.session.row.leading` therefore never mounts for a worker, so the
+ *   worker half of the owner's three-way request has no licensed seat.
+ * - **The conversation header is NOT composed (declined, not forgotten).**
+ *   `conversation.session.header.actions` is a real additive `list` seat and
+ *   would be the worker's only visible location, but ADR-0024's rider does
+ *   not license it. Ticket 123 records the header part as declined pending a
+ *   fresh dated human ruling extending the rider. The generic glyph factory
+ *   below still supports the `worker` kind so that ruling lands as a
+ *   composition edit, not a rewrite.
+ * - **`conversation.session.header.lineage` remains an unsafe seat** if that
+ *   ruling ever comes: it is a `single` slot
+ *   (`dsh-client-ui-conversation/lib/types/client/contract/slots.d.ts:225`)
+ *   and `dsh-client-ui-subagent` registers an unconditional entry into it at
+ *   the default priority 0 (`dsh-client-ui-subagent/lib/client.js:978-982`).
+ *   The shipped SlotCore throws on a same-priority second registration and
+ *   renders the LOWEST priority first, so a second entry would either throw
+ *   or displace the stock breadcrumb renderer.
  * - **`sidebar.session.row.leading`** is a `list` slot, root scope, owner
  *   `{sessionId}` (`dsh-client-ui-workspace/lib/types/client/contract/slots.d.ts:123`,
  *   rendered `:2306`). The stock schedule plugin occupies it at order 10
- *   (`dsh-client-ui-schedule/lib/client.js:7528`), so a dispatcher entry
+ *   (`dsh-client-ui-schedule/lib/client.js:7528`), so the dispatcher entry
  *   belongs at a HIGHER order and never shadows it.
  *
  * ## How each kind is identified
@@ -39,6 +43,8 @@
  *   (`dsh-session/lib/types/types.d.ts:78-82`), surfaced to the client on the
  *   list row (`SessionSummary.origin`), and the signal ADR-0027 §Settled 5
  *   names as the only one after the worker preset row was removed.
+ *   Resolution stays here so the declined header marker can be composed
+ *   unchanged if a future ruling licenses it; nothing renders it today.
  * - **Dispatcher:** `projectionValues.sessionKind === 'dispatcher'` — a
  *   projection our own adapter registers (`src/adapter/session-kind-projection.ts`).
  *   It folds the `command/run` + `command/done` pair the host already writes
@@ -60,43 +66,29 @@ import type { JSX } from "react";
 import { LOCALE_NAMESPACE, type TranslateFn } from "./overlay.js";
 
 /**
- * Title-adjacent per-session header band (dsh-owned LIST slot). Additive by
- * entry `id`; never a replacement seat.
- */
-export const HEADER_ACTIONS_SLOT = "conversation.session.header.actions";
-
-/**
  * The 16px leading cell of a stock sidebar session row (dsh-owned LIST slot).
  * Only the RESTING cell renders it (idle, non-archived, non-blank).
  */
 export const SIDEBAR_LEADING_SLOT = "sidebar.session.row.leading";
 
-/** Entry id for the worker marker in the header actions band. */
-export const WORKER_GLYPH_ENTRY_ID = "multitask-dispatcher-worker-kind";
-
-/**
- * Worker marker order: below `subagent-catalog` (10) and `job-list` (20), so
- * the marker sits closest to the title and never reorders stock entries.
- */
-export const WORKER_GLYPH_ORDER = 5;
-
 /**
  * Dispatcher cell order: ABOVE the stock schedule mark (10) so the stock
  * occupant always renders first inside the 16px cell.
  *
- * NOT COMPOSED — see the module doc: no durable dispatcher identity exists on
- * this install, so `apply` registers no sidebar entry. The constant and
- * {@link dispatcherGlyphRegistration} exist so the future one-line change is
- * a composition edit, not a contract invention.
+ * Composed by `apply` — the adapter's `sessionKind` projection gives the
+ * glyph a durable dispatcher identity to key on.
  */
 export const DISPATCHER_GLYPH_ORDER = 20;
 
-/** Entry id the (uncomposed) dispatcher cell entry would carry. */
+/** Entry id the dispatcher cell entry carries. */
 export const DISPATCHER_GLYPH_ENTRY_ID = "multitask-dispatcher-kind";
 
 /** A single character is the only safe fit for the 16px sidebar cell. */
 export const DISPATCHER_GLYPH = "◆";
-/** Worker marker in the header band: "this session is a delegated child". */
+/**
+ * Worker marker glyph, retained but NOT composed: the header seat it belongs to
+ * is not licensed by ADR-0024's rider (ticket 123 records it as declined).
+ */
 export const WORKER_GLYPH = "↳";
 
 /**
@@ -177,20 +169,14 @@ export interface SessionKindGlyphRegistrationOptions {
   readonly locale: string;
 }
 
-/** The worker marker's header registration (composed by `apply`). */
-export function workerGlyphRegistration(): SessionKindGlyphRegistrationOptions {
-  return {
-    name: HEADER_ACTIONS_SLOT,
-    id: WORKER_GLYPH_ENTRY_ID,
-    order: WORKER_GLYPH_ORDER,
-    locale: LOCALE_NAMESPACE,
-  };
-}
-
 /**
- * The dispatcher cell's sidebar registration. Composed by `apply`: the
- * `sessionKind` projection marks an activated dispatcher session durably, so
- * the glyph has a real identity to key on.
+ * The dispatcher cell's sidebar registration — the ONE additive registration
+ * ADR-0024's rider licenses. Composed by `apply`: the `sessionKind` projection
+ * marks an activated dispatcher session durably, so the glyph has a real
+ * identity to key on.
+ *
+ * A worker/header registration is deliberately absent: that seat is not
+ * licensed (ticket 123 §B, declined 2026-10-22).
  */
 export function dispatcherGlyphRegistration(): SessionKindGlyphRegistrationOptions {
   return {

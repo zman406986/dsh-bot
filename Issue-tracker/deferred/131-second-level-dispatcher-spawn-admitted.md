@@ -1,7 +1,8 @@
 # 131 — Second-level dispatcher spawn is admitted: the host depth ceiling never refuses a mitosis hop
 
-**Status:** open
-**Labels:** needs-triage
+**Status:** deferred
+**Labels:** needs-info
+**Deferred:** 2026-10-22 — blocked on a human decision: current behavior is ADR-0025-ruled (no mitosis bound of ours); see the 2026-10-22 comment for citations and both unblock options.
 **Blocked by:** nothing
 **Related:** ticket 118 (verification pass, 2026-10-22 — Finding 1; its test list expects a refusal that does not happen), ADR-0025 (§Starting bounds and §Alternatives left open — "the host's depth and pool values are what stop it"; no recursion gate of ours), ADR-0003 (the worker-leaf rule, untouched), ticket 130 (the related but separate identity gap)
 
@@ -62,3 +63,23 @@ Options 1 and 3 overlap; 2 is the only one that changes behaviour.
 Filed from ticket 118's verification pass (its 2026-10-22 comment, "Finding 1"). Chunk 3 had already measured it and recorded it as a finding without adding a gate; the verifier confirmed it against the shipped derivation and the host's `resolveChildDepth`. Ticket 118's own test list still expects a refusal, and its test file records the truth, so the contradiction sits inside that ticket. It is filed separately because the resolution is an owner ruling, not a chunk of implementation work. Labelled `needs-triage` for that reason.
 
 Ticket 118 was not edited. Its `Status: claimed` and test list are left as they are.
+
+### 2026-10-22 — dispatched as an implementation task; stopped before any code change
+
+An overnight dispatch framed this as a code bug: replace the per-hop `parentDepth + 2` with an absolute module constant so that a depth-2 dispatcher cannot spawn a depth-3 dispatcher. **Not implemented.** The dispatch itself said the ADR and this ticket are the source of truth; both refuse the change:
+
+- ADR-0025 §Starting bounds (line 61) **requires** `maxDepth = parentDepth + 2` per hop and calls it "a required implementation detail, not a bound of ours". §Alternatives left open (line 65) keeps "generation 1 only … a `recursion-limit`" as a proposal only: "adopting one needs its own ticket stating the tradeoff". §Consequences (line 70): "The first implementation adds no bound of ours."
+- This ticket's Constraints (line 54): "**No gate may be added under this ticket.** ADR-0025 forbids `recursion-limit`, `dispatcher-cap`, generation counters, and durable spawn budgets." Option 2 (the only behaviour-changing option) "requires an ADR amendment first" (lines 39, 34). No ADR-0025 amendment exists in the tree; the ADR index's last note (2026-10-21) says "mitosis proceeds under ADR-0025 unchanged".
+- Accepted ADRs outrank ticket rulings in the authority stack, so this ticket cannot authorise the gate even if it wanted to. It has no acceptance checkboxes; it is a decision ticket that "picks none".
+
+**The requested semantics cannot be delivered through the host's ceiling anyway.** The host's only test is `parentDepth + 1 > maxDepth`, applied to every child kind. ADR-0025 line 61 also requires that a spawned child dispatcher keep its worker hop. So a dispatcher at header depth 1 must be admitted to spawn a worker at depth 2 (`maxDepth >= 2`), while the same parent's dispatcher child also lands at depth 2. The host cannot tell a worker child from a dispatcher child, so no value of `maxDepth` admits the worker hop and refuses the dispatcher hop. Any "depth 2 may not spawn depth 3" rule is a check in `spawnDispatcher` — a gate of ours.
+
+The only gate-free cap is `maxDepth = min(parentDepth + 2, MAX)`, and it does not give the requested shape either: with `MAX = 2` a depth-1 dispatcher is admitted at depth 2 but its workers at depth 3 are refused, i.e. the second-level dispatcher becomes a worker-less leaf, contradicting line 61.
+
+Code unchanged: `src/worker/agent-def.ts:105-107` still returns `parentDepth + 2`; the call site is `src/adapter/cordis-dsh-host.ts:1245-1246`. Baseline re-run green: `test/spawn-dispatcher-host.test.ts` 9/9, `test/spawn-dispatcher-tool.test.ts` 22/22. The behaviour pinning the current truth stands at `test/spawn-dispatcher-activation.test.ts:606`.
+
+**To unblock**, the owner or a records pass must do one of: (a) amend ADR-0025 with a chosen generation bound and its tradeoff, then file the code ticket — this ticket's option 2; or (b) record that depth is not a mitosis bound and trim ADR-0025 §Starting bounds and the PRD's "host's depth ceiling and live-child pool" wording — options 1/3. Either way the records move first. Ticket stays open.
+
+### 2026-10-22 — deferred by agent ruling (subject to human reversal)
+
+Deferred 2026-10-22 by agent ruling (subject to human reversal), which supersedes the "ticket stays open" line above. This is not a defect: admitting a second-level dispatcher spawn is ruled intended by accepted ADR-0025, which mandates `maxDepth = parentDepth + 2` per hop and forbids any gate of ours, and `test/spawn-dispatcher-activation.test.ts:606` already pins the behaviour. Unblocking needs a dated human ruling on file, either (A) an ADR-0025 amendment choosing a generation bound and stating its tradeoff, which then needs a code ticket, or (B) a dated ruling that depth is not a mitosis bound, plus trimming the stale "host depth ceiling" wording in ADR-0025 §Starting bounds and PRD lines 136, 150, and 434. The 2026-10-22 comment above carries the full citations for both paths; this comment records only the parking decision. Move back to `open/` when that ruling lands.

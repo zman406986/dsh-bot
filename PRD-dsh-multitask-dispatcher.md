@@ -143,7 +143,7 @@ Surface names are **dsh-native**; do not ship Sand tool names.
 | Capability | Suggested surface | Semantics |
 |---|---|---|
 | Spawn stream | existing dsh spawn/task with a **worker** agent type | Blank worker; returns worker id + ack; non-blocking |
-| Check | `check_worker` or job status UI + tool | List running workers; detail: elapsed, tool count, recent activity, transcript path |
+| Check | `check_workers` or job status UI + tool | List running workers; detail: elapsed, tool count, recent activity, transcript path |
 | Steer | `steer_worker` / dsh followup-interrupt | Inject into running worker |
 | Message any agent | `message_agent` | Worker → the steer path above; dispatcher → its inbox and wake. Tagged as from another assistant, never the user. *(2026-10-18, ADR-0025)* |
 | Await a worker | `await_agent` | Block this turn on one named worker, ≤120 s; returns its terminal status and result, or "still running". *(2026-10-18, ADR-0025)* |
@@ -287,7 +287,7 @@ Only if product needs multi-bot:
 | Join | One bounded await on a **worker** target (≤120 s) returning its terminal status and result. Dispatchers are not awaitable. *(Added 2026-10-18, ADR-0025.)* |
 | Bounds | 8,000 chars/message, 8 accepted messages per sender per 60 s, inbox 64 undelivered. |
 | Storage | Sender outbound + receiver inbound as normal transcript entries |
-| Directory | File or DB of agents: id, name, description |
+| Directory | File or DB of agents: id, name, description. **Superseded 2026-10-22** — no directory is built: ADR-0018 C13 forbids an agent-identity roster, and ADR-0027 decision 1 makes the session id the identity. The row is kept as history. |
 | Images | Optional later; text first |
 
 Sand-like “full messaging hub” is **out of MVP**. Multitask dispatcher does **not** depend on peers.
@@ -385,14 +385,14 @@ Deliver as separate files in the product repo (e.g. `prompts/dispatcher.md`). Re
 
 ## 13. Milestones
 
-| Phase | Scope | Exit |
-|---|---|---|
-| **M0** | Spec freeze (this PRD); TypeScript in-process plugin confirmed | Team sign-off |
-| **M1** | Core FSM + steer + wake bus + unit tests | S8 passing |
-| **M2** | dsh adapter + worker agent type + tools | S1–S5 demo |
-| **M3** | Todos reconcile + policy prompts | S6 demo |
-| **M4** | Docs, ZH/EN prompts; adapted-copy review (§12, re-scoped 2026-09-18 — no verbatim text vs the reference; the old clean-room audit and the S7 identifier-grep check are voided, ADR-0018) run once the product is mostly finished | Adapted-copy review recorded |
-| **M5** (opt) | Peer async messaging | S9 |
+| Phase | Scope | Exit | Status (verified 2026-10-22 against the tree; exit demos not re-run) |
+|---|---|---|---|
+| **M0** | Spec freeze (this PRD); TypeScript in-process plugin confirmed | Team sign-off | **Done** — the TypeScript in-process Cordis plugin is the shipped form (ADR-0001). |
+| **M1** | Core FSM + steer + wake bus + unit tests | S8 passing | **Shipped** — `src/core/worker-fsm.ts`, `src/core/steer-queue.ts`, `src/core/wake-bus.ts` and their offline unit tests; the wake bus carries the opt-in coalescing window (ticket 108, `wakeCoalesceWindowMs`, default 0 = immediate). |
+| **M2** | dsh adapter + worker agent type + tools | S1–S5 demo | **Shipped** — `src/adapter/` (22 modules), `src/worker/agent-def.ts`; activation is the explicit `/dsh-bot` command (ADR-0009, renamed by ADR-0030); the dispatcher tool surface is the eight tools in `DISPATCHER_TOOL_NAMES`; the opt-in file inbox ships disabled by default (ADR-0023). |
+| **M3** | Todos reconcile + policy prompts | S6 demo | **Shipped** — `src/core/todo-reconciler.ts`, `src/core/policy/prompts.ts`; the worker activity ring and wake digest (ticket 110); session-kind glyph live (ticket 123, ADR-0024 rider). |
+| **M4** | Docs, ZH/EN prompts; adapted-copy review (§12, re-scoped 2026-09-18 — no verbatim text vs the reference; the old clean-room audit and the S7 identifier-grep check are voided, ADR-0018) run once the product is mostly finished | Adapted-copy review recorded | **Partly done** — the adapted-copy review is recorded (`docs/research/no-verbatim-copy-review-2026-09-19.md`) and the client locale dictionary ships en + zh. Model-facing prompt copy ships in **EN only**; no ZH policy/worker prompt exists (`prompts.ts` keeps the prose in one place so it can land later). |
+| **M5** (opt) | Peer async messaging | S9 | **Partly done** — 1:1 peer messaging (`message_agent`), the bounded `await_agent`, the `spawn_dispatcher` mitosis path, and the worker `reply_to_dispatcher` channel shipped (ADR-0025, ADR-0028; tickets 116–118, 122). Chatroom broadcasting is **not built** (ADR-0026; ticket 125 deferred 2026-10-22). |
 
 ---
 

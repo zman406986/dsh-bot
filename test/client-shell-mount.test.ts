@@ -43,7 +43,7 @@ import {
 } from "../src/client/overlay.js";
 import { PLUGINS_ROW_CONFIG_SLOT } from "../src/client/settings-card-store.js";
 import { TOOL_CALL_TOOLVIEW_SLOT } from "../src/client/toolviews.js";
-import { HEADER_ACTIONS_SLOT, SIDEBAR_LEADING_SLOT } from "../src/client/session-kind.js";
+import { SIDEBAR_LEADING_SLOT } from "../src/client/session-kind.js";
 import {
   MAIN_PAGE_SLOT,
   ROOT_FRAME_SLOT,
@@ -419,21 +419,20 @@ describe("shell staging mount — apply() over the fake seams", () => {
   it("the default posture renders NOTHING into dsh's layout: only additive slots register (ticket 99)", () => {
     const ctx = createMountCtx();
     apply(ctx);
-    // Exactly four declaration waits remain: the keyed toolview entries
+    // Exactly three declaration waits remain: the keyed toolview entries
     // (serving the stock chat — ticket 89's AC 3, additive), the keyed
-    // settings page (ticket 47, additive in the Plugins page), the worker
-    // session-kind glyph in the header actions band (ticket 123, additive by
-    // entry id), and the dispatcher glyph in the sidebar leading cell
-    // (ticket 123, keyed on the adapter's `sessionKind` projection). No
-    // layout surface of ours: no `root` entry, no `main` entry, and nothing
-    // claims the shipped `conversation` page key.
-    assert.equal(ctx.injects.length, 4);
+    // settings page (ticket 47, additive in the Plugins page), and the
+    // dispatcher glyph in the sidebar leading cell (ticket 123, keyed on the
+    // adapter's `sessionKind` projection; the header marker is declined
+    // there — ADR-0024's rider licenses one slot only). No layout surface of
+    // ours: no `root` entry, no `main` entry, and nothing claims the shipped
+    // `conversation` page key.
+    assert.equal(ctx.injects.length, 3);
     assert.deepEqual(
       ctx.injects.map((record) => record.parent).sort(),
       [
         PLUGINS_ROW_CONFIG_SLOT,
         TOOL_CALL_TOOLVIEW_SLOT,
-        HEADER_ACTIONS_SLOT,
         SIDEBAR_LEADING_SLOT,
       ].sort(),
     );
@@ -593,10 +592,10 @@ describe("shell staging mount — apply() over the fake seams", () => {
     const ctx = createMountCtx();
     apply(ctx);
     // Three declaration waits: tool.call.toolview, plugins.row.config, and
-    // the worker session-kind glyph (ticket 123). The `main` page and the
+    // the sidebar session-kind glyph (ticket 123). The `main` page and the
     // `root` election are not composed; the capsule + launcher shell.overlay
     // injects retired at the ticket-78 cutover.
-    assert.equal(ctx.injects.length, 4);
+    assert.equal(ctx.injects.length, 3);
     assert.equal(ctx.slotCell(MAIN_PAGE_SLOT).length, 0);
     assert.equal(ctx.slotCell(ROOT_FRAME_SLOT).length, 0);
 
@@ -606,7 +605,7 @@ describe("shell staging mount — apply() over the fake seams", () => {
     // A fresh fiber (post-HMR apply) registers the same additive posture
     // again — same slots, no accumulation, still nothing in dsh's layout.
     apply(ctx);
-    assert.equal(ctx.injects.length, 4);
+    assert.equal(ctx.injects.length, 3);
     assert.equal(ctx.slotCell(MAIN_PAGE_SLOT).length, 0);
     assert.equal(ctx.slotCell(ROOT_FRAME_SLOT).length, 0);
   });

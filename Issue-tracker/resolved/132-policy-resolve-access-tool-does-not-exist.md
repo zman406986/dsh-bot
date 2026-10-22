@@ -1,6 +1,6 @@
 # 132 — The access policy tells the model to call `resolve_access`, a tool that does not exist
 
-**Status:** open
+**Status:** resolved
 **Labels:** needs-triage
 **Blocked by:** nothing
 **Related:** ticket 119 (its 2026-10-22 comment recorded this as a contradiction found but out of scope — "needs its own ticket"), ADR-0008 (the structured access relay: worker ask → wake/gated policy → answer by `sendMessage`; it names no model-facing resolve tool), ADR-0009/ADR-0019 (per-session dispatcher tools), ticket 30 (Allow / Always allow / Deny option set and the wildcard fence), ticket 71 AC-4 (prompt location line)
@@ -65,3 +65,36 @@ No live run was needed: every claim above is a registration list, a call-site co
 ### 2026-10-22 — filing
 
 Filed from ticket 119's 2026-10-22 comment ("Contradiction found, not fixed", item 1), which flagged the line and said it needed its own ticket. Re-verified independently before filing: the eight-tool surface, the single worker-local tool, the worker-only `request_access`, and the two human-driven call sites of `Multitask.resolveAccess`. The line number in the flag was `:210`; the function starts at `:209` and the dead instruction is `:216`. Nothing was copied out of ticket 119, which stays as it is.
+
+## Resolution — 2026-10-22
+
+Took option 2 (rewrite the line, no tool added). One line changed in
+`src/core/policy/prompts.ts` (`buildAccessPolicyBlock()`):
+
+Old (`:216`):
+
+> `- Answer with resolve_access (allow or deny). Never leave an ask unanswered — timeout denies by default.`
+
+New:
+
+> `- Answer each ask in your reply with allow or deny. Never leave an ask unanswered — timeout denies by default.`
+
+The line no longer names a tool: the dispatcher answers an access ask by
+ordinary reply, and the timeout-deny clause is unchanged. The plain-language
+line above it is unchanged; this ticket tracked the dead tool name only.
+
+No acceptance checkboxes existed in this ticket. No `src/` or `test/` hit
+pinned the old line, so no test changed. Post-edit grep for `resolve_access`
+over `src/` and `test/` returns zero hits.
+
+Tests run (all pass):
+
+- `test/policy-assembler.test.ts` — 27 pass, 0 fail
+- `test/restart-honesty.test.ts` — 18 pass, 0 fail
+- `test/access-relay.test.ts` — 33 pass, 0 fail
+- `test/access-prompt.test.ts` — 56 pass, 0 fail
+- `test/adapter-policy-inject.test.ts` — 13 pass, 0 fail
+
+Not done here, left to the owner: the question in the Options section of
+whether a model-facing resolve tool should exist at all, and whether the
+block should still be appended to denial-only wakes.

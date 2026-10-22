@@ -150,9 +150,10 @@ export const localeDictionary: LocaleDictionary = {
     // `ACTIVATION_PRESENCE_HINT`) is the en authority; this face carries the
     // identical en string plus the zh translation so the pair stays a single
     // localized copy unit. The client face does not render it today — the
-    // host command result is the surface — but the key set is shared.
+    // host command result is the surface — but the key set is shared. The
+    // panel claim was removed by ticket 134 (ADR-0024: no panel is mounted).
     "activation.presence-hint":
-      "The Workers panel shows live progress; results arrive in this chat as they finish.",
+      "The dispatcher reports progress as it works; results arrive in this chat as they finish.",
     // Ticket 40: the per-row steer affordance. The hint renders after a
     // successful prefill (focus is not exposed — review and send); the
     // fallback is the copy-only degrade for when the draft is unreachable.
@@ -302,9 +303,10 @@ export const localeDictionary: LocaleDictionary = {
       "Answer sent — this card updates when the dispatcher confirms.",
     "shell.dispatch.gating": "Gate",
     // Ticket 123: the session-kind glyph labels. They are accessible names /
-    // tooltips on a small mark, never visible paragraph copy. The worker mark
-    // is the only one composed today (see src/client/session-kind.tsx); the
-    // dispatcher label ships inert with it so the pair stays a single unit.
+    // tooltips on a small mark, never visible paragraph copy. Only the
+    // dispatcher mark is composed (the sidebar cell ADR-0024's rider licenses;
+    // see src/client/session-kind.tsx); the worker label stays with it as
+    // retained machinery for the declined header seat.
     "indicator.dispatcher": "Dispatcher session",
     "indicator.worker": "Worker session",
   },
@@ -337,7 +339,7 @@ export const localeDictionary: LocaleDictionary = {
     "toolview.field.peer": "目标会话",
     "toolview.field.priority": "优先",
     "activation.presence-hint":
-      "“工作者”面板会显示实时进度；结果完成后会直接送达本聊天。",
+      "调度器会在工作中随时汇报进度；结果完成后会直接送达本聊天。",
     "roster.steer.button": "纠偏",
     "roster.steer.hint": "已为 {workerId} 填入输入框——请检查后发送。",
     "roster.steer.copy-fallback":

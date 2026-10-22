@@ -353,6 +353,77 @@ describe("ticket 118: host spawnDispatcher", () => {
   });
 });
 
+describe("ticket 130: host durable dispatcher mark", () => {
+  /** Minimal in-memory DurabilityPort: the two seams this ticket adds. */
+  function createMarkStore() {
+    const marks = new Map<string, { sessionId: string }>();
+    return {
+      marks,
+      writeWorkerMarker() {},
+      readWorkerMarkers() {
+        return [];
+      },
+      deleteWorkerMarker() {},
+      writeDispatcherMark(mark: { sessionId: string }) {
+        marks.set(mark.sessionId, mark);
+      },
+      readDispatcherMark(sessionId: string) {
+        return marks.get(sessionId);
+      },
+    };
+  }
+
+  it("writes the child's mark after the spawn resolves, keyed by the session id", async () => {
+    const ctx = createStubCtx();
+    const store = createMarkStore();
+    const host = createCordisDshHost(ctx, { markers: store });
+    host.bindParent(createAgent("disp-1"), "disp-1");
+
+    const result = await host.spawnDispatcher({
+      parentSessionId: "disp-1",
+      title: "Peer",
+      prompt: "Handle it.",
+    });
+
+    assert.deepEqual([...store.marks.keys()], [result.dispatcherId]);
+  });
+
+  it("does not write a mark when the host refuses the spawn", async () => {
+    const ctx = createStubCtx();
+    const store = createMarkStore();
+    const host = createCordisDshHost(ctx, { markers: store });
+    host.bindParent(createAgent("disp-1"), "disp-1");
+    ctx.failNextActivationWith(new Error("ACTIVATION_LIMIT_REACHED"));
+
+    await assert.rejects(
+      host.spawnDispatcher({
+        parentSessionId: "disp-1",
+        title: "Peer",
+        prompt: "Handle it.",
+      }),
+      /ACTIVATION_LIMIT_REACHED/,
+    );
+    assert.equal(store.marks.size, 0);
+  });
+
+  it("a failing mark write never turns an accepted spawn into a host refusal", async () => {
+    const ctx = createStubCtx();
+    const store = createMarkStore();
+    store.writeDispatcherMark = () => {
+      throw new Error("marker store unavailable");
+    };
+    const host = createCordisDshHost(ctx, { markers: store });
+    host.bindParent(createAgent("disp-1"), "disp-1");
+
+    const result = await host.spawnDispatcher({
+      parentSessionId: "disp-1",
+      title: "Peer",
+      prompt: "Handle it.",
+    });
+    assert.equal(result.dispatcherId, "child-1");
+  });
+});
+
 describe("ticket 118: FakeDshHost dispatcher spawn", () => {
   it("records dispatcher spawns separately and never as workers", async () => {
     const host = new FakeDshHost();

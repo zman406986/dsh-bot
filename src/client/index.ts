@@ -26,9 +26,11 @@
  *    for the row `<package name>#<settings namespace>`, whose form comes from
  *    the slot owner's props (0.2.1 replaced the removed `settings.plugin.item`
  *    slot and `ctx.settingsScope` service with this path);
- * 4. the worker session-kind glyph (ticket 123): one additive `list` entry
- *    in the stock conversation header's actions band, which marks a
- *    subagent session on its own conversation.
+ * 4. the session-kind indicator (ticket 123): ONE additive `list` entry in
+ *    the stock sidebar row's leading cell — the dispatcher glyph. That is the
+ *    only seat ADR-0024's rider licenses ("exactly one additional additive
+ *    registration ... no other slot is licensed"); the worker marker in the
+ *    conversation header is declined there and not composed.
  *
  * The roster/config watch and its feeds are NOT composed: no client service
  * serves that document on 0.2.1. `mountShellPage` and the shell-mount
@@ -121,7 +123,6 @@ import {
 import { createOnboardingPane } from "./onboarding-pane.js";
 import {
   createSessionKindGlyph,
-  workerGlyphRegistration,
   dispatcherGlyphRegistration,
 } from "./session-kind.js";
 
@@ -285,35 +286,24 @@ export function applyClientModule(
     );
   });
 
-  // Session-kind indicator (ticket 123; ADR-0024 rider + addendum): ONE
-  // additive list entry in the stock conversation header's actions band,
-  // marking a worker (subagent) session on its own conversation.
+  // Session-kind indicator (ticket 123; ADR-0024 rider + addendum): exactly
+  // ONE additive list entry, the dispatcher glyph in the stock sidebar row's
+  // 16px leading cell (`sidebar.session.row.leading`).
   //
-  // Seat choice: `conversation.session.header.actions` (`list`, session
-  // scope) — NOT `conversation.session.header.lineage`, which is a `single`
-  // slot already owned at the default priority by `dsh-client-ui-subagent`
-  // (`dsh-client-ui-subagent/lib/client.js:978-982`); a second single entry
-  // would throw on a same-priority collision or displace the stock
-  // breadcrumb renderer. The actions band holds the same claim additively by
-  // `id`, beside stock `subagent-catalog` (order 10) and `job-list` (order 20).
+  // The ADR-0024 rider (2026-10-18) licenses "exactly one additional additive
+  // registration, and it is this one ... no other slot is licensed by this
+  // rider". The worker marker in `conversation.session.header.actions`, which
+  // an earlier revision of this composition also registered, is therefore NOT
+  // composed: that seat is a different slot and needs a fresh dated human
+  // ruling extending the rider. The glyph factory and the worker kind stay
+  // exported from `session-kind.tsx` as retained, uncomposed machinery so the
+  // ruling can later be honoured at this one composition point.
   //
-  // Why both marks are composed: workers are identified by
-  // `origin: 'subagent'`, a durable header fact. Dispatchers are identified by
-  // the `sessionKind` projection the adapter registers, which folds the
-  // `command/run` + `command/done` pair `/dsh-bot` already writes —
-  // so the identity is durable and needs no event of our own. `agentPreset`
-  // is unusable here (every durable header reads "standard").
-  ctx.slots.inject(
-    workerGlyphRegistration().name,
-    () => {
-      const t = ctx.locale.bind(LOCALE_NAMESPACE);
-      return ctx.slots.register(
-        workerGlyphRegistration(),
-        createSessionKindGlyph("worker", t),
-      );
-    },
-  );
-
+  // Identity: dispatchers are identified by the `sessionKind` projection the
+  // adapter registers, which folds the `command/run` + `command/done` pair
+  // `/dsh-bot` already writes — so the identity is durable and needs no event
+  // of our own. `agentPreset` is unusable here (every durable header reads
+  // "standard").
   ctx.slots.inject(
     dispatcherGlyphRegistration().name,
     () => {

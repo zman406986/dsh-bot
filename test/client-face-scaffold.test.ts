@@ -630,11 +630,10 @@ describe("client face scaffold — apply over fake client seams", () => {
     const ctx = createClientCtx();
     apply(ctx);
     // Three declaration waits: tool.call.toolview (ticket 24),
-    // plugins.row.config (ticket 47), and the worker session-kind glyph in
-    // the header actions band (ticket 123). The `main` page and the `root`
-    // election are not composed; the capsule + launcher shell.overlay injects
-    // retired at the cutover.
-    assert.equal(ctx.injects.length, 4);
+    // plugins.row.config (ticket 47), and the dispatcher sidebar glyph
+    // (ticket 123). The `main` page and the `root` election are not composed;
+    // the capsule + launcher shell.overlay injects retired at the cutover.
+    assert.equal(ctx.injects.length, 3);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
 
     ctx.runFiberTeardown();
@@ -644,7 +643,7 @@ describe("client face scaffold — apply over fake client seams", () => {
 
     // A fresh fiber (post-HMR apply) registers everything again.
     apply(ctx);
-    assert.equal(ctx.injects.length, 4);
+    assert.equal(ctx.injects.length, 3);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
   });
 });

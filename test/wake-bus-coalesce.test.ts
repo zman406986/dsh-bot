@@ -115,7 +115,6 @@ describe("wake bus coalescing — window batching (ticket 108)", () => {
     const bus = createWakeBus({
       onDeliver: (id) => delivered.push(id),
       coalesceWindowMs: 50,
-      now: () => 1_000,
       schedule: scheduler.schedule,
     });
 

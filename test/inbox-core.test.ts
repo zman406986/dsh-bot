@@ -196,7 +196,6 @@ describe("inbox core — enqueueExternalJob (ticket 113)", () => {
     const bus: WakeBus = createWakeBus({
       onDeliver: (id) => delivered.push(id),
       coalesceWindowMs: 50,
-      now: () => 1_000,
       schedule: scheduler.schedule,
     });
 

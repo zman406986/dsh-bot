@@ -112,6 +112,24 @@ export interface CompactionBoundary {
 }
 
 /**
+ * Ticket 130: the durable dispatcher identity — one row per session this
+ * plugin spawned as a dispatcher peer. The row carries nothing but the
+ * session id (which is also the table key): its PRESENCE is the whole fact.
+ *
+ * It exists because a spawned dispatcher's only other signal is the in-memory
+ * lifecycle registry, which dies with the process. With this row, a
+ * cold-resumed child is re-activated as a dispatcher instead of degrading to
+ * a plain subagent.
+ *
+ * Rows are never deleted: deactivation also runs on plugin unload, so a
+ * delete there would wipe every mark at each restart. The table grows, and
+ * that is accepted.
+ */
+export interface DurableDispatcherMark {
+  readonly sessionId: string;
+}
+
+/**
  * Where the boundary is read and written. Implemented by the adapter over the
  * same storage domain as {@link DurabilityPort}; tests use
  * {@link createInMemoryDurability}.
@@ -152,6 +170,26 @@ export interface DurabilityPort {
   ): readonly DurableWorkerMarker[] | Promise<readonly DurableWorkerMarker[]>;
   /** Drop a marker once its obligation is closed (delivered or aborted). */
   deleteWorkerMarker(workerId: string): void | Promise<void>;
+  /**
+   * Ticket 130: record that this session was spawned as a dispatcher peer.
+   * Written once, after the spawn resolved; never deleted (deactivation also
+   * runs on plugin unload, so a delete would wipe the mark at every restart).
+   *
+   * Optional so stores and test doubles written before this ticket keep
+   * compiling; a store that omits it simply has no durable dispatcher
+   * identity, which is the pre-130 behaviour.
+   */
+  writeDispatcherMark?(mark: DurableDispatcherMark): void | Promise<void>;
+  /**
+   * Ticket 130: the mark for one session, or undefined when it was never
+   * spawned as a dispatcher. Optional for the same reason as the write.
+   */
+  readDispatcherMark?(
+    sessionId: string,
+  ):
+    | DurableDispatcherMark
+    | undefined
+    | Promise<DurableDispatcherMark | undefined>;
 }
 
 /**
@@ -223,6 +261,8 @@ export interface InMemoryDurability
   readonly markers: Map<string, DurableWorkerMarker>;
   /** Ticket 124: compaction boundaries, keyed by session id. */
   readonly boundaries: Map<string, CompactionBoundary>;
+  /** Ticket 130: dispatcher identity marks, keyed by session id. */
+  readonly dispatcherMarks: Map<string, DurableDispatcherMark>;
 }
 
 export function createInMemoryDurability(): InMemoryDurability {
@@ -230,9 +270,12 @@ export function createInMemoryDurability(): InMemoryDurability {
   // Ticket 124: the boundary lives beside the markers in the SAME store — one
   // domain, two tables, exactly like the adapter's storage domain.
   const boundaries = new Map<string, CompactionBoundary>();
+  // Ticket 130: same store again; the mark's presence is the whole fact.
+  const dispatcherMarks = new Map<string, DurableDispatcherMark>();
   return {
     markers,
     boundaries,
+    dispatcherMarks,
     writeWorkerMarker(marker: DurableWorkerMarker): void {
       markers.set(marker.workerId, { ...marker });
     },
@@ -253,6 +296,12 @@ export function createInMemoryDurability(): InMemoryDurability {
       sessionId: string,
     ): CompactionBoundary | undefined {
       return boundaries.get(sessionId);
+    },
+    writeDispatcherMark(mark: DurableDispatcherMark): void {
+      dispatcherMarks.set(mark.sessionId, { ...mark });
+    },
+    readDispatcherMark(sessionId: string): DurableDispatcherMark | undefined {
+      return dispatcherMarks.get(sessionId);
     },
   };
 }

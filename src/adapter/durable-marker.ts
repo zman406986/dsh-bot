@@ -1,6 +1,7 @@
 import type {
   CompactionBoundary,
   CompactionBoundaryStore,
+  DurableDispatcherMark,
   DurableWorkerMarker,
   DurabilityPort,
 } from "../core/durability.js";
@@ -37,6 +38,17 @@ export const INBOX_TABLE_NAME = "inbox_jobs";
  */
 export const COMPACTION_BOUNDARY_TABLE_NAME = "compaction_boundaries";
 /**
+ * Ticket 130: the durable dispatcher identity — one row per session this
+ * plugin spawned as a dispatcher peer, keyed by session id. Read on
+ * `agent/created`, so a cold-resumed child is re-activated as a dispatcher
+ * instead of degrading to a plain subagent.
+ *
+ * Rows are NEVER deleted. A dispatcher's deactivation also runs on plugin
+ * unload, so deleting there would wipe every mark at each restart — the
+ * opposite of what this table is for. The table grows; that is accepted.
+ */
+export const DISPATCHER_SESSION_TABLE_NAME = "dispatcher_sessions";
+/**
  * Ticket 113: the domain gained the `inbox_jobs` table, so the spec bumps
  * from 1 to 2. Existing `worker_markers` rows keep their shape (the new
  * `external` field is optional); the version bump only declares the wider
@@ -49,6 +61,8 @@ export const COMPACTION_BOUNDARY_TABLE_NAME = "compaction_boundaries";
  * of what a new optional table needs. A store written before this ticket opens
  * with the new table empty. Downgrades are not supported and are not a case
  * this repo claims.
+ *
+ * Ticket 130: `dispatcher_sessions` is added the same way, same reason.
  */
 export const DOMAIN_VERSION = 2;
 
@@ -241,6 +255,25 @@ const compactionBoundaryValueSchema = {
   parse: parseCompactionBoundary,
 };
 
+/**
+ * Minimal open-time validation for a dispatcher identity row (ticket 130).
+ * The session id is the key AND the only field; a row missing it is malformed.
+ */
+function parseDispatcherMark(value: unknown): DurableDispatcherMark {
+  if (typeof value !== "object" || value === null) {
+    throw new Error("dispatcher mark must be an object");
+  }
+  const m = value as Record<string, unknown>;
+  if (typeof m.sessionId !== "string" || m.sessionId.length === 0) {
+    throw new Error("dispatcher mark.sessionId must be a non-empty string");
+  }
+  return value as DurableDispatcherMark;
+}
+
+const dispatcherMarkValueSchema = {
+  parse: parseDispatcherMark,
+};
+
 /** Domain spec handed to `storageDomain.open`. */
 export function markerDomainSpec(): unknown {
   return {
@@ -255,6 +288,9 @@ export function markerDomainSpec(): unknown {
       },
       [COMPACTION_BOUNDARY_TABLE_NAME]: {
         valueSchema: compactionBoundaryValueSchema,
+      },
+      [DISPATCHER_SESSION_TABLE_NAME]: {
+        valueSchema: dispatcherMarkValueSchema,
       },
     },
   };
@@ -280,12 +316,13 @@ export interface StorageDomainDurability
 }
 
 /**
- * Durable marker + inbox checkpoint + compaction boundary store over
- * `ctx.storageDomain` (ADR-0006, ticket 113, ticket 124). Open is lazy: the
- * first read/write opens the domain ONCE (all tables share it — a second open
- * of one namespace is not assumed to be safe); later calls reuse it. Marker
- * key = workerId; checkpoint key = jobId; boundary key = sessionId. Reads
- * filter by parentSessionId at roster scale.
+ * Durable marker + inbox checkpoint + compaction boundary + dispatcher
+ * identity store over `ctx.storageDomain` (ADR-0006, ticket 113, ticket 124,
+ * ticket 130). Open is lazy: the first read/write opens the domain ONCE (all
+ * tables share it — a second open of one namespace is not assumed to be
+ * safe); later calls reuse it. Marker key = workerId; checkpoint key = jobId;
+ * boundary key = sessionId; dispatcher mark key = sessionId. Reads filter by
+ * parentSessionId at roster scale.
  */
 export function createStorageDomainDurability(
   storageDomain: StorageDomainLike,
@@ -325,6 +362,16 @@ export function createStorageDomainDurability(
         domain.table(
           COMPACTION_BOUNDARY_TABLE_NAME,
         ) as unknown as KvTableLike<CompactionBoundary>,
+    );
+  }
+
+  function ensureDispatcherTable(): Promise<KvTableLike<DurableDispatcherMark>> {
+    // Same localized cast as the inbox table (ticket 130).
+    return ensureDomain().then(
+      (domain) =>
+        domain.table(
+          DISPATCHER_SESSION_TABLE_NAME,
+        ) as unknown as KvTableLike<DurableDispatcherMark>,
     );
   }
 
@@ -389,6 +436,20 @@ export function createStorageDomainDurability(
       sessionId: string,
     ): Promise<CompactionBoundary | undefined> {
       const table = await ensureBoundaryTable();
+      return table.get(sessionId);
+    },
+
+    // Ticket 130: durable dispatcher identity, in the SAME domain. Keyed by
+    // session id and never deleted — see `DISPATCHER_SESSION_TABLE_NAME`.
+    async writeDispatcherMark(mark: DurableDispatcherMark): Promise<void> {
+      const table = await ensureDispatcherTable();
+      await table.put(mark.sessionId, mark);
+    },
+
+    async readDispatcherMark(
+      sessionId: string,
+    ): Promise<DurableDispatcherMark | undefined> {
+      const table = await ensureDispatcherTable();
       return table.get(sessionId);
     },
 

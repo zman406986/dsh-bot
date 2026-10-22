@@ -1,6 +1,6 @@
 # Dispatcher surfaces — the designed absences
 
-**Status:** shipped with ticket 32 (design-17 §4.8–4.9, §7, §8); **surface inventory corrected 2026-10-18 for the native-dsh posture (ADR-0024, ticket 114):** stock dsh is the primary UI and the only UI — our client module registers nothing into dsh's layout except the one session-kind glyph licensed by ADR-0024's 2026-10-18 rider (ruled, not yet implemented), and the floating window, launcher, and capsule are withdrawn. The designed absences below still stand; the surface inventory at the end records what ships and what stays in the tree unmounted. Reference:
+**Status:** shipped with ticket 32 (design-17 §4.8–4.9, §7, §8); **surface inventory corrected 2026-10-18 for the native-dsh posture (ADR-0024, ticket 114):** stock dsh is the primary UI and the only UI — our client module registers nothing into dsh's layout except the one session-kind glyph licensed by ADR-0024's 2026-10-18 rider (live since ticket 123), and the floating window, launcher, and capsule are withdrawn. The designed absences below still stand; the surface inventory at the end records what ships and what stays in the tree unmounted. Reference:
 `.scratch/clone-always-on/design-17-always-on-dispatcher.md` (sections
 §4.6–4.9 and the conflict table §5). All text here is original clean-room
 copy; the contaminated reference tree was not consulted.
@@ -8,7 +8,8 @@ copy; the contaminated reference tree was not consulted.
 This note records the surfaces the dispatcher deliberately does **not**
 build, and why. Each absence is a decision, not a gap left open by
 accident. Rationale is drawn from the PRD, the ADRs, and the verified dsh
-0.1.5-rc.1 extension points (`docs/research/dsh-plugin-ui-patterns.md`) — never from
+extension points (`docs/research/dsh-plugin-ui-patterns.md`, read against
+0.1.5-rc.1; the shipped 0.2.1 slot deltas are recorded on ticket 114) — never from
 the reference implementation.
 
 The rule the whole list follows: **presence is a projection of existing
@@ -19,8 +20,9 @@ feel.
 
 ## No push notifications
 
-dsh 0.1.5-rc.1 has **no notification or toast extension point**. Attention therefore
-routes only through surfaces the user has to look at:
+dsh exposes **no notification or toast extension point** (verified against
+0.1.5-rc.1; none appears among the 0.2.1 slot deltas recorded on ticket 114).
+Attention therefore routes only through surfaces the user has to look at:
 
 1. the Workers panel's **Needs you** section (`roster-store.ts`
    `rosterSectionFor`) when a panel is mounted — since ADR-0024 (2026-10-18)
@@ -30,7 +32,8 @@ routes only through surfaces the user has to look at:
    chat messages whenever the user is in the chat (the only live route in the
    native-dsh posture);
 3. the activation success copy, which sets that expectation up front
-   (`activation.presence-hint`).
+   (`activation.presence-hint`) — since ticket 134 (2026-10-22) the copy names
+   the dispatcher's own narration, not a panel, because no panel is mounted.
 
 No surface promises or simulates push: there are no "notify me" controls,
 no fake toasts, no bell/badge affordances, and no polling loop pretending to
@@ -43,7 +46,7 @@ the host's, not ours.** See design-17 §4.8.
 ## No todo board
 
 `ADR-0007` keeps the todo ledger **dispatcher-private**. The user-visible
-proxies are the panel (when mounted), presence, and in-chat narration — the dispatcher
+proxies are the panel (when mounted) and in-chat narration — the dispatcher
 reconciles the ledger and *speaks* the result (PRD S6). There is no task
 list, no column board, and no per-todo card.
 
@@ -51,7 +54,8 @@ The `todoId` chip rendered muted on a panel row is **linkage metadata**
 (worker ↔ ledger correlation so a settled worker can be matched to its
 entry), never a board item and never a task list. It is truncated, low
 contrast, and has no affordances. Rendered progress is carried by the
-worker rows themselves.
+worker rows themselves. This is dormant machinery in the native-dsh posture:
+the panel is retained and unmounted, so nothing renders it today.
 
 Building a board would be *our-invention surface*: the reference has none,
 the PRD requires none, and rendering ledger rows as a board risks reading
@@ -134,8 +138,8 @@ The record of what those surfaces were and why they are gone:
   model are **withdrawn with the surface**. They are historical record, not live contracts.
 
 `src/client/floating-window.tsx`, `src/client/floating-window-store.ts`, and the launcher
-registration in `src/client/overlay.ts` are ticket 114's to delete; until that deletion lands
-they are dead code, not composed surfaces. The shell machinery below stays in the tree as
+registration in `src/client/overlay.ts` were deleted by ticket 114 (dsh 0.2.1 port); they
+no longer exist in the tree. The shell machinery below stays in the tree as
 retained, unmounted machinery.
 
 ## Retained but not composed (native-dsh posture)
@@ -148,33 +152,46 @@ for a future surface registered at the one composition point, `src/client/index.
 | Shell page mount (store + feeds + pane/seat wiring) | `src/client/shell-mount.ts` | Retained, unmounted (as at `e773ef8`) |
 | Dispatcher shell element tree | `src/client/shell.tsx`, `src/client/shell-store.ts` | Retained, unmounted |
 | Roster panel | `src/client/panel.tsx`, `src/client/roster-store.ts` | Retained, unmounted |
-| Conversation pane / onboarding / approval pane | `src/client/conversation.tsx`, `src/client/conversation-store.ts`, `src/client/conversation-feed.ts`, `src/client/onboarding-pane.tsx`, `src/client/approval-pane.tsx` | Retained, unmounted |
-| Add/delete/stop dispatcher-session wiring (ticket 101) | `src/client/actions.ts`, `src/client/shell-store.ts`, `src/client/shell.tsx` | Retained functional wiring, unreachable without a mount |
+| Conversation pane / onboarding / approval pane | `src/client/conversation.tsx`, `src/client/conversation-store.ts`, `src/client/conversation-feed.ts`, `src/client/onboarding-pane.tsx`, `src/client/approval-pane.tsx`, `src/client/approval-cards.ts`, `src/client/approval-feed.ts` | Retained, unmounted; the approval/mirror feeds have no live channel on 0.2.1 |
+| Per-session mirror hub and shell feeds | `src/client/shell-mirror-feed.ts`, `src/client/shell-feed.ts` | Retained; no live channel feeds them (the settings-document mirror is gone) |
+| Roster mirror key grammar | `src/adapter/roster-channel.ts` | Retained as plain string functions only — no settings-document channel behind them on 0.2.1 |
 | Keyed `main` page and `root` election contracts | `src/client/shell-mount.ts` | Retained, reversible at one registration site |
 
+Ticket 101's client-side add/delete affordances (`describeAddPicker`,
+`shellDeletePress`, the per-row delete arming, and the `/dispatcher-stop` line)
+were deleted in the 0.2.1 port; the daemon-side activation and the host
+`agent/disposed` teardown path remain, and deactivation is now implicit only
+(ADR-0030).
+
 The single composition point is `src/client/index.ts`'s `apply`: it registers the locale
-namespace, the keyed `tool.call.toolview` entries, and the keyed `settings.plugin.item`
-card — the `e773ef8` shape, plus the one session-kind glyph licensed by ADR-0024's
+namespace, the keyed `tool.call.toolview` entries, the keyed `plugins.row.config`
+settings card, and the one session-kind glyph licensed by ADR-0024's
 2026-10-18 rider. A future surface is registered there and nowhere else.
 
-## The settings card (`Settings → 插件配置`, ticket 47)
+## The settings card (the Plugins page row, ticket 47)
 
-`Settings → 插件配置` renders the **intersection of two ledgers**: the settings
-namespaces the Host serves, and the cards registered into the keyed
-`settings.plugin.item` slot — dispatched as
-`renderSlot("settings.plugin.item", {}, { entryKey: ns })` per served namespace.
-The Host has always served our namespace; what was missing was the browser-side
-claim, so the section never appeared. `src/client/settings-card-store.ts` +
-`src/client/settings-card.tsx` do that registration: one keyed entry whose `key` is
-the plugin's settings namespace — that is the entire pairing rule, since the tab
-pairs namespace with card by key and never learns what the namespace means.
+The Plugins page renders a plugin row's configuration from the keyed
+`plugins.row.config` slot: the row page keys the cell
+`<package name>#<row id>` and hands the entry's accepted snapshot and its one
+atomic write verb in as owner props. A row the Host serves no settings
+namespace for gets no configure control at all, because the page resolves the
+form by making the row id, the Loader entry id, and the settings namespace the
+same string. `src/client/settings-card-store.ts` +
+`src/client/settings-card.tsx` do that registration: one keyed entry whose
+`key` names the plugin's settings namespace, and the card edits the form the
+page hands it rather than reaching for a service of its own.
+
+(Dated note: this replaced the 0.1.5-rc.1 `settings.plugin.item` card under
+`Settings → 插件配置`. dsh 0.2.1 removed that slot and the client
+`ctx.settingsScope` service; the roster watch that rode the same scope is gone
+too — see "Retained but not composed".)
 
 Deliberate properties, each a decision:
 
-- **One channel.** Reads and writes use the SAME `ctx.settingsScope` bind the
-  roster watch holds (`bind({namespace})` → `getSnapshot()`/`subscribe()`, and
-  `set`/`unset` for writes). A second bind would be a second revision view of
-  one document.
+- **One channel.** The card reads and writes only the form the slot owner hands in:
+  it re-attaches on each new page snapshot and writes through that form's one
+  `mutate(ops, revision)`. It never resolves a service or binds a second view of the
+  document — and the roster watch's own scope bind no longer exists to share.
 - **Nothing renders while the namespace is not served.** `unavailable`, or a
   section the Host has not accepted, yields an empty card — the pattern the shipped
   cards use (`PluginCard` returns `null`) rather than a disabled control nobody can act
@@ -185,8 +202,8 @@ Deliberate properties, each a decision:
 - **`overridden` is presence, not comparison.** A field's presence in the raw
   user layer marks it overridden even when its value equals the composition
   default, so an empty draft plans a clear (the field re-inherits the layer).
-- **A save is verified by read-back.** The scope's write resolves either way, so
-  a read-back that disagrees with what was staged keeps the drafts and reports
+- **A save is verified by read-back.** A `mutate` that answers `false`, or a
+  read-back that disagrees with what was staged, keeps the drafts and reports
   the failure rather than claiming a success the document does not carry.
 - **The flag is phrased as the SETTING.** The `enabled` control's hint states the
   ADR-0005 rule: a saved change applies to new chats, and the running chat keeps
@@ -197,8 +214,8 @@ Deliberate properties, each a decision:
 ## Theming: the surfaces use the host's design tokens
 
 In the native-dsh posture (ADR-0024) the only surfaces that own colours are the
-**settings card** and the **retained shell components** (unmounted); the ruled
-session-kind glyph takes the host's label tokens when it lands. They take
+**settings card** and the **retained shell components** (unmounted); the live
+session-kind glyph inherits the host's label tokens. They take
 **every colour from the host's shared semantic token
 layer** (`--dsw-alias-*`), so they follow the shell's light/dark setting instead
 of painting a private palette. The ticket-47 settings card does the same, in the
@@ -237,27 +254,30 @@ slots carry our content.
 
 | Surface | Implementation | State |
 |---|---|---|
-| Session-kind glyph in the sidebar row | `src/client/index.ts` (registration, not yet written) | **Ruled, not implemented** — additive `sidebar.session.row.leading` entry, a small glyph for dispatcher-owned sessions. Two limits: worker/subagent sessions are hidden by stock dsh and never become rows, so they cannot be marked (only dispatcher vs normal is achievable); and the leading cell renders only on idle, non-archived, non-blank rows — running rows show stock's status dot instead. 16px cell: glyph only, no text. Dispatcher-vs-peer-dispatcher distinction TBD. Pending the client 0.2.1 port (ADR-0024 rider, 2026-10-18) |
-| Settings card (`Settings → 插件配置`) | `src/client/settings-card.tsx` + `src/client/settings-card-store.ts` | **Live** — keyed `settings.plugin.item`, the one UI surface we register |
-| Five tool call views | `src/client/toolviews.ts` | **Live** — keyed `tool.call.toolview` entries where dispatcher tool calls happen |
+| Session-kind glyph in the sidebar row | `src/client/session-kind.tsx` + the registration in `src/client/index.ts` | **Live** — one additive `sidebar.session.row.leading` entry (order 20, above the stock schedule mark at 10), a dispatcher glyph keyed on the adapter's `sessionKind` projection. Single slot: the rider licenses exactly one registration. Limits: worker/subagent sessions are hidden by stock dsh and never become rows, so only dispatcher vs normal shows here; the leading cell renders only on idle, non-archived, non-blank rows. 16px cell: glyph only, no text (ADR-0024 rider, 2026-10-18). The worker marker in `conversation.session.header.actions` is **declined** — not licensed by the rider; a future dated human ruling can extend it (ticket 123, 2026-10-22) |
+| Settings card (the Plugins page row) | `src/client/settings-card.tsx` + `src/client/settings-card-store.ts` | **Live** — keyed `plugins.row.config`, the one configuration surface we register |
+| Six tool call views | `src/client/toolviews.ts` | **Live** — six keyed `tool.call.toolview` entries: the five long-standing dispatcher tools plus the retained historical `send_peer` key. The dispatcher surface is eight tools; `message_agent`, `await_agent`, and `spawn_dispatcher` deliberately have no row renderer yet and fall back to the generic tool row |
 | Locale dictionary (en + zh, identical key sets) | `src/client/overlay.ts` | **Live** — namespace registration, not layout |
-| Roster wire contract (snapshot v2) | `src/core/roster-snapshot.ts` | **Live** — the adapter-side wire contract |
+| Roster wire contract (snapshot v4) | `src/core/roster-snapshot.ts` | **Retained** — the parse/projection contract stays; no live channel feeds it on 0.2.1 (the settings-document mirror is gone) |
 | Activation command + presence hint | `src/adapter/activation-command.ts` | **Live** — `/dsh-bot` in the stock chat |
-| Stop command | `src/adapter/stop-command.ts` | **Withdrawn** — ADR-0030 (2026-10-21, ticket 129) removes the command and the file; deactivation is implicit via host disposal or plugin unload |
+| Stop command | removed (`src/adapter/stop-command.ts` deleted) | **Withdrawn** — ADR-0030 (2026-10-21, ticket 129) removed the command and the file; deactivation is implicit via host disposal or plugin unload |
 | Steer command | `src/adapter/steer-command.ts` | **Live** — `/dispatcher-steer` in the stock chat |
-| Access prompts (Allow / Always allow this session / Deny) | `src/adapter/access-prompt.ts` | **Live** — host approval surfaces |
+| Resolve command | `src/adapter/resolve-command.ts` | **Live** — `/dispatcher-resolve`, the transport approval cards answer through |
+| Access prompts (Allow / Always allow this session / Deny) | `src/adapter/access-prompt.ts` | **Live** — host `userQuestions.ask` prompts |
 | Restart notice | `src/adapter/restart-notice.ts` | **Live** — in-chat text |
 | Workers panel | `src/client/panel.tsx`, sections from `src/client/roster-store.ts` | Retained, unmounted |
-| Dispatcher shell (roster panel, conversation pane, add/delete seats) | `src/client/shell.tsx`, `src/client/shell-store.ts` | Retained, unmounted |
+| Dispatcher shell (roster panel, conversation pane) | `src/client/shell.tsx`, `src/client/shell-store.ts` | Retained, unmounted |
 | Shell page mount + `main`/`root` contracts | `src/client/shell-mount.ts` | Retained, unmounted |
-| Floating window / launcher / capsule | `src/client/floating-window.tsx`, `src/client/floating-window-store.ts`, launcher registration in `src/client/overlay.ts` | **Withdrawn** — ticket 114 deletes them |
+| Floating window / launcher / capsule | deleted — `src/client/floating-window.tsx`, `src/client/floating-window-store.ts`, the launcher registration in `src/client/overlay.ts` | **Withdrawn and deleted** — ticket 114 removed the files; ADR-0024 withdrew the surfaces |
 
-Dormant boot registers nothing beyond the two commands and the passive
-host plumbing; the roster, prompts, and tools exist only after an explicit
-`/dsh-bot` (ADR-0009). Client-side, the default composition registers
-the locale namespace, the keyed toolviews, and the keyed settings card, plus the
-one session-kind glyph licensed by ADR-0024's 2026-10-18 rider — and nothing
-else into dsh's layout: there is no chip, no window, and no presence copy
-before activation. The matrix is asserted in `test/composition-polish.test.ts`
-and `test/activation-lifecycle.test.ts`; the native-dsh posture pins are
-ticket 114's to add.
+Dormant boot registers the three host commands — `/dsh-bot`, `/dispatcher-steer`,
+`/dispatcher-resolve` — plus the passive host plumbing, and nothing else: the prompts
+and the tool surface exist only after an explicit `/dsh-bot` (ADR-0009). The roster
+snapshot has no live producer at all on 0.2.1, so nothing of it reaches a surface.
+Client-side, the default composition registers the locale namespace, the keyed
+toolviews, the keyed settings card, and the one session-kind glyph licensed by
+ADR-0024's 2026-10-18 rider — and nothing else into dsh's layout: there is no chip,
+no window, and no presence copy before activation. The matrix is asserted in
+`test/client-shell-mount.test.ts` (the three additive injects),
+`test/client-session-kind.test.ts` (the single glyph entry), and
+`test/activation-lifecycle.test.ts` (the dormant command list).
