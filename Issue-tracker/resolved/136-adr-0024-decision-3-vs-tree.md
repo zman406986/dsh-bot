@@ -1,7 +1,7 @@
 # 136 — ADR-0024 decision 3 says ticket 101's client wiring is preserved in full; the tree no longer has it
 
-**Status:** open
-**Labels:** needs-info
+**Status:** resolved
+**Labels:** needs-info (answered by owner ruling 2026-10-22)
 **Blocked by:** a dated human ruling, either way (see §The two options). No agent can settle this.
 **Related:** ADR-0024 decision 3 (the claim that conflicts), ADR-0030 (the `/dsh-bot` rename and `/dispatcher-stop` withdrawal), ADR-0021 decision 3 (the add/delete permission the wiring served), ticket 101 (the add/delete work), ticket 114 (the 0.2.1 port that removed the wiring, while its own checklist claimed to keep it), ADR-0018 C13 (no identity roster — the reason a session-management UI was ever the only place this lived)
 
@@ -90,3 +90,7 @@ None. There is no checkbox an agent can tick here. The exit is a dated human rul
 ### 2026-10-22 — filing
 
 Found by the documentation sweep. Every claim above was checked against the tree on 2026-10-22: the four symbols were grepped (three have zero hits in `src/`; the other two survive only inside `docs/surfaces.md`'s deletion note), the two commits were read with `git show --stat`, and ADR-0024 line 15 plus ticket 114 lines 53-54 were read before quoting. Labelled `needs-info`: the missing information is the owner's ruling, not a technical fact.
+
+### 2026-10-22 — resolved by owner ruling
+
+The owner ruled on 2026-10-22: "we reverted the separate UI entirely, all rulings on separate UI no longer valid." That settles this ticket as option 1 (accept the deletion): ADR-0024 decision 3's preservation clause is superseded by a dated note appended to the ADR; the deleted ticket-101 client wiring stays deleted; no corrective restore is wanted. The rider's single sidebar-glyph license stands (stock-dsh addition, not separate UI). Nothing to implement.

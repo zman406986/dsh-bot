@@ -2,7 +2,7 @@
 
 **Status:** deferred
 **Labels:** needs-info
-**Deferred:** 2026-10-22 — blocked on two human decisions (ADR-0026 open questions 3 and 4); the 2026-10-22 comment below records the reason and the reopen gate.
+**Deferred:** 2026-10-22 — owner ruled 2026-10-22: chatroom will NOT be implemented in the current version. Reopen only by a future dated owner decision.
 **Blocked by:** ADR-0026 open question 3 (how room traffic reaches a wake; C15 is unamended) and open question 4 (who may create a room) — both human decisions. 116 and 121 are resolved. Reopening also waits on 112 and 131 being settled.
 **Related:** ADR-0026 (§Settled bound set, membership identity, persistence), ADR-0002 (peers in scope), ADR-0006 / ADR-0018 A5 (persistence stays in dsh's store), ADR-0018 C13 (no identity roster), C15 (single wake kind), ADR-0018 U-H (no local search index)
 
@@ -65,3 +65,7 @@ Filed for ADR-0026, whose "bounds TBD / source material only" was replaced on 20
 ### 2026-10-22 — deferred by agent ruling (subject to human reversal)
 
 Deferred 2026-10-22 by agent ruling (subject to human reversal). Rooms are in scope per the 2026-10-18 ruling (ADR-0018 C14 room exclusion superseded by ADR-0026) and are not a "full messaging hub" rebuild (PRD §7.6 line 293); peer messaging itself is optional M5 (PRD §13). The build is blocked by ADR-0026 open questions 3 and 4, both human decisions: Q3 needs a new wake path or a C15 amendment (ADR-0026 line 13), and ADR-0003's no-worker-to-worker rule binds against a member-to-member log; Q4 needs an owner decision on room creation, since no client surface exists (ADR-0024). Reopen only after (a) C15 is amended for room wakes or a dispatcher-only room shape is ruled, (b) an owner decision names who creates a room, and (c) tickets 112 and 131 are settled. Move back to open/ when those land.
+
+### 2026-10-22 — owner ruling: not in the current version
+
+The owner ruled on 2026-10-22: "don't implement chatroom, at least not in current version." This answers the deferral: neither ADR-0026 open question needs an answer now. The ticket stays deferred; the two open questions and their citations remain below for whenever a future version picks this up. Nothing to implement.
