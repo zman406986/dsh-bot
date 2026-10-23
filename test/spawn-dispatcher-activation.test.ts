@@ -47,7 +47,7 @@ import {
 } from "../src/adapter/index.js";
 import { resolveSessionKind } from "../src/client/session-kind.js";
 import { DISPATCHER_SESSION_TABLE_NAME, WORKER_SESSION_TABLE_NAME } from "../src/adapter/durable-marker.js";
-import { SPAWN_DISPATCHER_TOOL } from "../src/core/policy/prompts.js";
+import { SPAWN_DISPATCHER_TOOL, buildDispatcherPolicySection } from "../src/core/policy/prompts.js";
 import { WORKER_PERSONA_SECTION } from "../src/worker/preset.js";
 
 function tick(): Promise<void> {
@@ -1410,6 +1410,148 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     });
     assert.equal(refusedSteer.ok, false);
     assert.equal(refusedSteer.reason, "not-running");
+  });
+});
+
+describe("ticket 141 — spawn generation through the real wiring", () => {
+  /**
+   * The owner's ruled line, end to end: a user-started dispatcher is
+   * generation 1, each spawn adds one, and a cold-resumed child keeps its
+   * number because the mark row carries it.
+   *
+   * Everything here runs the real plugin `apply()`, the real host, and the
+   * real core over a storage stub — no live dsh, no LLM.
+   */
+  async function readMarks(
+    storage: StorageTables,
+  ): Promise<Map<string, { sessionId?: string; generation?: number }>> {
+    return new Map(
+      storage.get(DISPATCHER_SESSION_TABLE_NAME) ?? [],
+    ) as Map<string, { sessionId?: string; generation?: number }>;
+  }
+
+  it("generation 1 spawns 2, generation 2 spawns 3: the child's policy names the pair", async () => {
+    const ctx = createActivationCtx();
+    apply(ctx, volatileConfig({ enabled: true }));
+    const creator = createScopedAgent("chat-1");
+    await activateDispatcher(ctx, creator);
+
+    // The user-started dispatcher's own text: byte-identical to the shipped
+    // block, and it never mentions a generation.
+    const creatorPolicy = textOf(creator.injected[0]);
+    assert.equal(creatorPolicy, buildDispatcherPolicySection());
+    assert.ok(!creatorPolicy.includes("generation"));
+
+    // generation 1 → child is generation 2.
+    await spawnPeer(creator, "Second", "Own the slice.");
+    const child = ctx.children[0] as StubChild;
+    const childPolicy = textOf(child.agent.injected[0]);
+    assert.ok(
+      childPolicy.includes(
+        "A generation-1 dispatcher spawned you. You are the generation-2 team leader.",
+      ),
+      childPolicy,
+    );
+
+    // generation 2 → grandchild is generation 3, spawned BY the child.
+    await spawnPeer(child.agent, "Third", "Own the next slice.");
+    const grandchild = ctx.children[1] as StubChild;
+    const grandchildPolicy = textOf(grandchild.agent.injected[0]);
+    assert.ok(
+      grandchildPolicy.includes(
+        "A generation-2 dispatcher spawned you. You are the generation-3 team leader.",
+      ),
+      grandchildPolicy,
+    );
+    // The creator's text is untouched by the deeper spawn.
+    assert.equal(textOf(creator.injected[0]), creatorPolicy);
+  });
+
+  it("the generation rides the mark row, one past the spawner's", async () => {
+    const storage: StorageTables = new Map();
+    const ctx = createActivationCtx(storage);
+    apply(ctx, volatileConfig({ enabled: true }));
+    const creator = createScopedAgent("chat-1");
+    await activateDispatcher(ctx, creator);
+    await spawnPeer(creator, "Second", "Own the slice.");
+    const child = ctx.children[0] as StubChild;
+    await spawnPeer(child.agent, "Third", "Own the next slice.");
+    const grandchild = ctx.children[1] as StubChild;
+
+    const marks = await readMarks(storage);
+    assert.equal(marks.get(String(child.agent.session.id))?.generation, 2);
+    assert.equal(
+      marks.get(String(grandchild.agent.session.id))?.generation,
+      3,
+    );
+  });
+
+  it("a cold-resumed grandchild keeps generation 3, with no parent activated in the new process", async () => {
+    const storage: StorageTables = new Map();
+    const first = createActivationCtx(storage);
+    apply(first, volatileConfig({ enabled: true }));
+    const creator = createScopedAgent("chat-1");
+    await activateDispatcher(first, creator);
+    await spawnPeer(creator, "Second", "Own the slice.");
+    const child = first.children[0] as StubChild;
+    await spawnPeer(child.agent, "Third", "Own the next slice.");
+    const grandchild = first.children[1] as StubChild;
+    const grandchildId = String(grandchild.agent.session.id);
+    const childId = String(child.agent.session.id);
+
+    // ── process restart ────────────────────────────────────────────────
+    // Storage survives; plugin + host state does not. NOTHING is activated
+    // in the new process — the resumed child alone must resolve its number.
+    const second = createActivationCtx(storage);
+    apply(second, volatileConfig({ enabled: true }));
+    assert.equal(second.children.length, 0);
+
+    const resumed = createScopedAgent(grandchildId, {
+      topLevel: false,
+      depth: 2,
+      parentSessionId: childId,
+      agentPreset: "standard",
+    });
+    second.agentsById.set(grandchildId, resumed);
+    second.fire("agent/created", { agent: resumed, source: "resume" });
+    await drain();
+
+    const policy = textOf(resumed.injected[0]);
+    assert.ok(
+      policy.includes(
+        "A generation-2 dispatcher spawned you. You are the generation-3 team leader.",
+      ),
+      policy,
+    );
+    // Re-activated as a dispatcher, not degraded to a plain subagent.
+    assert.deepEqual(resumed.scopedTools.names().sort(), DISPATCHER_TOOL_SET);
+  });
+
+  it("a pre-141 mark row without a generation activates as generation 2, no throw", async () => {
+    const storage: StorageTables = new Map();
+    // A row written by the old code: session id only, no generation field.
+    storage.set(
+      DISPATCHER_SESSION_TABLE_NAME,
+      new Map<string, unknown>([["legacy-child", { sessionId: "legacy-child" }]]),
+    );
+    const ctx = createActivationCtx(storage);
+    apply(ctx, volatileConfig({ enabled: true }));
+
+    const legacy = createScopedAgent("legacy-child", {
+      topLevel: false,
+      parentSessionId: "chat-1",
+    });
+    ctx.agentsById.set("legacy-child", legacy);
+    ctx.fire("agent/created", { agent: legacy, source: "resume" });
+    await drain();
+
+    const policy = textOf(legacy.injected[0]);
+    assert.ok(
+      policy.includes(
+        "A generation-1 dispatcher spawned you. You are the generation-2 team leader.",
+      ),
+      policy,
+    );
   });
 });
 
