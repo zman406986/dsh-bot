@@ -1,7 +1,7 @@
 # 141 — Should a dispatcher-spawned dispatcher get a different system prompt from a user-started one?
 
 **Status:** open
-**Labels:** needs-triage
+**Labels:** ready-for-agent
 **Blocked by:** a dated human decision — which option (if any) to build. This ticket records the research and the options; it does not rule.
 **Related:** ADR-0025 (mitosis; decision 2 "full dispatcher tool surface and dispatcher policy", decision 6 "child routes through its creator"), ticket 118 (the spawn path), ticket 140 (spawned dispatcher glyph parity — adjacent identity question, different surface), ticket 138 (deferred resume/glyph), ADR-0003 (workers stay leaves), `docs/research/reference-subagent-inherited-sections.md`, `docs/research/reference-agent-prompt-inventory.md`
 
@@ -88,3 +88,15 @@ Exactly three of 28 policy lines differ; the other 25 are identical, including b
 Files touched: `src/core/policy/prompts.ts`, `src/core/policy/assembler.ts`, `src/adapter/parent-agent.ts`, `test/policy-assembler.test.ts`, `test/spawn-dispatcher-activation.test.ts`. Nothing committed (lead commits). Byte-identity check output: `.scratch/testing/2026-10-22-ticket141-policy-slice/`.
 
 The full differentiation design — whether to adopt option A/B/C/D, the peer-roster labelling, and whether `deliver_result` should stay on a child — **still awaits the owner**. Status stays `needs-triage`; labels untouched.
+
+### 2026-10-23 — owner ruling: one generation line only
+
+The owner ruled: "just add one line saying they are spawned by an X generation dispatcher, and they are an X+1 generation team leader." This declines the research file's bigger options (full role redesign, per-generation doctrine) — the fix is ONE line in the spawned policy variant, nothing else.
+
+Acceptance:
+- [ ] The spawned variant's opener carries the ruled line: spawned by a generation-X dispatcher, and the child is the generation-X+1 team leader. User-started dispatchers are generation 1; each spawn adds one.
+- [ ] The user-started prompt stays byte-identical to today; the rest of the 3-line spawned delta (todo trigger, delivery route) stays intact.
+- [ ] Generation is persisted so a cold-resumed child re-activates with the same number (dispatcher_sessions mark field or an equivalent durable fact; no DOMAIN_VERSION bump).
+- [ ] Offline tests: generation-X spawner produces generation-X+1 child text; cold resume keeps the number; user text unchanged.
+
+Design notes for the implementer: thread an integer generation from the spawn path (src/core/multitask.ts spawn_dispatcher -> src/adapter/cordis-dsh-host.ts -> activateSpawnedDispatcher in src/adapter/parent-agent.ts) into buildDispatcherPolicySection's spawned variant (src/core/policy/prompts.ts). Do NOT trust delegationDepth as generation without verifying what the host passes for a dispatcher child (it may count worker hops); if ambiguous, store generation in the mark row.
