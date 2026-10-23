@@ -69,3 +69,5 @@ Deferred 2026-10-22 by agent ruling (subject to human reversal). Rooms are in sc
 ### 2026-10-22 — owner ruling: not in the current version
 
 The owner ruled on 2026-10-22: "don't implement chatroom, at least not in current version." This answers the deferral: neither ADR-0026 open question needs an answer now. The ticket stays deferred; the two open questions and their citations remain below for whenever a future version picks this up. Nothing to implement.
+
+### 2026-10-24 — hygiene: blockers 112 and 131 are both resolved; reopening now gates only on the owner's future dated decision (ADR-0026 open questions 3+4 remain human-owned). Deferral upheld per owner ruling 2026-10-22; no change to status.
