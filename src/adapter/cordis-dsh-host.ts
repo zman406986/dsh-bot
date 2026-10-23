@@ -261,11 +261,26 @@ export interface CordisDshHostOptions {
    * instead; in that case the child's first turn may already be open, so a
    * tool surface registered here may miss it (recorded limit, not hidden).
    *
-   * The adapter passes the exact live child Agent and its session id. It
-   * never inspects the outcome — activation failure must not turn a
-   * successful spawn into a host error.
+   * The adapter passes the exact live child Agent and its session id, plus the
+   * child's spawn generation (ticket 141: the spawner's generation + 1, 1 for
+   * a user-started dispatcher). It never inspects the outcome — activation
+   * failure must not turn a successful spawn into a host error.
    */
-  onDispatcherSpawned?: (agent: AgentLike, sessionId: string) => void;
+  onDispatcherSpawned?: (
+    agent: AgentLike,
+    sessionId: string,
+    generation: number,
+  ) => void;
+  /**
+   * Ticket 141: the spawn generation of a session this host knows, or null.
+   * The plugin supplies this (the lifecycle answers it for live sessions), so
+   * a spawn from a child computes parent generation + 1 instead of assuming
+   * the spawner is a user-started generation 1.
+   *
+   * Optional: a stub or pre-141 caller that omits it means "generation 1",
+   * which is exactly the old single-level shape.
+   */
+  dispatcherGenerationOf?: (sessionId: string) => number | null;
   /**
    * Ticket 142 (owner ruling 2026-10-22 — children half): a worker this
    * plugin spawned was adopted back into the host's registry after the host
@@ -711,6 +726,7 @@ export function createCordisDshHost(
   const composeWakeText = options?.composeWakeText;
   const workerLocalTools = options?.workerLocalTools;
   const onDispatcherSpawned = options?.onDispatcherSpawned;
+  const dispatcherGenerationOf = options?.dispatcherGenerationOf;
   const onWorkerReattachedRaw = options?.onWorkerReattached;
 
   /**
@@ -801,6 +817,22 @@ export function createCordisDshHost(
    * (the table never deletes either — see ticket 130).
    */
   const dispatcherMarks = new Map<string, string | undefined>();
+  /**
+   * Ticket 141: spawn generation per spawned dispatcher session (1 =
+   * user-started, +1 per spawn). A SEPARATE map on purpose: `dispatcherMarks`
+   * is read as a bare parent id in several places, and the generation is not
+   * a property of the parent — it is the child's depth in the dispatcher tree.
+   *
+   * Filled from three places, in this order of authority:
+   * - the reserved-id seed in `spawnDispatcher` (BEFORE `startActivation`
+   *   resolves, because `agent/created` fires inside that call and the mark
+   *   row does not exist yet);
+   * - the mark row, on a cold resume (`resumeMarkedDispatcher`) and on the
+   *   boot read (`refreshDispatcherMarks`);
+   * - never removed until `dispose` — a re-announcement of the same child
+   *   must resolve the same number.
+   */
+  const dispatcherGenerations = new Map<string, number>();
   /**
    * Ticket 138: sessions whose cold resume this process already asked the
    * host for. A second send before the resumed child is announced must not
@@ -1162,10 +1194,14 @@ export function createCordisDshHost(
    * started while a live child exists. A throw is therefore logged honestly
    * and the child stays live but inert; `dispatcherActivated` still records
    * the attempt so neither path retries it.
+   *
+   * `generation` (ticket 141) is resolved by the caller from the map/mark and
+   * forwarded to the hook; it is the number the policy text names.
    */
   function activateSpawnedDispatcher(
     childAgent: AgentLike,
     sessionId: string,
+    generation: number = dispatcherGenerations.get(sessionId) ?? 2,
   ): void {
     if (onDispatcherSpawned === undefined) {
       flushPendingWakeTurn(sessionId, childAgent);
@@ -1181,7 +1217,7 @@ export function createCordisDshHost(
     }
     dispatcherActivated.add(sessionId);
     try {
-      onDispatcherSpawned(childAgent, sessionId);
+      onDispatcherSpawned(childAgent, sessionId, generation);
     } catch (error) {
       try {
         console.warn(
@@ -1237,20 +1273,26 @@ export function createCordisDshHost(
   async function writeDispatcherMark(
     sessionId: string,
     parentSessionId?: string,
+    generation?: number,
   ): Promise<void> {
     // Ticket 138: the local mirror is updated FIRST and synchronously, so a
     // send arriving before the store write settles already sees the mark. The
     // parent rides the row because a send-triggered cold resume needs the
     // exact live parent Agent as the host's sender.
     dispatcherMarks.set(sessionId, parentSessionId);
+    // Ticket 141: the generation is mirrored the same way, so a re-announced
+    // child resolves its number even before the store round-trips.
+    if (generation !== undefined) {
+      dispatcherGenerations.set(sessionId, generation);
+    }
     const store = markers;
     if (store === undefined || store.writeDispatcherMark === undefined) return;
     try {
-      await store.writeDispatcherMark(
-        parentSessionId !== undefined
-          ? { sessionId, parentSessionId }
-          : { sessionId },
-      );
+      await store.writeDispatcherMark({
+        sessionId,
+        ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+        ...(generation !== undefined ? { generation } : {}),
+      });
     } catch (error) {
       try {
         console.warn(
@@ -1301,7 +1343,13 @@ export function createCordisDshHost(
       .then(() => store.readDispatcherMark?.(sessionId))
       .then((mark) => {
         if (mark === undefined) return;
-        activateSpawnedDispatcher(childAgent, sessionId);
+        // Ticket 141: the resumed child keeps the number it was spawned with.
+        // A pre-141 row has no field — every such row came from a spawn, so
+        // its honest reading is generation 2 (a direct child of a
+        // user-started dispatcher).
+        const generation = mark.generation ?? 2;
+        dispatcherGenerations.set(sessionId, generation);
+        activateSpawnedDispatcher(childAgent, sessionId, generation);
       })
       .catch((error) => {
         // A marker-store failure must not break the host's create path; the
@@ -1540,6 +1588,12 @@ export function createCordisDshHost(
           // copy; never downgrade a known parent to `undefined`.
           if (!dispatcherMarks.has(mark.sessionId)) {
             dispatcherMarks.set(mark.sessionId, mark.parentSessionId);
+          }
+          // Ticket 141: same rule for the generation — an in-process value
+          // (from the reserved-id seed or a spawn) is authoritative, so the
+          // store only fills the gap. A pre-141 row reads as generation 2.
+          if (!dispatcherGenerations.has(mark.sessionId)) {
+            dispatcherGenerations.set(mark.sessionId, mark.generation ?? 2);
           }
         }
       } catch (error) {
@@ -1893,6 +1947,19 @@ export function createCordisDshHost(
       // correlation available while the spawn is in flight.
       const reservedChildId = randomUUID();
       reservedDispatcherIds.add(reservedChildId);
+      // Ticket 141: the child is one generation past its spawner. A
+      // user-started dispatcher is generation 1 (the option is absent for
+      // every pre-141 caller), so a direct spawn is generation 2.
+      const spawnerGeneration =
+        dispatcherGenerationOf?.(opts.parentSessionId) ?? 1;
+      const childGeneration = spawnerGeneration + 1;
+      // Seed it BEFORE `startActivation`: `agent/created` fires inside that
+      // call, and the mark row — the other source of this number — is only
+      // written after it resolves. Without the seed the first activation
+      // would read no generation at all.
+      dispatcherGenerations.set(reservedChildId, childGeneration);
+      /** The id the host actually gave the child, or null if it refused. */
+      let spawnedId: string | null = null;
       try {
         const activation = await ctx.subagents.startActivation({
           provider: SPAWN_PROVIDER,
@@ -1913,13 +1980,18 @@ export function createCordisDshHost(
         // binds. Brand erased at the boundary; normally it equals the
         // reservation, and a host that minted its own id is still handled.
         const dispatcherId = String(activation.childId);
+        // Ticket 141: mirror the number under the id the host actually gave
+        // the child, so a host that minted its own id still activates with
+        // the right generation.
+        dispatcherGenerations.set(dispatcherId, childGeneration);
+        spawnedId = dispatcherId;
         // Fallback for a host that announced no `agent/created` (or announced
         // it under a different id). Deduplicated inside the helper, so a host
         // that DID announce the child is not activated twice. It runs BEFORE
         // the mark write so a slow store never delays a child's activation.
         const childAgent = ctx.agents.get(dispatcherId);
         if (childAgent !== undefined) {
-          activateSpawnedDispatcher(childAgent, dispatcherId);
+          activateSpawnedDispatcher(childAgent, dispatcherId, childGeneration);
         }
         // Ticket 130: the child is durable from here on. Written AFTER the
         // spawn resolved — there is no session id to key on before that — and
@@ -1928,8 +2000,13 @@ export function createCordisDshHost(
         // crash between the spawn and this write simply loses the mark (the
         // accepted window). A marker-store failure is logged and swallowed —
         // the host already accepted the spawn, so it must never read as a
-        // host refusal.
-        await writeDispatcherMark(dispatcherId, opts.parentSessionId);
+        // host refusal. Ticket 141: the row carries the generation, so a
+        // cold-resumed child comes back with the same number.
+        await writeDispatcherMark(
+          dispatcherId,
+          opts.parentSessionId,
+          childGeneration,
+        );
         // Bounded memory: the reservation is dropped in `finally`, and the
         // activation record stays so a LATE `agent/created` for this child is
         // still recognised as a dispatcher instead of falling through to the
@@ -1937,6 +2014,12 @@ export function createCordisDshHost(
         return { dispatcherId };
       } finally {
         reservedDispatcherIds.delete(reservedChildId);
+        // A refused spawn leaves no generation behind. (The reservation itself
+        // is normally the child id; a host that minted its own id gets its
+        // seed moved under that id above.)
+        if (spawnedId === null) {
+          dispatcherGenerations.delete(reservedChildId);
+        }
       }
     },
 
@@ -2011,6 +2094,7 @@ export function createCordisDshHost(
       reservedDispatcherIds.clear();
       dispatcherActivated.clear();
       dispatcherMarks.clear();
+      dispatcherGenerations.clear();
       resumeRequested.clear();
       pendingWakeTurns.clear();
       workerSessions.clear();

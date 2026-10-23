@@ -628,9 +628,15 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     // top-level gate: the child is a subagent by construction. `lifecycle` is
     // assigned below; this closure only runs once a spawn happens, never
     // during apply (same rule as `pumpFor`).
-    onDispatcherSpawned: (agent, sessionId) => {
-      lifecycle.activateSpawnedDispatcher(agent, sessionId);
+    onDispatcherSpawned: (agent, sessionId, generation) => {
+      lifecycle.activateSpawnedDispatcher(agent, sessionId, generation);
     },
+    // Ticket 141: a spawn from a CHILD must read that child's generation, not
+    // assume the spawner is a user-started generation 1. `lifecycle` is
+    // assigned below; this closure only runs when a spawn happens, never
+    // during apply (same deferred-closure rule as `pumpFor`).
+    dispatcherGenerationOf: (sessionId) =>
+      lifecycle.dispatcherGeneration(sessionId),
     // Ticket 142 (owner ruling 2026-10-22 — children half): the host adopted a
     // worker session it re-created. Resolve the ticket-59 unknown-state hold
     // into a live roster record so the worker is visible and stoppable again.

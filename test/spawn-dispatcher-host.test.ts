@@ -356,7 +356,10 @@ describe("ticket 118: host spawnDispatcher", () => {
 describe("ticket 130: host durable dispatcher mark", () => {
   /** Minimal in-memory DurabilityPort: the two seams this ticket adds. */
   function createMarkStore() {
-    const marks = new Map<string, { sessionId: string }>();
+    const marks = new Map<
+      string,
+      { sessionId: string; parentSessionId?: string; generation?: number }
+    >();
     return {
       marks,
       writeWorkerMarker() {},
@@ -364,7 +367,11 @@ describe("ticket 130: host durable dispatcher mark", () => {
         return [];
       },
       deleteWorkerMarker() {},
-      writeDispatcherMark(mark: { sessionId: string }) {
+      writeDispatcherMark(mark: {
+        sessionId: string;
+        parentSessionId?: string;
+        generation?: number;
+      }) {
         marks.set(mark.sessionId, mark);
       },
       readDispatcherMark(sessionId: string) {
@@ -421,6 +428,102 @@ describe("ticket 130: host durable dispatcher mark", () => {
       prompt: "Handle it.",
     });
     assert.equal(result.dispatcherId, "child-1");
+  });
+});
+
+describe("ticket 141: host spawn generation", () => {
+  /** Minimal mark store that records the whole row. */
+  function createMarkStore() {
+    const marks = new Map<
+      string,
+      { sessionId: string; parentSessionId?: string; generation?: number }
+    >();
+    return {
+      marks,
+      writeWorkerMarker() {},
+      readWorkerMarkers() {
+        return [];
+      },
+      deleteWorkerMarker() {},
+      writeDispatcherMark(mark: {
+        sessionId: string;
+        parentSessionId?: string;
+        generation?: number;
+      }) {
+        marks.set(mark.sessionId, mark);
+      },
+      readDispatcherMark(sessionId: string) {
+        return marks.get(sessionId);
+      },
+    };
+  }
+
+  it("a spawner reported as generation 2 makes the child generation 3, recorded on the row", async () => {
+    const ctx = createStubCtx();
+    const store = createMarkStore();
+    const host = createCordisDshHost(ctx, {
+      markers: store,
+      dispatcherGenerationOf: (sessionId) =>
+        sessionId === "disp-1" ? 2 : null,
+    });
+    host.bindParent(createAgent("disp-1"), "disp-1");
+
+    const result = await host.spawnDispatcher({
+      parentSessionId: "disp-1",
+      title: "Peer",
+      prompt: "Handle it.",
+    });
+
+    assert.equal(store.marks.get(result.dispatcherId)?.generation, 3);
+    assert.equal(store.marks.get(result.dispatcherId)?.parentSessionId, "disp-1");
+  });
+
+  it("with no generation resolver the spawner is generation 1, so the child is 2", async () => {
+    const ctx = createStubCtx();
+    const store = createMarkStore();
+    const host = createCordisDshHost(ctx, { markers: store });
+    host.bindParent(createAgent("disp-1"), "disp-1");
+
+    const result = await host.spawnDispatcher({
+      parentSessionId: "disp-1",
+      title: "Peer",
+      prompt: "Handle it.",
+    });
+
+    assert.equal(store.marks.get(result.dispatcherId)?.generation, 2);
+  });
+
+  it("the activation hook receives the same number the row stores, even though agent/created fires first", async () => {
+    const ctx = createStubCtx();
+    const store = createMarkStore();
+    const seen: Array<{ sessionId: string; generation: number }> = [];
+    const host = createCordisDshHost(ctx, {
+      markers: store,
+      // The spawner is a generation-4 dispatcher: the child must be 5, and
+      // the activation fires BEFORE the mark row exists — the reserved-id seed
+      // is the only thing that can supply the number at that moment.
+      dispatcherGenerationOf: (sessionId) =>
+        sessionId === "disp-1" ? 4 : null,
+      onDispatcherSpawned: (_agent, sessionId, generation) => {
+        seen.push({ sessionId, generation });
+      },
+    });
+    host.bindParent(createAgent("disp-1"), "disp-1");
+    // This stub mints its own child id instead of honouring `spec.childId`,
+    // so no announcement can match the reservation; the post-resolve fallback
+    // is the activation path here. It must still see the same number the row
+    // stores — that is what the pre-`startActivation` seed is for.
+    ctx.agents.get = (id: unknown) => createAgent(String(id), 1);
+
+    const result = await host.spawnDispatcher({
+      parentSessionId: "disp-1",
+      title: "Peer",
+      prompt: "Handle it.",
+    });
+    assert.equal(store.marks.get(result.dispatcherId)?.generation, 5);
+    assert.deepEqual(seen, [
+      { sessionId: result.dispatcherId, generation: 5 },
+    ]);
   });
 });
 
