@@ -1,6 +1,6 @@
 # 98 — Wrapper-frame approval answering + persisted-open-turn reconcile on activation
 
-**Status:** deferred
+**Status:** resolved
 **Labels:** needs-info
 **Deferred (2026-09-20, W27):** no operator impact under current defaults after the W27 wedge
 cleanup — the one wedged session (cf5249cf, our own test artifact) is repaired at the data layer
@@ -67,3 +67,5 @@ and answer natively — this stays deferred pending live confirmation under the 
 revisit trigger above now routes through ADR-0021/ticket 99 instead of ADR-0020 staging. Gap
 (2) (persisted open-turn reconcile on activation) is unaffected by the vehicle change. Status
 and Labels untouched by this comment.
+
+### 2026-10-24 — closed stale (owner pre-authorization). Both premises verified gone: the ADR-0020 root-frame vehicle and its injects were retired by tickets 99/114 (ADR-0021/0024 superseded the staging; `src/client/index.ts` records main/root injects RETIRED), and the approval seam now bounds the ask so the silent-answerer wedge is unreachable (`src/adapter/dispatch-approval.ts`, pinned offline in `test/dispatch-approval.test.ts`); the persisted-open-turn failure mode is host-repaired via `interruptedTurnClosers` on resume. Residual narration idea (tell the user a parked inbox exists) is not a human design decision — re-file as a small ticket if wanted. Agent ruling under the owner's 2026-10-24 blanket pre-authorization to close stale tickets; subject to human reversal.
