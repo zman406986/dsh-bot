@@ -1,6 +1,6 @@
 # Dispatcher surfaces — the designed absences
 
-**Status:** shipped with ticket 32 (design-17 §4.8–4.9, §7, §8); **surface inventory corrected 2026-10-18 for the native-dsh posture (ADR-0024, ticket 114):** stock dsh is the primary UI and the only UI — our client module registers nothing into dsh's layout except the one session-kind glyph licensed by ADR-0024's 2026-10-18 rider (live since ticket 123), and the floating window, launcher, and capsule are withdrawn. The designed absences below still stand; the surface inventory at the end records what ships and what stays in the tree unmounted. Reference:
+**Status:** shipped with ticket 32 (design-17 §4.8–4.9, §7, §8); **surface inventory corrected 2026-10-18 for the native-dsh posture (ADR-0024, ticket 114):** stock dsh is the primary UI and the only UI — our client module registers nothing into dsh's layout except the one session-kind glyph licensed by ADR-0024's 2026-10-18 rider (live since ticket 123), and the floating window, launcher, and capsule are withdrawn. **Re-verified against dsh 0.2.1-rc.3 on 2026-10-24 (ticket 144):** the slots this file relies on are unchanged in kind, scope, and replace risk; the shipped slot set grew by three navigation "More menu" seats, none of which renders a session row; `sessionVisible` still drops every `origin: 'subagent'` row. Evidence: `.scratch/testing/2026-10-24-rc3-compat/70-DELTA.md`. The designed absences below still stand; the surface inventory at the end records what ships and what stays in the tree unmounted. Reference:
 `.scratch/clone-always-on/design-17-always-on-dispatcher.md` (sections
 §4.6–4.9 and the conflict table §5). All text here is original clean-room
 copy; the contaminated reference tree was not consulted.
@@ -9,7 +9,8 @@ This note records the surfaces the dispatcher deliberately does **not**
 build, and why. Each absence is a decision, not a gap left open by
 accident. Rationale is drawn from the PRD, the ADRs, and the verified dsh
 extension points (`docs/research/dsh-plugin-ui-patterns.md`, read against
-0.1.5-rc.1; the shipped 0.2.1 slot deltas are recorded on ticket 114) — never from
+0.1.5-rc.1; the shipped 0.2.1 slot deltas are recorded on ticket 114 and
+re-verified on 0.2.1-rc.3 by ticket 144) — never from
 the reference implementation.
 
 The rule the whole list follows: **presence is a projection of existing
@@ -21,7 +22,8 @@ feel.
 ## No push notifications
 
 dsh exposes **no notification or toast extension point** (verified against
-0.1.5-rc.1; none appears among the 0.2.1 slot deltas recorded on ticket 114).
+0.1.5-rc.1; none appears among the 0.2.1 slot deltas recorded on ticket 114, and
+the rc.3 slot set adds only navigation "More menu" lists — ticket 144).
 Attention therefore routes only through surfaces the user has to look at:
 
 1. the Workers panel's **Needs you** section (`roster-store.ts`

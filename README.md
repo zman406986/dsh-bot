@@ -17,7 +17,7 @@ Working plugin, version 0.1.0. Offline-tested: `npm test` runs the suite with no
 ## Requirements
 
 - Node.js 22 or newer (`engines` in `package.json`).
-- A local dsh installation whose profile can load plugins. The plugin targets the 0.2.x plugin API; the code was verified against dsh 0.2.1-rc.2.
+- A local dsh installation whose profile can load plugins. The plugin targets the 0.2.x plugin API; the code was verified against dsh 0.2.1-rc.3 (ticket 144, 2026-10-24; rc.2 was the previous baseline, ticket 114).
 - npm. The repo uses npm workspaces, not pnpm.
 
 ## Build and test
