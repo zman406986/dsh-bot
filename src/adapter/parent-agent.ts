@@ -142,6 +142,7 @@ export interface BindDispatcherLifecycleResult {
   activateSpawnedDispatcher(
     agent: AgentLike,
     sessionId: string,
+    generation?: number,
   ): SpawnedActivationOutcome;
   /**
    * Best-effort one-shot **waking** delivery into ONE activated dispatcher
@@ -174,6 +175,17 @@ export interface BindDispatcherLifecycleResult {
    * from the previous activation would act for the new one.
    */
   activationGeneration(sessionId: string): number | null;
+  /**
+   * Spawn generation of an activated session (ticket 141): 1 for a
+   * user-started dispatcher, N+1 for a dispatcher spawned by a generation-N
+   * dispatcher. Null once the session is deactivated, like
+   * {@link activationGeneration} — a caller that needs the durable number for
+   * a dormant child reads the mark row instead.
+   *
+   * This is NOT {@link activationGeneration}: that one counts activations of
+   * one session id, this one is the depth of the dispatcher tree.
+   */
+  dispatcherGeneration(sessionId: string): number | null;
   /** Every activated dispatcher session id (ADR-0019). */
   dispatcherSessionIds(): readonly string[];
   /**
@@ -260,6 +272,17 @@ export function bindDispatcherLifecycle(
    * for a session that is not an activated dispatcher.
    */
   const generations = new Map<string, number>();
+  /**
+   * Spawn generation per session (ticket 141) — a DIFFERENT number from the
+   * activation counter above, and deliberately a separate map: that one is
+   * "which activation of this session id is live" (ticket 90), this one is
+   * "how deep in the dispatcher tree this session sits" (1 = user-started,
+   * +1 per spawn). Reusing the counter would renumber a cold-resumed child.
+   *
+   * It is stored here only so {@link BindDispatcherLifecycleResult.dispatcherGeneration}
+   * can report the live value; the durable source of truth is the mark row.
+   */
+  const spawnGenerations = new Map<string, number>();
   let activationSeq = 0;
   let unbound = false;
   const disposers: Array<() => void> = [];
@@ -372,11 +395,17 @@ export function bindDispatcherLifecycle(
    * `spawned` is this dispatcher's child (`activateSpawnedDispatcher`), which
    * has no user in its chat and no user-facing delivery, so its policy must
    * not claim either. Nothing else branches on it.
+   *
+   * `generation` is the third: the spawn generation the caller resolved (1 for
+   * a user chat, the mark's value + 1 for a spawn). It is stored so
+   * {@link BindDispatcherLifecycleResult.dispatcherGeneration} can answer it,
+   * and it reaches the spawned policy text only.
    */
   function bindActivation(
     agent: AgentLike,
     sessionId: string,
     origin: DispatcherOrigin,
+    generation: number,
   ): void {
     // ADR-0019: another chat being a dispatcher is not a refusal — each
     // session activates independently.
@@ -385,10 +414,12 @@ export function bindDispatcherLifecycle(
     // (`onActivated` starts the rebuild chain that captures the value).
     activationSeq += 1;
     generations.set(sessionId, activationSeq);
+    // Ticket 141: a separate number from the one above — see the map's doc.
+    spawnGenerations.set(sessionId, generation);
     host.bindParent(agent, sessionId);
     // ADR-0005: policy is fixed for this session's lifetime.
     if (policyEnabled) {
-      tryInject(agent, assembleSessionPolicy(true, origin));
+      tryInject(agent, assembleSessionPolicy(true, origin, generation));
     }
     onActivated?.(sessionId);
   }
@@ -408,7 +439,7 @@ export function bindDispatcherLifecycle(
       if (sessions.has(sessionId)) {
         return { ok: false, reason: "already-active-here" };
       }
-      bindActivation(agent, sessionId, "user");
+      bindActivation(agent, sessionId, "user", 1);
       return { ok: true };
     },
 
@@ -417,10 +448,16 @@ export function bindDispatcherLifecycle(
      * {@link activate} minus the top-level gate — the child is a subagent by
      * construction. `session-mismatch` is a keying guard, not a refusal
      * category a caller can earn by using the feature correctly.
+     *
+     * Ticket 141: `generation` is the child's spawn generation, resolved by
+     * the caller from the mark row (or from the in-process spawn map). The
+     * default 2 is the direct child of a user-started dispatcher — the shape
+     * every pre-141 spawn produced.
      */
     activateSpawnedDispatcher(
       agent: AgentLike,
       sessionId: string,
+      generation = 2,
     ): SpawnedActivationOutcome {
       if (unbound) {
         return { ok: false, reason: "unbound" };
@@ -431,7 +468,7 @@ export function bindDispatcherLifecycle(
       if (sessions.has(sessionId)) {
         return { ok: false, reason: "already-active-here" };
       }
-      bindActivation(agent, sessionId, "spawned");
+      bindActivation(agent, sessionId, "spawned", generation);
       return { ok: true };
     },
 
@@ -458,6 +495,13 @@ export function bindDispatcherLifecycle(
     activationGeneration(sessionId: string): number | null {
       if (!sessions.has(sessionId)) return null;
       return generations.get(sessionId) ?? null;
+    },
+
+    dispatcherGeneration(sessionId: string): number | null {
+      // Gated on liveness exactly like `activationGeneration`: a dormant
+      // session's number comes from its durable mark row, not from here.
+      if (!sessions.has(sessionId)) return null;
+      return spawnGenerations.get(sessionId) ?? null;
     },
 
     dispatcherSessionIds(): readonly string[] {
