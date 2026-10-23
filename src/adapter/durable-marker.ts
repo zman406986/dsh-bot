@@ -280,6 +280,11 @@ const compactionBoundaryValueSchema = {
  * malformed. Ticket 138 adds the optional spawner, so a malformed parent is
  * rejected instead of being read as "no parent" (which would silently disable
  * wake-on-send).
+ *
+ * Ticket 141 adds the optional generation (no DOMAIN_VERSION bump): a missing
+ * field is a pre-141 row and parses fine; a present one must be an integer of
+ * at least 2, because every marked session was spawned — generation 1 is
+ * reserved for user-started dispatchers, which never carry a mark.
  */
 function parseDispatcherMark(value: unknown): DurableDispatcherMark {
   if (typeof value !== "object" || value === null) {
@@ -294,6 +299,17 @@ function parseDispatcherMark(value: unknown): DurableDispatcherMark {
     typeof m.parentSessionId !== "string"
   ) {
     throw new Error("dispatcher mark.parentSessionId must be a string");
+  }
+  if (m.generation !== undefined) {
+    if (
+      typeof m.generation !== "number" ||
+      !Number.isInteger(m.generation) ||
+      m.generation < 2
+    ) {
+      throw new Error(
+        "dispatcher mark.generation must be an integer >= 2 when present",
+      );
+    }
   }
   return value as DurableDispatcherMark;
 }

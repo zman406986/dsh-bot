@@ -138,6 +138,18 @@ export interface DurableDispatcherMark {
    * never a permission.
    */
   readonly parentSessionId?: string;
+  /**
+   * Ticket 141: which generation of dispatcher this session is — a
+   * user-started dispatcher is generation 1, and each spawn adds one. Present
+   * on rows written from 141 on; absent on earlier rows, which activate as
+   * generation 2 (every mark row we ever wrote came from a spawn).
+   *
+   * It rides this row rather than a new table for the ticket-130 reason: the
+   * identity is already durable here, so a cold-resumed child keeps the number
+   * it was spawned with. Optional, so no DOMAIN_VERSION bump — pre-141 rows
+   * stay readable.
+   */
+  readonly generation?: number;
 }
 
 /**

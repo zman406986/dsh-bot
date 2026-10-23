@@ -398,6 +398,38 @@ describe("durable marker store over storageDomain", () => {
     // disable wake-on-send for that row.
     assert.doesNotThrow(() => parse({ sessionId: "child-1", parentSessionId: "p-1" }));
     assert.throws(() => parse({ sessionId: "child-1", parentSessionId: 7 }));
+    // Ticket 141: the optional generation. Absent is a pre-141 row and still
+    // parses; present must be an integer >= 2 — generation 1 is a
+    // user-started dispatcher, and those never carry a mark.
+    assert.doesNotThrow(() => parse({ sessionId: "child-1", generation: 3 }));
+    assert.throws(() => parse({ sessionId: "child-1", generation: 0 }));
+    assert.throws(() => parse({ sessionId: "child-1", generation: 1 }));
+    assert.throws(() => parse({ sessionId: "child-1", generation: 1.5 }));
+    assert.throws(() => parse({ sessionId: "child-1", generation: "2" }));
+  });
+
+  it("round-trips the optional generation on a dispatcher mark (ticket 141)", async () => {
+    const sd = createStubStorageDomain();
+    const durability = createStorageDomainDurability(sd);
+
+    await durability.writeDispatcherMark({
+      sessionId: "child-3",
+      parentSessionId: "child-2",
+      generation: 3,
+    });
+    const read = await durability.readDispatcherMark("child-3");
+    assert.ok(read);
+    assert.equal(read.generation, 3);
+    assert.equal(read.parentSessionId, "child-2");
+
+    // A pre-141 row is still readable and simply carries no generation.
+    await durability.writeDispatcherMark({ sessionId: "child-1" });
+    const legacy = await durability.readDispatcherMark("child-1");
+    assert.ok(legacy);
+    assert.equal(legacy.generation, undefined);
+    // No version bump for the new optional field.
+    const spec = markerDomainSpec() as { version: number };
+    assert.equal(spec.version, 2);
   });
 
   it("lists every dispatcher mark so the adapter can warm its mirror (ticket 138)", async () => {
