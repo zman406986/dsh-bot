@@ -112,3 +112,13 @@ Verified read-only against the installed `0.2.1-rc.2` tree rather than prior pro
 3. **Route B has no clean discriminator.** Enumerated every durable event in a child's log: descriptor, preset selection, delegated policy, header facts. None separates a dispatcher child from a worker child. Our `dispatcher_sessions` table sits in a different storage domain than the projection cache and is not readable from a projection unit's synchronous `init`/`apply`.
 
 No ruling was made and no code was touched. Label `needs-info`: the missing decision is the seat plus the identity channel, stated above. Ticket 138 stays deferred for its message-resume half; its glyph half is this ticket.
+
+### 2026-10-24 — research verdict attached (tickets 143 + 144). Verdict: NEEDS-RULING — implementation is possible only via decisions below. Evidence: docs/research/2026-10-24-dsh-ui-patch-for-spawned-dispatcher-glyph.md and .scratch/testing/2026-10-24-rc3-compat/70-DELTA.md. Decision menu for the owner (pick one per item):
+
+(1) UI route: (a) vendored replacement of @deepseek-ai/dsh-client-ui-workspace (partial fork, profile-wide, breaches ADR-0024 as written — needs an explicit ADR amendment), (b) shadow sidebar.workspaces — a single slot, same re-implementation cost, same breach, one-entry abdication back to stock, or (c) keep stock UI and use a non-sidebar seat: the child session's conversation.session.header.actions chip (replaceRisk none) or a main+sidebar.panellist panel.
+
+(2) Identity channel (exactly one): agentPreset at spawn (client-visible, composition cost already measured in 140), a new licensed channel over dispatcher_sessions, or an invented label marker. Reading dispatcher_sessions from a projection unit is NOT possible (sync, no I/O).
+
+(3) Two code-level facts any ruling must name: resolveSessionKind returns 'worker' for any origin 'subagent' before consulting the projection (src/client/session-kind.tsx:149) — relaxing this origin-first order needs a ruling; the sidebar leading cell mounts only on idle rows (:2306) — any sidebar-seat glyph is idle-only, record that limit.
+
+(4) Housekeeping: rider item 1 contains a dead roster-mirror premise sentence (roster mirror no longer the channel) — rewrite when ruling lands. rc.3 adds no relevant slot (three new 'More menu' seats, no sessionId payload). No code was touched for this research.
