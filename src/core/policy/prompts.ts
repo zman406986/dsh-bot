@@ -151,16 +151,24 @@ export const EMPTY_LEDGER_LINE = "(empty)";
  * delivery line (it has no user-facing send; its work goes back to the
  * dispatcher that summoned it). Omitted means `user`, which is the byte-stable
  * default the user-started path and every pre-141 caller keep.
+ *
+ * `generation` (ticket 141, owner ruling 2026-10-23) is which generation of
+ * dispatcher the reader is: a user-started dispatcher is generation 1, and
+ * each spawn adds one. The ruled sentence is appended to the SAME opener
+ * element in the spawned variant, so the spawned text still differs from the
+ * user text in exactly three lines. The user path ignores the number
+ * entirely — its bytes never depend on it.
  */
 export function buildDispatcherPolicySection(
   origin: DispatcherOrigin = "user",
+  generation = 2,
 ): string {
   const spawned = origin === "spawned";
   return [
     "# Multitask dispatcher",
     "",
     spawned
-      ? "Another dispatcher summoned you. You are a dispatcher in your own session: you coordinate workers the same way, and your results go back to that dispatcher, not to a user. You stay responsive. Heavy work goes to workers you spawn in the background."
+      ? `Another dispatcher summoned you. You are a dispatcher in your own session: you coordinate workers the same way, and your results go back to that dispatcher, not to a user. You stay responsive. Heavy work goes to workers you spawn in the background. A generation-${generation - 1} dispatcher spawned you. You are the generation-${generation} team leader.`
       : "You are the user's main assistant in this chat. You stay responsive. Heavy work goes to workers you spawn in the background.",
     "",
     "## How you work",

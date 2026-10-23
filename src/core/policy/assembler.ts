@@ -42,13 +42,16 @@ export interface WakeNotice {
  *
  * `origin` (ticket 141) selects the spawned wording; omitted means `user`,
  * so every pre-141 caller produces the same bytes it always did.
+ * `generation` (ticket 141) is forwarded to the spawned opener only; the
+ * default is the generation of a direct child of a user-started dispatcher.
  */
 export function assembleSessionPolicy(
   enabled: boolean,
   origin: DispatcherOrigin = "user",
+  generation = 2,
 ): string {
   if (!enabled) return "";
-  return buildDispatcherPolicySection(origin);
+  return buildDispatcherPolicySection(origin, generation);
 }
 
 /** Render one ledger line for the per-turn reminder. */

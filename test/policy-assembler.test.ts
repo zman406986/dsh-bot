@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
 import {
   assembleSessionPolicy,
@@ -248,6 +249,46 @@ describe("spawned dispatcher policy variant (ticket 141)", () => {
     assert.equal(assembleSessionPolicy(true, "user"), byDefault);
     assert.ok(byDefault.includes("You are the user's main assistant in this chat."));
     assert.ok(byDefault.includes("Only you deliver."));
+  });
+
+  it("user-started text is byte-identical to the shipped bytes (ticket 141 sha256 pin)", () => {
+    // Computed from `git show HEAD:src/core/policy/prompts.ts` BEFORE the
+    // first ticket-141 edit (2026-10-24): the user-started prompt must not
+    // change, not even by one byte.
+    const SHIPPED_SHA256 =
+      "a60de604503c46b31b34b4adebf01839c6a49030be32ddaa24db32476dea09e5";
+    const text = buildDispatcherPolicySection("user");
+    assert.equal(
+      createHash("sha256").update(text, "utf8").digest("hex"),
+      SHIPPED_SHA256,
+    );
+    // The generation argument cannot reach the user text, whatever it is.
+    assert.equal(buildDispatcherPolicySection("user", 7), text);
+    assert.equal(assembleSessionPolicy(true, "user", 9), text);
+    assert.ok(!text.includes("generation"), "the user text never says generation");
+    assert.ok(!text.includes("team leader"), "the user is not a team leader");
+  });
+
+  it("the spawned opener carries the ruled generation line (ticket 141)", () => {
+    // A generation-3 dispatcher's child is generation 4: the child sees its
+    // spawner's number and its own, and nothing else changes.
+    const spawned = buildDispatcherPolicySection("spawned", 3);
+    assert.ok(
+      spawned.includes(
+        "A generation-2 dispatcher spawned you. You are the generation-3 team leader.",
+      ),
+      "X spawns X+1: a generation-2 spawner makes a generation-3 leader",
+    );
+    assert.equal(assembleSessionPolicy(true, "spawned", 3), spawned);
+
+    // Default spawned is a direct child of a user-started dispatcher (1 → 2).
+    const byDefault = buildDispatcherPolicySection("spawned");
+    assert.ok(
+      byDefault.includes(
+        "A generation-1 dispatcher spawned you. You are the generation-2 team leader.",
+      ),
+    );
+    assert.equal(assembleSessionPolicy(true, "spawned"), byDefault);
   });
 
   it("spawned text says what the session is: summoned by a dispatcher, results go back to it", () => {
