@@ -1,6 +1,6 @@
 # 138 — A resumed spawned dispatcher cannot be messaged, and has no sidebar glyph
 
-**Status:** deferred
+**Status:** resolved
 **Labels:** needs-info
 **Deferred:** 2026-10-22 — originally blocked on two human decisions; **only the glyph one remains** (ADR-0027 condition (a) plus a preset-row/seat design, now tracked by ticket 140). Half 1 (message resume) shipped here; the children (worker) half shipped as ticket 142.
 **Blocked by:** (1) ~~a dated human ruling amending ticket 70's fence rule for message-triggered resume~~ — **LANDED 2026-10-22 for durable-marked bots; half 1 implemented here, children half implemented in ticket 142 (resolved)**; (2) a ruled preset-row design for the child's glyph (ADR-0027 §Starting identity and dispatch item 4, condition (a)) — still open, owned by ticket 140. Neither can be made from the code or the recorded rules.
@@ -122,3 +122,5 @@ Filed at ticket 130's resolution. Ticket 130 satisfied its identity acceptance: 
 - ~~The `RESUME_WAKE_CUE` wording is dispatcher-agnostic on purpose, so the children half can reuse it if the ruling says so.~~ **Reused unchanged** by `host.wakeDormantWorker`.
 
 **Not moved to `open/`.** The glyph half is the only open item left (ticket 140 owns it); message resume is done in both halves, and this ticket stays deferred as the split's record.
+
+### 2026-10-24 — superseded by ticket 140 for the only remaining item (spawned-dispatcher glyph). Both rationale halves are shipped records: dispatcher resume half shipped 2026-10-22 (`isDurablyMarkedDispatcher`/`wakeDormantWorker`/`RESUME_WAKE_CUE` in `src/adapter/cordis-dsh-host.ts`), workers half in resolved 142. Its 'close once 140 resolves' timing preference is overridden by the owner's 2026-10-24 blanket pre-authorization (no work remains here either way); the 2026-10-22 owner ruling on wake-ability is preserved verbatim above. Agent ruling; subject to human reversal.
