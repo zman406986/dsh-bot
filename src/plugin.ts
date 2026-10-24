@@ -51,7 +51,10 @@ import {
 } from "./adapter/index.js";
 import { registerWorkerAccessTool, createPendingAskSettleWaiter } from "./adapter/worker-access-tool.js";
 import type { WorkerActivityEntry } from "./adapter/cordis-dsh-host.js";
-import { registerRacoons } from "./adapter/racoons.js";
+import {
+  registerRacoonsMount,
+  type RacoonsMountHandle,
+} from "./adapter/racoons-mount.js";
 import { clampActivity, clampReport } from "./core/report-clamp.js";
 import { createWorkerLocalToolDefs } from "./core/tools.js";
 import { createWorkerAgentDef } from "./worker/agent-def.js";
@@ -101,13 +104,27 @@ export const Config = z.object({
    */
   inboxEnabled: z.boolean().default(false).volatile(),
   /**
-   * RACOONS M1 context cleanup, merged from the racoons-integration lane.
-   * Off by default. M1 scope: cap + append-mode seal; library config and
-   * structured evidence still apply. In-memory ledger and blobs expire on unload.
-   * No recall tool is registered. Independent of other opt-in flags.
-   * Read once at apply like `enabled`.
+   * Ticket 145 / racoons redo: the mount is always on inside the enabled
+   * path, so this switch only picks the enforcement mode. Off (the default)
+   * means `apply`: racoons may rewrite context on any session in this
+   * process — dispatcher, workers and plain chats alike. On means
+   * `record-only`: the same passes run and journal their verdicts, but no
+   * context edit is applied. Read once at apply like `enabled`.
    */
-  racoonsEnabled: z.boolean().default(false).volatile(),
+  racoonsRecordOnly: z.boolean().default(false).volatile(),
+  /**
+   * Ticket 145: durable racoons storage root. Empty (default) uses the
+   * library default `<DSH_HOME>/storages/racoons`. A non-empty value is
+   * resolved to an absolute path and every session's ledger lands under
+   * `<root>/sessions/<sessionId>/ledger.sqlite` with its blobs beside it.
+   */
+  racoonsStorageRoot: z.string().default("").volatile(),
+  /**
+   * Ticket 145: the context window in tokens that the half-window auto prune
+   * measures against. 0 (default) maps to `null`: the auto trigger stays off
+   * and only an explicit `/prune` message runs a pass. Read once at apply.
+   */
+  racoonsContextWindowTokens: z.number().min(0).default(0).volatile(),
   /** Inbox root directory. Empty (default) disables intake even when enabled. */
   inboxDir: z.string().default("").volatile(),
   /**
@@ -168,8 +185,12 @@ export interface PluginConfig {
    */
   enabled: { get(): boolean };
   accessRequestTimeoutMs?: { get(): number | undefined };
-  /** Opt-in RACOONS M1; in-memory ledger, independent of other flags. */
-  racoonsEnabled?: { get(): boolean | undefined };
+  /** Ticket 145: racoons record-only mode (`true`) vs apply (`false`). */
+  racoonsRecordOnly?: { get(): boolean | undefined };
+  /** Ticket 145: durable racoons root; empty means the library default. */
+  racoonsStorageRoot?: { get(): string | undefined };
+  /** Ticket 145: half-window prune denominator in tokens; 0 means off. */
+  racoonsContextWindowTokens?: { get(): number | undefined };
   /** Ticket 108: idle wake coalescing window in ms (0 = off). */
   wakeCoalesceWindowMs?: { get(): number | undefined };
   /** Ticket 113: opt-in file inbox (flat keys — see Config doc). */
@@ -481,6 +502,31 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       ? Math.max(1000, rawRescan)
       : 5000;
 
+  // ── Ticket 145: racoons config mapping ───────────────────────────────
+  // Read once at apply, like every other volatile field. `racoonsRecordOnly`
+  // false (the owner-ruled default) means `apply`; true is the explicit
+  // opt-out that only records. An empty root is "use the library default"
+  // (`<DSH_HOME>/storages/racoons`), passed as absent rather than as "";
+  // a non-empty root is resolved to an absolute path. `0` tokens means the
+  // half-window auto prune is off, which the library spells `null`.
+  const racoonsEnforcement = config.racoonsRecordOnly?.get() === true
+    ? "record-only" as const
+    : "apply" as const;
+  const rawRacoonsRoot = config.racoonsStorageRoot?.get();
+  const racoonsStorageRoot =
+    typeof rawRacoonsRoot === "string" && rawRacoonsRoot.trim().length > 0
+      ? resolve(rawRacoonsRoot.trim())
+      : undefined;
+  const rawWindowTokens = config.racoonsContextWindowTokens?.get();
+  // The library's own validator refuses anything but null or a positive safe
+  // integer, so a fractional or sub-1 value maps to `null` (off) rather than
+  // throwing out of apply. FLOOR, not round: half a token is not a window.
+  const wholeWindowTokens =
+    typeof rawWindowTokens === "number" && Number.isFinite(rawWindowTokens)
+      ? Math.floor(rawWindowTokens)
+      : 0;
+  const racoonsContextWindowTokens = wholeWindowTokens >= 1 ? wholeWindowTokens : null;
+
   /**
    * Honest error sink for inbox intake/checkpoint problems (malformed queue
    * lines, failed claims, failed writes). The plugin has no logger seam, so
@@ -584,6 +630,13 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
 
   // T10: real worker agent type — preset id + contract text + leaf depth.
   let multitaskRef: Multitask | null = null;
+  /**
+   * Ticket 145: the racoons mount, created unconditionally later in this
+   * apply (before any session can be activated or spawned). The closures
+   * below read it lazily — the dispatcher tool-surface activation and the
+   * worker composition both run long after apply returned.
+   */
+  let racoonsMount: RacoonsMountHandle | null = null;
   const host: CordisDshHost = createCordisDshHost(ctx, {
     markers,
     workerAgentDef: createWorkerAgentDef(),
@@ -606,9 +659,9 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     // Ticket 122: the child's mid-task reply channel. Registered on the
     // child's own scope at `agent/created`, so the dispatcher's surface never
     // lists it. `multitaskRef` is initialized by the time a child exists.
-    workerLocalTools: () => {
+    workerLocalTools: (workerSessionId) => {
       if (multitaskRef === null) return [];
-      return createWorkerLocalToolDefs({
+      const tools = createWorkerLocalToolDefs({
         multitask: multitaskRef,
         // Same resolution as the worker access tool: the exec session id IS
         // the worker id once this host owns it. The reply addresses
@@ -619,6 +672,16 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
           return host.owns(sessionId) ? sessionId : null;
         },
       });
+      // Ticket 145: the worker's OWN recall tool (ticket 145 step 4). The
+      // composition registers these on the child's scope only, and the
+      // handler reads THIS worker session's ledger — never another
+      // session's, and never a global one. The mount is created during apply,
+      // long before a child can exist; a missing mount means racoons is off
+      // and no recall is offered.
+      if (racoonsMount === null) return tools;
+      const sessionId = typeof workerSessionId === "string" ? workerSessionId : "";
+      if (sessionId === "") return tools;
+      return [...tools, ...racoonsMount.recallToolDefs(sessionId)];
     },
     // Ticket 118 chunk 3 / ADR-0025: the spawned-dispatcher activation path.
     // The host fires this once per successful `spawnDispatcher` — from the
@@ -935,6 +998,21 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       scopedTools !== undefined && typeof scopedTools.register === "function"
         ? registerDispatcherTools({ ctx: { tools: scopedTools }, ...toolDeps })
         : registerDispatcherTools({ ctx, ...toolDeps });
+    // Ticket 145 step 4: the dispatcher session's OWN recall tool. Registered
+    // on the same surface as the dispatcher tools (the activated agent's
+    // scoped `ctx.tools`, or the plugin-level fallback), so the model only
+    // sees recall in a session that is an activated dispatcher — and the
+    // handler reads THIS session's ledger via the mount's host-owned factory.
+    if (racoonsMount !== null) {
+      disposers.push(
+        racoonsMount.recallTools(
+          scopedTools !== undefined && typeof scopedTools.register === "function"
+            ? scopedTools
+            : ctx.tools,
+          sessionId,
+        ),
+      );
+    }
     acquireGlobalAccessTool();
     accessToolHoldersBySession.add(sessionId);
     sessionToolDisposers.set(sessionId, disposers);
@@ -1309,15 +1387,30 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     );
   }
 
-  if (config.racoonsEnabled?.get() === true) {
-    ctx.effect(
-      () => registerRacoons(ctx, {
-        enabled: true,
-        shouldHandle: (sessionId) => lifecycle.isDispatcherSession(sessionId),
-      }),
-      "multitask-dispatcher: racoons",
-    );
-  }
+  // Ticket 145: racoons mounts UNCONDITIONALLY inside the enabled path — no
+  // config gate, no session filter. The mount registers `session/event`,
+  // `llm/stream`, `agent/pre-step` and `agent/turn-stopping` on this plugin's
+  // own context, so the dispatcher session, every worker session and every
+  // plain chat get the same treatment. Its `openLedger` factory is host-owned
+  // and durable per session (`<root>/sessions/<id>/ledger.sqlite`), so the
+  // disposer must close those ledgers itself — the mount skips them.
+  ctx.effect(
+    () => {
+      const mount = registerRacoonsMount(ctx, {
+        enforcement: racoonsEnforcement,
+        ...(racoonsStorageRoot === undefined
+          ? {}
+          : { racoonsStorageRoot }),
+        contextWindowTokens: racoonsContextWindowTokens,
+      });
+      racoonsMount = mount;
+      return () => {
+        racoonsMount = null;
+        void mount.dispose();
+      };
+    },
+    "multitask-dispatcher: racoons",
+  );
 
   // The dormant plugin's only visible affordance (design-16 §3.3).
   // Cordis effect contract (ticket 44): the generator effect registers now

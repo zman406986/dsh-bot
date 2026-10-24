@@ -210,9 +210,21 @@ export const localeDictionary: LocaleDictionary = {
       "Microcompact old tool results",
     "settings.card.field.microcompactEnabled.hint":
       "When on, older tool output is emptied once a chat fills past a fixed share of the model window, keeping the newest few. This rewrites history, so the provider's prompt cache restarts from the oldest cleared entry.",
-    "settings.card.field.racoonsEnabled.label": "Context cleanup (RACOONS)",
-    "settings.card.field.racoonsEnabled.hint":
-      "When on, oversized tool results are capped and failed searches are sealed, with the originals restorable by recall id. Originals are kept in memory for this process only. Applies to new chats.",
+    // Ticket 145: racoons is always on while the multitask plugin is
+    // enabled, so the card only tunes it — record-only, storage root and the
+    // half-window prune denominator.
+    "settings.card.field.racoonsRecordOnly.label":
+      "Racoons record-only mode (no context edits)",
+    "settings.card.field.racoonsRecordOnly.hint":
+      "Off = racoons applies context cleanup to every chat in this process; removed content stays restorable by recall id, originals stored per session on disk.",
+    "settings.card.field.racoonsStorageRoot.label":
+      "Racoons storage root (empty = default <DSH_HOME>/storages/racoons)",
+    "settings.card.field.racoonsStorageRoot.hint":
+      "Folder that holds one ledger per chat. Leave empty to use the default location.",
+    "settings.card.field.racoonsContextWindowTokens.label":
+      "Racoons context window tokens (0 = auto half-window prune off)",
+    "settings.card.field.racoonsContextWindowTokens.hint":
+      "When set, a chat that reaches half this many tokens runs a prune pass. 0 leaves the automatic pass off.",
     // Ticket 77 (ADR-0020 slice 1): the wrapper shell's chrome copy. The
     // main-surface line survives as the no-seat fallback: since ticket 80
     // the pane is a host seat, and this copy shows only when a composition
@@ -376,9 +388,20 @@ export const localeDictionary: LocaleDictionary = {
     "settings.card.field.inboxEnabled.label": "启用文件收件箱",
     "settings.card.field.inboxEnabled.hint":
       "保存为调度器的设置：对新会话生效。开启后，调度器还会从下方目录接收任务。",
-    "settings.card.field.racoonsEnabled.label": "上下文清理（RACOONS）",
-    "settings.card.field.racoonsEnabled.hint":
-      "开启后，过大的工具结果会被裁剪，失败的搜索会被封存，原始内容可通过 recall id 取回。原始内容仅保存在本进程内存中。对新会话生效。",
+    // Ticket 145：只要调度器插件启用，RACOONS 就一直运行；此处只调节它——
+    // 仅记录模式、存储根目录、半窗口清理的窗口大小。
+    "settings.card.field.racoonsRecordOnly.label":
+      "RACOONS 仅记录模式（不改动上下文）",
+    "settings.card.field.racoonsRecordOnly.hint":
+      "关闭时，RACOONS 会对本进程内的所有会话执行上下文清理；被移除的内容仍可通过 recall id 按原样取回，原始内容按会话保存在磁盘上。",
+    "settings.card.field.racoonsStorageRoot.label":
+      "RACOONS 存储根目录（留空使用默认 <DSH_HOME>/storages/racoons）",
+    "settings.card.field.racoonsStorageRoot.hint":
+      "每个会话一份账本，都放在这个目录下。留空则使用默认位置。",
+    "settings.card.field.racoonsContextWindowTokens.label":
+      "RACOONS 上下文窗口 token 数（0 表示关闭半窗口自动清理）",
+    "settings.card.field.racoonsContextWindowTokens.hint":
+      "设置后，会话占用达到该数值的一半时会执行一次清理。0 表示不自动执行。",
     "settings.card.field.inboxDir.label": "收件箱目录",
     "settings.card.field.inboxDir.hint":
       "外部系统写入队列任务的文件夹。留空则保持收件箱关闭。",

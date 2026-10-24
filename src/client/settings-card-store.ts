@@ -219,11 +219,12 @@ function stringFieldSpec(
 /**
  * The schema fields this card edits — EXACTLY the fields of the host half's
  * `Config` (`src/plugin.ts`: `enabled`, `accessRequestTimeoutMs`,
- * `wakeCoalesceWindowMs`, `inboxEnabled`, `racoonsEnabled`, `inboxDir`,
- * `inboxRescanIntervalMs`), in schema order. The pair is pinned offline against
- * `Config.dict`, so a field added to the schema without a control fails the
- * suite instead of silently rendering an editable card that hides part of the
- * namespace.
+ * `wakeCoalesceWindowMs`, `inboxEnabled`, `racoonsRecordOnly`,
+ * `racoonsStorageRoot`, `racoonsContextWindowTokens`, `inboxDir`,
+ * `inboxRescanIntervalMs`, `microcompactEnabled`), in schema order. The pair
+ * is pinned offline against `Config.dict`, so a field added to the schema
+ * without a control fails the suite instead of silently rendering an editable
+ * card that hides part of the namespace.
  *
  * The `enabled` hint phrases the flag as the SETTING (ADR-0005): a saved change
  * lands in NEW chats, never as a live toggle of the running session.
@@ -250,9 +251,19 @@ export const SETTINGS_CARD_FIELDS: readonly SettingsCardFieldSpec[] = [
     "settings.card.field.inboxEnabled.hint",
   ),
   booleanFieldSpec(
-    "racoonsEnabled",
-    "settings.card.field.racoonsEnabled.label",
-    "settings.card.field.racoonsEnabled.hint",
+    "racoonsRecordOnly",
+    "settings.card.field.racoonsRecordOnly.label",
+    "settings.card.field.racoonsRecordOnly.hint",
+  ),
+  stringFieldSpec(
+    "racoonsStorageRoot",
+    "settings.card.field.racoonsStorageRoot.label",
+    "settings.card.field.racoonsStorageRoot.hint",
+  ),
+  numberFieldSpec(
+    "racoonsContextWindowTokens",
+    "settings.card.field.racoonsContextWindowTokens.label",
+    "settings.card.field.racoonsContextWindowTokens.hint",
   ),
   stringFieldSpec(
     "inboxDir",

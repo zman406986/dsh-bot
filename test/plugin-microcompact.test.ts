@@ -322,22 +322,26 @@ describe("microcompact plugin wiring (ticket 124)", () => {
     assert.equal(dict.microcompactEnabled?.meta?.default, false);
   });
 
-  it("registers NO pre-step listener when the field is off", () => {
+  it("adds NO pre-step listener when the field is off (the racoons mount's own one stays)", () => {
     const ctx = createStubCtx({ tokenMeter: createMeter(999_999_999) });
     apply(ctx as never, volatileConfig({ enabled: true }));
-    assert.equal(ctx.listeners.has("agent/pre-step"), false);
+    // Ticket 145: the racoons mount is unconditional inside the enabled path
+    // and registers its own `agent/pre-step` boundary listener, so the count
+    // is exactly that one — microcompact contributes nothing while off.
+    assert.equal((ctx.listeners.get("agent/pre-step") ?? []).length, 1);
     assert.doesNotThrow(() => {
       for (const dispose of ctx.disposers) dispose();
     });
   });
 
-  it("registers exactly one pre-step listener when the field is on, and unload removes it", () => {
+  it("adds exactly one pre-step listener when the field is on, and unload removes every one", () => {
     const ctx = createStubCtx({ tokenMeter: createMeter(999_999_999) });
     apply(
       ctx as never,
       volatileConfig({ enabled: true, microcompactEnabled: true }),
     );
-    assert.equal((ctx.listeners.get("agent/pre-step") ?? []).length, 1);
+    // The racoons boundary listener + this pass's own.
+    assert.equal((ctx.listeners.get("agent/pre-step") ?? []).length, 2);
     for (const dispose of ctx.disposers) dispose();
     assert.equal((ctx.listeners.get("agent/pre-step") ?? []).length, 0);
   });

@@ -536,11 +536,14 @@ async function spawnPeer(
   return callScoped(creator, SPAWN_DISPATCHER_TOOL, { title, prompt });
 }
 
+// The scoped dispatcher surface: the eight dispatcher tools plus the
+// ticket-145 per-session recall, which registers on the same agent scope.
 const DISPATCHER_TOOL_SET = [
   "await_agent",
   "check_workers",
   "deliver_result",
   "message_agent",
+  "recall",
   "spawn_dispatcher",
   "spawn_worker",
   "steer_worker",
@@ -578,7 +581,7 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     // The child's OWN scope holds the full dispatcher set…
     assert.deepEqual(child.agent.scopedTools.names().sort(), DISPATCHER_TOOL_SET);
     // …nothing leaked into the creator's scope or the global layer…
-    assert.equal(creator.scopedTools.names().length, 8);
+    assert.equal(creator.scopedTools.names().length, 9);
     assert.deepEqual(ctx.globalToolNames(), ["request_access"]);
     // …and the dispatcher policy was injected (ADR-0025 decision 1-2).
     assert.equal(child.agent.injected.length, 1);
@@ -845,7 +848,7 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
 
     // That session's surface is gone; the creator's is untouched (ADR-0019).
     assert.deepEqual(child.agent.scopedTools.names(), []);
-    assert.equal(creator.scopedTools.names().length, 8);
+    assert.equal(creator.scopedTools.names().length, 9);
   });
 
   it("a dispatcher spawn racing a worker spawn from the same parent composes the worker and activates the dispatcher", async () => {
@@ -888,10 +891,12 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
       workerChild.agent.scopedSections.includes(WORKER_PERSONA_SECTION),
       "the worker is composed as a worker",
     );
-    // A worker's scope holds ONLY its own reply tool (ticket 122) — never a
-    // dispatcher tool, never `spawn_dispatcher`.
+    // A worker's scope holds its own reply tool (ticket 122) plus the
+    // ticket-145 per-session recall — never a dispatcher tool, never
+    // `spawn_dispatcher`.
     assert.deepEqual(workerChild.agent.scopedTools.names(), [
       "reply_to_dispatcher",
+      "recall",
     ]);
     assert.ok(
       !dispatcherChild.agent.scopedSections.includes(WORKER_PERSONA_SECTION),
@@ -915,7 +920,7 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     // fallback also looked at `ctx.agents` — two candidate call sites, ONE
     // activation. A second one would throw on the scoped registry's duplicate
     // name rule (and would double-inject the policy).
-    assert.equal(child.agent.scopedTools.names().length, 8);
+    assert.equal(child.agent.scopedTools.names().length, 9);
     assert.equal(child.agent.injected.length, 1);
   });
 
@@ -1155,7 +1160,7 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
 
     second.fire("agent/created", { agent: resumedChild, source: "resume" });
     await drain();
-    assert.equal(resumedChild.scopedTools.names().length, 8);
+    assert.equal(resumedChild.scopedTools.names().length, 9);
     assert.equal(resumedChild.injected.length, 1);
 
     // A second resume of the SAME session in the SAME process: still one
@@ -1611,7 +1616,10 @@ describe("ticket 142 — a durably marked worker is wake-able by a send", () => 
     // tools, its own reply tool, and the contract section on its scope.
     const resumed = second.children.find((child) => child.id === workerId);
     assert.ok(resumed, "the host's sendMessage resumed the worker");
-    assert.deepEqual(resumed.agent.scopedTools.names(), ["reply_to_dispatcher"]);
+    assert.deepEqual(resumed.agent.scopedTools.names().sort(), [
+      "recall",
+      "reply_to_dispatcher",
+    ]);
     assert.deepEqual(resumed.agent.scopedSections, [WORKER_PERSONA_SECTION]);
     assert.equal(resumed.agent.injected.length, 0, "no dispatcher policy");
 

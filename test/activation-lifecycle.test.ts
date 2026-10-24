@@ -318,8 +318,10 @@ describe("activation lifecycle — flag matrix (design-16 §3.7)", () => {
     assert.deepEqual(ctx.toolNames(), []);
     // Two lifecycle listeners (agent/disposed, agent/status) + three host
     // listeners (subagent/end, session/event, agent/created — the worker
-    // composition seam, passive until a spawn is in flight).
-    assert.equal(ctx.listenerCount(), 5);
+    // composition seam, passive until a spawn is in flight) + the ticket-145
+    // racoons mount (session/event, llm/stream, agent/pre-step and
+    // agent/turn-stopping), which is always on inside the enabled path.
+    assert.equal(ctx.listenerCount(), 9);
     // No dispatcher tool claims a dormant key: a stock caller sees stock.
     for (const name of [
       "spawn_worker",
@@ -352,12 +354,15 @@ describe("activation lifecycle — command behavior", () => {
     assert.equal(agent.injected.length, 1);
     assert.ok(textOf(agent.injected[0]).includes("# Multitask dispatcher"));
     // Full dispatcher surface: eight tools (ticket 117 added await_agent,
-    // ticket 118 added spawn_dispatcher) + request_access.
+    // ticket 118 added spawn_dispatcher) + request_access + the ticket-145
+    // per-session recall (this context-less agent takes the plugin-level
+    // fallback surface).
     assert.deepEqual(ctx.toolNames().sort(), [
       "await_agent",
       "check_workers",
       "deliver_result",
       "message_agent",
+      "recall",
       "request_access",
       "spawn_dispatcher",
       "spawn_worker",
@@ -383,7 +388,7 @@ describe("activation lifecycle — command behavior", () => {
     });
     // No re-bind, no re-inject, no duplicate tools.
     assert.equal(agent.injected.length, 1);
-    assert.equal(ctx.toolNames().length, 9);
+    assert.equal(ctx.toolNames().length, 10);
   });
 
   it("a second chat activates as its own dispatcher (ADR-0019: no single slot)", () => {
@@ -418,8 +423,9 @@ describe("activation lifecycle — command behavior", () => {
     assert.equal(second.injected.length, 1);
     assert.equal(first.injected.length, 1);
     // Each chat owns its own scoped tool surface — no cross-session names.
-    assert.equal(first.ctx?.tools.registeredNames().length, 8);
-    assert.equal(second.ctx?.tools.registeredNames().length, 8);
+    // Eight dispatcher tools + the ticket-145 per-session recall.
+    assert.equal(first.ctx?.tools.registeredNames().length, 9);
+    assert.equal(second.ctx?.tools.registeredNames().length, 9);
     assert.equal(ctx.toolNames().length, 1); // request_access, global by design
   });
 
@@ -435,7 +441,7 @@ describe("activation lifecycle — command behavior", () => {
     // (mis-routing its calls). Pinned loud, not silent.
     const first = createAgent("s-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent: first });
-    assert.equal(ctx.toolNames().length, 9);
+    assert.equal(ctx.toolNames().length, 10);
 
     assert.throws(
       () =>
@@ -502,7 +508,7 @@ describe("activation lifecycle — deactivation and HMR", () => {
     const agent = createAgent("s-1");
 
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
-    assert.equal(ctx.toolNames().length, 9);
+    assert.equal(ctx.toolNames().length, 10);
 
     ctx.fire("agent/disposed", { agent });
     assert.deepEqual(ctx.toolNames(), []);
@@ -517,7 +523,7 @@ describe("activation lifecycle — deactivation and HMR", () => {
       text: DISPATCHER_START_SUCCESS,
     });
     assert.equal(agent.injected.length, 2);
-    assert.equal(ctx.toolNames().length, 9);
+    assert.equal(ctx.toolNames().length, 10);
   });
 
   it("dispose-all (HMR simulation) leaves no lingering binding or surface", () => {
@@ -525,7 +531,7 @@ describe("activation lifecycle — deactivation and HMR", () => {
     apply(ctx, volatileConfig({ enabled: true }));
     const agent = createAgent("s-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
-    assert.equal(ctx.toolNames().length, 9);
+    assert.equal(ctx.toolNames().length, 10);
 
     for (const dispose of [...ctx.disposers]) {
       dispose();
@@ -558,7 +564,8 @@ describe("activation lifecycle — dispatcher tool surface (ADR-0019)", () => {
     });
     assert.deepEqual(result, { kind: "success", text: DISPATCHER_START_SUCCESS });
 
-    // Eight dispatcher tools live in THIS agent's scope only…
+    // Eight dispatcher tools + the ticket-145 per-session recall live in THIS
+    // agent's scope only…
     assert.deepEqual(
       agent.ctx?.tools.registeredNames().sort(),
       [
@@ -566,6 +573,7 @@ describe("activation lifecycle — dispatcher tool surface (ADR-0019)", () => {
         "check_workers",
         "deliver_result",
         "message_agent",
+        "recall",
         "spawn_dispatcher",
         "spawn_worker",
         "steer_worker",
@@ -585,8 +593,9 @@ describe("activation lifecycle — dispatcher tool surface (ADR-0019)", () => {
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent: second });
 
     // Two dispatcher sessions, two disjoint scoped surfaces.
-    assert.equal(first.ctx?.tools.registeredNames().length, 8);
-    assert.equal(second.ctx?.tools.registeredNames().length, 8);
+    // Eight dispatcher tools + the ticket-145 per-session recall.
+    assert.equal(first.ctx?.tools.registeredNames().length, 9);
+    assert.equal(second.ctx?.tools.registeredNames().length, 9);
     assert.deepEqual(ctx.toolNames(), ["request_access"]);
   });
 
@@ -601,7 +610,7 @@ describe("activation lifecycle — dispatcher tool surface (ADR-0019)", () => {
     ctx.fire("agent/disposed", { agent: first });
 
     assert.deepEqual(first.ctx?.tools.registeredNames(), []);
-    assert.equal(second.ctx?.tools.registeredNames().length, 8);
+    assert.equal(second.ctx?.tools.registeredNames().length, 9);
     // request_access stays until the LAST dispatcher session ends.
     assert.deepEqual(ctx.toolNames(), ["request_access"]);
     ctx.fire("agent/disposed", { agent: second });

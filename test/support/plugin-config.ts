@@ -6,6 +6,9 @@
  * they can seed a value, and — for the ADR-0005 freeze pins — mutate the ref
  * after `apply` returned and prove the running session never re-reads it.
  */
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 /** Minimal structural volatile reference (the plugin's config shape). */
 export interface VolatileRef<T> {
@@ -28,6 +31,15 @@ export function mutableRef<T>(initial: T): MutableRef<T> {
   };
 }
 
+/**
+ * One per-process temp root for racoons ledgers (ticket 145). The mount is
+ * unconditional, so every `apply` in a test file would otherwise derive
+ * `<DSH_HOME>/storages/racoons` and write real ledgers into the developer's
+ * home directory. The dir is never cleaned up: it lives under the OS temp
+ * directory, and the OS owns its lifetime.
+ */
+export const TEST_RACOONS_STORAGE_ROOT = mkdtempSync(join(tmpdir(), "dsh-racoons-"));
+
 /** Plugin config values as a test writes them (plain, not refs). */
 export interface TestConfigValues {
   enabled: boolean;
@@ -38,6 +50,12 @@ export interface TestConfigValues {
   inboxRescanIntervalMs?: number;
   /** Ticket 124: deterministic microcompact (default off). */
   microcompactEnabled?: boolean;
+  /** Ticket 145: racoons record-only mode (default off → enforcement `apply`). */
+  racoonsRecordOnly?: boolean;
+  /** Ticket 145: durable racoons root; defaults to {@link TEST_RACOONS_STORAGE_ROOT}. */
+  racoonsStorageRoot?: string;
+  /** Ticket 145: half-window prune denominator; 0 means off. */
+  racoonsContextWindowTokens?: number;
 }
 
 /** Plugin config in the shape `apply` receives (volatile refs). */
@@ -49,6 +67,9 @@ export interface TestPluginConfig {
   inboxDir: VolatileRef<string | undefined>;
   inboxRescanIntervalMs: VolatileRef<number | undefined>;
   microcompactEnabled: VolatileRef<boolean | undefined>;
+  racoonsRecordOnly: VolatileRef<boolean | undefined>;
+  racoonsStorageRoot: VolatileRef<string | undefined>;
+  racoonsContextWindowTokens: VolatileRef<number | undefined>;
 }
 
 /** Wrap plain values in volatile refs; omitted fields read `undefined`. */
@@ -61,15 +82,38 @@ export function volatileConfig(values: TestConfigValues): TestPluginConfig {
     inboxDir: mutableRef(values.inboxDir),
     inboxRescanIntervalMs: mutableRef(values.inboxRescanIntervalMs),
     microcompactEnabled: mutableRef(values.microcompactEnabled),
+    racoonsRecordOnly: mutableRef(values.racoonsRecordOnly),
+    racoonsStorageRoot: mutableRef(
+      values.racoonsStorageRoot === undefined
+        ? TEST_RACOONS_STORAGE_ROOT
+        : values.racoonsStorageRoot,
+    ),
+    racoonsContextWindowTokens: mutableRef(values.racoonsContextWindowTokens),
   };
 }
 
 /**
- * Plain config values (from the racoons-integration lane): what a test
- * means, not what the host passes. For ref-shaped config use `volatileConfig`.
+ * Plain config values: what a test means, not what the host passes. For
+ * ref-shaped config use `volatileConfig`.
  */
 export function pluginConfig(
-  values: { enabled?: boolean; racoonsEnabled?: boolean } = {},
-): { enabled: boolean; racoonsEnabled?: boolean } {
-  return { enabled: true, racoonsEnabled: false, ...values };
+  values: {
+    enabled?: boolean;
+    racoonsRecordOnly?: boolean;
+    racoonsStorageRoot?: string;
+    racoonsContextWindowTokens?: number;
+  } = {},
+): {
+  enabled: boolean;
+  racoonsRecordOnly: boolean;
+  racoonsStorageRoot: string;
+  racoonsContextWindowTokens: number;
+} {
+  return {
+    enabled: true,
+    racoonsRecordOnly: false,
+    racoonsStorageRoot: TEST_RACOONS_STORAGE_ROOT,
+    racoonsContextWindowTokens: 0,
+    ...values,
+  };
 }

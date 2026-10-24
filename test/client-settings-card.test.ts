@@ -463,7 +463,11 @@ describe("settings card — render model (ticket 47)", () => {
         ["wakeCoalesceWindowMs", "number", "", null],
         // Ticket 113: the inbox trio — boolean, string (text input), number.
         ["inboxEnabled", "boolean", "", null],
-        ["racoonsEnabled", "boolean", "", null],
+        // Ticket 145: the racoons trio replaces the old on/off switch —
+        // boolean (record-only), string (storage root), number (window).
+        ["racoonsRecordOnly", "boolean", "", null],
+        ["racoonsStorageRoot", "string", "", null],
+        ["racoonsContextWindowTokens", "number", "", null],
         ["inboxDir", "string", "", null],
         ["inboxRescanIntervalMs", "number", "", null],
         // Ticket 124: microcompact is off by default and absent from the
@@ -473,7 +477,9 @@ describe("settings card — render model (ticket 47)", () => {
     );
     assert.deepEqual(
       view.fields.map((field) => field.overridden),
-      [false, false, false, false, false, false, false, false],
+      [
+        false, false, false, false, false, false, false, false, false, false,
+      ],
     );
   });
 
@@ -497,7 +503,9 @@ describe("settings card — render model (ticket 47)", () => {
         ["accessRequestTimeoutMs", false],
         ["wakeCoalesceWindowMs", false],
         ["inboxEnabled", false],
-        ["racoonsEnabled", false],
+        ["racoonsRecordOnly", false],
+        ["racoonsStorageRoot", false],
+        ["racoonsContextWindowTokens", false],
         ["inboxDir", false],
         ["inboxRescanIntervalMs", false],
         ["microcompactEnabled", false],
@@ -676,9 +684,9 @@ describe("settings card — store: staging, saving, and the honest failure path 
       store.getBox().view.fields.map((field) => field.text),
       // Ticket 108: the untouched third field seeds empty from the read-back.
       // Ticket 113: the three inbox fields likewise.
-      // RACOONS lane merge: the racoonsEnabled switch likewise (fifth field).
-      // Ticket 124: the microcompact switch is the eighth field, also empty.
-      ["false", "90000", "", "", "", "", "", ""],
+      // Ticket 145: the three racoons fields likewise (fields 5, 6 and 7).
+      // Ticket 124: the microcompact switch is the tenth field, also empty.
+      ["false", "90000", "", "", "", "", "", "", "", ""],
     );
   });
 

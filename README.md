@@ -74,10 +74,14 @@ Every field is a volatile setting of the plugin's `Config`, editable in dsh's Pl
 | `accessRequestTimeoutMs` | `120000` | How long an unanswered access ask waits before it is denied. |
 | `wakeCoalesceWindowMs` | `0` | Batch idle background wakes into one dispatcher turn per window. `0` wakes immediately. |
 | `inboxEnabled` | `false` | Opt-in file inbox. Off starts nothing at all. |
+| `racoonsRecordOnly` | `false` | Racoons record-only mode. Off means racoons applies context cleanup; on means it only records. |
+| `racoonsStorageRoot` | `""` | Racoons storage root. Empty uses `<DSH_HOME>/storages/racoons`. |
+| `racoonsContextWindowTokens` | `0` | Racoons context window in tokens; `0` leaves the half-window auto prune off. |
 | `inboxDir` | `""` | Inbox root. Empty disables intake even when enabled. |
 | `inboxRescanIntervalMs` | `5000` | Fallback rescan interval; clamped to a 1000 ms floor. |
-| `racoonsEnabled` | `false` | Opt-in context-cleanup path backed by the vendored racoons core workspace and `racoons-dsh`. |
 | `microcompactEnabled` | `false` | Clears the content of old tool results on dispatcher sessions at a fixed usage ratio. Off pending live verification. |
+
+Racoons is always on while the multitask plugin is enabled, and it covers the dispatcher session and every worker session, not just one of them. Removed content is restorable by its recall id, and the originals are stored durably per session under `<DSH_HOME>/storages/racoons` (one ledger file plus its blobs directory per session).
 
 ## Architecture
 

@@ -305,7 +305,9 @@ describe("plugin scaffold", () => {
       DISPATCHER_STEER_COMMAND,
       DISPATCHER_RESOLVE_COMMAND,
     ]);
-    assert.equal(ctx.disposers.length, 4);
+    // Three command registrations + the teardown + the ticket-145 racoons
+    // mount (which always registers inside the enabled path).
+    assert.equal(ctx.disposers.length, 5);
     for (const dispose of [...ctx.disposers]) dispose();
     assert.equal(ctx.registeredCommands.length, 0);
   });
@@ -320,7 +322,7 @@ describe("plugin scaffold", () => {
 
     // Eight dispatcher tools (ticket 116 retired send_peer for message_agent;
     // ticket 117 added await_agent; ticket 118 added spawn_dispatcher)
-    // + worker access tool (T13).
+    // + worker access tool (T13) + the ticket-145 per-session recall.
     const names = ctx.registeredTools.map((t) => t.name);
     for (const tool of [
       "spawn_worker",
@@ -343,7 +345,7 @@ describe("plugin scaffold", () => {
     // Re-activation registers a fresh surface.
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(ctx.registeredTools.length, 9);
+    assert.equal(ctx.registeredTools.length, 10);
   });
 
   it("tool executions route to the registering session (ADR-0019: gate retired)", async () => {
@@ -418,8 +420,8 @@ describe("plugin scaffold", () => {
     const agent = createAgent("session-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await new Promise((resolve) => setImmediate(resolve));
-    // Eight dispatcher tools + the worker access tool.
-    assert.equal(ctx.registeredTools.length, 9);
+    // Eight dispatcher tools + the worker access tool + per-session recall.
+    assert.equal(ctx.registeredTools.length, 10);
 
     for (const dispose of ctx.disposers) dispose();
 
@@ -438,7 +440,7 @@ describe("plugin scaffold", () => {
     const agent = createAgent("session-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(ctx.registeredTools.length, 9);
+    assert.equal(ctx.registeredTools.length, 10);
 
     for (const dispose of [...ctx.disposers]) dispose();
     assert.equal(ctx.registeredCommands.length, 0);
@@ -458,7 +460,7 @@ describe("plugin scaffold", () => {
       agent: createAgent("session-2"),
     });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(ctx.registeredTools.length, 9);
+    assert.equal(ctx.registeredTools.length, 10);
   });
 
   it("a firehose tool/call advances the count check_workers shows (ticket 75)", async () => {
@@ -572,7 +574,7 @@ describe("plugin scaffold", () => {
 
     // Nothing was unregistered and no state changed by observation alone.
     assert.deepEqual(ctx.registeredTools.map((t) => t.name), before);
-    assert.equal(before.length, 9);
+    assert.equal(before.length, 10);
   });
 
   // Ticket 112: plugin teardown must disarm the wake bus. Under the ticket-108

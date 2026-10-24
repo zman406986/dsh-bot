@@ -955,14 +955,17 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
       await new Promise((resolve) => setImmediate(resolve));
     }
 
-    // The dispatcher surface (eight tools since ticket 118 + request_access)
-    // alongside the foreign tool — no clobbering.
+    // The dispatcher surface (eight tools since ticket 118 + request_access
+    // + the ticket-145 per-session recall, which this context-less agent
+    // takes on the plugin-level fallback) alongside the foreign tool — no
+    // clobbering.
     assert.deepEqual(ctx.toolNames().sort(), [
       "await_agent",
       "check_workers",
       "deliver_result",
       FOREIGN.tool,
       "message_agent",
+      "recall",
       "request_access",
       "spawn_dispatcher",
       "spawn_worker",
@@ -1005,7 +1008,7 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
     );
     const agent = createAgent("s-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
-    assert.equal(ctx.toolNames().length, 10); // nine ours + one foreign
+    assert.equal(ctx.toolNames().length, 11); // ten ours + one foreign
 
     // HMR: dispose ONLY the dispatcher fiber.
     dispatcherFiber.dispose();
@@ -1058,7 +1061,7 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
       ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent }),
       { kind: "success", text: DISPATCHER_START_SUCCESS },
     );
-    assert.equal(ctx.toolNames().length, 9);
+    assert.equal(ctx.toolNames().length, 10);
   });
 });
 

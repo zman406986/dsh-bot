@@ -489,10 +489,14 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
       // field, same pairing rule).
       "settings.card.field.microcompactEnabled.hint",
       "settings.card.field.microcompactEnabled.label",
-      // Ticket 114: the RACOONS opt-in field (one label/hint pair per schema
-      // field, in the same pairing rule).
-      "settings.card.field.racoonsEnabled.hint",
-      "settings.card.field.racoonsEnabled.label",
+      // Ticket 145: the racoons trio replaces the old opt-in switch (one
+      // label/hint pair per schema field, same pairing rule).
+      "settings.card.field.racoonsContextWindowTokens.hint",
+      "settings.card.field.racoonsContextWindowTokens.label",
+      "settings.card.field.racoonsRecordOnly.hint",
+      "settings.card.field.racoonsRecordOnly.label",
+      "settings.card.field.racoonsStorageRoot.hint",
+      "settings.card.field.racoonsStorageRoot.label",
       // Ticket 108: the wake-coalescing window field (one label/hint pair
       // per schema field, in the same pairing rule).
       "settings.card.field.wakeCoalesceWindowMs.hint",

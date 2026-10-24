@@ -436,11 +436,12 @@ describe("composition polish — dormant registration matrix (design-17 §3.2/§
       agent.injected.filter((m) => textOf(m).includes("## Restart")).length,
       0,
     );
-    // Listener baseline: the passive plumbing is exactly five listeners
-    // (2 lifecycle + 3 host: `subagent/end`, `session/event`, `agent/created`
-    // — the last is the worker-composition seam and must stay passive while
-    // no spawn is in flight).
-    assert.equal(ctx.listenerCount(), 5);
+    // Listener baseline: the passive plumbing is exactly nine listeners —
+    // 2 lifecycle + 3 host (`subagent/end`, `session/event`, `agent/created`,
+    // the last being the worker-composition seam, passive while no spawn is in
+    // flight) + the ticket-145 racoons mount's four (`session/event`,
+    // `llm/stream`, `agent/pre-step`, `agent/turn-stopping`).
+    assert.equal(ctx.listenerCount(), 9);
   });
 
   it("an unrelated settings write while dormant does not surface a roster", async () => {
@@ -462,11 +463,14 @@ describe("composition polish — dormant registration matrix (design-17 §3.2/§
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await flushActivation();
 
+    // Eight dispatcher tools + request_access + the ticket-145 per-session
+    // recall (this context-less agent takes the plugin-level fallback).
     assert.deepEqual(ctx.toolNames().sort(), [
       "await_agent",
       "check_workers",
       "deliver_result",
       "message_agent",
+      "recall",
       "request_access",
       "spawn_dispatcher",
       "spawn_worker",
