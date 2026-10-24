@@ -6,6 +6,12 @@ import type { CheckContext, DeclaredRange } from "./context.js";
 export function checkSources(c: CheckContext, plans: readonly RulePlan[]): void {
   const all: DeclaredRange[] = [];
   const ownership = new Map<string, string>();
+  // On a verdict event a removal's node index *is* the revert cut: the card
+  // `candidate.ts` applies reverts to just before the read. A removal below the
+  // watermark is therefore a cut below it, and it is refused here before any
+  // candidate is built (design-protocol §3; the fence is the cut rule).
+  const reverted = new Set<string>(plans.flatMap(plan => plan.operations.flatMap(op =>
+    op.kind === "verdict" ? [op.removalId] : [])));
   for (const plan of plans) {
     const report = reporter(c, plan.ruleId, null);
     if (plan.baseRevision !== c.value.snapshot.revision) {
@@ -53,8 +59,22 @@ export function checkSources(c: CheckContext, plans: readonly RulePlan[]): void 
             }
           } else {
             const index = c.value.snapshot.nodes.findIndex(n => n.id === node.id);
-            if (index < c.freshStart || index < 0) {
-              report("outside-fresh-zone", "At-rest removal is below the live fresh-zone fence", node.id);
+            const revertedRemoval = reverted.has(removal.id);
+            // ADR-0012: the fence is a watermark fence, so a verdict cut is
+            // refused only against a real warm watermark. An unknown cache has
+            // none, so there is nothing for the cut to violate and it applies.
+            // The warm path itself is unchanged; at-rest removals keep the
+            // ordinary fresh-zone rule.
+            const fenced = revertedRemoval
+              ? c.value.snapshot.cache.kind === "warm" && index < c.freshStart
+              : index < c.freshStart || index < 0;
+            if (fenced) {
+              // One fact, one code: a verdict removal's index is its cut, so the
+              // same fence speaks the cut's name for it.
+              report(revertedRemoval ? "cut-below-watermark" : "outside-fresh-zone",
+                revertedRemoval
+                  ? "A verdict removal below the cache watermark would cut below it"
+                  : "At-rest removal is below the live fresh-zone fence", node.id);
             }
           }
         }

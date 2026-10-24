@@ -1,14 +1,17 @@
 {
   "name": "@racoons/core",
-  "version": "0.1.0-m1",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
-  "license": "Apache-2.0",
-  "types": "./public-types.d.ts",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
   "exports": {
-    ".": { "types": "./public-types.d.ts" },
-    "./*.js": { "types": "./lib/*.d.ts", "import": "./lib/*.js" }
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
   },
-  "files": ["lib", "public-types.d.ts"],
-  "engines": { "node": ">=22" }
+  "engines": {
+    "node": ">=22.13.0"
+  }
 }

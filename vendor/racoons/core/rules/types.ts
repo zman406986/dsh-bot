@@ -8,10 +8,12 @@ import type {
   LineRange,
   NodeId,
   NoteId,
+  RecallId,
   RemovalId,
   Revision,
   RuleId,
   SourceRef,
+  UnitId,
 } from "../types/identity.js";
 import type {
   CapabilityFlags,
@@ -53,6 +55,18 @@ export type Note =
       readonly removalId: RemovalId;
       readonly path: string;
       readonly keepLines: readonly LineRange[];
+    }
+  | {
+      readonly id: NoteId;
+      readonly kind: "receipt";
+      readonly removalId: RemovalId;
+      readonly unitId: UnitId;
+      /** The first hit path the receipt names; never empty. */
+      readonly path: string;
+      /** Line ranges of the forgotten span; empty when the whole node went. */
+      readonly ranges: readonly LineRange[];
+      /** Null ships the floor line without a topic label. */
+      readonly label: string | null;
     };
 
 export interface CapOp {
@@ -84,7 +98,19 @@ export interface SpanOp {
   readonly noteId: NoteId;
 }
 
-export type Operation = CapOp | SealOp | EvictOp | SpanOp;
+/**
+ * One forgotten unit: archive exactly the unit's span and append its receipt.
+ * The cut is the unit's own node index ("revert to just before the read"), so
+ * the operation names the unit rather than a placement.
+ */
+export interface VerdictOp {
+  readonly kind: "verdict";
+  readonly removalId: RemovalId;
+  readonly unitId: UnitId;
+  readonly noteId: NoteId;
+}
+
+export type Operation = CapOp | SealOp | EvictOp | SpanOp | VerdictOp;
 
 export interface RulePlan {
   readonly ruleId: RuleId;

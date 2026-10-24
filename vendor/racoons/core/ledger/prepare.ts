@@ -95,6 +95,11 @@ export async function verifyApplication(application: PreparableApplication): Pro
     archives: [...removalKeys.values()].map((json: string): unknown => JSON.parse(json)),
     appendRecords: records.map(({ recordId, sha256: hash }) => ({ recordId, sha256: hash })),
     sealedEpisodeIds: [...new Set(sealedEpisodeIds)].sort(),
+    // A revert application records the approved plan it carried, so the stored
+    // intent is auditable against what the host received (ADR-0004). It is
+    // hashed only through `applicationSha256`, never a second digest of its own.
+    ...(application.mode === "revert" && application.revert !== undefined
+      ? { revert: privateCopyJson(application.revert) } : {}),
   });
   const intentHash = await sha256(new TextEncoder().encode(stableJson([
     sessionId, eventId, applicationSha256,
@@ -115,3 +120,13 @@ export async function publishPreparation(preparation: Preparation, store: BlobSt
 
 function compare(a: string, b: string): number { return a < b ? -1 : a > b ? 1 : 0; }
 function mismatch(message: string): never { throw new LedgerError("hash-mismatch", message); }
+
+/**
+ * A JSON-private copy of the approved revert payload, taken synchronously
+ * before the first await: callers retain their objects, and the stored metadata
+ * must not change if they mutate one. `stableJson` rejects anything that cannot
+ * be encoded, so this only detaches; it never rewrites a value.
+ */
+function privateCopyJson(value: unknown): unknown {
+  return JSON.parse(stableJson(value));
+}

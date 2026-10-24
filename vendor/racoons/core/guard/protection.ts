@@ -43,7 +43,10 @@ export function verifiedCold(snapshot: SessionSnapshot, nowMs?: number): boolean
 }
 export function computeFreshZone(snapshot: SessionSnapshot, config: RacoonsConfig): FreshZone {
   const n = snapshot.nodes.length;
-  let start = n;
+  // ADR-0012: an unknown cache state carries no fresh-zone floor. The host never
+  // supplied a watermark, so there is none to protect; a removal applies
+  // wherever the bank can restore it. The warm path below is the only fence.
+  let start = snapshot.cache.kind === "unknown" ? 0 : n;
   if (snapshot.cache.kind === "warm") {
     const watermark = snapshot.cache.watermarkNodeIndex;
     if (Number.isSafeInteger(watermark) && watermark >= 0 && watermark <= n) start = watermark;

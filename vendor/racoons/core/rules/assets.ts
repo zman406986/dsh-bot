@@ -1,29 +1,20 @@
+/**
+ * The renderers and the re-export surface for the model-facing copy.
+ *
+ * The copy itself — the marker and receipt templates, the inventory and the two
+ * shipped system prompts — lives in `./assets-templates.ts`; every name it
+ * exports is re-exported here, so `rules/assets.js` stays the one import site
+ * for callers and for `index.ts`.
+ */
+
 import type { LineRange, RecallId } from "../types/identity.js";
 import type { PathEvidence } from "../types/transcript.js";
+import { NONE_MATCHED } from "./assets-templates.js";
 
-const CAP_MARKER_TEMPLATE =
-  "[Capped: showing <a>–<b> of <N> lines · <M> kB omitted · recall <id>]";
-const NEGATIVE_FACT_TEMPLATE =
-  "[search: <target>] not found in: <path> · <title or first heading> · <lines> · <size>, …";
-const NONE_MATCHED =
-  "No match in these files for this target. Do not re-read them.";
-const EMPTY_NEGATIVE_FACT_TEMPLATE = `[search: <target>] ${NONE_MATCHED}`;
-const SPAN_MARKER_TEMPLATE =
-  "[Showing lines X–Y of N in <path>. Full content restorable via recall id.]";
-
-export const RECALL_TOOL_DESCRIPTION =
-  "restores the exact original bytes of a sealed record by id.";
-
-export const MODEL_FACING_STRINGS: readonly string[] = [
-  CAP_MARKER_TEMPLATE,
-  NEGATIVE_FACT_TEMPLATE,
-  NONE_MATCHED,
-  EMPTY_NEGATIVE_FACT_TEMPLATE,
-  SPAN_MARKER_TEMPLATE,
-  RECALL_TOOL_DESCRIPTION,
-  " lines",
-  " bytes",
-];
+export {
+  MODEL_FACING_STRINGS, PRUNE_ASK_SYSTEM_PROMPT, RECALL_TOOL_DESCRIPTION,
+  VERDICT_JUDGE_SYSTEM_PROMPT,
+} from "./assets-templates.js";
 
 interface CapMarkerInput {
   readonly shownLines: LineRange;
@@ -51,6 +42,8 @@ interface NegativeFactInput {
 function oneLine(value: string): string {
   return value.replace(/[\r\n\u2028\u2029]+/gu, " ");
 }
+
+export { oneLine };
 
 export function negativeFact({
   target,
@@ -86,4 +79,34 @@ export function spanMarker({
   recallId,
 }: SpanMarkerInput): string {
   return `[Showing lines ${shownLines.startLine}–${shownLines.endLineInclusive} of ${totalLines} in ${path}. Full content restorable via recall ${recallId}.]`;
+}
+
+interface ReceiptLineInput {
+  readonly path: string;
+  /** Empty means the whole node is not retained: no range segment ships. */
+  readonly ranges: readonly LineRange[];
+  /** Absent or blank ships the floor line without a topic label. */
+  readonly label: string | null;
+  readonly recallId: RecallId;
+}
+
+/**
+ * The programmatic line that replaces a forgotten unit (PRD §6.3). It states
+ * only "not retained": unselected content is not condemned. Path and label are
+ * collapsed to one line so a receipt can never grow extra lines.
+ */
+export function receiptLine({
+  path,
+  ranges,
+  label,
+  recallId,
+}: ReceiptLineInput): string {
+  const target = oneLine(path);
+  // One <ranges> segment: `lines X–Y`, comma-joined when the spans are disjoint.
+  const span = ranges.length === 0
+    ? ""
+    : ` lines ${ranges.map(range => `${range.startLine}–${range.endLineInclusive}`).join(", ")}`;
+  const topic = label === null ? "" : oneLine(label).trim();
+  const about = topic.length === 0 ? "" : ` — about: ${topic}`;
+  return `[not retained] ${target}${span}${about} · recall ${recallId}`;
 }

@@ -115,6 +115,13 @@ export interface SessionSnapshot {
 export interface CapabilityFlags {
   readonly mutateResult: boolean;
   readonly rewriteHistory: boolean;
+  /**
+   * The programmatic revert seam (ADR-0007): the host can restore a cached
+   * prefix and append replacements. Optional because a host that has not
+   * declared it cannot apply a verdict removal; absence is refused, never
+   * assumed. Slice 4's dsh factory supplies it.
+   */
+  readonly revertHistory?: boolean;
   readonly atRest: boolean;
   readonly liveTokens: boolean;
   readonly log: boolean;

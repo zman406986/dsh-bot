@@ -4,6 +4,7 @@ import type {
 } from "../types/identity.js";
 import type { Clock } from "../types/transcript.js";
 import type { BreakerState, ValidationIssue } from "../guard/types.js";
+import type { RevertCost } from "../revert/types.js";
 import type { BlobStore } from "./blob-store.js";
 import type { RecallRecord } from "./manifest.js";
 
@@ -14,7 +15,7 @@ export type {
 export interface ArchiveRecord {
   readonly ruleId: RuleId;
   readonly removalId: RemovalId;
-  readonly operationKind: "cap" | "seal" | "evict" | "span";
+  readonly operationKind: "cap" | "seal" | "evict" | "span" | "verdict";
   readonly episodeId: EpisodeId | null;
   readonly title: string;
   readonly recall: RecallRecord;
@@ -36,11 +37,17 @@ export interface PreparableApplication {
   readonly sealedEpisodeIds: readonly EpisodeId[];
   // Present together on a full application; absent together on a bare subset.
   // application-integrity.ts hashes these to reproduce the guard's digest.
-  readonly mode?: "entry" | "append" | "rewrite" | "rehydrate";
+  readonly mode?: "entry" | "append" | "rewrite" | "rehydrate" | "revert";
   readonly replacements?: readonly {
     readonly bytes: Bytes;
     readonly sha256: Sha256;
   }[];
+  // Present exactly on a revert application; hashed with the same envelope.
+  readonly revert?: {
+    readonly cutIndex: number;
+    readonly survivors: readonly string[];
+    readonly cost: RevertCost;
+  };
   readonly createdAtMs?: number;
 }
 

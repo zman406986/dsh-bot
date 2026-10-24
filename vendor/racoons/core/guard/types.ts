@@ -1,10 +1,11 @@
 import type { RacoonsConfig } from "../config.js";
 import type { EngineInput } from "../engine/types.js";
 import type { ArchiveRecord, Ledger } from "../ledger/types.js";
+import type { RevertAppend, RevertCost } from "../revert/types.js";
 import type { RulePlan } from "../rules/types.js";
 import type {
   ByteRange, Bytes, EpisodeId, EventId, NodeId, RecallId,
-  Revision, RuleId, SessionId, Sha256, SourceRef,
+  Revision, RuleId, SessionId, Sha256, SourceRef, UnitId,
 } from "../types/identity.js";
 import type { CapabilityFlags, SessionSnapshot } from "../types/transcript.js";
 
@@ -19,7 +20,9 @@ export type ValidationCode =
   | "unsupported-capability" | "episode-open" | "episode-not-sealed"
   | "episode-evidence-missing" | "hit-removal" | "late-seal"
   | "cold-boundary-required" | "recursive-removal" | "recall-manifest-mismatch"
-  | "invalid-generated-record" | "breaker-disabled";
+  | "invalid-generated-record" | "breaker-disabled"
+  | "unknown-unit" | "incomplete-verdicts" | "label-too-long"
+  | "descriptor-too-long" | "invalid-line-span" | "cut-below-watermark";
 
 export interface ValidationIssue {
   readonly code: ValidationCode;
@@ -51,19 +54,35 @@ export interface RenderedRecord {
 }
 
 declare const guardValidated: unique symbol;
+/**
+ * A revert plan the guard has approved. `planSha256` is the digest of the
+ * approved plan, so the host applies exactly what the ledger prepared
+ * (ADR-0004) and a host-side substitution is detectable.
+ */
+export interface ValidatedRevert {
+  readonly unitIds: readonly UnitId[];
+  readonly cutIndex: number;
+  readonly survivors: readonly NodeId[];
+  readonly appends: readonly RevertAppend[];
+  readonly cost: RevertCost;
+  readonly baseRevision: Revision;
+  readonly planSha256: Sha256;
+}
 export interface ValidatedApplication {
   readonly [guardValidated]: true;
   readonly sessionId: SessionId;
   readonly eventId: EventId;
   readonly baseRevision: Revision;
   readonly phase: "entry" | "at-rest";
-  readonly mode: "entry" | "append" | "rewrite" | "rehydrate";
+  readonly mode: "entry" | "append" | "rewrite" | "rehydrate" | "revert";
   readonly applicationSha256: Sha256;
   readonly replacements: readonly Replacement[];
   readonly appendRecords: readonly RenderedRecord[];
   readonly archives: readonly ArchiveRecord[];
   readonly sealedEpisodeIds: readonly EpisodeId[];
   readonly createdAtMs: number;
+  /** Present exactly when `mode` is "revert"; absent otherwise. */
+  readonly revert?: ValidatedRevert;
 }
 export interface ValidationInput {
   readonly input: EngineInput;

@@ -3,6 +3,7 @@ import type { ByteRange } from "../types/identity.js";
 import type { CheckContext, Report } from "./context.js";
 import { reporter } from "./context.js";
 import type { Candidate } from "./candidate.js";
+import { checkRevertApplication } from "./checks-revert.js";
 import {
   canonicalApplicationBytes, complement, digest, equal, join, length, sameRanges, validRange,
 } from "./bytes.js";
@@ -116,10 +117,18 @@ export function checkOutput(c: CheckContext, candidate: Candidate): void {
     seen.add(replacement.source.nodeId);
     checkReplacement(c, replacement, candidate.expectedGenerated.get(replacement.source.nodeId), report);
   }
+  // A verdict removal is applied by checkpoint-revert: its bytes leave the
+  // transcript and the appended receipt takes their place, so it has no
+  // in-place replacement to demand (design-protocol §3, §5 Slice 3).
+  const reverted = new Set(c.value.plans.flatMap(plan => plan.operations.flatMap(op =>
+    op.kind === "verdict" ? [op.removalId] : [])));
   for (const plan of c.value.plans) for (const removal of plan.removals) {
+    if (reverted.has(removal.id)) continue;
     for (const source of removal.sources) if (!seen.has(source.source.nodeId)) {
       report("unused-removal", "Declared removal has no final replacement", source.source.nodeId);
     }
+  }
+  for (const plan of c.value.plans) for (const removal of plan.removals) {
     const archive = candidate.archives.find(a => a.ruleId === plan.ruleId && a.removalId === removal.id);
     if (archive === undefined) report("recall-manifest-mismatch", "Declared removal has no complete archive");
     else {
@@ -133,7 +142,13 @@ export function checkOutput(c: CheckContext, candidate: Candidate): void {
       })) report("recall-manifest-mismatch", "Archive does not cover precisely the declared source bodies and ranges");
       for (const source of removal.sources) {
         const replacement = candidate.replacements.find(r => r.source.nodeId === source.source.nodeId);
-        if (replacement?.evidenceRecallId !== archive.recall.id) {
+        if (reverted.has(removal.id)) {
+          // A reverted unit's evidence is the receipt, never a rewritten body.
+          if (replacement !== undefined) {
+            report("conflicting-operations", "A verdict removal cannot also rewrite its source in place",
+              source.source.nodeId);
+          }
+        } else if (replacement?.evidenceRecallId !== archive.recall.id) {
           report("recall-manifest-mismatch", "Replacement evidence recall ID differs from its archive");
         }
       }
@@ -150,6 +165,12 @@ export function checkOutput(c: CheckContext, candidate: Candidate): void {
   const expectedSeals = c.value.plans.flatMap(p => p.operations.flatMap(op => op.kind === "seal" ? [op.episodeId] : []));
   if (!equal(canonicalApplicationBytes(expectedSeals), canonicalApplicationBytes(candidate.sealedEpisodeIds))) {
     report("invalid-generated-record", "Sealed episode IDs differ from validated seal operations");
+  }
+  // A revert moves the transcript, so the fixed-count topology audit cannot
+  // speak for it: the plan's own claims are re-derived instead (§3, §5).
+  if (reverted.size > 0 || candidate.revert !== null) {
+    checkRevertApplication(c, candidate);
+    return;
   }
   const before = [...c.value.snapshot.nodes];
   if (c.value.input.kind === "entry") before.push(c.value.input.result);

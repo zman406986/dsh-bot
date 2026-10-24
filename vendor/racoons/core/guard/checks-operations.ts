@@ -5,33 +5,18 @@ import type { CheckContext, Report } from "./context.js";
 import { reporter } from "./context.js";
 import { checkEpisode } from "./checks-episodes.js";
 
-function checkCap(c: CheckContext, op: Extract<Operation, { kind: "cap" }>, removal: Removal | undefined, report: Report): void {
-  if (c.value.input.kind !== "entry" || !c.value.capabilities.mutateResult) {
-    report("unsupported-capability", "Cap requires the entry result mutation seam");
-  }
-  if (removal === undefined || removal.sources.length !== 1) {
-    report("invalid-plan", "Cap requires exactly one source"); return;
-  }
-  const source = removal.sources[0];
-  if (source === undefined) return;
-  const node = c.nodes.get(source.source.nodeId);
-  if (node === undefined) return;
-  if (node.kind !== "tool-result") report("invalid-plan", "Cap source must be a tool-result body", node.id);
-  const head = op.keepHeadEndByte;
-  if (!Number.isSafeInteger(head) || head < 0 || head >= node.bytes.length) {
-    report("invalid-range", "Cap head must be an integral offset before the source end", node.id); return;
-  }
-  const configured = c.value.config.thresholds.capHeadBytes;
-  const boundary = configured === null ? undefined
-    : lineRanges(node.bytes).find(line => line.endByteExclusive >= configured);
-  if (node.bytes.length <= c.value.config.thresholds.capBytes
-    || boundary === undefined || head !== boundary.endByteExclusive) {
-    report("invalid-plan", "Cap threshold or configured whole-line head policy is not satisfied", node.id);
-  }
-  if (!sameRanges(source.ranges, [{ startByte: head, endByteExclusive: node.bytes.length }])) {
-    report("unaccounted-removal", "Declared cap removal differs from the complement of its retained head", node.id);
-  }
+/**
+ * A verdict removal is applied by checkpoint-revert (ADR-0007), never by an
+ * in-place rewrite. The flag is absent on hosts that do not declare the seam;
+ * absence is a refusal, not an assumption.
+ */
+function declaresRevert(c: CheckContext): boolean {
+  return c.value.capabilities.revertHistory === true;
 }
+
+// The entry-time cap has no validation branch: ADR-0014 (2026-10-23) scrapped it.
+// A `cap` operation is declaration-only in the type vocabulary; no rule the
+// product registers emits one, and the candidate builder refuses it.
 function checkSpan(c: CheckContext, op: Extract<Operation, { kind: "span" }>, removal: Removal | undefined, report: Report): void {
   const source = removal?.sources[0], node = source === undefined ? undefined : c.nodes.get(source.source.nodeId);
   if (removal?.sources.length !== 1 || node === undefined || node.kind !== "tool-result") {
@@ -68,6 +53,9 @@ function noteMatches(note: Note, op: Operation): boolean {
     case "span": return note.kind === "span-marker" && note.removalId === op.removalId
       && note.keepLines.length === op.keepLines.length && note.keepLines.every((r, i) =>
         r.startLine === op.keepLines[i]?.startLine && r.endLineInclusive === op.keepLines[i]?.endLineInclusive);
+    // A verdict removal is paired with the receipt that replaces its unit.
+    case "verdict": return note.kind === "receipt" && note.removalId === op.removalId
+      && note.unitId === op.unitId;
   }
 }
 export function checkOperations(c: CheckContext, plans: readonly RulePlan[]): void {
@@ -92,7 +80,6 @@ export function checkOperations(c: CheckContext, plans: readonly RulePlan[]): vo
         if (usedRemovals.has(op.removalId)) report("conflicting-operations", "Removal is consumed by multiple operations");
         usedRemovals.add(op.removalId);
       }
-      if (op.kind === "cap") checkCap(c, op, removal, report);
       if (op.kind === "span") checkSpan(c, op, removal, report);
       if (op.kind === "seal" || op.kind === "evict") {
         if (episodeIds.has(op.episodeId)) report("conflicting-operations", "Episode has multiple operations in one application");
@@ -107,7 +94,10 @@ export function checkOperations(c: CheckContext, plans: readonly RulePlan[]): vo
         }
       }
       if (op.kind === "span" || op.kind === "evict" || (op.kind === "seal" && op.mode === "replace")) {
-        report("unsupported-capability", "M1 rejects span, evict, replace, rewrite and rehydrate operations");
+        report("unsupported-capability", "Span, evict and replace-mode seal operations have no application path");
+      }
+      if (op.kind === "verdict" && !declaresRevert(c)) {
+        report("unsupported-capability", "A verdict removal requires the programmatic revert seam");
       }
     });
     for (const removal of plan.removals) if (!usedRemovals.has(removal.id)) {

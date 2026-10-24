@@ -28,6 +28,9 @@ function note(v: unknown): boolean {
       && text(v.episodeId) && text(v.removalId);
     case "span-marker": return keys(v, ["id", "kind", "removalId", "path", "keepLines"])
       && text(v.removalId) && text(v.path) && array(v.keepLines, lines);
+    case "receipt": return keys(v, ["id", "kind", "removalId", "unitId", "path", "ranges", "label"])
+      && text(v.removalId) && text(v.unitId) && text(v.path) && array(v.ranges, lines)
+      && (v.label === null || typeof v.label === "string");
     default: return false;
   }
 }
@@ -43,6 +46,8 @@ function op(v: unknown): boolean {
       && text(v.episodeId) && text(v.removalId);
     case "span": return keys(v, ["kind", "removalId", "keepLines", "noteId"])
       && text(v.removalId) && array(v.keepLines, lines);
+    case "verdict": return keys(v, ["kind", "removalId", "unitId", "noteId"])
+      && text(v.removalId) && text(v.unitId);
     default: return false;
   }
 }

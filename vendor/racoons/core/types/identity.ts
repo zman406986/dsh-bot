@@ -11,6 +11,8 @@ export type NoteId = string;
 export type RecallId = string;
 export type IntentId = string;
 export type EventId = string;
+/** "unit:sha256:<hex over [sessionId, nodeId, node.sha256, start, end]>" */
+export type UnitId = string;
 
 export interface ByteRange {
   readonly startByte: number;

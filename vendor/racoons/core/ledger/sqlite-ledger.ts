@@ -7,6 +7,7 @@ import type {
   Ledger, LedgerEntry, LedgerEvent, PreparableApplication, PreparedIntent, SqliteLedgerOptions,
 } from "./types.js";
 import { LedgerError } from "./types.js";
+import { prepareLedgerFile } from "./migration.js";
 import { initializeSchema } from "./schema.js";
 import { storageError } from "./integrity.js";
 import { asRow, integer } from "./rows.js";
@@ -32,6 +33,9 @@ export class SqliteLedger implements Ledger {
   static async open(options: SqliteLedgerOptions): Promise<SqliteLedger> {
     let db: DatabaseSync | undefined;
     try {
+      // A version-1 file is rebuilt into a fresh v2 file before SQLite opens
+      // the path; see migration.ts for the ordering that makes this crash-safe.
+      prepareLedgerFile({ databasePath: options.databasePath });
       db = new DatabaseSync(options.databasePath);
       db.exec("PRAGMA foreign_keys = ON");
       db.exec("PRAGMA journal_mode = WAL");

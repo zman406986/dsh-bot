@@ -66,15 +66,15 @@
     "url": "https://github.com/zman406986/dsh-bot/issues"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "*",
-    "@racoons/core": "0.1.0-m1",
-    "racoons-dsh": "0.1.0-m1"
+    "@racoons/core": "0.1.0",
+    "racoons-dsh": "0.1.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

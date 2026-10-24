@@ -1,0 +1,278 @@
+/**
+ * One text answer from the host's model seam (ISSUE-022 chunk 5, beside the
+ * judge of ISSUE-024 chunk 2).
+ *
+ * Both ask shapes in this package end the same way: one system slot, one user
+ * message, no tools, and a joined `text-delta` stream read against one deadline.
+ * The judge then decodes the text as one wire verdict; the prune pass decodes it
+ * as an index map. So the stream is one function here and the decoders are
+ * their own modules: a second copy of this loop would be the thing that drifts.
+ *
+ * Fail-open is structural. Every failure that is not a joined text answer — no
+ * route, a thrown stream, an aborted or errored finish, a truncated `max-tokens`
+ * reply, empty text — is a typed record, never an exception into the host's
+ * step. The caller decides what a refusal means; here it only names itself.
+ */
+import {
+  ForkError, forkErrorMessage, hashSystem, hashTools,
+} from '@racoons/core';
+import type { Sha256 } from '@racoons/core';
+import type { DshLlmChunk, DshLlmService, DshLlmStreamOptions } from './plugin.js';
+
+/** The one default deadline shared by the judge and the prune ask. */
+export const DEFAULT_ASK_TIMEOUT_MS = 30_000;
+
+/**
+ * The process-local mark every ask from this package carries. The mount's
+ * `llm/stream` observer uses it to tell a racoons ask (judge, prune) from
+ * main's requests: an ask must never become the next fork seed. A symbol, so
+ * nothing reaches a provider body.
+ */
+const RACOONS_ASK_MARK = Symbol.for('racoons.ask');
+
+/** True for a request this package sent as its own ask. */
+export function isRacoonsAskRequest(options: unknown): boolean {
+  return options !== null && typeof options === 'object'
+    && (options as Record<symbol, unknown>)[RACOONS_ASK_MARK] === true;
+}
+
+/** Why a stream ask produced no text. */
+export type StreamFailureReason =
+  | 'not-configured' | 'stream-error' | 'stream-truncated' | 'timeout' | 'aborted' | 'no-text';
+
+export interface AskFailure<Reason extends string> {
+  readonly status: 'refused';
+  readonly reason: Reason;
+  /** The wire parser's stable code on a `wire-refusal`; null otherwise. */
+  readonly code: string | null;
+  readonly message: string;
+}
+
+export type StreamRefusal = AskFailure<StreamFailureReason>;
+
+/** The route and limits of one stream ask. */
+export interface StreamAskOptions {
+  readonly provider: string;
+  readonly model: string;
+  readonly timeoutMs?: number;
+  readonly maxTokens?: number;
+  readonly signal?: AbortSignal;
+}
+
+/** One answered stream: the joined text and the host's finish kind. */
+export interface StreamAnswer {
+  readonly status: 'answered';
+  /** The joined `text-delta` text, verbatim. */
+  readonly text: string;
+  /** The host's finish kind, or null when the stream ended without one. */
+  readonly finish: string | null;
+}
+
+export type StreamOutcome = StreamAnswer | StreamRefusal;
+
+/** The fork's recorded hashes; when present they are re-asserted before send. */
+export interface WireAskHashes {
+  readonly systemHash: Sha256;
+  readonly toolsHash: Sha256;
+}
+
+/** One wire-shaped ask: the fork's fields plus the hashes it recorded. */
+export interface WireAskRequest {
+  readonly system: string;
+  readonly tools: readonly unknown[];
+  readonly messages: readonly { readonly role: string; readonly text: string }[];
+  /** Present for a fork ask: a drifted system or tool list throws, never sends. */
+  readonly expected?: WireAskHashes;
+}
+
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+export function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function refuse<Reason extends string>(reason: Reason, message: string,
+  code: string | null = null): AskFailure<Reason> {
+  return { status: 'refused', reason, code, message };
+}
+
+/** The finish kind, from either host spelling (`"stop"` or `{kind: "stop"}`). */
+function finishKind(reason: unknown): string {
+  if (typeof reason === 'string') return reason;
+  if (isRecord(reason) && typeof reason['kind'] === 'string') return reason['kind'];
+  return 'unknown';
+}
+
+/** One iterator step, abandoned when the deadline's controller aborts. */
+function nextWithin(iterator: AsyncIterator<DshLlmChunk>,
+  signal: AbortSignal): Promise<IteratorResult<DshLlmChunk>> {
+  if (signal.aborted) return Promise.reject(new Error('aborted'));
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => { reject(new Error('aborted')); };
+    signal.addEventListener('abort', onAbort, { once: true });
+    iterator.next().then(
+      value => { signal.removeEventListener('abort', onAbort); resolve(value); },
+      (error: unknown) => { signal.removeEventListener('abort', onAbort); reject(error); },
+    );
+  });
+}
+
+/**
+ * Ask the host's model one question and join its text.
+ *
+ * The request is one system slot and one user message; no tools are offered, so
+ * the answer is text or nothing. Text deltas are joined in stream order, and the
+ * one deadline covers the whole stream. The text is returned undecoded on
+ * purpose: a caller that needs a shape decodes it itself and owns its own
+ * refusal codes.
+ */
+export async function askText(llm: DshLlmService, system: string, user: string,
+  options: StreamAskOptions): Promise<StreamOutcome> {
+  return askRequest(llm, {
+    system,
+    messages: [{ role: 'user', content: [{ type: 'text', text: user }] }],
+  }, options);
+}
+
+/**
+ * One wire-shaped ask (ISSUE-026 chunk 3): the full request a judge fork
+ * carries — `system`, `tools` and every message — sent as it stands.
+ *
+ * The fork's messages are turned into the host's request shape with the one
+ * mapping this seam has: each `{role, text}` becomes a text content block.
+ * Nothing is joined, reordered or truncated, and `system` is sent only when it
+ * is non-empty.
+ *
+ * A `tool` turn goes out as `user`: a text-projected seed carries no
+ * `tool_use` block, and a provider rejects a `tool_result` whose id names no
+ * call. The fork keeps its own role for hashing; only this projection is the
+ * host's, and the module note says why the projection exists at all.
+ *
+ * An `assistant` turn carries a `source`. The host requires one on every
+ * assistant message: its replay filter reads `message.source.replayState` and
+ * throws on an assistant message with no source (probe:
+ * `scratchpad/probe-llm/outcomes.jsonl`, every assistant-bearing shape without
+ * one failed with `Cannot read properties of undefined (reading
+ * 'replayState')`). The seed keeps only `{role, text}` — the capture drops the
+ * host's original source — so this projection supplies the source the host
+ * writes for a routed answer: this ask's own provider and model, and no
+ * `replayState`, which is the field that would make the host try to replay a
+ * response this ask never received.
+ *
+ * That is the honest limit of this seam: the host hands the adapter the request
+ * OBJECT, and the adapter maps it to the provider's HTTP body; no code here sees
+ * those HTTP bytes.
+ *
+ * A reply is text or nothing, exactly like `askText`: a tool call, an empty
+ * stream, a cap and a dead socket are all typed refusals.
+ *
+ * The last act before the host seam is touched is the fork's own invariant:
+ * when `expected` carries the fork's recorded hashes, the system bytes and the
+ * tool list are hashed again and a mismatch throws the fork's typed
+ * `ForkError` (`system-hash-drift` / `tools-hash-drift`) instead of sending a
+ * drifted prefix (CRITIC-026 P3#7). That throw is a caller-contract failure,
+ * not a stream refusal; the caller decides how to fail open.
+ */
+export async function askWire(llm: DshLlmService,
+  request: WireAskRequest,
+  options: StreamAskOptions): Promise<StreamOutcome> {
+  assertWireAskIntact(request);
+  return askRequest(llm, {
+    ...(request.system === '' ? {} : { system: request.system }),
+    ...(request.tools.length === 0 ? {} : { tools: request.tools }),
+    messages: request.messages.map(message => {
+      const role = message.role === 'tool' ? 'user' : message.role;
+      return {
+        role,
+        ...(role === 'assistant'
+          ? { source: { kind: 'model', provider: options.provider.trim(),
+            model: options.model.trim() } }
+          : {}),
+        content: [{ type: 'text', text: message.text }],
+      };
+    }),
+  }, options);
+}
+
+/** Re-assert the fork's recorded system and tool hashes immediately before send. */
+function assertWireAskIntact(request: WireAskRequest): void {
+  const expected = request.expected;
+  if (expected === undefined) return;
+  if (hashSystem(request.system) !== expected.systemHash) {
+    throw new ForkError('system-hash-drift', forkErrorMessage('system-hash-drift'));
+  }
+  if (hashTools(request.tools) !== expected.toolsHash) {
+    throw new ForkError('tools-hash-drift', forkErrorMessage('tools-hash-drift'));
+  }
+}
+
+/** The one stream loop both ask shapes share. Every ask is marked as racoons'. */
+async function askRequest(llm: DshLlmService, fields: {
+  readonly system?: string;
+  readonly tools?: readonly unknown[];
+  readonly messages: readonly Readonly<Record<string, unknown>>[];
+}, options: StreamAskOptions): Promise<StreamOutcome> {
+  const provider = options.provider.trim();
+  const model = options.model.trim();
+  if (provider === '' || model === '') {
+    return refuse('not-configured', 'no provider/model route for the ask');
+  }
+  const timeoutMs = options.timeoutMs ?? DEFAULT_ASK_TIMEOUT_MS;
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs) : null;
+  const outer = options.signal;
+  const forward = (): void => { controller.abort(); };
+  if (outer !== undefined) {
+    if (outer.aborted) controller.abort();
+    else outer.addEventListener('abort', forward, { once: true });
+  }
+  let text = '';
+  let finish: string | null = null;
+  try {
+    const request: DshLlmStreamOptions = {
+      provider, model,
+      ...fields.system === undefined ? {} : { system: fields.system },
+      ...fields.tools === undefined ? {} : { tools: fields.tools },
+      messages: fields.messages,
+      ...(options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens }),
+      signal: controller.signal,
+    };
+    (request as unknown as Record<symbol, unknown>)[RACOONS_ASK_MARK] = true;
+    const iterator = llm.stream(request)[Symbol.asyncIterator]();
+    for (;;) {
+      const step = await nextWithin(iterator, controller.signal);
+      if (step.done === true) break;
+      const chunk = step.value;
+      if (isRecord(chunk) && chunk['type'] === 'text-delta'
+        && typeof chunk['text'] === 'string') {
+        text += chunk['text'];
+        continue;
+      }
+      if (isRecord(chunk) && chunk['type'] === 'finish') {
+        finish = finishKind(chunk['reason']);
+        break;
+      }
+    }
+  } catch (error) {
+    if (timedOut) {
+      return refuse('timeout', `the ask stream produced no answer within ${String(timeoutMs)} ms`);
+    }
+    if (controller.signal.aborted) return refuse('aborted', 'the ask stream was aborted');
+    return refuse('stream-error', messageOf(error));
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+    outer?.removeEventListener('abort', forward);
+  }
+  if (finish === 'error' || finish === 'aborted') {
+    return refuse('stream-error', `the ask stream finished with ${finish}`);
+  }
+  if (finish === 'max-tokens') {
+    return refuse('stream-truncated', 'the answer hit the token cap and may be incomplete');
+  }
+  if (text.trim() === '') return refuse('no-text', 'the ask stream carried no text');
+  return { status: 'answered', text, finish };
+}

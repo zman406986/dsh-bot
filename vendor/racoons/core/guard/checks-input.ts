@@ -18,10 +18,16 @@ export function checkInput(value: ValidationInput, report: Report): void {
     "appendRecords", "rehydrateOnResume"] as const) {
     if (typeof value.capabilities[key] !== "boolean") report("invalid-plan", `Capability ${key} must be boolean`);
   }
-  if (value.input.kind !== "entry" && value.input.kind !== "at-rest") {
-    report("unsupported-capability", "Only entry and at-rest phases exist in M1");
+  // Optional seam: absent means "not declared", but a declared value must be a boolean.
+  const revertHistory: unknown = value.capabilities.revertHistory;
+  if (revertHistory !== undefined && typeof revertHistory !== "boolean") {
+    report("invalid-plan", "Capability revertHistory must be boolean when declared");
   }
-  if (value.input.kind === "at-rest" && !["step", "turn-end", "resume", "idle-past-ttl", "model-switch"].includes(value.input.reason)) {
+  if (value.input.kind !== "entry" && value.input.kind !== "at-rest"
+    && value.input.kind !== "verdict" && value.input.kind !== "prune") {
+    report("unsupported-capability", "An application phase must be entry, at-rest, verdict or prune");
+  }
+  if (value.input.kind === "at-rest" && !["step", "turn-end", "resume", "idle-past-ttl", "model-switch", "revisit"].includes(value.input.reason)) {
     report("unsupported-capability", "Unsupported at-rest application reason");
   }
   if (value.input.kind === "entry" && value.input.result.kind !== "tool-result") {
@@ -34,7 +40,7 @@ export function checkInput(value: ValidationInput, report: Report): void {
     report("invalid-plan", "Cache watermark must name a complete node boundary");
   }
   if (!["warm", "cold", "unknown"].includes(s.cache.kind)) report("invalid-plan", "Unknown cache-state tag");
-  for (const plan of value.plans) if (!["cap", "seal", "evict", "span"].includes(plan.ruleId)) {
+  for (const plan of value.plans) if (!["cap", "seal", "evict", "span", "verdict"].includes(plan.ruleId)) {
     report("wrong-rule", `Unknown rule ID ${plan.ruleId}`);
   }
 }
