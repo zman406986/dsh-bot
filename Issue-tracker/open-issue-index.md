@@ -6,6 +6,6 @@ Generated from `Issue-tracker/open/*.md` — 3 open tickets. The row set is owne
 
 | # | Ticket | Title | Status | Labels |
 |---|---|---|---|---|
-| 126 | [126-racoons-integration](open/126-racoons-integration.md) | Add the RACOONS M1 integration | open | ready-for-human |
 | 127 | [127-racoons-desktop-launcher](open/127-racoons-desktop-launcher.md) | Add the RACOONS desktop launcher | open | ready-for-human |
 | 140 | [140-spawned-dispatcher-glyph-parity](open/140-spawned-dispatcher-glyph-parity.md) | A spawned dispatcher gets no glyph: it is not a sidebar row at all, so the licensed seat cannot carry the mark | open | needs-info |
+| 145 | [145-racoons-redo-latest-full-coverage](open/145-racoons-redo-latest-full-coverage.md) | Racoons redo: latest upstream, full coverage (dispatcher + workers), durable storage | open | ready-for-agent |

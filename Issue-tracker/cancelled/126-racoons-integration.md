@@ -1,6 +1,6 @@
 # 126 — Add the RACOONS M1 integration
 
-**Status:** open
+**Status:** cancelled
 **Labels:** ready-for-human
 **Related:** RACOONS integration ruling, 2026-10-20; `docs/research/racoons-integration-2026-10-20.md`
 
@@ -58,6 +58,8 @@ schemastery version; the field is now `z.boolean().default(false)`, matching `en
 pairing test by design. Added `racoonsEnabled` to `SETTINGS_CARD_FIELDS` in schema order plus
 `settings.card.field.racoonsEnabled.{label,hint}` in both the English and Chinese faces.
 
+2026-10-24: Superseded by 145 (owner ruling: redo integration with latest upstream, full coverage incl workers; the M1 lane's remaining live check will not happen — the M1 code it would verify is being removed).
+
 ## Pre-existing failures, not caused by this branch
 
 `test/inbox-watcher.test.ts` fails 4 of its 15 cases with `assert.ok(report)` falsy. Proven
@@ -81,3 +83,4 @@ Worth its own ticket in dsh-bot.
   not yet supply from tool output.
 - **No live verification.** Host payload shapes, append return values, and replace bounds were
   exercised only against fakes built from the structural contracts.
+
