@@ -147,8 +147,10 @@ export interface RacoonsPluginConfig {
    * exactly as a completed pass does: the host rewrote the surface, so the old
    * growth baseline no longer describes the session and the next crossing is
    * pruned instead of waiting out a delta the compaction invalidated. When off,
-   * native compaction is observed and ignored. The shutdown default is the
-   * owner's decision; only the wiring is ruled here.
+   * native compaction is observed and ignored. The shipped default is ON (owner
+   * ruling 2026-10-24): the host's own compaction stays armed as a backstop, and
+   * racoons fires earlier than the host's own trigger would. `false` is the
+   * explicit opt-out.
    */
   readonly nativeCompactionBackstop?: boolean;
 }
@@ -175,7 +177,8 @@ export interface ResolvedRacoonsConfig {
   readonly contextWindowTokens: number | null;
   /**
    * True when a host compaction re-arms the half-window latch (ISSUE-022 DoD;
-   * CRITIC-022 P1-1). Provisional `false`; the shipped value is the owner's.
+   * CRITIC-022 P1-1). Shipped `true` per owner ruling 2026-10-24: the host's
+   * backstop stays armed and racoons fires earlier than the host's own trigger.
    */
   readonly nativeCompactionBackstop: boolean;
 }
@@ -486,9 +489,10 @@ export function resolvePluginConfig(raw: RacoonsPluginConfig | undefined): Resol
   // is the owner's. The coercion is the trigger's own validator, so the config
   // and the latch cannot disagree about what a window is (CRITIC-022 P3 #16).
   const contextWindowTokens = resolveContextWindowTokens(config.contextWindowTokens);
-  // Provisional default per CRITIC-022 P1-1: off. The DoD leaves the shipped
-  // value to the owner; only the wiring is landed here.
-  const nativeCompactionBackstop = config.nativeCompactionBackstop ?? false;
+  // Owner ruling 2026-10-24: the backstop ships ON. The host's native compaction
+  // stays armed, and racoons must fire earlier than the host's own trigger would
+  // (the ruling applies to any harness, not only dsh); `false` is the opt-out.
+  const nativeCompactionBackstop = config.nativeCompactionBackstop ?? true;
   if (episodeNoNewPathSteps !== null && !isCount(episodeNoNewPathSteps)) {
     throw new Error('racoons: episodeNoNewPathSteps must be null or a non-negative safe integer');
   }

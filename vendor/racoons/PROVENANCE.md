@@ -1,10 +1,11 @@
 # Vendored racoons — provenance
 
-- Upstream repo: `C:\Users\TZhen\Desktop\racoons` (branch `main`, working tree clean at copy time)
-- Upstream commit: `af78642e0a6154fc5fc26ef77aca6508382b198d`
-- Commit subject: `002: defer — owner: always observing; no dedicated session needed`
+- Upstream repo: `C:\Users\TZhen\Desktop\racoons` (branch `main`; tracked files clean at copy time — the only dirty entries are `docs/plans/` and an untracked ledger, neither under `packages/`)
+- Upstream commit: `70c99ef64056d517708fd0a5d70c71310700ff34`
+- Commit subject: `035: item 10 design — critic fixes (verdict authority, W source, milestones, snapshot, labels)`
 - Upstream commit date: 2026-10-24
 - Copy date: 2026-10-24
+- Re-sync date: 2026-10-24 — re-synced from `af78642e0a6154fc5fc26ef77aca6508382b198d` to `70c99ef64056d517708fd0a5d70c71310700ff34`. The re-sync covered a single changed source file, `packages/adapters/dsh/src/plugin.ts` (+10/−6 across commits `af78642..70c99ef`, landing commit `c05646b`), which flips the `nativeCompactionBackstop` default from `false` to `true` (owner ruling 2026-10-24). Every other vendored source file was verified byte-identical to `70c99ef`.
 
 ## What was copied
 
