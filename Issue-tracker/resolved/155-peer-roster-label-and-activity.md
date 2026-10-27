@@ -1,6 +1,6 @@
 # 155 — Peer roster rows show session ids only; ADR-0027 asks for a label plus the current tool/target
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Origin:** PRD gap scan 2026-10-28 — verified against the tree; nothing implemented.
 **Related:** PRD §7.6 (Phase 2 peer agents), ADR-0027 decision 3 (roster target richness: working/waiting/approval/idle plus current tool and current target) and decision 2 (`subagent.label` is the durable human-readable label, fallback order label → title → session id), ticket 121 (the roster as shipped), ADR-0018 C13 (no identity roster — this is a live projection, not a store).
@@ -46,11 +46,11 @@ Either way the roster must stay honest: absence renders nothing (no invented too
 
 ## Acceptance
 
-- [ ] A roster row for a live dispatcher peer shows its label (fallback order per ADR-0027 decision 2) and, when one was observed, its current tool and target in the existing `using <tool> on <target>` form.
-- [ ] No field is invented: an unobserved tool/target renders exactly as today, and a peer with no label renders its id.
-- [ ] The snapshot builder and renderer are unchanged in shape; only the candidate feed grows (or the builder gains one documented input).
-- [ ] Offline test: two peers with distinct labels and distinct current tools render two distinct rows; a peer with neither renders its id, byte-identically to today's output for that peer.
-- [ ] The tail stays byte-stable when nothing changes between turns (a test pins it, as ticket 121's does).
+- [x] A roster row for a live dispatcher peer shows its label (fallback order per ADR-0027 decision 2) and, when one was observed, its current tool and target in the existing `using <tool> on <target>` form.
+- [x] No field is invented: an unobserved tool/target renders exactly as today, and a peer with no label renders its id.
+- [x] The snapshot builder and renderer are unchanged in shape; only the candidate feed grows (or the builder gains one documented input).
+- [x] Offline test: two peers with distinct labels and distinct current tools render two distinct rows; a peer with neither renders its id, byte-identically to today's output for that peer.
+- [x] The tail stays byte-stable when nothing changes between turns (a test pins it, as ticket 121's does).
 
 ## Constraints
 
@@ -83,3 +83,19 @@ PRD §7.6 marks Phase 2 as optional. This is a read-only prompt-quality gain; it
 2. **`waiting` is still not a model-level wait.** Unchanged from ticket 121: `queuedWake` means "a wake is ready and no turn runs". Whether the host exposes anything finer is still open (ADR-0027 open question 4), and no new channel was invented for it.
 3. **Current tool is per-session, last-write-wins, and only as fresh as the last observed `tool/call`.** A peer blocked inside one long tool call shows that call; a peer between calls after `turn/end` shows nothing. That is the honest shape available from the firehose — no polling was added.
 4. **The client half has no peer roster row to extend.** `client/` carries no runtime consumer of `PeerRosterSnapshot`: `renderPeerRoster` feeds injected prompt text only. The sidebar's rows are per-session presence (`shell-store.ts`), the panel's rows are per-WORKER (`roster-store.ts`), and the peer roster never crosses to the browser. Adding a peer row renderer would be a new client surface, not an edit to an existing one — out of this ticket's scope and refused here rather than invented. What the client already shows for a peer is its stock `displayTitle` (which the host composes as title → `subagent.label` → id, `dsh-api-session-controller/lib/client.js:4175`), so a spawned dispatcher's label is already visible in the sidebar; nothing was re-keyed.
+
+### 2026-10-28 — resolved: label + current tool/target landed (`cce801e`, merged `da8fc00`)
+
+Landed in `cce801e`, merged to main via `da8fc00` (the `src/plugin.ts` conflict against ticket 153 was resolved additively — both the locale-preference wiring and the peer-label wiring are present). Post-merge state as reported by the implementer: typecheck clean, grouped offline suites 78 pass / 0 fail. All five acceptance boxes are ticked above; verified against the shipped tree:
+
+- **Label.** New `src/adapter/peer-label.ts` (`subagentLabelOf`) reads `ctx.sessionProjections.stateOf(session, "subagent")` — ADR-0027 decision 3's stated seam — lazily and null-safe; `src/plugin.ts` passes it as `BindDispatcherLifecycleOptions.peerLabelOf`; `peerRosterFor` puts the answer on `PeerRosterCandidate.label`. A session with no descriptor (every user-started dispatcher) answers null and still renders its id, as before.
+- **Tool/target.** `CordisDshHost.peerToolActivity(sessionId)` — a dispatcher-keyed map beside (not inside) the worker ring, fed by the existing `session/event` firehose and consulted before the `workers.has` gate, so the worker ring, `recentActivity`/`lastActivityAtMs` and `check_workers` never see a dispatcher key (test-pinned). Entries are deleted at that session's `turn/end` and on unbind, so a closed turn cannot show a stale tool.
+- **Renderer unchanged.** Rows now read `- Research scout (<id>) — working · using bash on npm test` from the existing `peerActivityPhrase`; where a field is absent the row renders exactly today's bytes.
+- **Tests.** `test/adapter-policy-inject.test.ts` gains the `peer roster feed` and `subagentLabelOf` blocks; `test/adapter-cordis-dsh-host.test.ts` gains the `peer tool/target feed` block — two distinct peers render two distinct rows, a peer with neither field is byte-identical, the throwing seam degrades to null, and the tail stays byte-stable across turns.
+
+**Deliberately not done — recorded so the owner sees them:**
+
+1. **The `title` fallback step is not wired.** ADR-0027 decision 2 states label → title → id, but the host title projection is a mutable auto-generated conversation title mounted on every session. Taking it would rename every user-started dispatcher's roster row — which the second acceptance box forbids ("a peer with no label renders its id", byte-identically) — and would add unclamped text to the prompt tail. Every peer this roster can list is spawned by `spawnDispatcher`, which passes `opts.title` as the descriptor label, so the label step already covers them. Recorded as a deviation, not a silent omission; reverting to the literal ADR order is a small edit if the owner prefers it.
+2. **No client peer-row renderer was added.** There is no such surface to extend: `renderPeerRoster` produces injected prompt text only, the sidebar rows are per-session presence, the panel rows are per-worker, and the peer roster never crosses to the browser. A peer row renderer would be a new client surface, not an edit to an existing one, so it was refused rather than invented. What the client already shows for a spawned dispatcher is its stock `displayTitle` (host-composed title → `subagent.label` → id), so the label is visible in the sidebar today.
+
+The implementer's other findings in the comment above (waiting is not a model-level wait; current tool is per-session, last-write-wins; no new store) stand unchanged by this close.
