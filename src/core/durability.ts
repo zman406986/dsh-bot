@@ -419,6 +419,15 @@ export function createInMemoryDurability(): InMemoryDurability {
     listDispatcherMarks(): readonly DurableDispatcherMark[] {
       return [...dispatcherMarks.values()];
     },
+    // Ticket 140 polish: same synchronous three-answer peek as the storage
+    // domain store (durable-marker.ts). This map is always "open", so the
+    // answer is never `"unknown"` — absence here is a real "no".
+    peekDispatcherMark(sessionId: string): DurableDispatcherMarkAnswer {
+      const mark = dispatcherMarks.get(sessionId);
+      return mark === undefined
+        ? { kind: "not-dispatcher" }
+        : { kind: "dispatcher", mark };
+    },
     writeWorkerSession(session: DurableWorkerSession): void {
       workerSessions.set(session.sessionId, { ...session });
     },

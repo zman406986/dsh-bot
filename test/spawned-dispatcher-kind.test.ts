@@ -498,6 +498,59 @@ describe("ticket 140 review fix: the cold case and the abstain rule", () => {
     assert.equal(resolveSessionKindState(unresolved), unresolved);
     assert.equal(resolveSessionKindState(INITIAL_SESSION_KIND_STATE), INITIAL_SESSION_KIND_STATE);
   });
+
+  it("(f) honesty branches: no store, unpeekable store, throwing peek", () => {
+    // No store at all: nothing was ever persisted here, so absence is
+    // definitive — and the projection CACHES that "no".
+    const bare = createCordisDshHost(createStubCtx());
+    assert.equal(bare.dispatcherMarkAnswer("no-store-child"), "not-dispatcher");
+    assert.equal(
+      initSessionKindProjection({ id: "no-store-child" }, (id) =>
+        bare.dispatcherMarkAnswer(id),
+      ).resolved,
+      undefined,
+    );
+
+    // A store that predates the peek seam: rows from a previous process
+    // would be invisible, so absence proves nothing.
+    const unpeekable = createCordisDshHost(createStubCtx(), {
+      markers: {
+        writeWorkerMarker() {},
+        readWorkerMarkers: () => [],
+        deleteWorkerMarker() {},
+      },
+    });
+    assert.equal(
+      unpeekable.dispatcherMarkAnswer("legacy-store-child"),
+      "unknown",
+    );
+    assert.equal(
+      initSessionKindProjection({ id: "legacy-store-child" }, (id) =>
+        unpeekable.dispatcherMarkAnswer(id),
+      ).resolved,
+      false,
+      "an unpeekable store abstains instead of caching a wrong no",
+    );
+
+    // A peek that throws is the same "cannot answer" case.
+    const throwing = createCordisDshHost(createStubCtx(), {
+      markers: {
+        writeWorkerMarker() {},
+        readWorkerMarkers: () => [],
+        deleteWorkerMarker() {},
+        peekDispatcherMark() {
+          throw new Error("table unreadable");
+        },
+      },
+    });
+    assert.equal(throwing.dispatcherMarkAnswer("throwing-child"), "unknown");
+    assert.equal(
+      initSessionKindProjection({ id: "throwing-child" }, (id) =>
+        throwing.dispatcherMarkAnswer(id),
+      ).resolved,
+      false,
+    );
+  });
 });
 
 function sessionKindView(state: SessionKindProjectionState): unknown {

@@ -476,8 +476,12 @@ export function createSessionKindGlyph(
  * That difference is the whole point: a spawned dispatcher is
  * `origin: 'subagent'`, so `origin`-first would resolve it `"worker"` and the
  * chip would never render. `resolveSessionKind` keeps its `origin`-first
- * order untouched (ADR-0027 §Settled 5); only this seat reads the projection
- * alone, and the projection is per-session (see the resolver's own note).
+ * order untouched (ADR-0027 §Settled 5). This seat is narrower than "the
+ * projection alone": it renders only for `origin === "subagent"` children
+ * whose projected kind is `"dispatcher"`, because a user-started dispatcher
+ * (origin unset) projects `"dispatcher"` too and already carries the sidebar
+ * glyph. The sidebar path stays origin-first and never mounts for subagent
+ * children.
  *
  * Same defensive face as the sidebar factory: missing id/hook or a
  * non-dispatcher session renders `null` without calling a hook.

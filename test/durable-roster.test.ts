@@ -529,3 +529,27 @@ describe("durable roster marker — restart rebuild", () => {
     assert.equal(drained.reconcile.landedUndelivered[0]?.id, "todo-1");
   });
 });
+
+describe("in-memory durability — dispatcher mark peek (ticket 140 polish)", () => {
+  it("answers with the same three-way shape as the durable store", async () => {
+    const durability = createInMemoryDurability();
+
+    // The map is always "open", so absence is a definitive "no".
+    assert.deepEqual(durability.peekDispatcherMark("chat-1"), {
+      kind: "not-dispatcher",
+    });
+
+    await durability.writeDispatcherMark({
+      sessionId: "child-1",
+      parentSessionId: "p-1",
+    });
+    const hit = durability.peekDispatcherMark("child-1");
+    assert.equal(hit.kind, "dispatcher");
+    if (hit.kind === "dispatcher") {
+      assert.equal(hit.mark.parentSessionId, "p-1");
+    }
+    assert.deepEqual(durability.peekDispatcherMark("chat-1"), {
+      kind: "not-dispatcher",
+    });
+  });
+});
