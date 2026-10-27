@@ -1,6 +1,6 @@
 # 145 — Racoons redo: latest upstream, full coverage (dispatcher + workers), durable storage
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-human
 **Origin:** owner 2026-10-24 (level-1 ruling): integrate the LATEST version of the external racoons library into dsh-bot, applied to EVERYTHING — the dispatcher session and all worker sessions — replacing the previous integration.
 **Related:** ticket 126 (superseded by this ticket — its M1 lane is removed, not extended), ticket 127 (desktop launcher — not touched here), ADR-0006 (worker-record durability split), ADR-0018 (imitate the reference; A5 no second database, U-H no usage accounting and no content-search index), ADR-0029 (deterministic microcompact), `docs/research/racoons-integration-2026-10-20.md`, `read-before-running-live-and-browser-tests.md` (mandatory before the live boot item).
@@ -52,7 +52,7 @@ The 126 integration vendored a stale M1 snapshot and mounted it behind a dispatc
 - [x] Config keys racoonsRecordOnly/racoonsStorageRoot/racoonsContextWindowTokens volatile with library-default mapping; card + both locales updated and parity-pinned.
 - [x] npm run typecheck, npm test, npm run lint:docs all green.
 - [x] ADR notes recorded in ticket comments (see below).
-- [ ] Live boot pass on a mock-LLM run (kill timer, trivial task; needs a human at the keyboard) — journal shows mounted + storage-plan, then for BOTH the dispatcher session and the worker session the chain `entry` → `entry-ask` → `entry-apply` (`status: landed`, `engineStatus: applied`) → one `surfaceOp: replace` (ADR-0028; no `publish` line on this path); recall round-trip in a worker session; llm/stream capture outcome recorded either way.
+- [x] Live boot pass on a mock-LLM run (kill timer, trivial task; needs a human at the keyboard) — journal shows mounted + storage-plan, then for BOTH the dispatcher session and the worker session the chain `entry` → `entry-ask` → `entry-apply` (`status: landed`, `engineStatus: applied`) → one `surfaceOp: replace` (ADR-0028; no `publish` line on this path); recall round-trip in a worker session; llm/stream capture outcome recorded either way.
 
 ## Comments
 
@@ -79,3 +79,17 @@ The 126 integration vendored a stale M1 snapshot and mounted it behind a dispatc
 2026-10-24: Re-synced vendor to upstream 70c99ef (full-tree verified: 0 differing/missing/extra source files; only change = owner ruling nativeCompactionBackstop ships ON, default false→true; glue untouched, inherits the new default) — gates re-verified: typecheck 0, test 1559/1559, lint:docs 0.
 
 2026-10-28: DoD vocabulary corrected to match upstream ADR-0028 after the ticket-148 vendor re-sync. `verdict-settled` is gone; the observed chain is `entry` → `entry-ask` → `entry-apply` (`status: landed`, `engineStatus: applied`) → one `surfaceOp: replace`, with no `publish` line on this path. Applies to both the dispatcher and worker lanes; the rest of the DoD is unchanged. A first live-boot attempt was blocked environmentally (main's `node_modules`/vendor clobbered by a concurrent process; being fixed separately) — evidence `.scratch/testing/2026-10-28-145-live-boot/summary.md`. That run says nothing about ticket code: blocked, not failed, no verdict either way.
+
+## Resolution — 2026-10-28
+
+**Offline gates** were green earlier: `1579/1579` tests at merge `a83f5e1` (the ticket-147 merge that carried the ticket-145 work); typecheck and `lint:docs` clean.
+
+**Live boot pass — VERDICT: LIVE-BOOT-PASS.** Round 3c observed all 8 acceptance items: `mounted`; the `storage-plan`; for BOTH the dispatcher lane and the worker lane `entry` → `entry-ask` → `entry-apply` (`status: landed`, `engineStatus: applied`) → exactly one `surfaceOp: replace`; a worker `recall` round-trip returning 941 bytes byte-identical to the original read (`sha256` prefix `0611f5e4…`); and the `llm/stream` outcome indirectly — zero `wire capture:` warnings, and both ask requests journaled as `entry-ask` via a seeded fork (a `no-seed` fork journals `entry-ask-refused` instead).
+
+**Evidence:** `.scratch/testing/2026-10-28-145-live-boot/` (git-ignored). `round3c/` is the accepted run (`summary.md`, `boot.log`, `mock-requests.jsonl`, `run.json`). Earlier attempts kept alongside: round 1 is the environmental failure record, round 2 is empty from a stopped agent, round 3 and 3b are aborted runs.
+
+**DoD wording.** Commit `38e146d` corrected the DoD vocabulary to the post-148 ADR-0028 chain (`verdict-settled` removed; `entry` → `entry-ask` → `entry-apply` → one `surfaceOp: replace`, no `publish` line). The boot ran against `7fe25dd` — pre-ticket-153 merge, same racoons mount — so the result stands for the mount this ticket built.
+
+**Residuals (recorded, not failures).** The mount journals no line naming the wire capture — a journal gap on that seam, not a seam failure. Cross-session recall refusal (worker asking for the parent's id) was covered offline only (`test/adapter-racoons-mount.test.ts` cases 4 and 5), not live.
+
+Bookkeeping: `**Status:**` → `resolved`; moved `Issue-tracker/open/145-racoons-redo-latest-full-coverage.md` → `Issue-tracker/resolved/`.
