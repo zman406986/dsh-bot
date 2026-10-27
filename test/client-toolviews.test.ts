@@ -1,6 +1,7 @@
 /**
- * Ticket 24 — per-tool call views (`tool.call.toolview`) for the five
- * dispatcher tools: keyed registration data, pure payload parsing, locale
+ * Ticket 24 — per-tool call views (`tool.call.toolview`) for the dispatcher
+ * tools (ticket 152 completed the set: all eight plus the retained historical
+ * `send_peer` key): keyed registration data, pure payload parsing, locale
  * shape, and apply() wiring over fake client seams (idioms from tickets
  * 20/21).
  *
@@ -274,23 +275,12 @@ describe("toolview — keyed registrations claim only our wire tool names", () =
     assert.equal(TOOL_CALL_TOOLVIEW_SLOT, "tool.call.toolview");
   });
 
-  it("claims the five unchanged dispatcher keys plus the retained historical send_peer key", () => {
-    // Ticket 116 retired send_peer from the tool surface and registered
-    // message_agent in its place. The client face has no message_agent row
-    // renderer yet, so it keeps claiming the send_peer key for historical
-    // rows (src/client/toolviews.ts records the deliberate lag).
-    // Ticket 117 added await_agent to the dispatcher surface; the client
-    // face has no row renderer for it either, and the core chunk that
-    // registered the tool deliberately does not touch src/client. Ticket 118
-    // added spawn_dispatcher with the SAME deliberate lag — no renderer, no
-    // claim. This pin states ALL THREE lags instead of pretending the lists
-    // match.
-    const expected = [...DISPATCHER_TOOL_NAMES]
-      .filter(
-        (name) =>
-          name !== AWAIT_AGENT_TOOL && name !== SPAWN_DISPATCHER_TOOL,
-      )
-      .map((name) => (name === MESSAGE_AGENT_TOOL ? SEND_PEER_TOOL : name));
+  it("claims every dispatcher tool plus the retained historical send_peer key", () => {
+    // Ticket 152 closed the deliberate lag: message_agent, await_agent and
+    // spawn_dispatcher each have their own row renderer now, so the claimed
+    // set is the dispatcher surface key for key, and send_peer stays claimed
+    // alone for historical rows (tickets 116-118 registered the new names).
+    const expected = [...DISPATCHER_TOOL_NAMES, SEND_PEER_TOOL];
     assert.deepEqual([...TOOLVIEW_TOOL_NAMES], expected);
     // Every claimed name is either a live dispatcher tool or the retained
     // historical send_peer key.
@@ -747,10 +737,13 @@ describe("toolview — apply() registers one keyed entry per tool via the fake s
 });
 
 describe("toolview — HMR reversal over the fake seam", () => {
-  it("fiber teardown removes all six entries; re-apply restores them cleanly", () => {
+  it("fiber teardown removes every entry; re-apply restores them cleanly", () => {
     const ctx = createClientCtx();
     apply(ctx);
-    assert.equal(ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT)?.entries.length, 6);
+    assert.equal(
+      ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT)?.entries.length,
+      TOOLVIEW_TOOL_NAMES.length,
+    );
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
 
     ctx.runFiberTeardown();
@@ -764,7 +757,10 @@ describe("toolview — HMR reversal over the fake seam", () => {
     // HMR-reversal assertion is a real contract check, not just a count.
     assert.doesNotThrow(() => apply(ctx));
     assert.equal(ctx.injects.length, 3);
-    assert.equal(ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT)?.entries.length, 6);
+    assert.equal(
+      ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT)?.entries.length,
+      TOOLVIEW_TOOL_NAMES.length,
+    );
     assert.equal(ctx.findInject(SHELL_OVERLAY_SLOT), undefined);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
   });
@@ -820,5 +816,217 @@ describe("toolview — send_peer payload parsing (ticket 70)", () => {
   it("degrades when nothing parses", () => {
     assert.equal(describeToolview("send_peer", null).kind, "degraded");
     assert.equal(describeToolview("send_peer", { args: 4 }).kind, "degraded");
+  });
+});
+
+describe("toolview — message_agent payload parsing (ticket 152)", () => {
+  it("renders the target, the acceptance lane, priority, and the ok outcome", () => {
+    const view = assertDetail(
+      describeToolview(MESSAGE_AGENT_TOOL, {
+        args: {
+          target: "worker-7",
+          text: "(body never renders on the row)",
+          priority: false,
+        },
+        result: {
+          ok: true,
+          target: "worker-7",
+          delivered_as: "steer",
+          message_id: "msg-1",
+          note: "Message parked.",
+        },
+      }),
+    );
+    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.agent), "worker-7");
+    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.deliveredAs), "steer");
+    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.priority), "false");
+    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "ok");
+    // The message body is never a row field.
+    assert.equal(
+      view.fields.some((field) => field.value.includes("body never renders")),
+      false,
+    );
+  });
+
+  it("renders a refused send with its reason and no lane field", () => {
+    const view = assertDetail(
+      describeToolview(MESSAGE_AGENT_TOOL, {
+        args: { target: "ghost", text: "…" },
+        result: {
+          ok: false,
+          reason: "unknown-target",
+          detail: "No agent \"ghost\".",
+        },
+      }),
+    );
+    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.agent), "ghost");
+    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "unknown-target");
+    assert.equal(
+      view.fields.some(
+        (field) => field.labelKey === TOOLVIEW_FIELD_KEYS.deliveredAs,
+      ),
+      false,
+    );
+  });
+
+  it("degrades a wrong-typed target instead of rendering a junk row", () => {
+    assert.equal(
+      describeToolview(MESSAGE_AGENT_TOOL, {
+        args: { target: 42 },
+        result: { ok: "yes", delivered_as: true },
+      }).kind,
+      "degraded",
+    );
+  });
+});
+
+describe("toolview — await_agent payload parsing (ticket 152)", () => {
+  it("renders the worker and the settled status with its terminal outcome", () => {
+    const view = assertDetail(
+      describeToolview(AWAIT_AGENT_TOOL, {
+        args: { target: "worker-3", timeout_ms: 30000 },
+        result: {
+          ok: true,
+          status: "settled",
+          target: "worker-3",
+          worker_status: "completed",
+          result: "Done.",
+          settled_at_ms: 1_700_000_000_000,
+          waited_ms: 1200,
+          summary: "Worker \"worker-3\" settled: completed.",
+        },
+      }),
+    );
+    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.worker), "worker-3");
+    assert.equal(
+      fieldOf(view, TOOLVIEW_FIELD_KEYS.status),
+      "settled · completed",
+    );
+    // A timeout is a normal outcome, not a failure: no Outcome field.
+    assert.equal(
+      view.fields.some(
+        (field) => field.labelKey === TOOLVIEW_FIELD_KEYS.outcome,
+      ),
+      false,
+    );
+  });
+
+  it("names the racer for a released wait and the reason for a refusal", () => {
+    const released = assertDetail(
+      describeToolview(AWAIT_AGENT_TOOL, {
+        args: { target: "worker-3" },
+        result: {
+          ok: true,
+          status: "released",
+          target: "worker-3",
+          reason: "user-message",
+          waited_ms: 500,
+          summary: "The wait was released.",
+        },
+      }),
+    );
+    assert.equal(
+      fieldOf(released, TOOLVIEW_FIELD_KEYS.status),
+      "released · user-message",
+    );
+
+    const refused = assertDetail(
+      describeToolview(AWAIT_AGENT_TOOL, {
+        args: { target: "dispatcher-b" },
+        result: {
+          ok: false,
+          reason: "not-awaitable",
+          detail: "Dispatchers are peers and cannot be awaited.",
+        },
+      }),
+    );
+    assert.equal(fieldOf(refused, TOOLVIEW_FIELD_KEYS.worker), "dispatcher-b");
+    assert.equal(
+      fieldOf(refused, TOOLVIEW_FIELD_KEYS.outcome),
+      "not-awaitable",
+    );
+  });
+
+  it("degrades a wrong-typed status instead of rendering a junk row", () => {
+    assert.equal(
+      describeToolview(AWAIT_AGENT_TOOL, {
+        args: { target: 42 },
+        result: { ok: true, status: 7, target: {} },
+      }).kind,
+      "degraded",
+    );
+  });
+});
+
+describe("toolview — spawn_dispatcher payload parsing (ticket 152)", () => {
+  it("renders the child session id, the title, and the ok outcome", () => {
+    const view = assertDetail(
+      describeToolview(SPAWN_DISPATCHER_TOOL, {
+        args: {
+          title: "Own the auth migration",
+          prompt: "(handoff prompt never renders on the row)",
+        },
+        result: {
+          ok: true,
+          dispatcher_id: "sess_child",
+          title: "Own the auth migration",
+          note: "Summoned as a peer dispatcher.",
+        },
+      }),
+    );
+    assert.equal(
+      fieldOf(view, TOOLVIEW_FIELD_KEYS.dispatcher),
+      "sess_child",
+    );
+    assert.equal(
+      fieldOf(view, TOOLVIEW_FIELD_KEYS.title),
+      "Own the auth migration",
+    );
+    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "ok");
+    // The handoff prompt is never a row field.
+    assert.equal(
+      view.fields.some((field) => field.value.includes("handoff prompt")),
+      false,
+    );
+  });
+
+  it("falls the title back to the args and renders a host refusal verbatim", () => {
+    const before = assertDetail(
+      describeToolview(SPAWN_DISPATCHER_TOOL, {
+        args: { title: "Own the auth migration", prompt: "…" },
+        result: null,
+      }),
+    );
+    assert.equal(fieldOf(before, TOOLVIEW_FIELD_KEYS.title), "Own the auth migration");
+    assert.equal(
+      before.fields.some(
+        (field) => field.labelKey === TOOLVIEW_FIELD_KEYS.outcome,
+      ),
+      false,
+    );
+
+    const refused = assertDetail(
+      describeToolview(SPAWN_DISPATCHER_TOOL, {
+        args: { title: "Too deep", prompt: "…" },
+        result: { ok: false, reason: "host-refused", detail: "maxDepth reached" },
+      }),
+    );
+    assert.equal(fieldOf(refused, TOOLVIEW_FIELD_KEYS.outcome), "host-refused");
+    assert.equal(
+      refused.fields.some(
+        (field) => field.labelKey === TOOLVIEW_FIELD_KEYS.dispatcher,
+      ),
+      false,
+    );
+  });
+
+  it("degrades a wrong-typed dispatcher id instead of rendering a junk row", () => {
+    assert.equal(
+      describeToolview(SPAWN_DISPATCHER_TOOL, {
+        args: { title: 9 },
+        result: { ok: "yes", dispatcher_id: ["sess"], title: null },
+      }).kind,
+      "degraded",
+    );
   });
 });

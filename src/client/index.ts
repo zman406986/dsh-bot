@@ -19,8 +19,10 @@
  * What registers (design-16 §4.2/§5):
  * 1. the `multitask-dispatcher` locale namespace ({en, zh});
  * 2. the per-tool call views (ticket 24): keyed `tool.call.toolview` entries
- *    for the six dispatcher wire tool names (five at 24; `send_peer` joined
- *    under ticket 70) — unclaimed keys, so additive-
+ *    for the eight dispatcher wire tool names plus the retained historical
+ *    `send_peer` key (five at 24; `send_peer` joined under ticket 70;
+ *    `message_agent`, `await_agent` and `spawn_dispatcher` completed the set
+ *    under ticket 152) — unclaimed keys, so additive-
  *    safe against the shipped composition (research Finding 5);
  * 3. the plugin's configuration page: one keyed `plugins.row.config` entry
  *    for the row `<package name>#<settings namespace>`, whose form comes from
@@ -238,7 +240,7 @@ export function applyClientModule(
   // one entry per dispatcher wire tool name. Keys are the plugin-owned core
   // tool names (ticket 11) — unclaimed by the shipped composition, so each
   // cell is ours by default and the generic row remains the fallback shape.
-  // All six registrations ride the same inject controller: fiber unload
+  // All nine registrations ride the same inject controller: fiber unload
   // disposes the controller and every entry with it (HMR-safe).
   //
   // Ticket 89 (2026-09-19), rationale re-based by ticket 99 (ADR-0021) —
