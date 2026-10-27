@@ -59,3 +59,15 @@ Whatever is chosen must fail closed to EN when the preference is absent, unreada
 ## Comments
 
 2026-10-28: Filed from a read-only gap scan. Verified by grep: zero CJK characters in `prompts.ts`, `worker/prompt.ts`, `wake-copy.ts`, `access-prompt.ts`; the client dictionary has both faces (222 key lines in `overlay.ts`). The "existing language-switch seam" is the client locale preference, and the plugin does not read it today — that wiring is part of this ticket, not assumed as present.
+
+2026-10-28 — **Step 1 of 2 done (policy asset only).** Remaining step 2: worker contract (`src/worker/prompt.ts`) plus the wake/access blocks (`buildWakeInstructionsBlock`, `buildAccessPolicyBlock`, `buildPeerWakeInstructionsBlock`, peer roster heading/intro) and the eight tool descriptions. Status stays open until step 2 lands.
+
+**Seam chosen (option 1, scoped to step 1).** The policy face is keyed by the same two ids the client dictionary uses — `"zh"` / `"en"`, matching the host's `LOCALE_IDS` order — via `PolicyLanguage` and `resolvePolicyLanguage` (`src/core/policy/prompts.ts`). Selection is fail-closed and exact-match only: anything other than the literal `"zh"` (`undefined`, `null`, `"en"`, `"zh-CN"`, `"ja"`, a non-string) composes EN. No prefix matching on purpose — a half-translated policy is worse than an English one. `buildDispatcherPolicySection(origin, generation, language)` and `assembleSessionPolicy(enabled, origin, generation, language)` take it as a trailing argument defaulting to `"en"`, so every existing caller composes byte-identical EN.
+
+Wiring the live preference read (`ctx.settings` / `locale.preference`) into `src/adapter/parent-agent.ts` is **not** in step 1: it is a behaviour change on the activation path, and this step is copy-only per the ticket's Constraints. The seam is a pure function today, ready for that one call site.
+
+**Copy.** ZH block in `prompts.ts` as `buildDispatcherPolicySectionZh`, sibling to the untouched EN face. Re-derived in Chinese from the PRD rules — authored copy, never a translation of the reference tree (ADR-0018 B9). Terminology follows the client dictionary's zh face so model and UI name the same things: 调度器 / 工作者 / 待办 / 纠偏 / 流 / 送达 / 唤醒 / 会话 / 代理. Tool names and status literals stay ASCII (`spawn_worker`, `in_progress`, `completed`, …).
+
+**Tests.** New `dispatcher policy — ZH face (ticket 153)` suite in `test/policy-assembler.test.ts` (13 cases): fail-closed selection, EN byte stability, ZH heading presence/order via `POLICY_SECTION_HEADINGS_ZH`, 25 EN↔ZH directive pairs, literal tool identifiers, the bounded-wait bound, no EN leftovers outside backticks, no forbidden vocabulary, exactly three origin-dependent lines, spawned generation line, EN/ZH line-shape equality, and no CJK in the EN face. The ticket-141 sha256 pin did **not** move — the EN face is byte-identical, which is exactly what that pin proves.
+
+**Still to do (step 2).** The PRD M4 row and `docs/surfaces.md` still say EN only; both move with step 2, when the whole table is covered. The live preference read on the activation path also lands there, once the last asset has a ZH face.

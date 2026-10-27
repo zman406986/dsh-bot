@@ -24,6 +24,10 @@ import {
   buildDispatcherPolicySection,
   buildPeerWakeInstructionsBlock,
   PEER_ROSTER_INTRO,
+  POLICY_LANGUAGES,
+  POLICY_SECTION_HEADINGS,
+  POLICY_SECTION_HEADINGS_ZH,
+  resolvePolicyLanguage,
 } from "../src/core/policy/prompts.js";
 import { emptyReportPlaceholder, REPORT_CLAMP_CHARS } from "../src/core/report-clamp.js";
 import {
@@ -623,5 +627,231 @@ describe("dispatcher policy — messaging, bounded await, mitosis (ticket 119)",
       !peerWake.includes("send_peer"),
       "the retired verb is not the reply path",
     );
+  });
+});
+
+/**
+ * Ticket 153 step 1: the dispatcher policy section ships EN + ZH. The ZH face
+ * is authored copy, so these pin MEANING PARITY (same rules, same numbers,
+ * same tool names, same line shape) plus the absence of EN leftovers — not
+ * prose quality, which ticket 154's review owns.
+ */
+describe("dispatcher policy — ZH face (ticket 153)", () => {
+  /** Any latin word of 3+ letters outside backticks is an EN leftover. */
+  const LATIN_WORD = /[A-Za-z]{3,}/g;
+
+  it("only an exact shipped id selects ZH; everything else fails closed to EN", () => {
+    // The host carries `LOCALE_IDS = ["zh", "en"]`; a preference is one of
+    // those two strings or absent. Only the exact ZH literal switches.
+    assert.equal(resolvePolicyLanguage("zh"), "zh");
+    for (const unknownPreference of [
+      "en",
+      "zh-CN",
+      "zh-TW",
+      "ZH",
+      "zh_CN",
+      "ja",
+      "",
+      null,
+      undefined,
+      0,
+      1,
+      true,
+      {},
+      [],
+      () => "zh",
+    ]) {
+      assert.equal(
+        resolvePolicyLanguage(unknownPreference),
+        "en",
+        `must fail closed to EN: ${String(unknownPreference)}`,
+      );
+    }
+    assert.deepEqual([...POLICY_LANGUAGES], ["zh", "en"]);
+  });
+
+  it("default and explicit EN compose the same bytes as before ticket 153", () => {
+    // The EN face is untouched: the existing sha256 pin above covers the
+    // exact bytes, and these assert the new argument cannot reach it.
+    const byDefault = buildDispatcherPolicySection();
+    assert.equal(buildDispatcherPolicySection("user", 2, "en"), byDefault);
+    assert.equal(buildDispatcherPolicySection("user", 7, "en"), byDefault);
+    assert.equal(assembleSessionPolicy(true), byDefault);
+    assert.equal(assembleSessionPolicy(true, "user", 2, "en"), byDefault);
+    assert.equal(
+      assembleSessionPolicy(true, "user", 2, resolvePolicyLanguage("ja")),
+      byDefault,
+    );
+  });
+
+  it("ZH keeps the section headings, in order", () => {
+    for (const origin of ["user", "spawned"] as const) {
+      const policy = buildDispatcherPolicySection(origin, 2, "zh");
+      let last = -1;
+      for (const heading of POLICY_SECTION_HEADINGS_ZH) {
+        const at = policy.indexOf(heading);
+        assert.ok(at >= 0, `${origin}: missing ZH section ${heading}`);
+        assert.ok(at > last, `${origin}: ZH section out of order ${heading}`);
+        last = at;
+      }
+    }
+    // The marker lists are separate and neither leaks into the other face.
+    for (const heading of POLICY_SECTION_HEADINGS_ZH) {
+      assert.ok(!POLICY_SECTION_HEADINGS.includes(heading as never));
+    }
+  });
+
+  it("ZH carries every directive the EN face carries (meaning parity)", () => {
+    const zh = buildDispatcherPolicySection("user", 2, "zh");
+    // Each entry is one EN directive and a ZH phrase that can only appear if
+    // that directive survived the authoring pass.
+    const parity: readonly (readonly [string, string])[] = [
+      ["You are the user's main assistant in this chat.", "用户在这个聊天里的主要助手"],
+      ["stay responsive", "保持随时响应"],
+      ["dispatcher, not the workhorse", "你是调度器，不是干重活的人"],
+      ["Independent requests run in parallel", "相互独立的请求并行推进"],
+      ["A correction to work already in flight is a steer", "对已经开始的工作做修正"],
+      ["One live worker per stream", "每条流只允许一个在运行的工作者"],
+      ["Each spawn records its own todo entry", "每次启动都会记下它自己的待办条目"],
+      ["first visible acknowledgement", "第一次对用户可见的确认"],
+      ["Worker exit alone completes nothing", "工作者退出本身不算完成"],
+      ["reconcile the ledger", "先对齐账本"],
+      ["Worker prompts are self-contained", "给工作者的提示必须自包含"],
+      ["Only you deliver", "只有你负责送达"],
+      ["message any agent you can see", "给任何你看得见的代理发消息"],
+      ["Waiting is not polling", "等待不是轮询"],
+      ["summon another dispatcher", "召唤另一个调度器"],
+      ["same tools, same policy", "同样的工具、同样的策略"],
+      ["stop or change course in plain language", "让你停下或改变方向"],
+      ["Never claim a stopped worker produced a result", "绝不要声称已停止的工作者产出了结果"],
+      ["never reference a task board or milestone view", "绝不要提到任务看板或里程碑视图"],
+      ["The user never hears the machinery", "用户永远看不到背后的运行细节"],
+      ["Poll in a loop", "循环轮询"],
+      ["A spawn only starts it", "启动只是开始"],
+      ["Clone a stream because the user corrected it", "因为用户做了修正，就复制出一条流"],
+      ["Dump a worker transcript", "把工作者的记录"],
+      ["similar jargon", "这类行话"],
+    ];
+    for (const [enNeedle, zhNeedle] of parity) {
+      assert.ok(
+        buildDispatcherPolicySection("user").includes(enNeedle),
+        `EN face lost its counterpart of: ${zhNeedle}`,
+      );
+      assert.ok(zh.includes(zhNeedle), `ZH face missing: ${zhNeedle}`);
+    }
+  });
+
+  it("ZH names the tools and statuses as literal ASCII identifiers", () => {
+    const zh = buildDispatcherPolicySection("user", 2, "zh");
+    for (const identifier of [
+      CHECK_WORKERS_TOOL,
+      MESSAGE_AGENT_TOOL,
+      AWAIT_AGENT_TOOL,
+      SPAWN_DISPATCHER_TOOL,
+      "in_progress",
+      "completed",
+    ]) {
+      assert.ok(
+        zh.includes(`\`${identifier}\``),
+        `ZH copy must keep the literal identifier: ${identifier}`,
+      );
+    }
+  });
+
+  it("ZH keeps the numbered bounds the EN face states", () => {
+    const zh = buildDispatcherPolicySection("user", 2, "zh");
+    // One bounded wait only, and the only legal wait is a single await_agent.
+    assert.ok(zh.includes("等一次"), "the single-wait bound survives");
+    assert.ok(zh.includes("有上限"), "the wait is still bounded");
+    assert.ok(zh.includes("唯一允许的等待"), "the one legal wait is named");
+  });
+
+  it("ZH carries no EN leftovers besides the allowed ASCII identifiers", () => {
+    for (const origin of ["user", "spawned"] as const) {
+      const zh = buildDispatcherPolicySection(origin, 3, "zh");
+      // Strip the backticked ASCII identifiers the contract requires, then
+      // any latin word left is an untranslated EN fragment.
+      const withoutIdentifiers = zh.replace(/`[^`]+`/g, " ");
+      const leftovers = [...withoutIdentifiers.matchAll(LATIN_WORD)].map(
+        (match) => match[0],
+      );
+      assert.deepEqual(
+        leftovers,
+        [],
+        `${origin}: untranslated EN words leaked into the ZH face`,
+      );
+      // The EN headings must not appear in the ZH block.
+      for (const heading of POLICY_SECTION_HEADINGS) {
+        assert.ok(!zh.includes(heading), `${origin}: EN heading in ZH copy: ${heading}`);
+      }
+    }
+  });
+
+  it("ZH carries no forbidden identifier either (ADR-0018 no-verbatim)", () => {
+    for (const origin of ["user", "spawned"] as const) {
+      assertNewCopy(buildDispatcherPolicySection(origin, 2, "zh"));
+    }
+  });
+
+  it("the spawned ZH variant differs from the user ZH variant in exactly three lines", () => {
+    // Same shape as the EN pin: the origin only rewrites the opener, the todo
+    // trigger, and the delivery line.
+    const userLines = buildDispatcherPolicySection("user", 2, "zh").split("\n");
+    const spawnedLines = buildDispatcherPolicySection("spawned", 2, "zh").split("\n");
+    assert.equal(spawnedLines.length, userLines.length);
+    const differing = userLines.filter((line, index) => line !== spawnedLines[index]);
+    assert.equal(differing.length, 3, "exactly three ZH lines differ by origin");
+  });
+
+  it("the spawned ZH opener carries the generation line", () => {
+    const zh = buildDispatcherPolicySection("spawned", 3, "zh");
+    assert.ok(
+      zh.includes("召唤你的是第 2 代调度器。你是第 3 代团队负责人。"),
+      "X spawns X+1 survives translation",
+    );
+    // The user face never mentions generations, in either language.
+    const userZh = buildDispatcherPolicySection("user", 9, "zh");
+    assert.equal(userZh, buildDispatcherPolicySection("user", 2, "zh"));
+    assert.ok(
+      !/第 *\d+ *代/.test(userZh),
+      "the user face never states a generation number",
+    );
+  });
+
+  it("ZH mirrors the EN line shape (same blocks, same bullet count)", () => {
+    // Meaning parity is a structural fact here: the faces are authored
+    // one-to-one, so a bullet added to one face and not the other fails.
+    for (const origin of ["user", "spawned"] as const) {
+      const en = buildDispatcherPolicySection(origin, 2, "en").split("\n");
+      const zh = buildDispatcherPolicySection(origin, 2, "zh").split("\n");
+      assert.equal(zh.length, en.length, `${origin}: line count differs`);
+      const enBullets = en.filter((line) => line.startsWith("- ")).length;
+      const zhBullets = zh.filter((line) => line.startsWith("- ")).length;
+      assert.equal(zhBullets, enBullets, `${origin}: bullet count differs`);
+      assert.equal(enBullets, 19, "14 How-you-work + 5 never-do bullets");
+      // Blank lines and headings sit at the same indices in both faces.
+      en.forEach((line, index) => {
+        const other = zh[index] ?? "";
+        if (line === "") assert.equal(other, "", `${origin}: blank line ${index} moved`);
+        if (line.startsWith("#")) {
+          assert.ok(other.startsWith("#"), `${origin}: heading ${index} missing in ZH`);
+        }
+      });
+    }
+  });
+
+  it("ZH never mixes faces: no ZH character in the EN block", () => {
+    for (const origin of ["user", "spawned"] as const) {
+      const en = buildDispatcherPolicySection(origin);
+      assert.ok(
+        !/[\u3400-\u9fff]/.test(en),
+        `${origin}: CJK characters leaked into the EN face`,
+      );
+    }
+  });
+
+  it("flag OFF stays empty in either language", () => {
+    assert.equal(assembleSessionPolicy(false, "user", 2, "zh"), "");
+    assert.equal(assembleSessionPolicy(false, "spawned", 2, "zh"), "");
   });
 });

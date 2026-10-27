@@ -262,12 +262,16 @@ export {
   DELIVER_RESULT_TOOL,
   DISPATCHER_TOOL_NAMES,
   PEER_WAKE_SECTION_HEADINGS,
+  POLICY_LANGUAGES,
+  POLICY_SECTION_HEADINGS_ZH,
+  resolvePolicyLanguage,
   SPAWN_DISPATCHER_TOOL,
   SPAWN_WORKER_TOOL,
   STEER_WORKER_TOOL,
   STOP_WORKER_TOOL,
   TOOL_DESCRIPTIONS,
 } from "./core/policy/prompts.js";
+export type { PolicyLanguage } from "./core/policy/prompts.js";
 export {
   buildTurnReminderForSession,
   createDispatcherTools,

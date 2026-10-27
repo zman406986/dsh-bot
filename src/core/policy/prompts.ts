@@ -1,7 +1,13 @@
 /**
  * Dispatcher policy prompt copy (new copy only).
  * Section headings are stable test markers (presence + order only).
- * Full prose lives here so ZH can land later without code churn.
+ * Full prose lives here so both language faces stay in one module: the
+ * dispatcher policy section ships EN + ZH (ticket 153), the other assets
+ * (standing rules, wake/access/peer blocks, tool descriptions) still ship
+ * EN only.
+ *
+ * The ZH face is authored copy re-derived from the PRD rules, never a
+ * translation of the reference tree's text (ADR-0018 exception B9).
  */
 
 /** Tool names registered for the dispatcher only. */
@@ -100,6 +106,17 @@ export const POLICY_SECTION_HEADINGS = [
   "## What you never do",
 ] as const;
 
+/**
+ * ZH counterparts of {@link POLICY_SECTION_HEADINGS}, same order (ticket 153).
+ * Separate constants rather than a two-key record: the EN list is pinned by
+ * existing tests, and a record would let a missing face read as `undefined`.
+ */
+export const POLICY_SECTION_HEADINGS_ZH = [
+  "# 多任务调度器",
+  "## 你的工作方式",
+  "## 绝不要做的事",
+] as const;
+
 export const REMINDER_SECTION_HEADINGS = ["## Ledger", "## Standing rules"] as const;
 
 export const WAKE_SECTION_HEADINGS = [
@@ -140,6 +157,35 @@ export const PEER_ROSTER_INTRO =
 /** Empty-ledger marker in the per-turn reminder. */
 export const EMPTY_LEDGER_LINE = "(empty)";
 
+// ── Language seam (ticket 153) ────────────────────────────────────────────
+
+/**
+ * The language of model-facing policy prose.
+ *
+ * The product has exactly one language switch: the host `locale` settings
+ * namespace, whose `preference` field carries one of `LOCALE_IDS`
+ * (`["zh", "en"]`) or nothing at all. The client dictionary is keyed by the
+ * same two ids, so the policy face uses them verbatim instead of inventing a
+ * second vocabulary.
+ */
+export type PolicyLanguage = "en" | "zh";
+
+/** Every language the policy copy ships, in the host's declared order. */
+export const POLICY_LANGUAGES: readonly PolicyLanguage[] = ["zh", "en"];
+
+/**
+ * Fail-closed selection: only an exact shipped id selects a non-EN face.
+ * Absent, unreadable (`null`/`undefined`/a non-string), or a language we do
+ * not ship (`"ja"`, `"zh-CN"`) all yield EN — the policy must never compose a
+ * mixed-language block, and it must never guess.
+ *
+ * Deliberately no prefix matching: `"zh-CN"` is not a face we author, and a
+ * half-translated policy is worse than an English one.
+ */
+export function resolvePolicyLanguage(preference: unknown): PolicyLanguage {
+  return preference === "zh" ? "zh" : "en";
+}
+
 /**
  * Full dispatcher policy section. Injected once per dispatcher session
  * when the feature flag is ON (ADR-0005).
@@ -160,6 +206,17 @@ export const EMPTY_LEDGER_LINE = "(empty)";
  * entirely — its bytes never depend on it.
  */
 export function buildDispatcherPolicySection(
+  origin: DispatcherOrigin = "user",
+  generation = 2,
+  language: PolicyLanguage = "en",
+): string {
+  return language === "zh"
+    ? buildDispatcherPolicySectionZh(origin, generation)
+    : buildDispatcherPolicySectionEn(origin, generation);
+}
+
+/** EN face of the dispatcher policy section — byte-stable since ticket 141. */
+function buildDispatcherPolicySectionEn(
   origin: DispatcherOrigin = "user",
   generation = 2,
 ): string {
@@ -205,6 +262,62 @@ export function buildDispatcherPolicySection(
     "- Clone a stream because the user corrected it.",
     "- Dump a worker transcript or a long tool log into the user's chat.",
     '- Say "dispatching", "spawning a worker", "background agent", or similar jargon to the user.',
+  ].join("\n");
+}
+
+/**
+ * ZH face of the dispatcher policy section (ticket 153).
+ *
+ * Authored copy, not a translation of any reference text (ADR-0018 B9): the
+ * rules are re-derived from the PRD in Chinese and kept one-to-one with the
+ * EN face — same bullets, same order, same line count, same directives.
+ *
+ * Terminology follows the client dictionary's zh face (`src/client/overlay.ts`)
+ * so the model and the UI name the same things: 调度器 / 工作者 / 待办 / 纠偏 /
+ * 流 / 送达 / 唤醒 / 会话 / 代理. Tool names and status literals stay ASCII
+ * identifiers (`spawn_worker`, `in_progress`, `completed`, …); transliterating
+ * them would break the tool contract.
+ */
+function buildDispatcherPolicySectionZh(
+  origin: DispatcherOrigin = "user",
+  generation = 2,
+): string {
+  const spawned = origin === "spawned";
+  return [
+    "# 多任务调度器",
+    "",
+    spawned
+      ? `另一个调度器召唤了你。你在自己的会话里就是调度器：你用同样的方式协调工作者，你的结果回到那个调度器，而不是给用户。你要保持随时响应。繁重的工作交给你在后台启动的工作者。召唤你的是第 ${generation - 1} 代调度器。你是第 ${generation} 代团队负责人。`
+      : "你是用户在这个聊天里的主要助手。你要保持随时响应。繁重的工作交给你在后台启动的工作者。",
+    "",
+    "## 你的工作方式",
+    "",
+    "- 你是调度器，不是干重活的人。对话和一步就能完成的部分自己做。复杂、多步的工作交给工作者。",
+    "- 相互独立的请求并行推进。除非两条流属于同一个逻辑流，否则绝不要让流 B 等待流 A。",
+    "- 对已经开始的工作做修正，就是对那个工作者发一次纠偏。不要为同一条流再启动第二个工作者。",
+    "- 每条流只允许一个在运行的工作者。没把握就先查一下，再启动。",
+    spawned
+      ? "- 每次启动都会记下它自己的待办条目。可以同时有多条处于 `in_progress`。在你第一次向召唤你的调度器汇报该结果时，把该条目标为 `completed`。工作者退出本身不算完成。"
+      : "- 每次启动都会记下它自己的待办条目。可以同时有多条处于 `in_progress`。在第一次对用户可见的确认时把该条目标为 `completed`——用户已经看到，或已被告知结果正在推进或已送达。工作者退出本身不算完成。",
+    "- 每次唤醒先对齐账本：哪些在运行，哪些已经完成但还没送达，哪些还需要派出。",
+    "- 给工作者的提示必须自包含。工作者看不到这个对话、用户之前的消息，也看不到同类的工作。把目标、约束、相关背景、成功标准以及汇报格式都写进启动提示里。",
+    spawned
+      ? "- 工作者不能和用户说话。他们的结果回到你这里；你的结果回到召唤你的那个调度器。"
+      : "- 工作者不能和用户说话。只有你负责送达。",
+    "- 你可以给任何你看得见的代理发消息（`message_agent`）。对工作者来说，这是对进行中工作的修正；对另一个调度器来说，这是一个助手写给另一个助手。它绝不会以用户身份送达，也永远不算作用户在说话。",
+    "- 如果你的下一步卡在一个工作者的结果上，就对那个工作者等一次（`await_agent`），并设好上限。等待不是轮询。",
+    "- 你可以召唤另一个调度器（`spawn_dispatcher`）。它是同伴：同样的工具、同样的策略，自己的账本和收件箱。它不能和用户说话，所以它的工作只能经由你到达用户。它不能被等待——给它发消息，它的答复之后会自己回来。",
+    "- 如果用户用日常的话让你停下或改变方向，就把这当作对相应工作者的一次纠偏或停止（停止工具），然后直白地说明你停掉或改变了什么。绝不要声称已停止的工作者产出了结果。",
+    "- 进度靠你自己的叙述来传达；绝不要提到任务看板或里程碑视图。",
+    "- 用户永远看不到背后的运行细节。不要提工作者、流、唤醒或派发。就像一个忙碌的人那样说话。",
+    "",
+    "## 绝不要做的事",
+    "",
+    "- 循环轮询。`check_workers` 是快照：不要反复调用它，不要在两次查看之间休眠，也绝不要无上限地等待。对你真正需要的那个工作者做一次有上限的 `await_agent`，是唯一允许的等待。",
+    "- 假装一次启动已经把活干完了。启动只是开始。",
+    "- 因为用户做了修正，就复制出一条流。",
+    "- 把工作者的记录或很长的工具日志倒进用户的聊天里。",
+    "- 对用户说“派发中”“正在启动工作者”“后台代理”这类行话。",
   ].join("\n");
 }
 

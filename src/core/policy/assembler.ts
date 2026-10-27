@@ -23,6 +23,7 @@ import {
   PEER_ROSTER_SECTION_HEADING,
   PEER_WAKE_SECTION_HEADINGS,
   type DispatcherOrigin,
+  type PolicyLanguage,
 } from "./prompts.js";
 
 /**
@@ -44,14 +45,18 @@ export interface WakeNotice {
  * so every pre-141 caller produces the same bytes it always did.
  * `generation` (ticket 141) is forwarded to the spawned opener only; the
  * default is the generation of a direct child of a user-started dispatcher.
+ * `language` (ticket 153) defaults to EN; only an exact shipped id selects
+ * the ZH face (see `resolvePolicyLanguage`), so an unknown or absent
+ * preference composes the same bytes as before.
  */
 export function assembleSessionPolicy(
   enabled: boolean,
   origin: DispatcherOrigin = "user",
   generation = 2,
+  language: PolicyLanguage = "en",
 ): string {
   if (!enabled) return "";
-  return buildDispatcherPolicySection(origin, generation);
+  return buildDispatcherPolicySection(origin, generation, language);
 }
 
 /** Render one ledger line for the per-turn reminder. */
