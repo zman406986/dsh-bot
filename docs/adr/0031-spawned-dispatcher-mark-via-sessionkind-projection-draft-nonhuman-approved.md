@@ -19,7 +19,7 @@
 
 ## Context
 
-**The ticket.** [Ticket 140](../../Issue-tracker/open/140-spawned-dispatcher-glyph-parity.md) records the owner's 2026-10-22 ruling — "spawned dispatchers should get same glyph as user spawned dispatcher, doesn't matter if user or a dispatcher initiated the command" — and the two blockers that stopped it: no identity, and no seat.
+**The ticket.** [Ticket 140](../../Issue-tracker/resolved/140-spawned-dispatcher-glyph-parity.md) records the owner's 2026-10-22 ruling — "spawned dispatchers should get same glyph as user spawned dispatcher, doesn't matter if user or a dispatcher initiated the command" — and the two blockers that stopped it: no identity, and no seat.
 
 **Why a spawned dispatcher read as a worker.** It is a host subagent child, so its durable header carries `origin: 'subagent'` and `delegationDepth`, identical to a worker's. `resolveSessionKind` resolves origin first and answers `"worker"` before it ever looks at the projection (`src/client/session-kind.tsx:295-300`). That order is deliberate — it stops a worker inheriting a parent's mark in the sidebar — and this ruling leaves it in place.
 
@@ -52,7 +52,7 @@
 
 ## Traceability
 
-- **Ruling:** ticket 140's 2026-10-28 comment (`Issue-tracker/open/140-spawned-dispatcher-glyph-parity.md`) — an agent ruling made under the owner's full-rein grant of the same date, explicitly subject to human reversal. The ticket's 2026-10-22 and 2026-10-24 comments carry the seat survey and the route evaluation this draft builds on.
+- **Ruling:** ticket 140's 2026-10-28 comment (`Issue-tracker/resolved/140-spawned-dispatcher-glyph-parity.md`) — an agent ruling made under the owner's full-rein grant of the same date, explicitly subject to human reversal. The ticket's 2026-10-22 and 2026-10-24 comments carry the seat survey and the route evaluation this draft builds on.
 - **Implementation:** branch `ticket-140-spawned-dispatcher-mark`, commit `5c76e01` — **under review at the time of writing**, not merged. Keyed to that commit: seed at `src/adapter/cordis-dsh-host.ts:2073-2079`, seed delete at `:2159`, mirror read at `:1698`; `stateVersion` 2 at `src/adapter/session-kind-projection.ts:98`, `initSessionKindProjection` at `:242`; probe wiring at `src/plugin.ts:493-494` and `:753`; header resolution at `src/client/session-kind.tsx:324`, registration at `:372`, slot and order constants at `:250`/`:255`; inject at `src/client/index.ts:328`. Offline coverage added in `test/spawned-dispatcher-kind.test.ts` and `test/client-session-kind.test.ts`.
 - **ADRs:** 0024 rider item 1 (seat enumeration binds; roster-mirror premise dead), 0027 (the `sessionKind` projection is the identity source), 0018 (imitate the host; no fork), 0025 (mitosis — a spawned dispatcher is a peer dispatcher), 0006/A5 (no second database), 0023-era convention that drafts move nothing until signed.
 - **Tickets:** 140 (this ruling), 138 (superseded glyph half; resume half stays), 130 (durable `dispatcher_sessions` mark — the mirror this draft consults), 123 (the glyph machinery and the header decline this draft narrows), 114 (the 0.2.1 port that killed the roster channel), 143/144 (the route research and rc.3 delta).

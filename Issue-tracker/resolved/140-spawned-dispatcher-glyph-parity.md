@@ -1,7 +1,7 @@
 # 140 — A spawned dispatcher gets no glyph: it is not a sidebar row at all, so the licensed seat cannot carry the mark
 
-**Status:** open
-**Labels:** needs-info
+**Status:** resolved
+**Labels:** needs-info (kept as filed; the closure is recorded in the Resolution section, not a label move)
 **Blocked by:** a dated human ruling with two parts: (1) which seat may render a spawned dispatcher's glyph, given that stock dsh hides every `origin: 'subagent'` session from the sidebar; (2) which identity channel that seat may read, given that no durable, child-local fact on dsh 0.2.1-rc.2 discriminates a dispatcher child from a worker child.
 **Related:** ticket 138 (deferred — this ticket takes over its glyph half only; the message-resume half stays there), ticket 130 (resolved 2026-10-22 — durable `dispatcher_sessions` mark), ticket 123 (resolved — the glyph machinery and the header decline), ticket 114 (the 0.2.1 port), ADR-0024 rider + addendum (the one licensed glyph registration), ADR-0027 §Starting identity and dispatch item 4 (preset condition (a)), ADR-0025 (mitosis), ADR-0018 (imitate the host), ticket 118 (the identity probe)
 
@@ -157,3 +157,24 @@ Review items and what changed:
 3. **v2 discard hit user-started rows too** — fixed by not bumping: `stateVersion` stays 1. The abstain is per-row state (`resolved: false` in the row), so only cells whose derivation depends on the mirror retry, and every user-started dispatcher row keeps its cached `active: true` across the upgrade. The intermediate v2 stamped by the first commit of this branch is still discarded by the version guard, since its init-only derivation is what the review corrected. Recorded residual: a v1 row for a spawned child (status quo ante — no such child carried a mark before this ticket) reads as settled "not a dispatcher" until that session's log is refolded.
 4. Free fixes: (a) all spawn seeds (`reservedDispatcherIds`, the mark seed, the generation seed) now sit INSIDE the `try`, so a throw from the plugin-supplied `dispatcherGenerationOf` cannot leak a phantom; (b) `docs/surfaces.md` chip row now says order 30 and documents the origin gate; (c) stale test title updated to "four waits".
 5. Document-only residuals, no code: (a) a host that mints its own child id leaves the projection's `init` result keyed on the reserved id — defensive only, because the local spawn provider honours `spec.childId`; (b) a spawn whose `startLocal` activation is disposed leaves the projection row active on a disposed child — no one-liner exists (the projection registry has no per-session invalidation seam), and the row is harmlessly unread for a dead session. Both recorded here rather than guessed at.
+
+## Resolution — 2026-10-28
+
+Implemented and merged. A spawned dispatcher now carries the dispatcher mark in its own conversation header, and it resolves to kind `"dispatcher"` from its durable mark.
+
+**Landed:** branch `ticket-140-spawned-dispatcher-mark`, commits `5c76e01` (implementation) and `df59939` (review fixes), merged to `main` via `e920a77`; polish `2768b82` (header-seat comment truth, in-memory peek parity, honesty-branch pins).
+
+**Design record:** `docs/adr/0031-spawned-dispatcher-mark-via-sessionkind-projection-draft-nonhuman-approved.md` — a **draft, non-human-approved** ADR recording the seat-extension ruling (ADR-0024's rider grows by exactly one seat: `conversation.session.header.actions`, dispatcher mark on `origin: "subagent"` children only). **It awaits the owner's signature**; nothing in it is accepted until then, and it can be reversed at a single seam.
+
+**What the code does** (spots to read, not a re-spec):
+
+- **Mark mirror seeded at child-id reserve.** `spawnDispatcher` writes the reserved child id into the adapter's `dispatcherMarks` mirror *before* `startActivation`, because the projection unit's `init` runs at `session/created` inside that call while the durable `dispatcher_sessions` row is written only after the spawn resolves. The seed is deleted on a failed spawn (or when the host minted its own id), so no phantom mark survives.
+- **Tri-state answer, no durable wrong answer.** `dispatcherMarkAnswer` answers mirror → synchronous durable peek → `"unknown"`. `"unknown"` starts an UNRESOLVED projection cell (`resolved: false`) that later settles from a real event or wire read; it never durably caches "not a dispatcher".
+- **Header chip is origin-gated.** `resolveHeaderDispatcherKind` renders only when `origin === "subagent"` **and** the projected kind is `"dispatcher"`, so a user-started dispatcher keeps its sidebar glyph and gains no second mark. `resolveSessionKind` keeps its `origin`-first order untouched.
+- **`stateVersion` stays 1.** The abstain is per-row state, not a unit-wide version bump, so a v1 checkpoint is not discarded wholesale.
+
+**Reviews:** two independent reviews ran. The first found two defects — a missing origin gate on the header chip and cold-mirror cache poisoning — both fixed in `df59939`. The second returned SHIP with notes; its points are folded into `2768b82`.
+
+**Recorded residuals** (in the comments above, restated for the closed record): a v1 projection row for a spawned child stays settled "no" until that session's log is fully refolded; settlement is not pushed to connected idle sessions (late, never wrong); and the host-minted-id and disposed-child cases are documentation-only notes, no code. The message-resume half stays with ticket 138; the ADR-0024 rider prose rewrite still waits on the draft's signature.
+
+**Bookkeeping:** `**Status:**` → `resolved`; moved `Issue-tracker/open/140-spawned-dispatcher-glyph-parity.md` → `Issue-tracker/resolved/`; `Issue-tracker/open-issue-index.md` regenerated. The authoritative acceptance check-off is the list under this ticket's 2026-10-28 comment; the older unchecked list above was written before the ruling and is kept as history. No merge (lead merges).
