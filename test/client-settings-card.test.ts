@@ -395,10 +395,10 @@ describe("settings card — registration is the pairing contract (ticket 47)", (
     );
     assert.ok(![...clientInject].includes("settingsScope"));
     // And the composition makes no runtime inject request of its own: the
-    // card's form arrives through the slot props, not a bound scope. Three
+    // card's form arrives through the slot props, not a bound scope. Four
     // declaration waits exist (toolviews, this card, the ticket-123 sidebar
-    // glyph).
-    assert.equal(ctx.injects.length, 3);
+    // glyph, the ticket-140 header chip).
+    assert.equal(ctx.injects.length, 4);
   });
 
   it("every card copy key exists in both faces, and the dictionaries stay parallel", () => {

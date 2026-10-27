@@ -698,9 +698,10 @@ describe("onboarding shell seat + composition wiring (ticket 68)", () => {
   it("a full apply() registers only the additive entries and nothing in dsh's layout", () => {
     const ctx = createOnboardingCtx();
     assert.doesNotThrow(() => apply(ctx));
-    // The default composition's three declaration waits: toolviews, the
-    // settings page, and the sidebar session-kind glyph (ticket 123).
-    assert.equal(ctx.injects.length, 3);
+    // The default composition's four declaration waits: toolviews, the
+    // settings page, the sidebar session-kind glyph (ticket 123), and the
+    // header chip (ticket 140).
+    assert.equal(ctx.injects.length, 4);
     const main = ctx.injects.find((record) => record.parent === "main");
     assert.equal(main, undefined, "no `main` page in the default posture");
   });

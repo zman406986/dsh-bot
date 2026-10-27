@@ -122,3 +122,38 @@ No ruling was made and no code was touched. Label `needs-info`: the missing deci
 (3) Two code-level facts any ruling must name: resolveSessionKind returns 'worker' for any origin 'subagent' before consulting the projection (src/client/session-kind.tsx:149) — relaxing this origin-first order needs a ruling; the sidebar leading cell mounts only on idle rows (:2306) — any sidebar-seat glyph is idle-only, record that limit.
 
 (4) Housekeeping: rider item 1 contains a dead roster-mirror premise sentence (roster mirror no longer the channel) — rewrite when ruling lands. rc.3 adds no relevant slot (three new 'More menu' seats, no sessionId payload). No code was touched for this research.
+
+### 2026-10-28 — ruling implemented (agent ruling under owner full-rein grant, subject to human reversal; draft ADR to follow separately)
+
+Ruling as given: a spawned dispatcher gets the mark via (1) the host-side `sessionKind` projection unit consulting the adapter's dispatcher-mark mirror, and (2) a client header chip reading `projectionValues.sessionKind`. No new projection key, no new channel; `resolveSessionKind`'s `origin`-first order untouched.
+
+What landed (branch `ticket-140-spawned-dispatcher-mark`):
+
+- **Adapter** (`src/adapter/cordis-dsh-host.ts`): `spawnDispatcher` seeds `dispatcherMarks` with the reserved child id at the reserve site, BEFORE `startActivation` — the projection's `init` runs inside that call (`session/created`), and the durable row is only written after it resolves. `finally` deletes the seed when the host refused (`spawnedId === null`) or minted its own id, so a failed spawn leaves no phantom mark for the peer fence.
+- **Projection** (`src/adapter/session-kind-projection.ts`): `init` now takes the late-bound mirror probe (`sessionKindProjectionDefinition`, `initSessionKindProjection`). `stateVersion` 1 → 2: a v1 checkpoint must be discarded and refolded, or a spawned child's wrong kind would stay durably cached. Fail-closed on a missing/throwing probe or an unreadable header.
+- **Wiring** (`src/plugin.ts`): the unit is registered before `createCordisDshHost` exists, so the probe is a mutable ref (`dispatcherMarkProbe`), assigned right after construction. Nothing captures the host instance at registration time.
+- **Client** (`src/client/session-kind.tsx`, `src/client/index.ts`): second, separately ruled seat — one additive `conversation.session.header.actions` entry (order 30, above stock `job-list` at 20 and `subagent-catalog` at 10). It resolves from `projectionValues.sessionKind` directly (`resolveHeaderDispatcherKind`), because the child IS `origin: 'subagent'` and `resolveSessionKind` would answer `"worker"` there; that function is unchanged. The worker marker is still not composed in any seat.
+
+Acceptance status under this ruling:
+
+- [x] The ruled seat renders the same `◆`-era mark for a spawned dispatcher (the shared bot portrait; `createSessionHeaderKindGlyph` reuses `SessionKindMark`).
+- [x] Offline: a spawned dispatcher session resolves to `"dispatcher"` from its durable facts (`test/spawned-dispatcher-kind.test.ts`).
+- [x] Offline: a user-started dispatcher is unchanged — its command fold still marks it.
+- [x] Offline: a worker still resolves `"worker"`; `resolveSessionKind` keeps `origin` first.
+- [x] Offline: a normal session renders nothing; a failed spawn leaves no mark.
+- [x] Composition: two seats, each licensed by a dated ruling; the sidebar registration and its inject-count pins moved 3 → 4 in the client suites.
+- [x] No new host channel: the mirror is our own in-process map, the projection is the existing key.
+
+Not covered by this ruling, left untouched: the message-resume half (ticket 138), the ADR-0024 rider prose rewrite (draft ADR pending), and any worker-model client-side effect of `origin`-first ordering.
+
+One boundary worth naming: a projection-cache row written by the PRE-140 unit (stateVersion 1) is discarded on read by the contract's version rule and refolds from `init`, which at boot has no mark in the mirror (it warms on activation). Such a child therefore projects null until something re-derives it — the same window the ticket-138 mirror already has. (SUPERSEDED by the fix-first comment below: the version now stays 1 and the abstain is per-row `resolved: false`, so only mirror-dependent cells retry.)
+
+### 2026-10-28 — FIX-FIRST review applied (same branch, second commit)
+
+Review items and what changed:
+
+1. **Header chip had no origin gate** — `resolveHeaderDispatcherKind` now requires `origin === "subagent"` AND `projectionValues.sessionKind === "dispatcher"`. A user-started dispatcher (origin unset) keeps its sidebar glyph and gets no second mark. Tests: `client-session-kind.test.ts` asserts a top-level dispatcher renders no chip, a spawned child renders one.
+2. **Cold-mirror self-poisoning** — the probe is now tri-state (`"dispatcher" | "not-dispatcher" | "unknown"`), backed by a new synchronous `DurabilityPort.peekDispatcherMark` (row / no-row / store-not-open) that never opens the store. The adapter's `dispatcherMarkAnswer` answers from the mirror first (spawn-time seed, warm-up writes) and falls back to the durable peek, which is the cold-resume and upgrade-boot case the review names. `init` with an `"unknown"` answer starts an UNRESOLVED cell (`resolved: false`, remembers the session id) instead of a definitive "not a dispatcher"; `apply` and `wire.view` re-ask on every later touch and settle once the source answers. Throwing probe → `"unknown"`. Tests: `spawned-dispatcher-kind.test.ts` covers cold mirror + durable row → dispatcher; cold store → unresolved, no definitive claim, later event settles; open store + absent row → resolved "no"; wire read settles without mutating state.
+3. **v2 discard hit user-started rows too** — fixed by not bumping: `stateVersion` stays 1. The abstain is per-row state (`resolved: false` in the row), so only cells whose derivation depends on the mirror retry, and every user-started dispatcher row keeps its cached `active: true` across the upgrade. The intermediate v2 stamped by the first commit of this branch is still discarded by the version guard, since its init-only derivation is what the review corrected. Recorded residual: a v1 row for a spawned child (status quo ante — no such child carried a mark before this ticket) reads as settled "not a dispatcher" until that session's log is refolded.
+4. Free fixes: (a) all spawn seeds (`reservedDispatcherIds`, the mark seed, the generation seed) now sit INSIDE the `try`, so a throw from the plugin-supplied `dispatcherGenerationOf` cannot leak a phantom; (b) `docs/surfaces.md` chip row now says order 30 and documents the origin gate; (c) stale test title updated to "four waits".
+5. Document-only residuals, no code: (a) a host that mints its own child id leaves the projection's `init` result keyed on the reserved id — defensive only, because the local spawn provider honours `spec.childId`; (b) a spawn whose `startLocal` activation is disposed leaves the projection row active on a disposed child — no one-liner exists (the projection registry has no per-session invalidation seam), and the row is harmlessly unread for a dead session. Both recorded here rather than guessed at.

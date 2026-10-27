@@ -453,6 +453,34 @@ describe("durable marker store over storageDomain", () => {
     assert.equal(sd.opens.length, 1, "the list shares the one open domain");
   });
 
+  it("peeks one mark synchronously without opening the store (ticket 140 review fix)", async () => {
+    const sd = createStubStorageDomain();
+    const durability = createStorageDomainDurability(sd);
+
+    // Cold: the domain has never been opened, so absence proves nothing.
+    assert.deepEqual(durability.peekDispatcherMark("child-1"), {
+      kind: "unknown",
+    });
+    assert.equal(sd.opens.length, 0, "a peek never opens the domain");
+
+    await durability.writeDispatcherMark({
+      sessionId: "child-1",
+      parentSessionId: "p-1",
+    });
+    // Open now: the row is answered synchronously from the same in-memory
+    // table every write mutated.
+    const hit = durability.peekDispatcherMark("child-1");
+    assert.equal(hit.kind, "dispatcher");
+    if (hit.kind === "dispatcher") {
+      assert.equal(hit.mark.parentSessionId, "p-1");
+    }
+    // Open and absent: a definitive "no".
+    assert.deepEqual(durability.peekDispatcherMark("chat-1"), {
+      kind: "not-dispatcher",
+    });
+    assert.equal(sd.opens.length, 1, "the peek reused the one open domain");
+  });
+
   /**
    * Ticket 142 (owner ruling 2026-10-22 — the children half): the wake
    * identity of a WORKER session. It lives in the same domain, follows the

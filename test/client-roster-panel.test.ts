@@ -974,14 +974,15 @@ describe("roster panel — apply() registers only the additive entries; the over
     );
   });
 
-  it("fiber teardown (HMR) frees every registration; re-apply restores three waits", () => {
+  it("fiber teardown (HMR) frees every registration; re-apply restores four waits", () => {
     const ctx = createClientCtx();
     apply(ctx);
-    // Three declaration waits: tool.call.toolview (ticket 24),
-    // plugins.row.config (ticket 47), and the sidebar session-kind glyph
-    // (ticket 123). No settings-scope watch exists on 0.2.1, so the
-    // composition makes no runtime inject request at all.
-    assert.equal(ctx.injects.length, 3);
+    // Four declaration waits: tool.call.toolview (ticket 24),
+    // plugins.row.config (ticket 47), the sidebar session-kind glyph
+    // (ticket 123), and the header chip (ticket 140). No settings-scope watch
+    // exists on 0.2.1, so the composition makes no runtime inject request at
+    // all.
+    assert.equal(ctx.injects.length, 4);
 
     ctx.runFiberTeardown();
     assert.equal(ctx.injects.length, 0);
@@ -991,7 +992,7 @@ describe("roster panel — apply() registers only the additive entries; the over
     // live cell would throw the shipped slot collision (the fake models that
     // rule), so teardown really must free every cell — assert it.
     assert.doesNotThrow(() => apply(ctx));
-    assert.equal(ctx.injects.length, 3);
+    assert.equal(ctx.injects.length, 4);
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
   });
 });

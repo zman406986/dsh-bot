@@ -86,8 +86,36 @@ import {
 export const SESSION_KIND_PROJECTION_KEY = "sessionKind";
 
 /**
- * Persisted-cache invalidation version. Bump whenever the state fields or
- * fold semantics change (`ProjectionDefinition.stateVersion`).
+ * Persisted-cache invalidation version (`ProjectionDefinition.stateVersion`).
+ *
+ * STAYS 1 (ticket 140 review fix, item 3). The contract's bump rule exists so
+ * rows an older unit wrote are not forward-applied into garbage. Here they
+ * cannot be:
+ *
+ * - the fold semantics are unchanged — `apply` still performs the same pure
+ *   command-log fold; the mark source only ADDS a start signal the log cannot
+ *   carry;
+ * - the new fields are optional and additive; a row that lacks them parses as
+ *   "resolved", which is correct for every row whose `active` came from the log
+ *   alone (every user-started dispatcher row);
+ * - a row written while the mark source could not answer carries
+ *   `resolved: false` IN THE ROW, so the abstain is per-row state rather than a
+ *   unit-wide version. `parse` restores it and every later event / wire read
+ *   re-derives. That is the "only the rows whose derivation depends on the
+ *   mirror" seam: exactly those rows retry, and no correct row is thrown away.
+ *
+ * Keeping 1 therefore fixes review item 3 by construction: a user-started
+ * dispatcher's cached `active: true` survives the upgrade, so its sidebar glyph
+ * never disappears. (A v2 row — stamped by the intermediate build of this
+ * branch — is discarded by the same version guard, since v2's init-only
+ * derivation is what this review corrected.)
+ *
+ * RECORDED RESIDUAL: a v1 row written for a SPAWNED child before this ticket
+ * says `active: false` with no `resolved` marker, so it seeds that cell as a
+ * settled "not a dispatcher" and that one child keeps no chip until its log is
+ * refolded from `init` (cache loss / a full cold read). That is the exact
+ * status quo ante — no spawned child carried a mark before this ticket — so it
+ * is not a regression. See the ticket comment.
  */
 export const SESSION_KIND_PROJECTION_STATE_VERSION = 1;
 
@@ -108,11 +136,31 @@ export const LEGACY_DISPATCHER_STOP_COMMAND = "dispatcher-stop";
  * Host fold state. Plain JSON on purpose (the projection cache persists it).
  * `pending*` hold commandIds seen in `command/run` and not yet settled by
  * `command/done`; they let concurrent command transactions pair correctly.
+ *
+ * `resolved` (ticket 140 review fix) says whether the non-log source — the
+ * dispatcher-mark mirror — has answered for this session yet. `apply` folds
+ * the LOG, so it cannot derive dispatcher identity for a spawned child (whose
+ * log never carries `/dsh-bot`); when a cell is first built while the mirror is
+ * cold (a resumed child at boot, an upgrade boot), `init` records
+ * `resolved: false` — "not decided yet" — rather than a definitive "not a
+ * dispatcher". Every later committed event re-consults the late-bound probe
+ * ({@link applySessionKindProjection}'s third argument) and flips this flag
+ * once the mirror answers, so the cached row never claims a final answer it
+ * cannot support. Until then the wire value stays `null` (fail closed: an
+ * unknown kind is never displayed as a mark).
+ *
+ * `sessionId` rides the state only for an UNRESOLVED cell — `apply` receives
+ * no Session, so this is how the re-derivation names the id it asks about.
+ * Once resolved the field is dropped; a resolved cell never needs it.
  */
 export interface SessionKindProjectionState {
   readonly active: boolean;
   readonly pendingStarts: readonly string[];
   readonly pendingStops: readonly string[];
+  /** False until the mirror has answered for this session (see above). */
+  readonly resolved?: boolean;
+  /** The session an unresolved cell belongs to (see above). */
+  readonly sessionId?: string;
 }
 
 /** The minimal structural event view the fold reads (never throws on junk). */
@@ -192,6 +240,135 @@ export const INITIAL_SESSION_KIND_STATE: SessionKindProjectionState =
     pendingStops: Object.freeze([]) as readonly string[],
   });
 
+/** Frozen UNRESOLVED state (ticket 140 review fix): the mirror AND the
+ * durable table could not answer yet, so the cell carries no kind claim and
+ * remembers its session id for the next read/event's re-derivation. Shared,
+ * never mutated. */
+export const UNRESOLVED_SESSION_KIND_STATE: SessionKindProjectionState =
+  Object.freeze({
+    active: false,
+    pendingStarts: Object.freeze([]) as readonly string[],
+    pendingStops: Object.freeze([]) as readonly string[],
+    resolved: false,
+  });
+
+/**
+ * Ticket 140 review fix: the three answers the dispatcher-mark source can
+ * give. `"unknown"` is NOT "no": it means the source has not loaded yet
+ * (the durable store's open is async), so the projection must abstain instead
+ * of caching a definitive "not a dispatcher".
+ */
+export type DispatcherMarkAnswer = "dispatcher" | "not-dispatcher" | "unknown";
+
+/** Late-bound probe for the dispatcher-mark source. */
+export type DispatcherMarkProbe = (sessionId: string) => DispatcherMarkAnswer;
+
+/**
+ * Ticket 140: the session id carried by the header the registry hands
+ * `init`. `header.id` is the host `SessionId` (`dsh-session/lib/types/
+ * types.d.ts:66`) and equals the id the session row is listed under. Any
+ * other shape answers null so the projection fails closed.
+ */
+export function sessionIdOfHeader(header: unknown): string | null {
+  if (typeof header !== "object" || header === null) return null;
+  const id = (header as { id?: unknown }).id;
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
+
+/**
+ * Ticket 140 (review fix): apply one probe answer to a state. Resolved
+ * answers settle the cell and drop the remembered id; `"unknown"` keeps the
+ * cell unresolved for the next read.
+ */
+function settleFromAnswer(
+  state: SessionKindProjectionState,
+  sessionId: string,
+  answer: DispatcherMarkAnswer,
+): SessionKindProjectionState {
+  if (answer === "unknown") {
+    return state.resolved === false && state.sessionId === sessionId
+      ? state
+      : {
+          ...state,
+          resolved: false,
+          sessionId,
+        };
+  }
+  const active = answer === "dispatcher" ? true : state.active;
+  return {
+    active,
+    pendingStarts: state.pendingStarts,
+    pendingStops: state.pendingStops,
+  };
+}
+
+/**
+ * Ticket 140: the unit's `init` for a session whose dispatcher identity may
+ * already be known from the adapter's dispatcher-mark source (the in-memory
+ * mirror plus its durable table).
+ *
+ * A spawned dispatcher is a host subagent child: its own log carries no
+ * `command/run` pair (nobody typed `/dsh-bot` in it), so the command fold
+ * alone would report it as NOT a dispatcher — and the projection cache would
+ * checkpoint that wrong kind durably. `spawnDispatcher` seeds the mirror with
+ * the reserved child id BEFORE `startActivation`, so by the time the host
+ * announces `session/created` the id is already known. The probe is a
+ * late-bound accessor: the unit is registered before the host object exists
+ * (`src/plugin.ts`), so this function must never capture a host instance.
+ *
+ * Review fix: an `"unknown"` answer is NOT cached as "not a dispatcher". The
+ * cell starts UNRESOLVED ({@link UNRESOLVED_SESSION_KIND_STATE}) and every
+ * later event re-asks ({@link applySessionKindProjection}); until an answer
+ * lands the wire value is `null`, so an unknown session renders no mark
+ * rather than a wrong one.
+ *
+ * Fail-closed: an unreadable header or a throwing probe start from the empty
+ * (or unresolved) state — a cosmetic indicator must never break the create
+ * path. With NO probe at all, the command fold is the only authority, which
+ * is the pre-140 shape and needs no later re-derivation.
+ */
+export function initSessionKindProjection(
+  header: unknown,
+  probe?: DispatcherMarkProbe,
+): SessionKindProjectionState {
+  const sessionId = sessionIdOfHeader(header);
+  if (sessionId === null) return INITIAL_SESSION_KIND_STATE;
+  if (probe === undefined) {
+    // No source at all: the command fold is the only authority (pre-140).
+    // That is a RESOLVED starting point — nothing else can ever settle it.
+    return INITIAL_SESSION_KIND_STATE;
+  }
+  let answer: DispatcherMarkAnswer = "unknown";
+  try {
+    answer = probe(sessionId);
+  } catch {
+    answer = "unknown";
+  }
+  return settleFromAnswer(INITIAL_SESSION_KIND_STATE, sessionId, answer);
+}
+
+/**
+ * Ticket 140 review fix: re-ask the dispatcher-mark source for a cell that
+ * is still UNRESOLVED. Called from the fold on every committed event (the
+ * only moment the unit is touched), and exposed for a direct settle after a
+ * mirror warm-up. A resolved cell is returned unchanged (same reference).
+ */
+export function resolveSessionKindState(
+  state: SessionKindProjectionState,
+  probe?: DispatcherMarkProbe,
+): SessionKindProjectionState {
+  if (state.resolved !== false) return state;
+  const sessionId = state.sessionId;
+  if (sessionId === undefined || probe === undefined) return state;
+  let answer: DispatcherMarkAnswer = "unknown";
+  try {
+    answer = probe(sessionId);
+  } catch {
+    answer = "unknown";
+  }
+  return settleFromAnswer(state, sessionId, answer);
+}
+
 /** Defensive event-data read: null for anything but a plain object. */
 function eventDataOf(
   event: SessionProjectionEventLike,
@@ -213,11 +390,18 @@ function removeAt(
  * Pure transition. Returns the SAME state reference for every event this
  * unit does not own (the registry's documented no-work rule) and for a
  * duplicate command id.
+ *
+ * `probe` (ticket 140 review fix) is the late-bound dispatcher-mark source.
+ * It is consulted ONLY while the state is unresolved, so the re-derivation
+ * costs one lookup per event until the source answers, then nothing. Omitted
+ * (stub callers, pre-140 shapes) keeps the pure command fold.
  */
 export function applySessionKindProjection(
   state: SessionKindProjectionState,
   event: SessionProjectionEventLike,
+  probe?: DispatcherMarkProbe,
 ): SessionKindProjectionState {
+  state = resolveSessionKindState(state, probe);
   if (event.type === "command/run") {
     const data = eventDataOf(event);
     if (data === null) return state;
@@ -267,17 +451,19 @@ export function applySessionKindProjection(
     if (typeof commandId !== "string") return state;
     const startIndex = state.pendingStarts.indexOf(commandId);
     if (startIndex >= 0) {
+      // Spread from `state` so an UNRESOLVED cell keeps its re-derivation
+      // marker through a log transition (review fix).
       return {
+        ...state,
         active: outcome === "success" ? true : state.active,
         pendingStarts: removeAt(state.pendingStarts, startIndex),
-        pendingStops: state.pendingStops,
       };
     }
     const stopIndex = state.pendingStops.indexOf(commandId);
     if (stopIndex >= 0) {
       return {
+        ...state,
         active: outcome === "success" ? false : state.active,
-        pendingStarts: state.pendingStarts,
         pendingStops: removeAt(state.pendingStops, stopIndex),
       };
     }
@@ -323,10 +509,24 @@ export function parseSessionKindProjectionState(
       "sessionKind projection state.pendingStops must be an array of strings",
     );
   }
+  const resolved = record["resolved"];
+  const sessionId = record["sessionId"];
+  if (resolved !== undefined && typeof resolved !== "boolean") {
+    throw new Error(
+      "sessionKind projection state.resolved must be a boolean when present",
+    );
+  }
+  if (sessionId !== undefined && typeof sessionId !== "string") {
+    throw new Error(
+      "sessionKind projection state.sessionId must be a string when present",
+    );
+  }
   return {
     active: record["active"],
     pendingStarts: [...(starts as string[])],
     pendingStops: [...(stops as string[])],
+    ...(resolved !== undefined ? { resolved } : {}),
+    ...(sessionId !== undefined ? { sessionId } : {}),
   };
 }
 
@@ -442,6 +642,42 @@ export const SESSION_KIND_PROJECTION_DEFINITION: SessionProjectionDefinitionLike
   };
 
 /**
+ * Ticket 140 (review fix): the same unit, with `init` AND `apply` consulting
+ * the late-bound dispatcher-mark source, so a spawned dispatcher child
+ * projects `"dispatcher"` from its session's creation — and a cell first
+ * built while the source cannot answer stays UNRESOLVED instead of caching a
+ * definitive "not a dispatcher". Everything else is shared with
+ * {@link SESSION_KIND_PROJECTION_DEFINITION} by reference.
+ *
+ * The probe is read at CALL time through the thunk, not captured as a host
+ * object: the unit is registered before the host exists (`src/plugin.ts`).
+ *
+ * @param probeOf the late-bound probe thunk; omitted means the command fold is
+ *   the only source (the pre-140 shape).
+ */
+export function sessionKindProjectionDefinition(
+  probeOf?: () => DispatcherMarkProbe | undefined,
+): SessionProjectionDefinitionLike<SessionKindProjectionState> {
+  if (probeOf === undefined) {
+    return SESSION_KIND_PROJECTION_DEFINITION;
+  }
+  return {
+    ...SESSION_KIND_PROJECTION_DEFINITION,
+    init: (header) => initSessionKindProjection(header, probeOf()),
+    apply: (state, event) =>
+      applySessionKindProjection(state, event, probeOf()),
+    wire: {
+      ...SESSION_KIND_PROJECTION_DEFINITION.wire,
+      // Review fix: a cell checkpointed while unresolved (no event since)
+      // must still show its mark once the source can answer — the wire read
+      // re-asks without mutating the state, so the stored row never claims a
+      // final answer and the next event settles it for real.
+      view: (state) => viewSessionKind(resolveSessionKindState(state, probeOf())),
+    },
+  };
+}
+
+/**
  * Register the unit through the host registry.
  *
  * Optional by design: a host without `sessionProjections` (older trees,
@@ -450,21 +686,27 @@ export const SESSION_KIND_PROJECTION_DEFINITION: SessionProjectionDefinitionLike
  * host), the registration is made on the injected child so unloading this
  * plugin removes the key with it.
  *
+ * @param probeOf ticket 140 (review fix): a late-bound thunk for the
+ *   dispatcher-mark source. The plugin registers this unit BEFORE the host
+ *   object exists, so the probe must be read at call time, never captured.
+ *   Omitted: the command fold is the only source.
  * @returns the registry's own disposer, or null when no registry answered.
  *   Registration is already an effect on the calling/injected fiber; the
  *   disposer exists for explicit early removal (tests, HMR teardown).
  */
 export function registerSessionKindProjection(
   ctx: SessionProjectionHostLike,
+  probeOf?: () => DispatcherMarkProbe | undefined,
 ): (() => void) | null {
   let dispose: (() => void) | null = null;
+  const definition = sessionKindProjectionDefinition(probeOf);
   const registerOn = (host: SessionProjectionChildLike): void => {
     const registry = host.sessionProjections;
     if (registry === undefined || typeof registry.register !== "function") {
       return;
     }
     try {
-      dispose = registry.register(SESSION_KIND_PROJECTION_DEFINITION);
+      dispose = registry.register(definition);
     } catch (error) {
       // A cosmetic indicator must never break dispatcher activation: a host
       // that rejects the unit (e.g. a key/version conflict) leaves the client

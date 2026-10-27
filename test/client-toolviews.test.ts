@@ -699,12 +699,13 @@ describe("toolview — apply() registers one keyed entry per tool via the fake s
     const ctx = createClientCtx();
     apply(ctx);
 
-    // Three injects: tool.call.toolview (toolviews) + plugins.row.config
+    // Four injects: tool.call.toolview (toolviews) + plugins.row.config
     // (ticket 47's settings page) + the dispatcher session-kind glyph in the
-    // sidebar leading cell (ticket 123). The `main` page and `root` election
+    // sidebar leading cell (ticket 123) + the dispatcher header chip
+    // (ticket 140, 2026-10-28 ruling). The `main` page and `root` election
     // are not composed (stock dsh stays primary). The shell.overlay injects
     // (capsule, launcher) retired at the ticket-78 cutover.
-    assert.equal(ctx.injects.length, 3);
+    assert.equal(ctx.injects.length, 4);
     const overlay = ctx.findInject(SHELL_OVERLAY_SLOT);
     const toolviews = ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT);
     assert.equal(overlay, undefined, "no overlay inject post-cutover");
@@ -756,7 +757,7 @@ describe("toolview — HMR reversal over the fake seam", () => {
     // left any entry in its cell (the fake now models that rule), so the
     // HMR-reversal assertion is a real contract check, not just a count.
     assert.doesNotThrow(() => apply(ctx));
-    assert.equal(ctx.injects.length, 3);
+    assert.equal(ctx.injects.length, 4);
     assert.equal(
       ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT)?.entries.length,
       TOOLVIEW_TOOL_NAMES.length,

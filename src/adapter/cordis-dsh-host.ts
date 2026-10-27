@@ -389,6 +389,23 @@ export interface CordisDshHost extends DshHost {
    */
   isDurablyMarkedDispatcher(sessionId: string): boolean;
   /**
+   * Ticket 140 (review fix): the tri-state answer the `sessionKind` projection
+   * unit consumes from `init` and from every fold step of an unresolved cell.
+   *
+   * - `"dispatcher"` — the in-memory mirror knows the id (spawn-time seed, an
+   *   in-process write, or a warm-up read), OR the durable table holds a row;
+   * - `"not-dispatcher"` — nothing knows it AND no durable seam exists at all
+   *   (stub stores), the only case where absence is definitive;
+   * - `"unknown"` — the durable store has not been opened yet, so absence
+   *   proves nothing. The unit records that as UNRESOLVED and re-asks on the
+   *   next event instead of caching a wrong kind.
+   *
+   * Synchronous by construction: the projection contract forbids I/O.
+   */
+  dispatcherMarkAnswer(
+    sessionId: string,
+  ): "dispatcher" | "not-dispatcher" | "unknown";
+  /**
    * Ticket 138: merge the store's current mark table into the mirror.
    * Called once per dispatcher activation (from the plugin's `onActivated`
    * chain, after the durability rebuild) — in-process writes enter the mirror
@@ -1788,6 +1805,37 @@ export function createCordisDshHost(
       return dispatcherMarks.has(sessionId);
     },
 
+    dispatcherMarkAnswer(
+      sessionId: string,
+    ): "dispatcher" | "not-dispatcher" | "unknown" {
+      // Ticket 140 review fix: the projection unit's `init`/`apply` asks THIS.
+      // Fast path: the in-memory mirror, which carries the spawn-time seed
+      // (so a child is answered before its durable row exists) and every mark
+      // warmed at boot. When the mirror does not know the id, the durable
+      // table answers — that is the cold case this fix is for (a resumed
+      // child at boot, before the plugin's activation-time warm-up ran). An
+      // unopened store answers "unknown", which the unit records as
+      // unresolved instead of caching a wrong "not a dispatcher".
+      if (dispatcherMarks.has(sessionId)) return "dispatcher";
+      const store = markers;
+      if (store === undefined) {
+        // No durable store at all: nothing was ever persisted, so the mirror
+        // is the whole authority and its absence IS definitive.
+        return "not-dispatcher";
+      }
+      if (store.peekDispatcherMark === undefined) {
+        // A store exists but cannot be peeked synchronously (an older
+        // implementation, or a test double). Rows from a previous process
+        // would be invisible, so absence proves nothing.
+        return "unknown";
+      }
+      try {
+        return store.peekDispatcherMark(sessionId).kind;
+      } catch {
+        return "unknown";
+      }
+    },
+
     async refreshDispatcherMarks(): Promise<void> {
       const store = markers;
       if (store === undefined || store.listDispatcherMarks === undefined) {
@@ -2162,21 +2210,30 @@ export function createCordisDshHost(
       // before it resolves on the installed host — so identity is the only
       // correlation available while the spawn is in flight.
       const reservedChildId = randomUUID();
-      reservedDispatcherIds.add(reservedChildId);
-      // Ticket 141: the child is one generation past its spawner. A
-      // user-started dispatcher is generation 1 (the option is absent for
-      // every pre-141 caller), so a direct spawn is generation 2.
-      const spawnerGeneration =
-        dispatcherGenerationOf?.(opts.parentSessionId) ?? 1;
-      const childGeneration = spawnerGeneration + 1;
-      // Seed it BEFORE `startActivation`: `agent/created` fires inside that
-      // call, and the mark row — the other source of this number — is only
-      // written after it resolves. Without the seed the first activation
-      // would read no generation at all.
-      dispatcherGenerations.set(reservedChildId, childGeneration);
       /** The id the host actually gave the child, or null if it refused. */
       let spawnedId: string | null = null;
       try {
+        // Every seed below is INSIDE the try (review fix): the generation
+        // callback is plugin-supplied and can throw, and a seed written
+        // outside the try would then outlive the failed spawn — a phantom
+        // reservation / mark the `finally` never revisits.
+        reservedDispatcherIds.add(reservedChildId);
+        // Ticket 140 (review fix): seed the durable-mark MIRROR with the
+        // reserved id BEFORE `startActivation`. The `sessionKind` projection
+        // unit's `init` runs at `session/created`, inside that call, and reads
+        // this source; the durable row is only written after the spawn
+        // resolves (below), so an unseeded init would have nothing to read.
+        dispatcherMarks.set(reservedChildId, opts.parentSessionId);
+        // Ticket 141: the child is one generation past its spawner. A
+        // user-started dispatcher is generation 1 (the option is absent for
+        // every pre-141 caller), so a direct spawn is generation 2. Seeded
+        // BEFORE `startActivation`: `agent/created` fires inside that call,
+        // and the mark row — the other source of this number — is only
+        // written after it resolves.
+        const spawnerGeneration =
+          dispatcherGenerationOf?.(opts.parentSessionId) ?? 1;
+        const childGeneration = spawnerGeneration + 1;
+        dispatcherGenerations.set(reservedChildId, childGeneration);
         const activation = await ctx.subagents.startActivation({
           provider: SPAWN_PROVIDER,
           label: opts.title,
@@ -2235,6 +2292,14 @@ export function createCordisDshHost(
         // seed moved under that id above.)
         if (spawnedId === null) {
           dispatcherGenerations.delete(reservedChildId);
+        }
+        // Ticket 140: the mirror never self-deletes and the peer fence
+        // (`src/core/multitask.ts`) reads it, so a failed spawn must not leave
+        // a phantom dispatcher mark. The same applies when the host minted its
+        // own id: the reservation never became a session, and the durable
+        // write above keyed the REAL child id instead.
+        if (spawnedId !== reservedChildId) {
+          dispatcherMarks.delete(reservedChildId);
         }
       }
     },

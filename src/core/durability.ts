@@ -153,6 +153,15 @@ export interface DurableDispatcherMark {
 }
 
 /**
+ * Ticket 140 review fix: the three answers a SYNCHRONOUS mark peek can give.
+ * See {@link DurabilityPort.peekDispatcherMark}.
+ */
+export type DurableDispatcherMarkAnswer =
+  | { readonly kind: "dispatcher"; readonly mark: DurableDispatcherMark }
+  | { readonly kind: "not-dispatcher" }
+  | { readonly kind: "unknown" };
+
+/**
  * Ticket 142 (owner ruling 2026-10-22 — the CHILDREN half of "bots should be
  * wake-able"): the durable wake identity of a WORKER session — one row per
  * child this plugin spawned as a worker, keyed by the worker id (which IS the
@@ -247,6 +256,23 @@ export interface DurabilityPort {
   listDispatcherMarks?():
     | readonly DurableDispatcherMark[]
     | Promise<readonly DurableDispatcherMark[]>;
+  /**
+   * Ticket 140 review fix: a SYNCHRONOUS, single-row read of the mark table
+   * that never opens the store. Three answers, because two are not enough:
+   *
+   * - `"dispatcher"` — the row is right there;
+   * - `"not-dispatcher"` — the table is open and holds no row for this id, so
+   *   the absence is a real answer;
+   * - `"unknown"` — the store has not been opened yet (its open is async), so
+   *   absence proves nothing.
+   *
+   * The projection unit's `init` is synchronous and must not cache a
+   * definitive "not a dispatcher" it cannot support, so it needs exactly this
+   * distinction. Optional like the other mark seams: a store that omits it
+   * answers `"unknown"` from the caller's point of view until it reports
+   * `"not-dispatcher"` some other way.
+   */
+  peekDispatcherMark?(sessionId: string): DurableDispatcherMarkAnswer;
   /**
    * Ticket 142 (owner ruling 2026-10-22 — children half): record that this
    * worker id is a live worker session this plugin spawned, and which
