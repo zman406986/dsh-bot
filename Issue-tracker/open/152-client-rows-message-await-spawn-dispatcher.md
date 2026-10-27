@@ -36,3 +36,11 @@ Effect for the user: the three most visible peer/mitosis actions — sending to 
 ## Comments
 
 2026-10-28: Filed from a read-only gap scan. The lag is already documented in code and docs — this ticket closes it; it does not discover a defect.
+
+2026-10-28 (implementation, branch `ticket-152-tool-rows`): done, awaiting review — Status stays open.
+
+- `src/client/toolviews.ts`: added `describeMessageAgent` (target, acceptance lane `delivered_as`, priority, ok/refusal outcome; message body never rendered), `describeAwaitAgent` (worker id, status line — `settled · <worker_status>`, `released · <reason>`, or a plain `still-running`/`gone`; a refusal adds the verbatim reason as outcome), and `describeSpawnDispatcher` (child session id, clamped title from result with args fallback, outcome; handoff prompt never rendered). `TOOLVIEW_TOOL_NAMES` is now `DISPATCHER_TOOL_NAMES` + the retained historical `send_peer` key (nine keys); the "deliberate lag" comment is replaced with the closed state.
+- `src/client/overlay.ts`: four new field keys in both faces — `toolview.field.agent`, `toolview.field.status`, `toolview.field.delivered-as`, `toolview.field.dispatcher`; en/zh parity intact (validator passes).
+- `docs/surfaces.md`: the tool-view row is now "Nine tool call views" and no longer describes a gap; `src/client/index.ts` module comment updated to the nine-key count.
+- Tests: `test/client-toolviews.test.ts` — the claim pin now expects the exact dispatcher surface plus `send_peer`; three new describe blocks (one per tool) cover the key fields, refusal/degrade paths, wrong-typed fields, and body/prompt non-rendering. The locale-key pin in `test/client-face-scaffold.test.ts` gained the four new keys.
+- Verification (worktree only): `tsx --test test/client-toolviews.test.ts test/client-face-scaffold.test.ts test/coexistence.test.ts test/client-conversation-surface.test.ts` → 230 pass, 0 fail; `npm run typecheck` clean.

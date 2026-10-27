@@ -235,9 +235,9 @@ This turn was opened by the peer inbox.`;
     const rendered = JSON.stringify(transcript.items);
     assert.equal(rendered.includes("Peer message"), false);
     assert.equal(rendered.includes("peer inbox"), false);
-    // Peer traffic, if ever shown, is a tool row (the client face still keys
-    // historical send_peer rows; message_agent rows degrade to the generic
-    // fallback) — never a fabricated user/assistant bubble.
+    // Peer traffic, if ever shown, is a tool row (historical send_peer rows
+    // and, since ticket 152, message_agent rows each get their own row) —
+    // never a fabricated user/assistant bubble.
   });
 
   it("omits text-less assistant messages (tool-call-only steps) instead of empty bubbles", () => {

@@ -1141,7 +1141,7 @@ describe("coexistence — client face: additive lists and keyed cells (Finding 5
     assert.match(options.id, /^foreign-helper-/);
   });
 
-  it("tool.call.toolview: foreign key cell unaffected by the five dispatcher keys", () => {
+  it("tool.call.toolview: foreign key cell unaffected by the dispatcher keys", () => {
     const ctx = createClientCtx();
     applyForeignClientPlugin(ctx);
     applyDispatcherClient(ctx);

@@ -4,9 +4,9 @@
  * The shipped `tool.call.toolview` slot is KEYED by wire tool name (Finding 5,
  * `dsh-client-ui-tool` contract/slots.d.ts:9-23): a key the shipped
  * composition already covers is replaced, not shared; an UNCLAIMED key falls
- * back to the generic tool row. The dispatcher tool names (five since ticket
- * 11, six since ticket 70 added `send_peer`) have been plugin-owned and none
- * is claimed by any shipped
+ * back to the generic tool row. The dispatcher tool names (eight since
+ * ticket 118; nine keys claimed here with the retained historical
+ * `send_peer`) have been plugin-owned and none is claimed by any shipped
  * `dsh-client-ui-*` package (shipped claims per the 0.1.5-rc.1 catalog:
  * `cordis_define` / `cordis_run` only), so claiming them is additive-safe.
  *
@@ -23,10 +23,13 @@
  */
 
 import {
+  AWAIT_AGENT_TOOL,
   CHECK_WORKERS_TOOL,
   DELIVER_RESULT_TOOL,
   DISPATCHER_TOOL_NAMES,
+  MESSAGE_AGENT_TOOL,
   SEND_PEER_TOOL,
+  SPAWN_DISPATCHER_TOOL,
   SPAWN_WORKER_TOOL,
   STEER_WORKER_TOOL,
   STOP_WORKER_TOOL,
@@ -40,20 +43,18 @@ import { LOCALE_NAMESPACE } from "./overlay.js";
 export const TOOL_CALL_TOOLVIEW_SLOT = "tool.call.toolview";
 
 /**
- * The wire tool names this face claims, in registration order — the five
- * long-standing dispatcher tools plus the retained historical `send_peer`
- * key. `deliver_result` is included because its call row benefits from an
+ * The wire tool names this face claims, in registration order — the eight
+ * dispatcher tools plus the retained historical `send_peer` key (ticket 152).
+ * `deliver_result` is included because its call row benefits from an
  * at-a-glance delivered/todo outcome on wake turns (ticket 24 "if it
  * benefits"); `send_peer` (ticket 70) because its row is the user-visible
  * trace of peer traffic on the conversation surface.
  *
- * Deliberate lag, recorded rather than hidden: the dispatcher surface has
- * since grown to eight tools — `message_agent` (ticket 116, which reuses the
- * `send_peer` key), `await_agent` (ticket 117) and `spawn_dispatcher`
- * (ticket 118). This face has no row renderer for any of the three, so it
- * claims none of them by name; their calls fall back to the generic tool
- * row. Adding renderers is client work, separate from the core tickets that
- * registered the tools.
+ * `message_agent` (ticket 116), `await_agent` (ticket 117) and
+ * `spawn_dispatcher` (ticket 118) had no row renderer here — the deliberate
+ * lag ticket 152 closes: each now has its own parser below, so the dispatcher
+ * surface is covered key for key. `send_peer` stays claimed because
+ * transcripts from before ticket 116 still carry those rows.
  */
 export const TOOLVIEW_TOOL_NAMES: readonly string[] = [
   SPAWN_WORKER_TOOL,
@@ -61,6 +62,9 @@ export const TOOLVIEW_TOOL_NAMES: readonly string[] = [
   STEER_WORKER_TOOL,
   STOP_WORKER_TOOL,
   DELIVER_RESULT_TOOL,
+  MESSAGE_AGENT_TOOL,
+  AWAIT_AGENT_TOOL,
+  SPAWN_DISPATCHER_TOOL,
   SEND_PEER_TOOL,
 ];
 
@@ -107,6 +111,12 @@ export const TOOLVIEW_FIELD_KEYS = {
   attachments: "toolview.field.attachments",
   peer: "toolview.field.peer",
   priority: "toolview.field.priority",
+  // Ticket 152: labels for the message_agent / await_agent /
+  // spawn_dispatcher rows.
+  agent: "toolview.field.agent",
+  status: "toolview.field.status",
+  deliveredAs: "toolview.field.delivered-as",
+  dispatcher: "toolview.field.dispatcher",
 } as const;
 
 /** Locale key for the degraded row copy. */
@@ -375,6 +385,102 @@ function describeSendPeer(payload: ToolCallPayload): ToolviewModel {
 }
 
 /**
+ * Ticket 152: the message_agent row (ticket 116's one messaging verb). The
+ * target is the thing the user cares about, and `delivered_as` says which
+ * lane accepted it ("steer" = your worker, "peer" = another dispatcher). The
+ * message BODY never renders here, same rule as `send_peer`; the call's text
+ * stays in the dispatcher's turns.
+ */
+function describeMessageAgent(payload: ToolCallPayload): ToolviewModel {
+  const args = asRecord(payload.args);
+  const result = asRecord(payload.result);
+  const fields: ToolviewField[] = [];
+
+  const target = asString(result?.target) ?? asString(args?.target);
+  if (target !== null) {
+    fields.push({ labelKey: TOOLVIEW_FIELD_KEYS.agent, value: target });
+  }
+  const deliveredAs = asString(result?.delivered_as);
+  if (deliveredAs !== null) {
+    fields.push({ labelKey: TOOLVIEW_FIELD_KEYS.deliveredAs, value: deliveredAs });
+  }
+  const priority = asBool(args?.priority);
+  if (priority !== null) {
+    fields.push({
+      labelKey: TOOLVIEW_FIELD_KEYS.priority,
+      value: priority ? "true" : "false",
+    });
+  }
+  const outcome = outcomeField(result);
+  if (outcome !== null) fields.push(outcome);
+
+  return detailOrDegraded(fields, []);
+}
+
+/**
+ * Ticket 152: the await_agent row (ticket 117's one bounded wait). The
+ * worker id plus the outcome status is the whole story: `settled` carries
+ * the worker's terminal status after it, and a `released` wait names which
+ * racer cut it short. A timeout is a normal outcome, so no "Outcome" field
+ * on the success path — only a refusal renders its reason.
+ */
+function describeAwaitAgent(payload: ToolCallPayload): ToolviewModel {
+  const args = asRecord(payload.args);
+  const result = asRecord(payload.result);
+  const fields: ToolviewField[] = [];
+
+  const target = asString(result?.target) ?? asString(args?.target);
+  if (target !== null) {
+    fields.push({ labelKey: TOOLVIEW_FIELD_KEYS.worker, value: target });
+  }
+  const status = asString(result?.status);
+  if (status !== null) {
+    const workerStatus = asString(result?.worker_status);
+    const reason = asString(result?.reason);
+    const detail =
+      status === "settled" && workerStatus !== null
+        ? `${status} · ${workerStatus}`
+        : status === "released" && reason !== null
+          ? `${status} · ${reason}`
+          : status;
+    fields.push({ labelKey: TOOLVIEW_FIELD_KEYS.status, value: detail });
+  }
+  if (result !== null && asBool(result.ok) === false) {
+    const outcome = outcomeField(result);
+    if (outcome !== null) fields.push(outcome);
+  }
+
+  return detailOrDegraded(fields, []);
+}
+
+/**
+ * Ticket 152: the spawn_dispatcher row (ticket 118's mitosis). The child
+ * session id is what the dispatcher messages later, so it leads; the title
+ * names what was summoned. The handoff prompt never renders here.
+ */
+function describeSpawnDispatcher(payload: ToolCallPayload): ToolviewModel {
+  const args = asRecord(payload.args);
+  const result = asRecord(payload.result);
+  const fields: ToolviewField[] = [];
+
+  const dispatcherId = asString(result?.dispatcher_id);
+  if (dispatcherId !== null) {
+    fields.push({
+      labelKey: TOOLVIEW_FIELD_KEYS.dispatcher,
+      value: dispatcherId,
+    });
+  }
+  const title = clampText(result?.title) ?? clampText(args?.title);
+  if (title !== null) {
+    fields.push({ labelKey: TOOLVIEW_FIELD_KEYS.title, value: title });
+  }
+  const outcome = outcomeField(result);
+  if (outcome !== null) fields.push(outcome);
+
+  return detailOrDegraded(fields, []);
+}
+
+/**
  * Parse one tool call payload into a view model for the given wire tool
  * name. Never throws: every deviation (foreign tool name, non-object props,
  * wrong-typed fields, junk rows) degrades to the safe `degraded` model.
@@ -401,6 +507,12 @@ export function describeToolview(
         return describeStop(payload);
       case DELIVER_RESULT_TOOL:
         return describeDeliver(payload);
+      case MESSAGE_AGENT_TOOL:
+        return describeMessageAgent(payload);
+      case AWAIT_AGENT_TOOL:
+        return describeAwaitAgent(payload);
+      case SPAWN_DISPATCHER_TOOL:
+        return describeSpawnDispatcher(payload);
       case SEND_PEER_TOOL:
         return describeSendPeer(payload);
       default:
