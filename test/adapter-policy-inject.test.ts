@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { createMultitask } from "../src/core/multitask.js";
 import {
   bindDispatcherLifecycle,
+  subagentLabelOf,
   type AgentLike,
 } from "../src/adapter/index.js";
 import type { AdapterContext, CordisDshHost } from "../src/adapter/cordis-dsh-host.js";
@@ -100,10 +101,16 @@ function createHostStub(): CordisDshHost & {
   bound: Array<{ agent: AgentLike; sessionId: string }>;
   /** Ticket 58: dispatcher wakes recorded so the redrive can be asserted. */
   wakeups: string[];
+  /** Ticket 155: per-session current tool/target the roster feed reads. */
+  peerTools: Map<string, { tool: string | null; target: string | null }>;
   fireSettled(event: unknown): void;
 } {
   const bound: Array<{ agent: AgentLike; sessionId: string }> = [];
   const wakeups: string[] = [];
+  const peerTools = new Map<
+    string,
+    { tool: string | null; target: string | null }
+  >();
   const settledCallbacks: Array<(event: never) => void> = [];
   const stepCallbacks: Array<(workerId: string) => void | Promise<void>> = [];
 
@@ -152,12 +159,15 @@ function createHostStub(): CordisDshHost & {
     markers: undefined,
     workerIdOf: () => undefined,
     owns: () => false,
+    peerTools,
+    peerToolActivity: (sessionId: string) => peerTools.get(sessionId) ?? null,
     emitStepBoundary(): void {},
     dispose(): void {},
   };
   return host as unknown as CordisDshHost & {
     bound: Array<{ agent: AgentLike; sessionId: string }>;
     wakeups: string[];
+    peerTools: Map<string, { tool: string | null; target: string | null }>;
     fireSettled(event: unknown): void;
   };
 }
@@ -458,5 +468,182 @@ describe("dispatcher activation lifecycle (ticket 19)", () => {
     ctx.emit("agent/session-start", { agent });
     ctx.emit("agent/status", { agent, status: "running" });
     assert.equal(agent.injected.length, 1);
+  });
+});
+
+describe("peer roster feed carries label + current tool/target (ticket 155)", () => {
+  /** Activate N dispatchers; the first is the viewer. */
+  function activatePeers(options: {
+    count: number;
+    labels?: Readonly<Record<string, string | null>>;
+    throwFor?: string;
+  }) {
+    const ctx = createCtx();
+    const host = createHostStub();
+    const multitask = createMultitask(host);
+    const labels = options.labels ?? {};
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask, {
+      policyEnabled: true,
+      peerLabelOf: (session) => {
+        const id = String((session as { id?: unknown }).id);
+        if (options.throwFor === id) throw new Error("registry exploded");
+        return labels[id] ?? null;
+      },
+    });
+    const agents = Array.from({ length: options.count }, (_, index) =>
+      createAgent(`session-${index + 1}`),
+    );
+    for (const agent of agents) lifecycle.activate(agent);
+    const viewer = agents[0];
+    assert.ok(viewer);
+    return { ctx, host, multitask, lifecycle, agents, viewer };
+  }
+
+  /** The roster block of the viewer's last injected reminder. */
+  function rosterOf(agent: CaptureAgent): string {
+    const text = textOf(agent.injected.at(-1));
+    const at = text.indexOf("## Other agents");
+    return at < 0 ? "" : text.slice(at);
+  }
+
+  it("two peers with distinct labels and distinct tools render two distinct rows", () => {
+    const { ctx, host, viewer } = activatePeers({
+      count: 3,
+      labels: { "session-2": "Research scout" },
+    });
+    host.peerTools.set("session-2", { tool: "read_file", target: "src/core/policy" });
+    host.peerTools.set("session-3", { tool: "grep", target: "roster" });
+
+    ctx.emit("agent/status", { agent: viewer, status: "running" });
+    const roster = rosterOf(viewer);
+    assert.ok(
+      roster.includes(
+        "- Research scout (session-2) — idle · using read_file on src/core/policy",
+      ),
+      roster,
+    );
+    assert.ok(roster.includes("- session-3 — idle · using grep on roster"), roster);
+    assert.equal(
+      roster.split("\n").filter((line) => line.startsWith("- ")).length,
+      2,
+      "one row per peer, never merged",
+    );
+  });
+
+  it("a peer with neither a label nor an observed tool renders exactly as before", () => {
+    const { ctx, viewer } = activatePeers({ count: 2 });
+    ctx.emit("agent/status", { agent: viewer, status: "running" });
+    const roster = rosterOf(viewer);
+    assert.ok(roster.includes("- session-2 — idle"), roster);
+    assert.ok(!roster.includes("·"), "no activity suffix without an observation");
+  });
+
+  it("a labelled peer with no observed tool shows the label only", () => {
+    const { ctx, viewer } = activatePeers({
+      count: 2,
+      labels: { "session-2": "Changelog" },
+    });
+    ctx.emit("agent/status", { agent: viewer, status: "running" });
+    const roster = rosterOf(viewer);
+    assert.ok(roster.includes("- Changelog (session-2) — idle"), roster);
+    assert.ok(!roster.includes("·"));
+  });
+
+  it("the label read is best-effort: a throwing seam leaves the row on its id", () => {
+    const { ctx, viewer } = activatePeers({ count: 2, throwFor: "session-2" });
+    assert.doesNotThrow(() =>
+      ctx.emit("agent/status", { agent: viewer, status: "running" }),
+    );
+    assert.ok(rosterOf(viewer).includes("- session-2 — idle"));
+  });
+
+  it("the roster tail is byte-stable across turns while nothing changes", () => {
+    const { ctx, viewer } = activatePeers({
+      count: 2,
+      labels: { "session-2": "Research scout" },
+    });
+    ctx.emit("agent/status", { agent: viewer, status: "running" });
+    const once = textOf(viewer.injected.at(-1));
+    ctx.emit("agent/status", { agent: viewer, status: "idle" });
+    ctx.emit("agent/status", { agent: viewer, status: "running" });
+    assert.equal(textOf(viewer.injected.at(-1)), once);
+  });
+
+  it("the current tool rides the same row as liveness (working · using …)", () => {
+    const { ctx, host, agents } = activatePeers({
+      count: 2,
+      labels: { "session-2": "Research scout" },
+    });
+    const viewer = agents[0];
+    const peer = agents[1];
+    assert.ok(viewer && peer);
+    host.peerTools.set("session-2", { tool: "bash", target: "npm test" });
+    ctx.emit("agent/status", { agent: peer, status: "running" });
+    ctx.emit("agent/status", { agent: viewer, status: "running" });
+    assert.ok(
+      rosterOf(viewer).includes(
+        "- Research scout (session-2) — working · using bash on npm test",
+      ),
+      rosterOf(viewer),
+    );
+  });
+});
+
+describe("subagentLabelOf — the ADR-0027 label read (ticket 155)", () => {
+  /** Registry stub: `stateOf` answers from a per-session map of raw states. */
+  function registry(states: Readonly<Record<string, unknown>>) {
+    return {
+      stateOf(session: unknown, key: string): unknown {
+        if (key !== "subagent") return undefined;
+        return states[String((session as { id?: unknown }).id)];
+      },
+    };
+  }
+
+  it("reads the folded identity label, never the wire mode", () => {
+    const label = subagentLabelOf(
+      registry({ s1: { identity: { mode: "continuable", label: "Research scout", seq: 3 } } }),
+      { id: "s1" },
+    );
+    assert.equal(label, "Research scout");
+  });
+
+  it("a session without a descriptor answers null (a user-started dispatcher)", () => {
+    assert.equal(subagentLabelOf(registry({ s1: {} }), { id: "s1" }), null);
+    assert.equal(subagentLabelOf(registry({}), { id: "s1" }), null);
+  });
+
+  it("collapses whitespace and treats an empty label as absent", () => {
+    assert.equal(
+      subagentLabelOf(registry({ s1: { identity: { label: "  Two\n words " } } }), {
+        id: "s1",
+      }),
+      "Two words",
+    );
+    assert.equal(
+      subagentLabelOf(registry({ s1: { identity: { label: "   " } } }), { id: "s1" }),
+      null,
+    );
+  });
+
+  it("no registry, no stateOf, junk state, or a throw all answer null", () => {
+    assert.equal(subagentLabelOf(undefined, { id: "s1" }), null);
+    assert.equal(subagentLabelOf({}, { id: "s1" }), null);
+    assert.equal(subagentLabelOf(registry({ s1: 42 }), { id: "s1" }), null);
+    assert.equal(
+      subagentLabelOf(registry({ s1: { identity: "nope" } }), { id: "s1" }),
+      null,
+    );
+    assert.equal(
+      subagentLabelOf(
+        {
+          stateOf() {
+            throw new Error("registry exploded");
+          },
+        },
+        { id: "s1" },
+      ),
+      null,
+    );
   });
 });

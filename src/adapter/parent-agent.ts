@@ -225,6 +225,25 @@ export interface BindDispatcherLifecycleOptions {
    * session's access-policy rows, and abandons that session's prompts here.
    */
   readonly onDeactivated?: (sessionId: string) => void;
+  /**
+   * Ticket 155: the durable human-readable label of ONE peer session, or
+   * null when none is readable. ADR-0027 decision 2 names `subagent.label` as
+   * the label and decision 3 reads it from the session projection
+   * (`projectionValues.subagent.label`); the registry is reached through the
+   * plugin's guarded `ctx.get("sessionProjections")`, so the read is handed
+   * in rather than performed here (the adapter holds no plugin context).
+   *
+   * `session` is the live host session of the peer (the `AgentLike.session`
+   * this lifecycle already holds) — the registry read needs the Session, not
+   * its id.
+   *
+   * The roster's fallback is label → title → session id, and this seam
+   * supplies only the first step: an absent, throwing, or unreadable answer
+   * simply leaves the label empty and the row falls back — never a guess.
+   * Only SPAWNED children carry a descriptor, so a user-started dispatcher
+   * answers null and renders its id, exactly as before.
+   */
+  readonly peerLabelOf?: (session: unknown) => string | null;
 }
 
 /**
@@ -258,6 +277,7 @@ export function bindDispatcherLifecycle(
   const policyEnabled = options?.policyEnabled ?? true;
   const onActivated = options?.onActivated;
   const onDeactivated = options?.onDeactivated;
+  const peerLabelOf = options?.peerLabelOf;
   /**
    * Activated dispatcher sessions: insertion-ordered sessionId → live agent.
    * The LAST entry is the most recently activated session (the map-of-one
@@ -295,24 +315,50 @@ export function bindDispatcherLifecycle(
   }
 
   /**
-   * Live peer rows for the prompt tail (ticket 121). Eligible peers are the
-   * OTHER activated dispatchers: workers are leaves and already reachable
-   * through the ledger and `check_workers`, and a session never lists itself.
+   * Live peer rows for the prompt tail (ticket 121; ticket 155 adds the
+   * label and the current tool). Eligible peers are the OTHER activated
+   * dispatchers: workers are leaves and already reachable through the ledger
+   * and `check_workers`, and a session never lists itself.
    *
-   * No activity phrase here: the host's activity ring is keyed by WORKER id,
-   * and a dispatcher peer has none — passing a session id would read a
-   * different agent's ring. Liveness is the honest signal for peers.
+   * Sources, each one an existing read — nothing new is polled:
+   * - `label` — the plugin's `subagent.label` read (ADR-0027 decision 2) via
+   *   `peerLabelOf`. Unreadable or absent stays null and the renderer falls
+   *   back to the session id, exactly as before.
+   * - `currentTool`/`currentTarget` — the host's per-dispatcher `tool/call`
+   *   observation (`peerToolActivity`), keyed by session id and cleared at
+   *   `turn/end`. The WORKER ring is never consulted: it is keyed by worker
+   *   id, and passing a session id would read a different agent's ring.
+   *
+   * Absence renders nothing on both counts, so an unchanged roster stays
+   * byte-identical.
    */
   function peerRosterFor(selfSessionId: string) {
-    const candidates = [...sessions.keys()]
-      .filter((sessionId: string) => sessionId !== selfSessionId)
-      .map((sessionId: string) => ({
-        sessionId,
-        busy: multitask.wakeBus.isBusy(sessionId),
-        pendingApproval: multitask.listPendingAccess(sessionId).length > 0,
-        queuedWake: multitask.wakeBus.peek(sessionId) !== undefined,
-      }));
+    const candidates = [...sessions.entries()]
+      .filter(([sessionId]) => sessionId !== selfSessionId)
+      .map(([sessionId, peerAgent]) => {
+        const tool = host.peerToolActivity(sessionId);
+        return {
+          sessionId,
+          label: readPeerLabel(peerAgent.session),
+          busy: multitask.wakeBus.isBusy(sessionId),
+          pendingApproval: multitask.listPendingAccess(sessionId).length > 0,
+          queuedWake: multitask.wakeBus.peek(sessionId) !== undefined,
+          currentTool: tool?.tool ?? null,
+          currentTarget: tool?.target ?? null,
+        };
+      });
     return buildPeerRosterSnapshot(selfSessionId, candidates);
+  }
+
+  /** Best-effort label read: an absent seam or a throwing answer is null. */
+  function readPeerLabel(session: unknown): string | null {
+    if (peerLabelOf === undefined) return null;
+    try {
+      return peerLabelOf(session);
+    } catch {
+      // A label is prompt garnish; a broken read must never break the turn.
+      return null;
+    }
   }
 
   disposers.push(

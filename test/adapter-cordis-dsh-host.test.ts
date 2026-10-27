@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   createCordisDshHost,
   describeToolActivity,
+  describeToolCall,
   listGlobalToolNames,
   mapStopReason,
   normalizeSettleReport,
@@ -1277,6 +1278,91 @@ describe("CordisDshHost session/event activity feed (ticket 29)", () => {
     assert.equal(describeToolActivity({}), null);
     assert.equal(describeToolActivity({ name: 7, arguments: "{}" }), null);
     assert.equal(describeToolActivity({ name: "bash" }), "bash");
+  });
+});
+
+describe("CordisDshHost peer tool/target feed (ticket 155)", () => {
+  /** Bind a dispatcher parent so its session id counts as a peer source. */
+  function bindDispatcher(ctx: ReturnType<typeof createStubCtx>, id: string) {
+    const host = createCordisDshHost(ctx);
+    host.bindParent(createAgent(id), id);
+    return host;
+  }
+
+  it("records the tool and target of a bound dispatcher session's tool/call", () => {
+    const ctx = createStubCtx();
+    const host = bindDispatcher(ctx, "disp-1");
+    assert.equal(host.peerToolActivity("disp-1"), null);
+
+    fireSessionEvent(ctx, "disp-1", toolCallEvent("read_file", { path: "src/core/policy" }));
+    assert.deepEqual(host.peerToolActivity("disp-1"), {
+      tool: "read_file",
+      target: "src/core/policy",
+    });
+  });
+
+  it("a peer's tool call never reaches the worker ring or the tool-call count", async () => {
+    const ctx = createStubCtx();
+    const { host, workerId } = await spawnOneWorker(ctx);
+    const seen: string[] = [];
+    host.onWorkerToolCall((id) => seen.push(id));
+
+    fireSessionEvent(ctx, "disp-1", toolCallEvent("bash", { command: "npm test" }));
+
+    assert.deepEqual(seen, [], "no worker count for a dispatcher key");
+    assert.equal(host.recentActivity("disp-1"), null, "the worker ring stays worker-keyed");
+    assert.equal(host.recentActivity(workerId), null);
+    assert.deepEqual(host.peerToolActivity("disp-1"), {
+      tool: "bash",
+      target: "npm test",
+    });
+  });
+
+  it("turn/end clears the current tool — a closed turn has no live activity", () => {
+    const ctx = createStubCtx();
+    const host = bindDispatcher(ctx, "disp-1");
+
+    fireSessionEvent(ctx, "disp-1", toolCallEvent("grep", { pattern: "todo" }));
+    assert.ok(host.peerToolActivity("disp-1"));
+    fireSessionEvent(ctx, "disp-1", { type: "turn/end", data: { turn: 1, reason: "completed" } });
+    assert.equal(host.peerToolActivity("disp-1"), null);
+  });
+
+  it("an unreadable payload clears the entry instead of keeping a stale tool", () => {
+    const ctx = createStubCtx();
+    const host = bindDispatcher(ctx, "disp-1");
+
+    fireSessionEvent(ctx, "disp-1", toolCallEvent("bash", { command: "go" }));
+    fireSessionEvent(ctx, "disp-1", { type: "tool/call", data: { name: 7 } });
+    assert.equal(host.peerToolActivity("disp-1"), null);
+  });
+
+  it("an unbound session records nothing; unbind and dispose clear the entry", () => {
+    const ctx = createStubCtx();
+    const host = bindDispatcher(ctx, "disp-1");
+
+    fireSessionEvent(ctx, "stranger", toolCallEvent("bash", { command: "x" }));
+    assert.equal(host.peerToolActivity("stranger"), null);
+
+    fireSessionEvent(ctx, "disp-1", toolCallEvent("bash", { command: "go" }));
+    host.unbindParent("disp-1");
+    assert.equal(host.peerToolActivity("disp-1"), null);
+
+    host.bindParent(createAgent("disp-2"), "disp-2");
+    fireSessionEvent(ctx, "disp-2", toolCallEvent("bash", { command: "go" }));
+    host.dispose();
+    assert.equal(host.peerToolActivity("disp-2"), null);
+  });
+
+  it("describeToolCall keeps the halves apart and is null-safe", () => {
+    assert.deepEqual(describeToolCall({ name: "read", arguments: '{"path":"a/b"}' }), {
+      tool: "read",
+      target: "a/b",
+    });
+    assert.deepEqual(describeToolCall({ name: "read" }), { tool: "read", target: null });
+    assert.equal(describeToolCall(undefined), null);
+    assert.equal(describeToolCall({}), null);
+    assert.equal(describeToolCall({ name: "" }), null);
   });
 });
 

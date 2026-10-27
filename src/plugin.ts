@@ -52,6 +52,7 @@ import {
   type TokenMeterLike,
 } from "./adapter/index.js";
 import { registerWorkerAccessTool, createPendingAskSettleWaiter } from "./adapter/worker-access-tool.js";
+import { subagentLabelOf } from "./adapter/peer-label.js";
 import type { WorkerActivityEntry } from "./adapter/cordis-dsh-host.js";
 import {
   registerRacoonsMount,
@@ -1156,6 +1157,18 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
 
   const lifecycle = bindDispatcherLifecycle(ctx, host, multitask, {
     policyEnabled: enabled,
+    // Ticket 155 / ADR-0027 decisions 2–3: the peer roster's label. The
+    // registry is resolved lazily per read (the same guarded `ctx.get` route
+    // ticket 147 uses for `sessionKind`), so a host that mounts the
+    // projection plugins later still answers, and a host without them simply
+    // yields null — the row then falls back to the session id.
+    peerLabelOf: (session) => {
+      try {
+        return subagentLabelOf(resolveSessionProjections(ctx), session);
+      } catch {
+        return null;
+      }
+    },
     onActivated: (sessionId) => {
       activateToolSurface(sessionId);
       // Ticket 31: the restart notice and redrive ride the durability
