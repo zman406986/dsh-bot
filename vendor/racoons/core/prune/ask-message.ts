@@ -33,7 +33,7 @@ import type { PruneAnchorResult } from "./anchor.js";
 /** The line that opens the table inside the user message. */
 export const PRUNE_ASK_TABLE_HEADING =
   "Units still in memory, by assigned index. Each row begins with the index you answer with and "
-  + "quotes two verbatim samples of that unit's content.";
+  + "names two lines of that unit's content by number.";
 
 /**
  * The instruction that ends every ask's user message, as one line. It states the
@@ -117,13 +117,13 @@ export function renderPruneAskTable(
 
 /**
  * One row: the assigned index, the whole call, the occurrence ordinal and the
- * two quoted samples. A refused anchor names its refusal instead — never an
- * empty quote, which would read as content that exists but is blank.
+ * unit's anchors, joined by one middle dot. A refused anchor names its refusal
+ * instead — never an empty anchor list, which would read as a unit that needs
+ * no anchor. A unit with no quotable line names none: the row ends at the call.
  *
- * The samples are inserted verbatim, newlines included: they are bytes of the
- * unit, and the anchor rule says verbatim. Only kind and path are collapsed to
- * one line: they are harness metadata, and a break in one would forge a row
- * starting with an index we never wrote.
+ * An anchor never carries a newline, so a row stays one line per unit; `oneLine`
+ * on the call facts is what keeps harness metadata from forging a row that
+ * starts with an index we never wrote.
  */
 function renderPruneAskRow(row: PruneAskRow): string {
   const anchor = row.anchor;
@@ -131,5 +131,6 @@ function renderPruneAskRow(row: PruneAskRow): string {
   const head = `${String(row.index)}. [${oneLine(anchor.kind)}]${path} `
     + `(call #${String(anchor.callOrdinal)})`;
   if (isRefusedPruneAnchor(anchor)) return `${head} — anchor unavailable: ${anchor.refusal}`;
-  return `${head} — "${anchor.excerptA}" … "${anchor.excerptB}"`;
+  if (anchor.anchors.length === 0) return head;
+  return `${head} — ${anchor.anchors.join(" · ")}`;
 }

@@ -30,7 +30,7 @@
  */
 import { canonicalBytesWithByteArrays, sha256Sync } from '@racoons/core';
 import type { EngineResult, PrunePassApplication } from '@racoons/core';
-import type { MountJournal } from './judge-seam.js';
+import type { MountJournal } from './journal-kinds.js';
 
 /**
  * The engine event id for one pass: the session, the round for legibility, and
@@ -85,7 +85,7 @@ export interface PruneApplyOptions {
  * ask never produced a document is `no-application`, one whose document holds
  * no removal is `no-removals`, and a mount with no window is `no-window`.
  * Before this split the first two shared `no-removals`, so a run could not tell
- * "the judge kept everything" from "the pass never asked".
+ * "the pass kept everything" from "the pass never asked".
  */
 export async function applyPrunePass(options: PruneApplyOptions): Promise<EngineResult | null> {
   const { sessionId, application, round, windowTokens, journal } = options;

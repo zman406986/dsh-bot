@@ -8,10 +8,10 @@
  *
  * Two counting rules matter:
  *
- *   - `l1RemovalCount` counts the L1 removals the pass would ACT on, so a
- *     protected unit's proof is not counted (the proof stands, but protection
- *     overrides every layer and the pass removes nothing — the same rule
- *     `estimatePassTokens` uses).
+ *   - `l1RemovalCount` counts the L1 removals the pass would ACT on — every
+ *     proof on a unit still in memory. There is no exclusion layer (ADR-0020),
+ *     so the count and `estimatePassTokens`' byte arithmetic agree by
+ *     construction.
  *   - a pass that sent no ask has no judged counts. `application: null` means
  *     exactly that (no model seam), so L2, refusals and rejections are zero
  *     rather than "every index refused" — nothing was asked, so nothing was
@@ -21,7 +21,6 @@
  * the key order is fixed by the constant lists, and no input is mutated.
  */
 
-import type { UnitId } from "../types/identity.js";
 import type { PruneAnswerRefusalCode } from "./ask-answer.js";
 import { PRUNE_ANSWER_REFUSAL_CODES } from "./ask-answer.js";
 import type { PrunePassAttemptTotals, PruneTableAttempt } from "./attempts.js";
@@ -31,8 +30,12 @@ import type { PrunePassApplication } from "./pass-merge.js";
 import type { Level1Rule } from "./types.js";
 import { LEVEL1_RULES } from "./level1.js";
 
-/** The L2 actions a pass can act on; `keepall` removes nothing and is not counted. */
-export const PRUNE_REMOVAL_ACTIONS = ["keeplines", "forgetall"] as const;
+/**
+ * The L2 actions a pass can act on; `keepall` removes nothing and is not
+ * counted. `keeplines` and `forgetlines` are counted under their own names, so a
+ * pass never folds one partial class into the other (ADR-0026, ADR-0027 §5).
+ */
+export const PRUNE_REMOVAL_ACTIONS = ["keeplines", "forgetall", "forgetlines"] as const;
 
 export type PruneRemovalAction = (typeof PRUNE_REMOVAL_ACTIONS)[number];
 
@@ -56,8 +59,6 @@ export interface PruneRecordedFields {
   readonly l1RemovalCount: Readonly<Record<Level1Rule, number>>;
   /** Removals the ask decided, one count per action. */
   readonly l2RemovalCount: Readonly<Record<PruneRemovalAction, number>>;
-  /** Units protection kept out of the pass entirely. */
-  readonly excludedCount: number;
   /** Units whose answer could not be read, one count per refusal code. */
   readonly refusedCount: Readonly<Record<PruneAnswerRefusalCode, number>>;
   /** Keys that addressed no unit of this pass; no unit is affected by one. */
@@ -89,7 +90,6 @@ export function pruneRecordOf(
   application: PrunePassApplication | null,
   attempts: PruneAttemptTelemetry | null = null,
 ): PruneRecordedFields {
-  const excluded = new Set<UnitId>(plan.excluded.map(entry => entry.unitId));
   const l1RemovalCount: Record<Level1Rule, number> = Object.fromEntries(
     LEVEL1_RULES.map(rule => [rule, 0] as const),
   ) as Record<Level1Rule, number>;
@@ -100,9 +100,8 @@ export function pruneRecordOf(
     PRUNE_ANSWER_REFUSAL_CODES.map(code => [code, 0] as const),
   ) as Record<PruneAnswerRefusalCode, number>;
   if (application === null) {
-    // No ask was sent: count only what bytes proved and protection lets through.
+    // No ask was sent: count only what the bytes proved.
     for (const removal of plan.l1.removals) {
-      if (excluded.has(removal.unitId)) continue;
       l1RemovalCount[removal.rule] += 1;
     }
   } else {
@@ -116,7 +115,6 @@ export function pruneRecordOf(
     round: plan.round,
     l1RemovalCount,
     l2RemovalCount,
-    excludedCount: plan.excluded.length,
     refusedCount,
     rejectedCount: application === null ? 0 : application.rejected.length,
     estTokens: estimatePassTokens(plan),

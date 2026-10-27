@@ -1,15 +1,20 @@
 import type { NodeId, UnitId } from "../types/identity.js";
 import type { ToolResultNode } from "../types/transcript.js";
 import type { ProcessingUnit } from "../units/types.js";
-import { buildPruneExcerpts } from "./excerpt.js";
+import { buildPruneAnchors } from "./anchor-positions.js";
+import type { PruneAnchorShareOptions } from "./anchor-positions.js";
+
 /**
- * One row of the big prune's batched ask and its anchor (ISSUE-022 §Unit
- * addressing; ADR-0009). The judge never locates bytes: the row's assigned
- * index is the address and the anchor only directs attention, built by us from
- * the unit's own bytes:
+ * One row of the big prune's batched ask and its anchors (ISSUE-022 §Unit
+ * addressing; ADR-0009, re-based on ADR-0022 §7). The judge never locates
+ * bytes: the row's assigned index is the address and the anchor only directs
+ * attention, built by us from the unit's own bytes:
  *
  *     kind: "Read", path: "config.ts", callOrdinal: 2,
- *     excerptA: "…from the 30th percentile…", excerptB: "…from the 70th…"
+ *     anchors: [
+ *       'line 60 of 201 ends with "retries: 3, timeoutMs: 30000"',
+ *       'line 140 of 201 ends with "(/srv/app/test/deploy.test.js:41:9)"',
+ *     ]
  *
  * The anchor has three parts, in this order:
  *
@@ -22,24 +27,30 @@ import { buildPruneExcerpts } from "./excerpt.js";
  *    computes it over the rows together. This is what tells cross-rule L1
  *    survivors of byte-identical calls apart after stale copies are gone. A
  *    lone anchor is occurrence 1.
- * 3. **Two excerpts** — the byte samples `./excerpt.ts` builds at the swept
- *    positions and budgets. Its rule, degenerate shapes and caps live there.
+ * 3. **The anchors** — `anchorsAt`'s one-anchor-per-line renderings at the
+ *    lines holding the unit's 30th and 70th byte shares. The quoting routine,
+ *    the format and every fallback are `../rules/anchors.js`'s, shared with the
+ *    entry ask; only the placement arithmetic is this seam's
+ *    (`./anchor-positions.ts`). The format is
+ *    `line L of N ends with "..."`, and a blank band reads
+ *    `lines A–B are blank`.
  *
- * Every excerpt number is a parameter, defaulted and exported by `./excerpt.ts`
- * (positions 0.3 / 0.7, share 0.02 of the unit's bytes, 40 words). A later
- * sweep varies them there, and the anchor carries whatever it is given.
+ * Every share is a parameter, defaulted and exported by
+ * `./anchor-positions.ts`. A later sweep varies them there, and the anchor
+ * carries whatever it is given.
  *
  * Bytes safety: a `ProcessingUnit` carries a span, never content, so the bytes
  * are read from the node only after the same proof `planLevel1Prune` applies —
  * source hash and length must match the node, and the span must sit inside it.
  * A failed proof returns a refused anchor carrying `kind`, `path`,
- * `callOrdinal` and a `refusal` code, with no excerpt fields: wrong bytes are
- * never excerpted, and a renderer must show the refusal rather than an empty
- * string that reads as content. Nothing throws on bad transcript data.
+ * `callOrdinal` and a `refusal` code, with no `anchors` field: wrong bytes are
+ * never quoted, and a renderer must show the refusal rather than an empty
+ * array that reads as "no anchor needed". Nothing throws on bad transcript
+ * data.
  *
  * Pure and deterministic: same unit, node and options yield the same anchor and
- * no input is mutated. An invalid option value throws `RangeError`, because
- * that is a caller bug, not transcript data.
+ * no input is mutated. An invalid share throws `RangeError`, because that is a
+ * caller bug, not transcript data.
  */
 
 /** Every refusal `buildPruneAnchor` can file, as data for tests and callers. */
@@ -52,16 +63,15 @@ export const PRUNE_ANCHOR_REFUSALS = [
 ] as const;
 
 /**
- * The four swept numbers, re-exported here because the anchor is where callers
- * meet them. Their rule lives in `./excerpt.ts`; changing a default is a change
- * to that file, so the two can never disagree.
+ * The swept shares, re-exported here because the anchor is where callers meet
+ * them. Their rule lives in `./anchor-positions.ts`; changing a default is a
+ * change to that file, so the two can never disagree.
  */
 export {
-  PRUNE_ANCHOR_MAX_SHARE, PRUNE_ANCHOR_MAX_WORDS, PRUNE_ANCHOR_POSITION_A,
-  PRUNE_ANCHOR_POSITION_B, PRUNE_EXCERPT_CUT_MARK,
-} from "./excerpt.js";
+  PRUNE_ANCHOR_POSITION_A, PRUNE_ANCHOR_POSITION_B,
+} from "./anchor-positions.js";
 
-/** Why an anchor has no excerpts: the unit's bytes were not proven or not readable. */
+/** Why a row carries no anchors: the unit's bytes were not proven or not readable. */
 export type PruneAnchorRefusal = (typeof PRUNE_ANCHOR_REFUSALS)[number];
 
 /** What the mount knows about the whole call and the transcript cannot. */
@@ -72,12 +82,8 @@ export interface PruneCallFacts {
   readonly targetPath?: string;
 }
 
-/** The swept numbers, the caller-known call facts, and this row's ordinal. */
-export interface PruneAnchorOptions {
-  readonly positionA?: number;
-  readonly positionB?: number;
-  readonly maxShare?: number;
-  readonly maxWords?: number;
+/** The swept shares, the caller-known call facts, and this row's ordinal. */
+export interface PruneAnchorOptions extends PruneAnchorShareOptions {
   readonly callFacts?: PruneCallFacts;
   /** Which occurrence of this whole call the row is, 1-based (`assignCallOrdinals`). */
   readonly callOrdinal?: number;
@@ -88,8 +94,7 @@ export interface PruneAnchor {
   readonly kind: string;
   readonly path?: string;
   readonly callOrdinal: number;
-  readonly excerptA: string;
-  readonly excerptB: string;
+  readonly anchors: readonly string[];
 }
 
 /** The degenerate anchor: the call facts plus the reason no bytes were read. */
@@ -102,7 +107,7 @@ export interface RefusedPruneAnchor {
 
 export type PruneAnchorResult = PruneAnchor | RefusedPruneAnchor;
 
-/** Narrows a result to the refusal shape, which carries no excerpts. */
+/** Narrows a result to the refusal shape, which carries no anchors. */
 export function isRefusedPruneAnchor(
   anchor: PruneAnchorResult,
 ): anchor is RefusedPruneAnchor {
@@ -129,9 +134,9 @@ export function buildPruneAnchor(
 
   const located = locateContent(unit, node);
   if ("refusal" in located) return { ...head, refusal: located.refusal };
-  const excerpts = buildPruneExcerpts(located.content, options);
-  if ("refusal" in excerpts) return { ...head, refusal: excerpts.refusal };
-  return { ...head, excerptA: excerpts.excerptA, excerptB: excerpts.excerptB };
+  const built = buildPruneAnchors(located.content, options);
+  if ("refusal" in built) return { ...head, refusal: built.refusal };
+  return { ...head, anchors: built.anchors };
 }
 
 /**
@@ -185,7 +190,7 @@ type LocatedContent =
 /**
  * The same proof `planLevel1Prune` locates units with: source hash and length
  * must name this node, and the span must sit inside it. An empty span is legal
- * here (nothing to excerpt); a reversed or out-of-bounds one is not.
+ * here (nothing to quote); a reversed or out-of-bounds one is not.
  */
 function locateContent(
   unit: ProcessingUnit,

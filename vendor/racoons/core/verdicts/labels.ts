@@ -1,19 +1,19 @@
 import { oneLine } from "../rules/assets.js";
 
 /**
- * The label length the agent is told about. It is behavioural tuning: the
- * enforced number below is the contract (research §4 owner ruling).
+ * The receipt label cap the product advertises, in characters. It is the
+ * owner's ruled 40 (research §4) and a constant, not configuration: the gate
+ * tuning that once supplied it is gone (ADR-0028), and the manual forget
+ * receipt is its only reader.
  */
-export function advertisedLabelLimit(configured: number): number {
-  return configured;
-}
+export const RECEIPT_LABEL_CHAR_LIMIT = 40;
 
 /**
  * The enforced label length: the advertised cap plus one quarter of hidden
  * headroom. Agents miscount their own output and retry in loops; the slack
  * absorbs the overshoot. 40 advertised is 50 enforced.
  */
-export function enforcedLabelLimit(configured: number): number {
+export function enforcedLabelLimit(configured: number = RECEIPT_LABEL_CHAR_LIMIT): number {
   return Math.ceil(configured * 5 / 4);
 }
 
@@ -31,13 +31,15 @@ export function normalizeLabel(label: string): string {
  * empty normalised label is not a length failure: it means the floor receipt
  * line ships without a label.
  */
-export function labelIssue(label: string, configured: number): "label-too-long" | null {
+export function labelIssue(
+  label: string, configured: number = RECEIPT_LABEL_CHAR_LIMIT,
+): "label-too-long" | null {
   return normalizeLabel(label).length > enforcedLabelLimit(configured) ? "label-too-long" : null;
 }
 
 /**
  * The forgetall descriptor cap, in words (ISSUE-017; owner ruling 2026-10-22).
- * It is not `advertisedLabelLimit`: that number counts characters of a topic
+ * It is not `RECEIPT_LABEL_CHAR_LIMIT`: that number counts characters of a topic
  * label, this one counts words of a one-line description, and the two are not
  * interchangeable. It is a constant, not configuration, because the owner's
  * ruling fixes the number; H-011 measurement can promote it later.

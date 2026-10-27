@@ -16,52 +16,43 @@ import type { CheckContext } from "./context.js";
 import { reporter } from "./context.js";
 
 /**
- * The verdict protocol's guard checks (design-protocol §3, §5 Slice 2; the
+ * The prune pass's guard checks (design-protocol §3, §5 Slice 2; the
  * three-action format is ISSUE-017's).
  *
  * The guard re-derives every claim in a verdict plan from the snapshot and the
- * batch. It never trusts the planner's arithmetic: a `keeplines` removal must be
- * the complement of the kept spans inside the unit, computed here from the
- * node's own line offsets. Perturbing one span therefore breaks the plan.
+ * pass document. It never trusts the planner's arithmetic: a `keeplines`
+ * removal must be the complement of the kept spans inside the unit, computed
+ * here from the node's own line offsets. Perturbing one span therefore breaks
+ * the plan.
  *
- * Two validations exist only here. The tracker records what the agent said but
- * never asks when the gate asked: a verdict stamped with a round the gate never
- * presented answers nothing, so it is `unknown-unit` here. A descriptor past the
- * 25-word cap would put a paragraph into a receipt, so it is
- * `descriptor-too-long`. Neither is silently trimmed or rewritten;
- * all-or-nothing rejects the batch.
+ * One validation exists only here. A descriptor past the 25-word cap would put
+ * a paragraph into a receipt, so it is `descriptor-too-long`. It is never
+ * silently trimmed or rewritten; all-or-nothing rejects the pass.
  *
- * A verdict plan applies on a verdict event and on a prune pass, and only
- * there; it is the application of one settled batch, not a rule pass. A prune
- * event's document is read as one batch by `pruneVerdicts`, and its membership
- * window is every unit the document names (`pruneWindow`), because the event's
- * own `window` is the token bound it was planned against. When `input.window`
- * is present on a verdict event it is the authoritative membership list, so a
- * verdict for a unit the gate did not present is `unknown-unit` even though the
- * snapshot can prove it.
- * An event without a window (a hand-built batch) falls back to the widest
- * window the snapshot can prove: every unit above the bar. A unit below the bar
- * or absent from the snapshot is `unknown-unit`, and a plan that does not answer
- * its own forgets is `incomplete-verdicts`.
+ * A verdict plan applies on a prune pass and only there; it is the application
+ * of one merged pass document, not a rule pass. The document is read as one
+ * batch by `pruneVerdicts`, and its membership window is every unit the
+ * document names (`pruneWindow`), because the event's own `window` is the token
+ * bound it was planned against.
  */
 export function checkVerdicts(c: CheckContext, plans: readonly RulePlan[]): void {
   const verdictPlans = plans.filter(plan => plan.ruleId === VERDICT_RULE_ID);
   const input = c.value.input;
-  if (input.kind !== "verdict" && input.kind !== "prune") {
-    // A verdict plan outside a verdict or prune event is a rule trying to cast a vote.
+  if (input.kind !== "prune") {
+    // A verdict plan outside a prune event is a rule trying to cast a vote.
     for (const plan of verdictPlans) {
       reporter(c, plan.ruleId, null)("invalid-plan",
-        "A verdict plan applies only on a verdict event or a prune pass");
+        "A verdict plan applies only on a prune pass");
     }
     return;
   }
-  const batch: unknown = input.kind === "verdict" ? input.verdicts : pruneVerdicts(input);
+  const batch: unknown = pruneVerdicts(input);
   if (!isBatch(batch)) {
     reporter(c, VERDICT_RULE_ID, null)("invalid-plan",
-      "A verdict event must carry a round and a list of verdicts");
+      "A prune event must carry a round and a list of verdicts");
     return;
   }
-  if (input.kind === "prune" && (!Number.isSafeInteger(input.window) || input.window <= 0)) {
+  if (!Number.isSafeInteger(input.window) || input.window <= 0) {
     // The bound is what the pass was planned against; without it the event
     // cannot say whether its removals were inside any window at all.
     reporter(c, VERDICT_RULE_ID, null)("invalid-plan",
@@ -69,17 +60,15 @@ export function checkVerdicts(c: CheckContext, plans: readonly RulePlan[]): void
   }
   for (const plan of plans) {
     if (plan.ruleId !== VERDICT_RULE_ID) {
-      reporter(c, plan.ruleId, null)("wrong-rule", "A verdict event carries verdict plans only");
+      reporter(c, plan.ruleId, null)("wrong-rule", "A prune event carries verdict plans only");
     }
   }
-  const units = windowUnits(c, input.kind === "verdict"
-    ? presentedWindow(input) : pruneWindow(input));
-  // Gate rounds are presented ordinals, so the first presentation is round 1.
-  // A prune pass numbers its own indices the same way: its first pass is round 1.
+  const units = windowUnits(c, pruneWindow(input));
+  // A prune pass numbers its own indices from one, so its first pass is round 1.
   const pointed = batch.round >= 1;
   if (!pointed) {
     reporter(c, VERDICT_RULE_ID, null)("invalid-plan",
-      "A verdict batch must name the gate round it settles");
+      "A verdict batch must name the pass round it settles");
   }
 
   const answered = new Map<UnitId, Verdict>();
@@ -102,7 +91,7 @@ export function checkVerdicts(c: CheckContext, plans: readonly RulePlan[]): void
     }
     if (pointed && (verdict.answeredInRound < 1 || verdict.answeredInRound > batch.round)) {
       reporter(c, VERDICT_RULE_ID, null)("unknown-unit",
-        `Verdict answers round ${String(verdict.answeredInRound)}, which this gate never presented`,
+        `Verdict answers round ${String(verdict.answeredInRound)}, which this pass never assigned`,
         unit?.nodeId ?? null);
     }
     checkAnswerShape(c, verdict, unit);
@@ -163,11 +152,13 @@ export function checkVerdicts(c: CheckContext, plans: readonly RulePlan[]): void
 }
 
 /**
- * The answer's own shape, independent of any plan. A `keeplines` answer must
- * name legal spans that keep something and give up something (ISSUE-017 §3):
- * keeping every line is a `keepall`, keeping none is a `forgetall` without a
- * descriptor, and both are refused rather than reinterpreted. An out-of-bounds
- * span is refused, never clamped. A `forgetall` descriptor must fit the
+ * The answer's own shape, independent of any plan. A `keeplines` or
+ * `forgetlines` answer must name legal spans that leave something on both sides
+ * (ISSUE-017 §3; ADR-0026 §5): naming every line is a `keepall` and naming none
+ * is a `forgetall` without a descriptor, and both are refused rather than
+ * reinterpreted. An out-of-bounds span is refused, never clamped. Which side a
+ * named span falls on depends on the action; the validation of the NAMED spans
+ * is the same arithmetic either way. A `forgetall` descriptor must fit the
  * 25-word cap.
  */
 function checkAnswerShape(c: CheckContext, verdict: Verdict, unit: ProcessingUnit | undefined): void {
@@ -177,17 +168,22 @@ function checkAnswerShape(c: CheckContext, verdict: Verdict, unit: ProcessingUni
       `A receipt descriptor must stay within ${String(RECEIPT_DESCRIPTOR_WORD_LIMIT)} words`,
       unit?.nodeId ?? null);
   }
-  if (verdict.action !== "keeplines") return;
-  const kept = normalizeKeptSpans(verdict.ranges);
-  if (kept === null) {
+  if (verdict.action !== "keeplines" && verdict.action !== "forgetlines") return;
+  const named = normalizeKeptSpans(verdict.ranges);
+  const name = verdict.action;
+  if (named === null) {
     reporter(c, VERDICT_RULE_ID, null)("invalid-line-span",
-      "A keeplines verdict needs spans of at least one line, each within its own bounds",
+      `A ${name} verdict needs spans of at least one line, each within its own bounds`,
       unit?.nodeId ?? null);
     return;
   }
-  if (kept.length === 0) {
+  if (named.length === 0) {
+    // `keeplines`' wording is pinned by its own tests; the mirror names its own
+    // degenerate case in its own words.
     reporter(c, VERDICT_RULE_ID, null)("invalid-line-span",
-      "A keeplines verdict that keeps no line is a forgetall without a descriptor; it must name spans",
+      name === "keeplines"
+        ? "A keeplines verdict that keeps no line is a forgetall without a descriptor; it must name spans"
+        : "A forgetlines verdict that names no line gives up nothing; it must name spans",
       unit?.nodeId ?? null);
     return;
   }
@@ -195,20 +191,28 @@ function checkAnswerShape(c: CheckContext, verdict: Verdict, unit: ProcessingUni
   const lines = unit.span.lineRange;
   if (lines === null) {
     reporter(c, VERDICT_RULE_ID, null)("invalid-line-span",
-      "A keeplines verdict needs a line-addressable unit", unit.nodeId);
+      `A ${name} verdict needs a line-addressable unit`, unit.nodeId);
     return;
   }
   const count = lines.endLineInclusive - lines.startLine + 1;
-  const last = kept[kept.length - 1];
+  const last = named[named.length - 1];
   if (last !== undefined && last.to > count) {
     reporter(c, VERDICT_RULE_ID, null)("invalid-line-span",
-      `A keeplines span runs past the unit's ${String(count)} lines; spans are never clamped`,
+      `A ${name} span runs past the unit's ${String(count)} lines; spans are never clamped`,
       unit.nodeId);
     return;
   }
-  if (complementLineSpans(kept, count).length === 0) {
+  // Both-ends rule. `keeplines` names what stays, so naming every line gives up
+  // nothing (`keepall`); `forgetlines` names what leaves, so naming every line
+  // gives up the whole unit (`forgetall`). Same refusal, opposite side.
+  const namesEverything = named.length === 1 && named[0]?.from === 1 && named[0]?.to === count;
+  const complement = complementLineSpans(named, count);
+  if (namesEverything || (verdict.action === "keeplines" && complement.length === 0)) {
     reporter(c, VERDICT_RULE_ID, null)("invalid-line-span",
-      "A keeplines verdict that keeps every line gives up nothing; it is a keepall", unit.nodeId);
+      verdict.action === "keeplines"
+        ? "A keeplines verdict that keeps every line gives up nothing; it is a keepall"
+        : "A forgetlines verdict that names every line is a forgetall without a descriptor",
+      unit.nodeId);
   }
 }
 
@@ -242,20 +246,13 @@ function nodeBytesOf(c: CheckContext, unit: ProcessingUnit): Uint8Array | null {
   return node !== undefined && node.kind === "tool-result" ? node.bytes : null;
 }
 
-/** The presented window, when the event carries one; `null` means "not recorded". */
-function presentedWindow(input: Extract<EngineInput, { readonly kind: "verdict" }>): readonly UnitId[] | null {
-  const window: unknown = (input as { readonly window?: unknown }).window;
-  if (window === undefined || window === null) return null;
-  return Array.isArray(window) ? window.filter((id): id is UnitId => typeof id === "string" && id.length > 0) : null;
-}
-
 type PruneInput = Extract<EngineInput, { readonly kind: "prune" }>;
 
 /**
  * A prune event's merged document read as one verdict batch (ADR-0009: one
  * decision set, one epoch break). A removal IS the unit's answer, so the batch
  * carries exactly the removals: L1 proved whole-unit forgets with no descriptor
- * and the pass's own round, L2 the judge's action with the round it answered in.
+ * and the pass's own round, L2 the agent's action with the round it answered in.
  * Units the pass kept claim nothing and are not in the batch; they are in the
  * window so a plan naming one is refused rather than silently applied.
  */
@@ -268,9 +265,9 @@ export function pruneVerdicts(input: PruneInput): VerdictBatch {
 }
 
 function toVerdict(removal: PruneRemoval, round: number): Verdict {
-  if (removal.action === "keeplines") {
+  if (removal.action === "keeplines" || removal.action === "forgetlines") {
     return {
-      unitId: removal.unitId, action: "keeplines",
+      unitId: removal.unitId, action: removal.action,
       ranges: removal.ranges, answeredInRound: removal.answeredInRound,
     };
   }
@@ -300,21 +297,18 @@ export function pruneWindow(input: PruneInput): readonly UnitId[] {
   }
 }
 
-/**
- * The units the gate actually put to the agent, in snapshot order. A recorded
- * window narrows the widest set: a unit it omits was never asked, so a verdict
- * naming it answers nothing even though the snapshot still holds it. An absent
- * or unusable window falls back to every unit above the bar.
- */
-function windowUnits(c: CheckContext, window: readonly UnitId[] | null): ReadonlyMap<UnitId, ProcessingUnit> {
+/** The units the pass's document names, in snapshot order. */
+function windowUnits(
+  c: CheckContext, window: readonly UnitId[],
+): ReadonlyMap<UnitId, ProcessingUnit> {
   const tracker = new UnitTracker({
     sessionId: c.value.snapshot.sessionId,
     barBytes: c.value.config.protocol.barBytes,
   });
   const units = new Map<UnitId, ProcessingUnit>();
-  const named = window === null ? null : new Set(window);
+  const named = new Set(window);
   for (const unit of tracker.units(c.value.snapshot)) {
-    if (named !== null && !named.has(unit.id)) continue;
+    if (!named.has(unit.id)) continue;
     units.set(unit.id, unit);
   }
   return units;
@@ -344,6 +338,7 @@ function isBatch(value: unknown): value is VerdictBatch {
 const VERDICT_FIELDS: ReadonlyMap<string, readonly string[]> = new Map([
   ["keepall", ["unitId", "action", "answeredInRound"]],
   ["keeplines", ["unitId", "action", "answeredInRound", "ranges"]],
+  ["forgetlines", ["unitId", "action", "answeredInRound", "ranges"]],
   ["forgetall", ["unitId", "action", "answeredInRound", "summary"]],
 ]);
 
@@ -353,16 +348,17 @@ function closedShape(value: Record<string, unknown>, allowed: readonly string[])
 }
 
 /**
- * Reads one answer in the three-action format, or `null` when the shape is not
+ * Reads one answer in the four-action format, or `null` when the shape is not
  * a verdict at all: a missing unit id, an unknown action, a field the action
- * does not carry, a fractional round, a `keeplines` whose range list is empty
+ * does not carry, a fractional round, a partial-class range list that is empty
  * or holds a non-integral span, or a `forgetall` whose summary slot is neither
  * a string nor null. The caller reports `invalid-plan`; this function never
  * repairs an answer. Ordering, overlap and bounds are `normalizeKeptSpans`' and
  * `checkAnswerShape`'s work.
  *
- * The field set is closed (owner ruling 2026-10-23). `keepall` and `keeplines`
- * carry no free text at all; `forgetall` carries `summary` and nothing else.
+ * The field set is closed (owner ruling 2026-10-23). `keepall`, `keeplines` and
+ * `forgetlines` carry no free text at all; `forgetall` carries `summary` and
+ * nothing else.
  */
 export function readVerdict(value: unknown): Verdict | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
@@ -376,7 +372,7 @@ export function readVerdict(value: unknown): Verdict | null {
   const allowed = VERDICT_FIELDS.get(action);
   if (allowed === undefined || !closedShape(verdict, allowed)) return null;
   if (action === "keepall") return { unitId, action, answeredInRound };
-  if (action === "keeplines") {
+  if (action === "keeplines" || action === "forgetlines") {
     const ranges = readSpans(verdict["ranges"]);
     if (ranges === null) return null;
     return { unitId, action, answeredInRound, ranges };

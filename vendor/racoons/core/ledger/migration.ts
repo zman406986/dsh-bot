@@ -8,15 +8,29 @@ import { storageError } from "./integrity.js";
 import { asRow, asRows } from "./rows.js";
 import type { Row, SqlValue } from "./rows.js";
 import {
-  LEGACY_SCHEMA_VERSION, LEDGER_APPLICATION_ID, LEDGER_TABLES, SCHEMA_VERSION,
-  initializeSchema,
+  LEGACY_SCHEMA_VERSION, LEDGER_APPLICATION_ID, LEDGER_TABLES, PREVIOUS_SCHEMA_VERSION,
+  SCHEMA_VERSION, initializeSchema,
 } from "./schema.js";
 import { LedgerError } from "./types.js";
 
-/** The retired version-1 file. Its presence is the never-re-read marker. */
-export const LEGACY_BACKUP_SUFFIX = ".v1.bak";
-/** The staged version-2 file; renamed over the main path only once it is durable. */
-export const MIGRATION_STAGING_SUFFIX = ".v2.tmp";
+/**
+ * The retired version-1 file. Its presence is the never-re-read marker for that
+ * version. Each source version keeps its own suffix, so the v1 backup taken by
+ * an earlier migration survives a later v2 rebuild untouched.
+ */
+export const LEGACY_BACKUP_SUFFIX = `.v${LEGACY_SCHEMA_VERSION}.bak`;
+/** The retired version-2 file (the verdict-only CHECK). */
+export const VERDICT_BACKUP_SUFFIX = `.v${PREVIOUS_SCHEMA_VERSION}.bak`;
+/** The staged current-version file; renamed over the main path once durable. */
+export const MIGRATION_STAGING_SUFFIX = `.v${SCHEMA_VERSION}.tmp`;
+/** Staging suffixes earlier schema versions wrote; a crash may leave one complete. */
+const RETIRED_STAGING_SUFFIXES = [".v2.tmp"] as const;
+
+/** Every version `migration.ts` rebuilds, with the suffix its backup takes. */
+const BACKUP_SUFFIXES: readonly (readonly [number, string])[] = [
+  [LEGACY_SCHEMA_VERSION, LEGACY_BACKUP_SUFFIX],
+  [PREVIOUS_SCHEMA_VERSION, VERDICT_BACKUP_SUFFIX],
+];
 
 const SQLITE_MAGIC = "SQLite format 3\u0000";
 const HEADER_BYTES = 100;
@@ -24,8 +38,8 @@ const JOURNAL_SIDECARS = ["-wal", "-shm", "-journal"] as const;
 
 /**
  * One column list per table, in dependency order. Copied explicitly, never by
- * `SELECT *`, so a v1 file with an extra legacy column still migrates and the
- * insert order stays deterministic.
+ * `SELECT *`, so an older file with an extra legacy column still migrates and
+ * the insert order stays deterministic.
  */
 const COLUMNS: readonly (readonly [string, readonly string[]])[] = [
   ["blobs", ["sha256", "byte_length", "created_at_ms"]],
@@ -55,7 +69,7 @@ export interface LedgerFileOptions {
 
 export interface LedgerFileOutcome {
   readonly status: MigrationStatus;
-  /** Absolute path of the retired v1 file, when one exists. */
+  /** Absolute path of the most recent retired older-version file, when any exists. */
   readonly backupPath: string | null;
   /** Rows carried into the staged file; 0 when nothing was rebuilt. */
   readonly rowsCopied: number;
@@ -71,13 +85,14 @@ interface Facts {
 const ABSENT: Facts = { exists: false, isDatabase: false, version: 0, applicationId: 0 };
 
 /**
- * Brings the file at `databasePath` to schema 2 (design-protocol §7 Q3 ruling):
- * a version-1 file is rebuilt into a fresh v2 file, and the v1 file is then
- * renamed `*.v1.bak` — never mutated in place, never re-read once a `.bak`
- * sibling exists.
+ * Brings the file at `databasePath` to the current schema: a version-1 or
+ * version-2 file is rebuilt into a fresh current-version file in one hop, and
+ * the old file is then renamed `*.v<old>.bak` — never mutated in place, never
+ * re-read once its own `.bak` sibling exists.
  *
- * The file at the main path is, at every instant, either the untouched v1 file,
- * absent, or a complete v2 file. Nothing in between is ever observable.
+ * The file at the main path is, at every instant, either the untouched old
+ * file, absent, or a complete current-version file. Nothing in between is ever
+ * observable.
  *
  * Synchronous on purpose: this is a short, sequential file protocol, and an
  * `await` between the retire and the promote would widen the window in which
@@ -88,25 +103,31 @@ export function prepareLedgerFile(options: LedgerFileOptions): LedgerFileOutcome
     return { status: "fresh", backupPath: null, rowsCopied: 0 };
   }
   const main = resolve(options.databasePath);
-  const backup = `${main}${LEGACY_BACKUP_SUFFIX}`;
   const staging = `${main}${MIGRATION_STAGING_SUFFIX}`;
   try {
     const facts = inspect(main);
     if (!facts.exists) {
       // A crash between "retire" and "promote" leaves exactly this shape: no
-      // main, a v1 backup, and a fully staged v2 file. Promote it back.
-      if (existsSync(backup)) {
-        if (!stagingIsComplete(staging)) {
+      // main, an old-version backup, and a complete staged file. Promote it.
+      const backup = existingBackup(main);
+      if (backup !== null) {
+        const staged = promotableStaging(main);
+        if (staged === null) {
           // Never re-read the backup (ruling), and never silently start an
           // empty ledger over one: that would lose the recorded history.
           throw new LedgerError("storage",
             `Trash ledger is missing; ${backup} exists but no complete rebuild is staged`);
         }
         deleteStaleSidecars(main);
-        promote(staging, main);
+        promote(staged, main);
+        if (staged !== staging) {
+          // A crash under an earlier schema left a complete staging file of
+          // that version. It is main now and still needs its own rebuild.
+          return { ...prepareLedgerFile(options), status: "resumed" };
+        }
         return { status: "resumed", backupPath: backup, rowsCopied: 0 };
       }
-      discardStaging(staging);
+      discardStaging(main);
       return { status: "fresh", backupPath: null, rowsCopied: 0 };
     }
     if (!facts.isDatabase) {
@@ -118,41 +139,67 @@ export function prepareLedgerFile(options: LedgerFileOptions): LedgerFileOutcome
     }
     if (facts.version === SCHEMA_VERSION || facts.version === 0) {
       // 0 is an uninitialized SQLite file: `initializeSchema` stamps it, or
-      // refuses when it already holds a v1-shaped `application_removals`.
-      discardStaging(staging);
-      return { status: "current", backupPath: existsSync(backup) ? backup : null, rowsCopied: 0 };
+      // refuses when it already holds an older-shaped `application_removals`.
+      discardStaging(main);
+      const current = existingBackup(main);
+      return { status: "current", backupPath: current, rowsCopied: 0 };
     }
-    if (facts.version !== LEGACY_SCHEMA_VERSION) {
+    const backupSuffix = BACKUP_SUFFIXES.find(([version]) => version === facts.version)?.[1];
+    if (backupSuffix === undefined) {
       throw new LedgerError("unsupported-schema", `Unsupported trash ledger schema ${String(facts.version)}`);
     }
+    const backup = `${main}${backupSuffix}`;
     if (existsSync(backup)) {
-      // Ruling: a v1 file with a `.bak` sibling is never re-read. Rebuilding
-      // again would overwrite the evidence of the first migration.
+      // Ruling: an old-version file with its `.bak` sibling is never re-read.
+      // Rebuilding again would overwrite the evidence of the first migration.
       throw new LedgerError("unsupported-schema",
-        `Refusing to re-read a version-1 trash ledger beside ${backup}`);
+        `Refusing to re-read a version-${String(facts.version)} trash ledger beside ${backup}`);
     }
     // A stale staging file is a crashed earlier attempt; it is untrusted.
-    discardStaging(staging);
+    discardStaging(main);
     return rebuild(main, backup, staging, options.onStep);
   } catch (error) {
     throw storageError(error, "Cannot prepare trash ledger file");
   }
 }
 
+/** The most recent retired version's `.bak` sibling, or null when none exists. */
+function existingBackup(main: string): string | null {
+  for (const [, suffix] of [...BACKUP_SUFFIXES].reverse()) {
+    const path = `${main}${suffix}`;
+    if (existsSync(path)) return path;
+  }
+  return null;
+}
+
+/** The complete staged file a crashed migration left, current version first. */
+function promotableStaging(main: string): string | null {
+  for (const path of stagingPaths(main)) {
+    if (stagingVersion(path) !== null) return path;
+  }
+  return null;
+}
+
+/** A post-retire staging file of the current version, then of retired versions. */
+function stagingPaths(main: string): readonly string[] {
+  return [`${main}${MIGRATION_STAGING_SUFFIX}`,
+    ...RETIRED_STAGING_SUFFIXES.map(suffix => `${main}${suffix}`)];
+}
+
 /**
  * Rebuild order (the crash-safety contract, one filesystem step per line):
  *
- * 1. read v1 once through a read-only handle — the main file is never written;
- * 2. write the whole v2 file at `*.v2.tmp` (DELETE journal, so one file);
+ * 1. read the old file once through a read-only handle — main is never written;
+ * 2. write the whole current-version file at `*.v3.tmp` (DELETE journal, one file);
  * 3. fsync the staged file, then its directory — its bytes survive a power cut;
- * 4. rename v1 → `*.v1.bak`, its journal sidecars with it;
- * 5. rename `*.v2.tmp` → main, then fsync the directory.
+ * 4. rename old → `*.v<old>.bak`, its journal sidecars with it;
+ * 5. rename `*.v3.tmp` → main, then fsync the directory.
  *
- * A crash before 3 leaves v1 untouched plus a deletable staging file. A crash
- * between 4 and 5 leaves no main, a complete backup and a complete staged file
- * — the next open promotes it (`resumed`). A crash after 5 leaves a complete v2
- * file. No ordering leaves a half-migrated file at the main path, and the v1
- * file is never written: it is only renamed.
+ * A crash before 3 leaves the old file untouched plus a deletable staging file.
+ * A crash between 4 and 5 leaves no main, a complete backup and a complete
+ * staged file — the next open promotes it (`resumed`). A crash after 5 leaves a
+ * complete current-version file. No ordering leaves a half-migrated file at the
+ * main path, and the old file is never written: it is only renamed.
  */
 function rebuild(
   main: string, backup: string, staging: string, onStep?: (step: MigrationStep) => void,
@@ -245,37 +292,49 @@ function assertQuickCheck(db: DatabaseSync, message: string): void {
   }
 }
 
-/** A staged v2 file is only promotable if it is complete and self-consistent. */
-function stagingIsComplete(staging: string): boolean {
-  if (!existsSync(staging)) return false;
+/**
+ * The schema version a staged file carries, or null when it is missing,
+ * foreign, or not self-consistent. The current version and the version just
+ * before it are both promotable: a crash that ran under the older schema left
+ * a complete staging file of that version, which is promoted and then rebuilt
+ * again by the caller.
+ */
+function stagingVersion(staging: string): number | null {
+  if (!existsSync(staging)) return null;
   let db: DatabaseSync | undefined;
   try {
     db = new DatabaseSync(staging, { readOnly: true });
-    if (pragma(db, "user_version") !== SCHEMA_VERSION ||
-        pragma(db, "application_id") !== LEDGER_APPLICATION_ID) return false;
+    const version = pragma(db, "user_version");
+    if (version === null || (version !== SCHEMA_VERSION && version !== PREVIOUS_SCHEMA_VERSION)) {
+      return null;
+    }
+    if (pragma(db, "application_id") !== LEDGER_APPLICATION_ID) return null;
     const tables = asRows(db.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table'").all(), "sqlite_master")
       .map(row => row["name"]);
-    if (!LEDGER_TABLES.every(table => tables.includes(table))) return false;
+    if (!LEDGER_TABLES.every(table => tables.includes(table))) return null;
     assertQuickCheck(db, "Incomplete staged ledger");
-    return true;
+    return version;
   } catch {
-    return false;
+    return null;
   } finally { db?.close(); }
 }
 
 /**
  * Delete journal files a crashed writer left beside the main path. Only called
- * where the main path is absent or already v2 — never beside a v1 file whose
- * uncheckpointed frames would be lost.
+ * where the main path is absent or already current — never beside an older file
+ * whose uncheckpointed frames would be lost.
  */
 function deleteStaleSidecars(main: string): void {
   for (const suffix of JOURNAL_SIDECARS) rmSync(`${main}${suffix}`, { force: true });
 }
 
-function discardStaging(staging: string): void {
-  rmSync(staging, { force: true });
-  for (const suffix of JOURNAL_SIDECARS) rmSync(`${staging}${suffix}`, { force: true });
+/** Deletes every staging file a crashed attempt could have left at `main`. */
+function discardStaging(main: string): void {
+  for (const path of stagingPaths(main)) {
+    rmSync(path, { force: true });
+    for (const suffix of JOURNAL_SIDECARS) rmSync(`${path}${suffix}`, { force: true });
+  }
 }
 
 function pragma(db: DatabaseSync, name: string): number | null {

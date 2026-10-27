@@ -5,14 +5,26 @@ export {
 } from './capabilities.js';
 export { classifyDshTool, deriveToolEvidence } from './evidence.js';
 export type { DshEvidenceInput, DshPathObservation, DshResultFacts } from './evidence.js';
+// Host usage → core `ApiUsage` (PRD §6.9, gap G8; ISSUE-045 chunk D1). The
+// disjoint-bucket arithmetic is the host's own contract restated once; a rig
+// that feeds `engine.observe` itself reads it instead of re-deriving it.
+export { readAssistantUsage, usageRequestId } from './usage.js';
+export type { DshUsageRead, DshUsageSource } from './usage.js';
 export {
   toCoreEnvelope, fromCoreEnvelope, toCoreTranscript, fromCoreTranscript, createDshRecord,
 } from './envelope.js';
 export type {
   DshEnvelope, DshTranscriptItem, DshMessageItem, DshToolResultItem, DshRecordItem,
 } from './envelope.js';
-export { DshApplicationPort, createDshPort } from './port.js';
-export type { DshPortOptions, DshSessionState } from './port.js';
+// The answered checkpoint's host-write contract (ISSUE-058 chunk P3a; ADR-0022
+// §11–§12): the turns one exchange occupies, the two writes that apply an
+// answer, and the typed refusal codes. Exported because the mount composes the
+// turn's summary and journals the write it performed.
+export { DshApplicationPort, composeEntryShapeTurn, createDshPort, entryShapePrefix } from './port.js';
+export type {
+  DshAskExchange, DshEntryApplyOutcome, DshEntryRefusal, DshEntryRefusalCode, DshPortOptions,
+  DshSessionState,
+} from './port.js';
 export {
   applyValidatedRevert, NO_PARTIAL_KEEPS, partialKeepsFromArchives, planRevertAppend,
   revertPlanSha256,
@@ -28,8 +40,19 @@ export {
 export type {
   DshRecallOutput, DshRecallPart, DshToolHost, DshToolRegistration, DshToolSources,
 } from './tools.js';
+// The manual forget tool (ISSUE-045 chunk D2): argument mapping, the
+// snapshot-side decision and the answer projection. Exported so a rig can drive
+// each leg without a live mount.
+export {
+  decideForget, forgetAnswer, forgetAnswerText, forgetEventId, forgetUnavailable, readForgetArgs,
+} from './forget-tool.js';
+export type {
+  DshForgetDecision, DshForgetRefusal, DshForgetScheduled, DshForgetValue,
+} from './forget-tool.js';
 export { createDshAdapter } from './adapter.js';
-export type { DshAdapter, DshAdapterOptions, DshAdapterPort, DshEngine } from './adapter.js';
+export type {
+  DshAdapter, DshAdapterOptions, DshAdapterPort, DshEngine, DshEntryAnswerOutcome,
+} from './adapter.js';
 export {
   RACOONS_PLUGIN_INJECT, RACOONS_PLUGIN_NAME, createRacoonsMount, createRacoonsPlugin,
   defaultStorageRoot, engineConfig as pluginEngineConfig, resolvePluginConfig,
@@ -50,33 +73,18 @@ export type {
 } from './plugin.js';
 export type { RacoonsStorageErrorCode } from './storage.js';
 export { revertSessionFromHost } from './mount-revert.js';
-export { DEFAULT_JUDGE_TIMEOUT_MS, askJudge, buildJudgeAsk, renderHistoryItems } from './judge.js';
-export type {
-  AskJudgeOptions, JudgeAnswer, JudgeAskRefusal, JudgeAskResult, JudgeFailureReason,
-  JudgeOutcome, JudgeRefusal, RenderedHistory,
-} from './judge.js';
-export { DEFAULT_ASK_TIMEOUT_MS, askText, askWire, isRacoonsAskRequest } from './llm-ask.js';
+export { DEFAULT_ASK_TIMEOUT_MS, askWire, isRacoonsAskRequest } from './llm-ask.js';
 export type {
   AskFailure, StreamAnswer, StreamAskOptions, StreamFailureReason, StreamOutcome, StreamRefusal,
 } from './llm-ask.js';
-export {
-  JUDGE_TABLE_UNITS, runJudgePass,
-} from './judge-pass.js';
-export type {
-  JudgePassAsked, JudgePassOptions, JudgePassOutcome, JudgePassRefusal, JudgePassWindow,
-} from './judge-pass.js';
-export { appendPassReceipt, judgeReceiptText, passReceiptText } from './judge-receipt.js';
-export type {
-  AppendPassReceiptInput, JudgePassReceiptInput, JudgeReceiptInput,
-} from './judge-receipt.js';
 export { captureMainRequest, createMainWireCapture } from './main-wire.js';
 export type { CapturedMainRequest, MainWireCapture } from './main-wire.js';
-export { createJudgeSeam, judgeRouteOf } from './judge-seam.js';
-export type {
-  JudgeAsked, JudgeRoute, JudgeSeam, JudgeSeamOptions, JudgeSettleOutcome, MountJournal,
-  PresentedWindow,
-} from './judge-seam.js';
-export { PRUNE_COMMAND, callFactsOf, protectedUnitIdsOf, runRecordOnlyPrune } from './prune.js';
+// The host route both surviving asks read (ADR-0028: the entry checkpoint and
+// the bulk prune). The seam file it used to live in is gone with the judge.
+export { judgeRouteOf } from './route.js';
+export type { JudgeRoute } from './route.js';
+export type { MountJournal } from './journal-kinds.js';
+export { PRUNE_COMMAND, callFactsOf, runRecordOnlyPrune } from './prune.js';
 export type {
   PruneRefusalReason, PruneSummaryTrace, RecordOnlyPruneOptions, RecordOnlyPruneOutcome,
 } from './prune.js';
@@ -91,3 +99,12 @@ export { DSH_PARITY_CHECKLIST } from './parity.js';
 export type { DshParityRow } from './parity.js';
 export { WireRequestParseError, canonicalWireRequest, parseWireRequest } from './wire-request.js';
 export type { WireRequestParseErrorCode } from './wire-request.js';
+// The landed-then-ask entry checkpoint's ask (ISSUE-058 chunk P3c-1; ADR-0022
+// §3–§6, §14; anchor design §1, §4, §7): the body-free anchored ask, the one
+// bounded correction turn, and the fail-open refusal codes. Exported so the
+// mount (and a rig) drives the same seam without a second copy.
+export { askEntry, entryAskFacts, entryRetryAskMessage } from './entry-ask.js';
+export type {
+  EntryAskAnswered, EntryAskFacts, EntryAskOff, EntryAskOptions, EntryAskOutcome,
+  EntryAskRefused, EntryAskRefusalCode, EntryAskRetryCode, EntryAskRoute, EntryAskTurn,
+} from './entry-ask.js';

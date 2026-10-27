@@ -1,6 +1,6 @@
 import type {
-  Bytes, EpisodeId, EventId, IntentId, RecallId, RemovalId, Revision,
-  RuleId, SessionId, Sha256,
+  ByteRange, Bytes, EpisodeId, EventId, IntentId, RecallId, RemovalId, Revision,
+  RuleId, SessionId, Sha256, SourceRef,
 } from "../types/identity.js";
 import type { Clock } from "../types/transcript.js";
 import type { BreakerState, ValidationIssue } from "../guard/types.js";
@@ -15,7 +15,12 @@ export type {
 export interface ArchiveRecord {
   readonly ruleId: RuleId;
   readonly removalId: RemovalId;
-  readonly operationKind: "cap" | "seal" | "evict" | "span" | "verdict";
+  /**
+   * `proof` and `forget` are admitted by the type before the storage schema
+   * admits them (ISSUE-045 chunks L1/C4/C1); a row the schema refuses surfaces
+   * as a `LedgerError`, never as a silently restamped kind (ADR-0018).
+   */
+  readonly operationKind: "cap" | "seal" | "evict" | "span" | "verdict" | "proof" | "forget";
   readonly episodeId: EpisodeId | null;
   readonly title: string;
   readonly recall: RecallRecord;
@@ -99,8 +104,78 @@ export interface Ledger {
   prepare(application: PreparableApplication): Promise<PreparedIntent>;
   append(event: LedgerEvent): Promise<LedgerEntry>;
   events(sessionId: SessionId): AsyncIterable<LedgerEntry>;
-  recall(id: RecallId): Promise<RecallRecord>;
+  /**
+   * Exact bytes for one recall id. When the row is missing and `options.reader`
+   * is supplied, the ledger may answer from the unchanged source file instead
+   * (PRD §6.7, the two-device safety rule; ISSUE-045 chunk C7). Either lane
+   * returns the same `RecallRecord`, so a caller cannot tell them apart; every
+   * error other than `not-found` still throws.
+   */
+  recall(id: RecallId, options?: RecallOptions): Promise<RecallRecord>;
   close(): Promise<void>;
+  /**
+   * Export one session as a self-contained archive: rows, blobs and a manifest
+   * in deterministic order, with a sha256 over the archive (PRD §6.7; ISSUE-045
+   * chunk C9, ADR-0019). Optional because a ledger implementation may not ship
+   * it yet; absence is declared, never faked. The durable per-session file stays
+   * the record of record (ADR-0015).
+   */
+  export?(sessionId: SessionId): Promise<LedgerArchive>;
+  /**
+   * Rebuild a session's ledger from an archive, refusing any archive whose
+   * digest, canonical encoding, per-blob hashes or foreign references disagree
+   * (chunk C9). Additive: it never deletes the archive's source rows, and it
+   * preserves the archived event order. A target that already holds another row
+   * at an archived sequence number refuses the archive as a conflict rather than
+   * renumbering one copy of the session (ADR-0015, ADR-0019).
+   */
+  hydrate?(archive: LedgerArchive): Promise<HydratedLedger>;
+}
+
+/**
+ * One session's exported ledger archive (chunk C9). `bytes` is the archive
+ * itself; `archiveSha256` is its digest, recomputed on hydrate.
+ */
+export interface LedgerArchive {
+  readonly sessionId: SessionId;
+  readonly archiveSha256: Sha256;
+  readonly bytes: Bytes;
+}
+
+/** What a hydrate imported, so a caller can tell an empty archive from a no-op. */
+export interface HydratedLedger {
+  readonly sessionId: SessionId;
+  readonly events: number;
+  readonly recalls: number;
+}
+
+/**
+ * The fallback lane a recall takes when its ledger row is missing (PRD §6.7;
+ * ISSUE-045 chunk C7, the two-device safety rule). The record names a path, the
+ * ranges it archived and the content hash it expects; a re-read returns bytes
+ * only when the hash still matches. A changed file is a refusal, never a
+ * substitute, and every error other than `not-found` still throws.
+ */
+export interface SourceFallbackRequest {
+  readonly source: SourceRef;
+  /** The file path the archived content came from, spelled as stored. */
+  readonly path: string;
+  readonly ranges: readonly ByteRange[];
+}
+
+/** The seam that re-reads an unchanged source; injected, never a global. */
+export interface LedgerSourceReader {
+  read(request: SourceFallbackRequest): Promise<Bytes>;
+}
+
+/**
+ * What a recall may consult beyond the ledger. Absent, a miss is
+ * `LedgerError('not-found')` exactly as before; present, the miss may fall back
+ * to the unchanged source. It is a parameter, not ledger state, so one ledger
+ * serves several hosts (ISSUE-045 chunk C7).
+ */
+export interface RecallOptions {
+  readonly reader?: LedgerSourceReader;
 }
 
 export interface SqliteLedgerOptions {

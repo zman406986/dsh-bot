@@ -4,7 +4,24 @@ export interface DshParityRow {
   readonly racoonsEquivalent: string;
   readonly status: 'covered' | 'deferred' | 'n/a';
   readonly reason?: string;
+  /**
+   * The file that proves a `covered` row, repo-relative. Absent on rows that
+   * predate this field. A covered row in `CHUNK_PARITY_IDS` must name one, and
+   * `parity.test.ts` refuses a path that does not exist — a claim with no test
+   * behind it is a claim of a different kind.
+   */
+  readonly proof?: string;
 }
+
+/**
+ * The rows ISSUE-045 chunk C12 adds, one per gap the core-completion work
+ * closed at the surface: manual forget (G1), proof removals (G2), per-path
+ * coverage (G3), recall source fallback (G5) and usage reconciliation (G8).
+ * G4/G6/G7 ride inside these (write invalidation is proven by the proof tests
+ * the rows name; export/hydrate is core-only and carries no dsh behaviour).
+ */
+export const CHUNK_PARITY_IDS = ['manual-forget', 'proof-removals',
+  'per-path-coverage', 'recall-source-fallback', 'usage-reconciliation'] as const;
 
 /** Contract coverage, not a claim that the unavailable worktree was executed or inspected. */
 export const DSH_PARITY_CHECKLIST: readonly DshParityRow[] = Object.freeze([
@@ -35,4 +52,45 @@ export const DSH_PARITY_CHECKLIST: readonly DshParityRow[] = Object.freeze([
     racoonsEquivalent: 'Adapter tests cover the declared core and host contracts.', status: 'deferred',
     reason: 'The requested reference source and test paths are absent; behaviour beyond the PRD '
       + 'cannot be verified with Read and Write alone.' },
+
+  // --- ISSUE-045 chunk C12: the core-completion gaps, row by row -----------
+  // PRD §6.2 "Mistakes are recoverable: manual forget, or recall by id."
+  { id: 'manual-forget', microcompactBehaviour: 'Let the agent undo one of its own reads on request.',
+    racoonsEquivalent: 'The additive `forget` tool resolves a path and line ranges to one held unit '
+      + 'and the mount applies it at its next boundary as one revert plus one receipt; a refused '
+      + 'request applies nothing.', status: 'covered',
+    proof: 'packages/adapters/dsh/test/forget-tool.test.ts' },
+  // PRD §6.6 stale read / superseded read.
+  { id: 'proof-removals', microcompactBehaviour: 'Drop a read the transcript itself proves wrong or '
+      + 'redundant.', racoonsEquivalent: 'Core registers the stale-read and superseded-read rules; '
+      + 'both plan one `proof` op through the same revert lane a verdict uses (ADR-0018), and the '
+      + 'mount applies them in its at-rest pass.', status: 'covered',
+    proof: 'packages/adapters/dsh/test/prune.test.ts' },
+  // PRD §6.6 "Coverage is metered in bytes per source path across all
+  // result-producing calls". The meter is core's; the mount does not yet build
+  // the snapshot rows, so this row is honest as deferred.
+  { id: 'per-path-coverage', microcompactBehaviour: 'Report what each source path costs the context.',
+    racoonsEquivalent: 'Core ships `CoverageMeter` (tool-name agnostic, hit/miss/unknown split, '
+      + 'proven by `packages/core/test/coverage.test.ts`), but no mount path yet builds '
+      + '`SessionSnapshot.pathCoverage` from it.', status: 'deferred',
+    reason: 'The meter is core-only today: nothing calls `CoverageMeter.record` outside tests, so no '
+      + 'host receives per-path byte rows. Wiring it into the mount\'s snapshot is a follow-up '
+      + '(ISSUE-053), not a behaviour this adapter can claim.' },
+  // PRD §6.7 "recall falls back to re-reading the unchanged source when the
+  // ledger misses — the two-device safety rule."
+  { id: 'recall-source-fallback', microcompactBehaviour: 'Restore archived bytes after a ledger miss.',
+    racoonsEquivalent: 'Core answers a miss from the unchanged source under the manifest\'s own hash '
+      + '(proven by `packages/core/test/recall-fallback.test.ts` and '
+      + '`packages/core/test/recall-integrity.test.ts`); a changed file is a refusal, never a '
+      + 'substitute.', status: 'deferred',
+    reason: 'The mount calls `engine.recall(id)` with no `RecallOptions`, so no live dsh recall ever '
+      + 'hands the ledger a reader. The lane is core\'s and proven there; exposing it through the '
+      + 'mount is ISSUE-053.' },
+  // PRD §6.9 "authoritative counts reconcile from API usage (including cached
+  // tokens) after each call."
+  { id: 'usage-reconciliation', microcompactBehaviour: 'Reconcile the local estimate against the '
+      + 'provider\'s own counts.', racoonsEquivalent: 'The mount reads the `assistant/message` usage '
+      + 'row, maps the host\'s disjoint buckets onto the core\'s whole-prompt count with the cache '
+      + 'share kept readable, and journals `usage-reconciled` or `usage-missing` once per request.',
+    status: 'covered', proof: 'packages/adapters/dsh/test/plugin.test.ts' },
 ]);

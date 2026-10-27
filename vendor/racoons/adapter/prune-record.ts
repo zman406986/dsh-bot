@@ -13,7 +13,7 @@ import { pruneRecordOf } from '@racoons/core';
 import type {
   PruneAttemptTelemetry, PrunePassApplication, PrunePassPlan, PruneRecordedFields, UnitId,
 } from '@racoons/core';
-import type { MountJournal } from './judge-seam.js';
+import type { MountJournal } from './journal-kinds.js';
 
 /** Why a pass moved no judged answer; journaled by name, never thrown. */
 export type PruneRefusalReason =

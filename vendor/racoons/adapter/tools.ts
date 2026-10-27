@@ -1,9 +1,11 @@
 import type {
-  Disposable, NodeId, RecallId, RecallRecord, ToolSpec,
+  Disposable, ForgetRequest, NodeId, RecallId, RecallRecord, ToolSpec,
 } from '@racoons/core';
 import {
   RECALL_TOOL_DESCRIPTION, canonicalManifestBytes, sha256Sync,
 } from '@racoons/core';
+import { readForgetArgs } from './forget-tool.js';
+import type { DshForgetValue } from './forget-tool.js';
 
 /**
  * The core copy names what the tool does; the adapter appends how to read an
@@ -19,11 +21,17 @@ const RECALL_TOOL_DESCRIPTION_DSH = RECALL_TOOL_DESCRIPTION
  * replaces a native read (ADR-0007): `forget`/`expand`/`recall` sit beside the
  * host's own tools.
  *
- * Only `recall` has an execution path in this milestone. `forget` needs the
- * verdict seam and `expand` belongs to the Pull/skeleton protocol, which
- * design-protocol §1 explicitly leaves to its own plan; both ship as declared
- * specs and are never registered until a handler exists, so the model is never
- * offered a tool that would fail.
+ * `forget` and `recall` have execution paths (ISSUE-045 chunk D2 added the
+ * manual forget handler behind the spec PRD §6.2 requires). `expand` belongs to
+ * the Pull/skeleton protocol, which design-protocol §1 explicitly leaves to its
+ * own plan; it ships as a declared spec and is never registered until a handler
+ * exists, so the model is never offered a tool that would fail.
+ *
+ * The `forget` argument surface is the one the spec declares and no more: the
+ * path the content came from and, optionally, the 1-based line ranges within
+ * that result. There is no label argument — the receipt ships its floor line —
+ * and no unit or node id, because the caller names content the way the
+ * transcript spells it (PRD §6.2, `units/lookup.ts`).
  */
 export const DSH_TOOL_SPECS: readonly ToolSpec[] = Object.freeze([
   { name: 'forget',
@@ -64,7 +72,7 @@ export const DSH_TOOL_SPECS: readonly ToolSpec[] = Object.freeze([
 /** One tool as the host receives it: the spec plus the function behind it. */
 export interface DshToolRegistration {
   readonly spec: ToolSpec;
-  execute(args: unknown): Promise<DshRecallOutput>;
+  execute(args: unknown): Promise<DshRecallOutput | DshForgetValue>;
 }
 
 /** The host's additive registration seam: `ctx.tools.register` returns an unregister. */
@@ -72,9 +80,16 @@ export interface DshToolHost {
   register(tool: DshToolRegistration): () => void;
 }
 
-/** What the adapter can already answer. Absent handlers mean an unregistered tool. */
+/**
+ * What the adapter can already answer. Absent handlers mean an unregistered
+ * tool. `forget` returns the request's outcome — a scheduled request or the
+ * lookup's own refusal — and never applies a removal itself: a tool call runs
+ * with its own assistant message still unanswered on the surface, where no
+ * revert can be built (`forget-tool.ts` states the probe that proved it).
+ */
 export interface DshToolSources {
   readonly recall: (id: RecallId) => Promise<RecallRecord>;
+  readonly forget?: (request: ForgetRequest) => Promise<DshForgetValue>;
 }
 
 export interface DshRecallPart {
@@ -131,15 +146,28 @@ function recallIdArg(args: unknown): RecallId {
   return id;
 }
 
-/** The registrations the supplied sources can honour, in spec order. */
+/**
+ * The registrations the supplied sources can honour, in spec order. `recall` is
+ * always present; `forget` joins it only when a handler was supplied, so a host
+ * that wires no manual-forget path never offers the tool.
+ */
 export function createDshTools(sources: DshToolSources): readonly DshToolRegistration[] {
   const recallSpec = DSH_TOOL_SPECS.find(spec => spec.name === 'recall');
   if (recallSpec === undefined) throw new Error('The recall spec left the inventory');
-  return [{ spec: recallSpec,
-    execute: async args => {
-      const id = recallIdArg(args);
-      return recallText(await sources.recall(id), id);
-    } }];
+  const forget = sources.forget;
+  const forgetSpec = DSH_TOOL_SPECS.find(spec => spec.name === 'forget');
+  if (forget !== undefined && forgetSpec === undefined) {
+    throw new Error('The forget spec left the inventory');
+  }
+  return [
+    ...(forget === undefined || forgetSpec === undefined ? [] : [{ spec: forgetSpec,
+      execute: async (args: unknown): Promise<DshForgetValue> => forget(readForgetArgs(args)) }]),
+    { spec: recallSpec,
+      execute: async args => {
+        const id = recallIdArg(args);
+        return recallText(await sources.recall(id), id);
+      } },
+  ];
 }
 
 /**

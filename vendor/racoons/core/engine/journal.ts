@@ -95,13 +95,16 @@ export function receiptMatches(prepared: PreparedEvent, receipt: ApplyReceipt): 
     && (details === null || receipt.baseRevision === details.intent.baseRevision);
 }
 
+/**
+ * The breaker's state as the durable record states it: the last validation's
+ * own reading. The `breaker-disabled` event is a notice marker, not a latch — a
+ * later completed validation writes `disabled: false`, and re-deriving from the
+ * marker would resurrect a disable the session already cleared (ISSUE-057).
+ */
 export function breakerState(entries: readonly LedgerEntry[]): BreakerState {
   let state: BreakerState = { consecutiveValidationFailures: 0, disabled: false };
   for (const { event } of entries) {
     if (event.kind === 'validation') state = event.breaker;
-    if (state.disabled || event.kind === 'breaker-disabled') {
-      return { consecutiveValidationFailures: 2, disabled: true };
-    }
   }
   return state;
 }

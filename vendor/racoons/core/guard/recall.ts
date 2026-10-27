@@ -1,28 +1,71 @@
 import {
-  buildRecallManifest, encodeRecallManifest, manifestSha256, recallIdFor,
+  buildRecallManifest, encodeRecallManifest, recallIdFor,
 } from "../ledger/manifest.js";
-import type { Ledger, RecallRecord } from "../ledger/types.js";
+import type { RecallManifest, RecallManifestPart, RecallRecord } from "../ledger/manifest.js";
+import type { Ledger } from "../ledger/types.js";
 import type { Removal } from "../rules/types.js";
+import type { RecallId, SessionId, Sha256 } from "../types/identity.js";
 import type { CheckContext, Report } from "./context.js";
 import { canonicalApplicationBytes, digest, equal } from "./bytes.js";
 import { privateCopy } from "./checks-shape.js";
 
+/**
+ * One removal's recall identity, computed synchronously.
+ *
+ * `makeRecall` and the entry-shape planner must agree on the id byte for byte:
+ * the planner renders the marker that carries it, and the guard mints the
+ * archive under it. One implementation is the only way that agreement cannot
+ * drift, so both call here — `digest` is `sha256Sync`, the same digest
+ * `manifestSha256` computes asynchronously, so the identity is identical either
+ * way and the caller needs no await.
+ */
+export function recallManifestFor(
+  sessionId: SessionId, parts: readonly RecallManifestPart[],
+): { readonly manifest: RecallManifest; readonly manifestSha256: Sha256; readonly id: RecallId } {
+  const manifest = buildRecallManifest(sessionId, [...parts]);
+  const manifestSha256 = digest(encodeRecallManifest(manifest));
+  return { manifest, manifestSha256, id: recallIdFor(manifestSha256) };
+}
+
+/** The manifest parts one removal's archived bodies and ranges hash to. */
+export function recallManifestParts(parts: RecallRecord["parts"]): readonly RecallManifestPart[] {
+  return parts.map(part => ({
+    source: { ...part.source }, blobSha256: digest(part.bytes),
+    removedRanges: part.removedRanges.map(span => ({ range: { ...span.range }, sha256: span.sha256 })),
+  }));
+}
+
 export async function makeRecall(c: CheckContext, removal: Removal): Promise<RecallRecord> {
+  return makeRecallOver(c, removal, null);
+}
+
+/**
+ * The same archive, banked over an EXPLICIT body instead of the node's current
+ * bytes.
+ *
+ * The entry lane needs this: a shaped turn replaces the landed result, and the
+ * plan carries the ORIGINAL body the port held before that. Banking the node's
+ * current bytes would store the shaped body and the recall id in its marker
+ * would restore the wrong content. Every other lane passes `null` and reads the
+ * node, exactly as before.
+ */
+export async function makeRecallOver(
+  c: CheckContext, removal: Removal, override: Uint8Array | null,
+): Promise<RecallRecord> {
   const order = [...c.nodes.keys()];
   const sources = [...removal.sources].sort((a, b) =>
     order.indexOf(a.source.nodeId) - order.indexOf(b.source.nodeId));
   const parts = sources.map(s => {
     const node = c.nodes.get(s.source.nodeId);
     if (node === undefined) throw new Error("Unknown archive source");
-    return { source: { ...s.source }, bytes: node.bytes.slice(), removedRanges: s.ranges.map(range => ({
-      range: { ...range }, sha256: digest(node.bytes.slice(range.startByte, range.endByteExclusive)),
+    const body = override ?? node.bytes;
+    return { source: { ...s.source }, bytes: body.slice(), removedRanges: s.ranges.map(range => ({
+      range: { ...range }, sha256: digest(body.slice(range.startByte, range.endByteExclusive)),
     })) };
   });
-  const manifest = buildRecallManifest(c.value.snapshot.sessionId, parts.map(p => ({
-    source: p.source, blobSha256: digest(p.bytes), removedRanges: p.removedRanges,
-  })));
-  const hash = await manifestSha256(manifest);
-  return { id: recallIdFor(hash), manifestSha256: hash, manifest, parts };
+  const { manifest, manifestSha256, id } = recallManifestFor(
+    c.value.snapshot.sessionId, recallManifestParts(parts));
+  return { id, manifestSha256, manifest, parts };
 }
 export function checkRecall(record: RecallRecord, sessionId: string, report: Report): void {
   try {
@@ -66,6 +109,10 @@ export async function checkEvidenceRecalls(c: CheckContext, ledger: Ledger, repo
       continue;
     }
     try {
+      // No `RecallOptions` here on purpose: this check proves that the *ledger*
+      // still holds the evidence's provenance. The source lane (chunk C7) re-reads
+      // a mutable file, so letting it answer would turn an edited file into a
+      // provenance refusal instead of the banked record it is.
       const recall = privateCopy(await ledger.recall(evidence.sourceRecallId));
       checkRecall(recall, c.value.snapshot.sessionId, report);
       const part = recall.parts.find(p => p.source.nodeId === node.id);

@@ -12,7 +12,7 @@ import type { ProcessingUnit } from "../units/types.js";
  * A fourth family is impossible by ruling, not by omission: "unreferenced since
  * N turns" is unobservable, because use happens in the agent's memory and every
  * outside signal is a lower bound on it (Ruling 8,
- * `docs/plans/2026-10-21-protocol/rulings.md`). Such a unit is judged at L2 and
+ * `archive/2026-10-21-protocol/rulings.md`). Such a unit is judged at L2 and
  * is never removed here.
  */
 export type Level1Rule =

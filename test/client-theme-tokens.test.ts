@@ -20,6 +20,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { ROSTER_PANEL_CSS } from "../src/client/panel.js";
+import { SESSION_KIND_GLYPH_CSS } from "../src/client/session-kind.js";
 import { SETTINGS_CARD_CSS } from "../src/client/settings-card.js";
 
 /** Distinct `var(--dsw-…)` tokens referenced by a stylesheet, sorted. */
@@ -34,6 +35,9 @@ function tokensIn(css: string): string[] {
 const SURFACES = [
   { name: "roster panel (ROSTER_PANEL_CSS)", css: ROSTER_PANEL_CSS },
   { name: "settings card (SETTINGS_CARD_CSS)", css: SETTINGS_CARD_CSS },
+  // Ticket 146: the dispatcher bot portrait draws with `currentColor` plus
+  // this one token, so it carries the same contract as the other surfaces.
+  { name: "session-kind glyph (SESSION_KIND_GLYPH_CSS)", css: SESSION_KIND_GLYPH_CSS },
 ] as const;
 
 /** The colour-bearing declarations of one selector, for role assertions. */
@@ -110,6 +114,11 @@ describe("theme tokens — no private palette survives (ticket 49)", () => {
       "--dsw-alias-label-tertiary",
       "--dsw-alias-state-business-primary",
       "--dsw-alias-state-error-primary",
+    ]);
+    // Ticket 146: the portrait is `currentColor`-first; only the eyes take a
+    // token, and it is the plain label colour (never the brand-primary trap).
+    assert.deepEqual(tokensIn(SESSION_KIND_GLYPH_CSS), [
+      "--dsw-alias-label-primary",
     ]);
   });
 });

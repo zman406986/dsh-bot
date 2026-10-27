@@ -5,10 +5,13 @@ import type { RevertAppend, RevertPlan } from "../revert/types.js";
 import type { NodeId, NoteId, UnitId } from "../types/identity.js";
 import type { CheckContext } from "./context.js";
 import type { RevertApplication } from "./checks-revert.js";
-import { makeRecall } from "./recall.js";
+import { join } from "./bytes.js";
+import { makeRecall, makeRecallOver } from "./recall.js";
 import { renderRecords, renderedNoteId } from "./render.js";
-import type { ReceiptAssets, RecordAssets } from "./render.js";
+import { renderShapeTurn, shapeTurnMatches } from "./shape-turn.js";
+import type { ProofReceiptAssets, ReceiptAssets, RecordAssets } from "./render.js";
 import type { ArchiveRecord, RenderedRecord, Replacement } from "./types.js";
+import type { RecallRecord } from "../ledger/manifest.js";
 
 type NegativeAssets = RecordAssets["negative"] extends ReadonlyMap<string, infer V> ? V : never;
 
@@ -46,7 +49,51 @@ export async function buildCandidate(c: CheckContext): Promise<Candidate> {
     // The entry-time cap has no materialization arm: ADR-0014 (2026-10-23)
     // scrapped it. A `cap` operation falls through to the unsupported-operation
     // refusal below, so no rule can put an in-place rewrite on the path.
-    if (op.kind === "seal" && op.mode === "append") {
+    if (op.kind === "shape") {
+      // A shaped entry, landed-node contract (ISSUE-056 chunk C4, reworked by
+      // ISSUE-058 chunk P3b; ADR-0022 §12–§13). The answer judged a result that
+      // already landed; applying it rewinds past that result's turn and appends
+      // ONE new turn. So this arm carries the new turn's bytes as the
+      // replacement of the landed node and banks the ORIGINAL body the port
+      // holds — never the shaped one — so recall is byte-exact.
+      //
+      // The op states everything: `unitId`, `keptRanges` over `originalBytes`,
+      // and the exact `replacementBytes`. This arm turns those claims into the
+      // candidate and decides nothing: no range, no marker byte, no recall id.
+      const removal = plan.removals.find(r => r.id === op.removalId), source = removal?.sources[0];
+      const node = source === undefined ? undefined : c.nodes.get(source.source.nodeId);
+      if (removal === undefined || source === undefined || node === undefined || node.kind !== "tool-result") {
+        throw new Error("Missing checked shape source");
+      }
+      // The landed result is the entry event's own node. A shape never addresses
+      // another node: the answer was about the result immediately above the ask.
+      if (c.value.input.kind !== "entry" || c.value.input.result.id !== node.id) {
+        throw new Error("A shape operation applies only to the landed entry result");
+      }
+      const original = op.originalBytes;
+      const turn = renderShapeTurn({ source: source.source, original,
+        keptRanges: op.keptRanges, sessionId: c.value.snapshot.sessionId });
+      if (turn === null || !shapeTurnMatches(turn, op.replacementBytes)) {
+        throw new Error("A shape's replacement bytes differ from its plan");
+      }
+      const recall = await makeRecallOver(c, removal, original);
+      // The archive kind vocabulary is the durable schema's (ledger/schema.ts
+      // admits seven kinds and this chunk may not widen it): a shaped entry is
+      // recorded as the agent decision it is, and the row's own `ruleId`
+      // (`entry-shape`) names the lane precisely.
+      archives.push({ ruleId: plan.ruleId, removalId: removal.id, operationKind: "verdict",
+        episodeId: null, title: removal.title, recall });
+      // The guard compares the JOINED generated ranges against this value, so
+      // the expectation is the marker once per dropped gap — one slice of the
+      // turn per gap, which is exactly what the renderer placed.
+      const markerBytes = join(turn.generatedRanges.map(range =>
+        turn.bytes.slice(range.startByte, range.endByteExclusive)));
+      expectedGenerated.set(node.id, markerBytes);
+      replacements.push({ source: { ...source.source }, bytes: turn.bytes.slice(),
+        sha256: turn.sha256, retainedCopies: turn.retainedCopies.map(copy => ({ ...copy })),
+        generatedRanges: turn.generatedRanges.map(range => ({ ...range })),
+        evidenceRecallId: recall.id });
+    } else if (op.kind === "seal" && op.mode === "append") {
       const episode = c.episodes.find(e => e.id === op.episodeId);
       if (episode === undefined) throw new Error("Missing checked episode");
       const data = { target: episode.target.label, entries: episode.paths.filter(p => p.outcome === "miss") };
@@ -56,25 +103,23 @@ export async function buildCandidate(c: CheckContext): Promise<Candidate> {
       appendRecords.push(rendered);
       expectedRecords.set(note.id, encode(negativeFact(data)));
       sealedEpisodeIds.push(episode.id);
-    } else if (op.kind === "verdict") {
-      // A verdict removal is never rewritten in place: the unit's bytes leave
-      // the transcript and one receipt takes their place (design-protocol §2).
+    } else if (op.kind === "verdict" || op.kind === "proof") {
+      // A verdict or proof removal is never rewritten in place: the unit's bytes
+      // leave the transcript and one receipt takes their place (design-protocol
+      // §2; ADR-0018 §2). A proof burn differs only in what its receipt says —
+      // path, ranges and recall id, no descriptor — and in the archive kind.
       const removal = plan.removals.find(r => r.id === op.removalId), source = removal?.sources[0];
       const node = source === undefined ? undefined : c.nodes.get(source.source.nodeId);
       if (removal === undefined || source === undefined || node === undefined || node.kind !== "tool-result") {
         throw new Error("Missing checked verdict source");
       }
-      if (note.kind !== "receipt") throw new Error("A verdict operation requires a receipt note");
-      if (forgotten.has(node.id)) throw new Error("Two verdict removals share one node");
+      if (forgotten.has(node.id)) throw new Error("Two reverted removals share one node");
       const recall = await makeRecall(c, removal);
-      archives.push({ ruleId: plan.ruleId, removalId: removal.id, operationKind: "verdict",
+      archives.push({ ruleId: plan.ruleId, removalId: removal.id, operationKind: op.kind,
         episodeId: null, title: removal.title, recall });
-      const receipt: ReceiptAssets = { path: note.path, ranges: note.ranges, label: note.label,
-        recallId: recall.id };
-      const rendered = renderRecords([note], {
-        negative, receipt: new Map<string, ReceiptAssets>([[note.id, receipt]]),
-      })[0];
-      if (rendered === undefined) throw new Error("Missing verdict receipt");
+      const rendered = op.kind === "verdict"
+        ? renderVerdictReceipt(note, recall)
+        : renderProofReceipt(note, recall);
       appendRecords.push(rendered);
       expectedRecords.set(rendered.recordId, rendered.bytes);
       forgotten.set(node.id, { unitId: op.unitId, nodeId: node.id, record: rendered });
@@ -82,6 +127,33 @@ export async function buildCandidate(c: CheckContext): Promise<Candidate> {
   }
   return { replacements, appendRecords, archives, sealedEpisodeIds, expectedGenerated, expectedRecords,
     revert: planRevert(c, forgotten) };
+}
+
+/** The receipt line a forgotten unit leaves: path, ranges, optional label, recall id. */
+function renderVerdictReceipt(note: Note, recall: RecallRecord): RenderedRecord {
+  if (note.kind !== "receipt") throw new Error("A verdict operation requires a receipt note");
+  const receipt: ReceiptAssets = { path: note.path, ranges: note.ranges, label: note.label,
+    recallId: recall.id };
+  const rendered = renderRecords([note], {
+    negative: new Map(), receipt: new Map<string, ReceiptAssets>([[note.id, receipt]]),
+  })[0];
+  if (rendered === undefined) throw new Error("Missing verdict receipt");
+  return rendered;
+}
+
+/**
+ * A proof burn's receipt: the same line shape with no descriptor at all. The
+ * note has no label slot, so nothing can be described into the line (ADR-0018).
+ */
+function renderProofReceipt(note: Note, recall: RecallRecord): RenderedRecord {
+  if (note.kind !== "proof-receipt") throw new Error("A proof operation requires a proof receipt note");
+  const receipt: ProofReceiptAssets = { path: note.path, ranges: note.ranges, recallId: recall.id };
+  const rendered = renderRecords([note], {
+    negative: new Map(), receipt: new Map(),
+    proof: new Map<string, ProofReceiptAssets>([[note.id, receipt]]),
+  })[0];
+  if (rendered === undefined) throw new Error("Missing proof receipt");
+  return rendered;
 }
 
 /**
@@ -104,7 +176,7 @@ function planRevert(c: CheckContext, forgotten: ReadonlyMap<NoteId, ForgottenRec
   const ordered: { readonly index: number; readonly entry: ForgottenReceipt }[] = [];
   for (const [nodeId, entry] of forgotten) {
     const index = nodes.findIndex(node => node.id === nodeId);
-    if (index < 0) throw new Error("A verdict source left the snapshot");
+    if (index < 0) throw new Error("A reverted removal's source left the snapshot");
     ordered.push({ index, entry });
   }
   ordered.sort((a, b) => a.index - b.index);

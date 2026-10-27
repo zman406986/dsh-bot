@@ -1,12 +1,11 @@
 /**
- * One text answer from the host's model seam (ISSUE-022 chunk 5, beside the
- * judge of ISSUE-024 chunk 2).
+ * One wire answer from the host's model seam (ISSUE-022 chunk 5; ADR-0028).
  *
- * Both ask shapes in this package end the same way: one system slot, one user
- * message, no tools, and a joined `text-delta` stream read against one deadline.
- * The judge then decodes the text as one wire verdict; the prune pass decodes it
- * as an index map. So the stream is one function here and the decoders are
- * their own modules: a second copy of this loop would be the thing that drifts.
+ * Both surviving ask shapes in this package end the same way: one system slot,
+ * one user message, no tools, and a joined `text-delta` stream read against one
+ * deadline — the entry checkpoint's anchored ask and the bulk prune's table
+ * ask. They decode the text differently; the stream loop is one function here,
+ * because a second copy of it would be the thing that drifts.
  *
  * Fail-open is structural. Every failure that is not a joined text answer — no
  * route, a thrown stream, an aborted or errored finish, a truncated `max-tokens`
@@ -16,15 +15,16 @@
 import {
   ForkError, forkErrorMessage, hashSystem, hashTools,
 } from '@racoons/core';
-import type { Sha256 } from '@racoons/core';
+import type { ApiUsage, Sha256 } from '@racoons/core';
 import type { DshLlmChunk, DshLlmService, DshLlmStreamOptions } from './plugin.js';
+import { readAssistantUsage } from './usage.js';
 
-/** The one default deadline shared by the judge and the prune ask. */
+/** The one default deadline shared by the entry ask and the prune ask. */
 export const DEFAULT_ASK_TIMEOUT_MS = 30_000;
 
 /**
  * The process-local mark every ask from this package carries. The mount's
- * `llm/stream` observer uses it to tell a racoons ask (judge, prune) from
+ * `llm/stream` observer uses it to tell a racoons ask (entry, prune) from
  * main's requests: an ask must never become the next fork seed. A symbol, so
  * nothing reaches a provider body.
  */
@@ -66,6 +66,15 @@ export interface StreamAnswer {
   readonly text: string;
   /** The host's finish kind, or null when the stream ended without one. */
   readonly finish: string | null;
+  /**
+   * The ask's cost, when the host reported one (ISSUE-056 C6a — leader ruling
+   * on the Phase R plan): the `{type:'usage'}` chunk the host emits before
+   * `finish`, mapped to the core's `ApiUsage` by the one shipped arithmetic.
+   * Absent means the host said nothing — never a zero claim. It is data on the
+   * answer only; the engine's meter does not see an ask (the token watchdog
+   * meters main traffic by design, so an ask's spend is reconciled post-run).
+   */
+  readonly usage?: ApiUsage;
 }
 
 export type StreamOutcome = StreamAnswer | StreamRefusal;
@@ -105,6 +114,25 @@ function finishKind(reason: unknown): string {
   return 'unknown';
 }
 
+/**
+ * The ask's cost, read off one `{type:'usage'}` chunk by the ONE arithmetic the
+ * package already ships for host usage (`readAssistantUsage`, `./usage.ts`).
+ *
+ * That reader takes the `assistant/message` event shape, and the stream chunk is
+ * the same row one level in: `{type:'usage', usage: TokenUsage}`. This function
+ * is the projection — the row is re-wrapped in the event shape the reader
+ * declares and nothing else is supplied (`seq` is required by the type and read
+ * by nothing). The alternative, reading the counters here, would be a second
+ * copy of the disjoint-bucket rule, which is exactly what must not drift.
+ *
+ * `undefined` means the host made no claim: an absent, null or unusable row.
+ */
+function usageOfChunk(chunk: Record<string, unknown>): ApiUsage | undefined {
+  const read = readAssistantUsage({ type: 'assistant/message', seq: 0,
+    data: { usage: chunk['usage'] } });
+  return read !== null && read.kind === 'usage' ? read.usage : undefined;
+}
+
 /** One iterator step, abandoned when the deadline's controller aborts. */
 function nextWithin(iterator: AsyncIterator<DshLlmChunk>,
   signal: AbortSignal): Promise<IteratorResult<DshLlmChunk>> {
@@ -120,25 +148,8 @@ function nextWithin(iterator: AsyncIterator<DshLlmChunk>,
 }
 
 /**
- * Ask the host's model one question and join its text.
- *
- * The request is one system slot and one user message; no tools are offered, so
- * the answer is text or nothing. Text deltas are joined in stream order, and the
- * one deadline covers the whole stream. The text is returned undecoded on
- * purpose: a caller that needs a shape decodes it itself and owns its own
- * refusal codes.
- */
-export async function askText(llm: DshLlmService, system: string, user: string,
-  options: StreamAskOptions): Promise<StreamOutcome> {
-  return askRequest(llm, {
-    system,
-    messages: [{ role: 'user', content: [{ type: 'text', text: user }] }],
-  }, options);
-}
-
-/**
- * One wire-shaped ask (ISSUE-026 chunk 3): the full request a judge fork
- * carries — `system`, `tools` and every message — sent as it stands.
+ * One wire-shaped ask (ISSUE-026 chunk 3): the full request a fork carries —
+ * `system`, `tools` and every message — sent as it stands.
  *
  * The fork's messages are turned into the host's request shape with the one
  * mapping this seam has: each `{role, text}` becomes a text content block.
@@ -165,8 +176,8 @@ export async function askText(llm: DshLlmService, system: string, user: string,
  * OBJECT, and the adapter maps it to the provider's HTTP body; no code here sees
  * those HTTP bytes.
  *
- * A reply is text or nothing, exactly like `askText`: a tool call, an empty
- * stream, a cap and a dead socket are all typed refusals.
+ * A reply is text or nothing: a tool call, an empty stream, a cap and a dead
+ * socket are all typed refusals.
  *
  * The last act before the host seam is touched is the fork's own invariant:
  * when `expected` carries the fork's recorded hashes, the system bytes and the
@@ -232,6 +243,10 @@ async function askRequest(llm: DshLlmService, fields: {
   }
   let text = '';
   let finish: string | null = null;
+  // The host's own accounting for this call, when it reports one. The chunk is
+  // `{type:'usage', usage: TokenUsage}` and arrives before `finish`; it used to
+  // be discarded here (ISSUE-056 C6a), which left every ask's cost estimated.
+  let usage: ApiUsage | undefined;
   try {
     const request: DshLlmStreamOptions = {
       provider, model,
@@ -250,6 +265,13 @@ async function askRequest(llm: DshLlmService, fields: {
       if (isRecord(chunk) && chunk['type'] === 'text-delta'
         && typeof chunk['text'] === 'string') {
         text += chunk['text'];
+        continue;
+      }
+      if (isRecord(chunk) && chunk['type'] === 'usage') {
+        // The one shipped arithmetic (`./usage.ts`) maps the host's disjoint
+        // buckets to the core's `ApiUsage`. A row it cannot use is no claim,
+        // never a zero one: the field stays absent and the ask is still answered.
+        usage = usageOfChunk(chunk) ?? usage;
         continue;
       }
       if (isRecord(chunk) && chunk['type'] === 'finish') {
@@ -274,5 +296,6 @@ async function askRequest(llm: DshLlmService, fields: {
     return refuse('stream-truncated', 'the answer hit the token cap and may be incomplete');
   }
   if (text.trim() === '') return refuse('no-text', 'the ask stream carried no text');
-  return { status: 'answered', text, finish };
+  return { status: 'answered', text, finish,
+    ...(usage === undefined ? {} : { usage }) };
 }

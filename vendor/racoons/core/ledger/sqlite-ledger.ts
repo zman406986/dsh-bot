@@ -4,7 +4,8 @@ import type { Clock } from "../types/transcript.js";
 import type { BlobStore } from "./blob-store.js";
 import type { RecallRecord } from "./manifest.js";
 import type {
-  Ledger, LedgerEntry, LedgerEvent, PreparableApplication, PreparedIntent, SqliteLedgerOptions,
+  HydratedLedger, Ledger, LedgerArchive, LedgerEntry, LedgerEvent, PreparableApplication,
+  PreparedIntent, RecallOptions, SqliteLedgerOptions,
 } from "./types.js";
 import { LedgerError } from "./types.js";
 import { prepareLedgerFile } from "./migration.js";
@@ -15,6 +16,8 @@ import { publishPreparation, verifyApplication } from "./prepare.js";
 import { commitPreparation } from "./commit-preparation.js";
 import { appendEvent, decodeEntry } from "./event-store.js";
 import { readRecall } from "./recall.js";
+import { exportSession } from "./export-file.js";
+import { commitArchive, publishArchiveBlobs, verifyArchive } from "./rehydrate.js";
 
 export type { SqliteLedgerOptions } from "./types.js";
 
@@ -87,10 +90,40 @@ export class SqliteLedger implements Ledger {
     } catch (error) { throw storageError(error, "Cannot read events"); }
   }
 
-  async recall(id: RecallId): Promise<RecallRecord> {
+  async recall(id: RecallId, options?: RecallOptions): Promise<RecallRecord> {
     this.#assertOpen();
-    try { return await readRecall(this.#db, this.#store, id); }
+    // The source lane (ISSUE-045 chunk C7) lives inside `readRecall`, so both
+    // lanes share one error envelope: a refusal from a changed file keeps its
+    // own `LedgerError` code, and a non-ledger failure is still `storage`.
+    try { return await readRecall(this.#db, this.#store, id, options); }
     catch (error) { throw storageError(error, `Cannot recall ${id}`); }
+  }
+
+  /**
+   * One session as a self-contained archive: its rows, the bodies they name, and
+   * a manifest, in deterministic order, with a sha256 over the archive (PRD §6.7;
+   * ISSUE-045 chunk C9). Additive — the durable per-session file stays the record
+   * of record (ADR-0015) — and explicit: nothing here runs automatically.
+   */
+  async export(sessionId: SessionId): Promise<LedgerArchive> {
+    this.#assertOpen();
+    try { return await exportSession(this.#db, this.#store, sessionId); }
+    catch (error) { throw storageError(error, `Cannot export session ${sessionId}`); }
+  }
+
+  /**
+   * Rebuild a session from an archive. Verification (digest, canonical encoding,
+   * every blob's hash and length, every foreign reference) completes before the
+   * first body is published, so a refused archive leaves this ledger untouched.
+   */
+  async hydrate(archive: LedgerArchive): Promise<HydratedLedger> {
+    this.#assertOpen();
+    try {
+      const verified = await verifyArchive(archive);
+      await publishArchiveBlobs(verified.blobs, this.#store);
+      this.#assertOpen();
+      return this.#transaction(() => commitArchive(this.#db, verified.document));
+    } catch (error) { throw storageError(error, "Cannot hydrate ledger archive"); }
   }
 
   async close(): Promise<void> {

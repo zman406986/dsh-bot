@@ -34,62 +34,57 @@ import type { NextTableOptions, PruneAskItem, PruneAskRow, PruneAskTable } from 
 import { planLevel1Prune } from "./level1.js";
 import type { Level1PrunePlan } from "./types.js";
 
-/** Every reason a unit is out of this pass, as data. Adding one needs a ruling. */
-export const PRUNE_PASS_EXCLUSION_REASONS = ["protected"] as const;
-
-/**
- * Why a unit is out of the pass. `protected` covers both directions: the unit is
- * never asked (a verdict on it is unusable — the guard refuses
- * `protected-content`, so the ask would spend a round on an impossible answer)
- * and an L1 removal of it is never applied.
- */
-export type PrunePassExclusionReason = (typeof PRUNE_PASS_EXCLUSION_REASONS)[number];
-
-export interface PrunePassExclusion {
-  readonly unitId: UnitId;
-  readonly reason: PrunePassExclusionReason;
-}
-
 export interface PrunePassInput {
   /** Every unit still in memory, in transcript order. Duplicate ids are ignored. */
   readonly units: readonly ProcessingUnit[];
   readonly nodes: readonly ToolResultNode[];
   readonly episodes: readonly Episode[];
-  /** Units protection covers; they are neither asked nor removed. */
-  readonly protectedUnitIds: readonly UnitId[];
   /** What the mount knows per node; see `./anchor.ts`. */
   readonly callFacts?: ReadonlyMap<NodeId, PruneCallFacts>;
   /** The pass's round ordinal; stamped on every assigned index. */
   readonly round: number;
   /** Table-builder options; production passes none. */
   readonly tableOptions?: NextTableOptions;
+  /**
+   * Unit ids a SETTLED entry keep already settled (ISSUE-073): the unit a
+   * result checkpoint answered `keepall` for and applied. Omitted or empty
+   * excludes nothing. The caller supplies it post-invalidation — a unit a later
+   * write invalidated is not settled any more and must not be here.
+   */
+  readonly settled?: ReadonlySet<UnitId>;
 }
 
-/** One pass as a document: the two layers, its ask tables and the exclusions. */
+/** One pass as a document: the two layers and its ask tables. */
 export interface PrunePassPlan {
   readonly round: number;
-  /** L1's own verdict, untouched by protection; `excluded` overrides it. */
+  /** L1's own verdict. */
   readonly l1: Level1PrunePlan;
-  /** L1's kept list minus protected units, in transcript order. */
+  /** L1's kept list, in transcript order. */
   readonly askRows: readonly PruneAskRow[];
   /** `askRows` in contiguous tables of at most twelve units, in order. */
   readonly tables: readonly PruneAskTable[];
-  /** Protected units still in memory, in transcript order. */
-  readonly excluded: readonly PrunePassExclusion[];
   /** `index → unitId + round`, ready for `parsePruneAnswer`. */
   readonly stamps: ReadonlyMap<number, WireStamp>;
   /** Every unit the pass was given, deduplicated, in transcript order. */
   readonly units: readonly ProcessingUnit[];
+  /**
+   * The units this pass withheld from its ask because a settled entry keep
+   * already decided them (ISSUE-073), in transcript order. Always a subset of
+   * `l1.kept`; empty when the caller passed no settled set.
+   */
+  readonly settledWithheld: readonly UnitId[];
 }
 
 /**
  * Plans one record-only pass. L1 runs over the units first. The ask covers
- * EXACTLY L1's kept list minus protected units — every unit still in memory is
- * re-asked, including units an earlier pass kept, because asking is the only way
- * to learn it is now unneeded (Ruling 8: L2 asks everything still in memory). A
- * protected unit that L1 could prove removable stays in `l1.removals` (the proof
- * stands, and L1 is not weakened by protection) but is `excluded`, and the merge
- * never turns it into a removal.
+ * L1's kept list minus the units a SETTLED entry keep already settled
+ * (ISSUE-073): a keep-all the result checkpoint applied is final, so a later
+ * pass never re-lists that unit. Every other unit still in memory is re-asked,
+ * including units an earlier pass kept, because asking is the only way to learn
+ * it is now unneeded (Ruling 8: L2 asks everything still in memory). The
+ * settled set is the one exclusion and it is the caller's: a unit whose entry
+ * ask failed open, was refused or was never asked is not in it and stays
+ * listable. No content class is held back (ADR-0020).
  */
 export function planPrunePass(input: PrunePassInput): PrunePassPlan {
   const { round } = input;
@@ -109,14 +104,15 @@ export function planPrunePass(input: PrunePassInput): PrunePassPlan {
   for (const node of input.nodes) {
     if (node.kind === "tool-result" && !nodes.has(node.id)) nodes.set(node.id, node);
   }
-  const protectedIds = new Set(input.protectedUnitIds);
-  const excluded: PrunePassExclusion[] = units
-    .filter(unit => protectedIds.has(unit.id))
-    .map(unit => ({ unitId: unit.id, reason: "protected" }));
 
   const items: PruneAskItem[] = [];
+  const settled = input.settled;
+  const withheld: UnitId[] = [];
   for (const unitId of l1.kept) {
-    if (protectedIds.has(unitId)) continue;
+    // A settled keep is final (ISSUE-073): the entry checkpoint already decided
+    // this unit, so a later table never lists it again. Only the ask is
+    // withheld — L1's byte proofs run over every unit regardless.
+    if (settled !== undefined && settled.has(unitId)) { withheld.push(unitId); continue; }
     const unit = byId.get(unitId);
     // L1's kept list is drawn from these units, so this cannot miss; skipping
     // would drop a unit from the ask, which is the one thing the ask must not do.
@@ -135,7 +131,7 @@ export function planPrunePass(input: PrunePassInput): PrunePassPlan {
     stamps.set(row.index, { unitId: row.unit.id, answeredInRound: round });
   }
   return {
-    round, l1, askRows, excluded, stamps, units,
+    round, l1, askRows, stamps, units, settledWithheld: withheld,
     tables: buildAskTables(askRows, input.tableOptions),
   };
 }
@@ -163,9 +159,8 @@ function buildAskTables(
  * The estimate the bench and the meter share: four bytes per token, rounded up —
  * `CharHeuristicTokenMeter`'s rule, computed without materialising the bytes.
  *
- * `l1RemovalsBytes` counts the L1 removals this pass would act on, so an
- * excluded unit's proof adds nothing (it removes nothing). `askTableTokens` is
- * the sum over the pass's tables, each measured at its own rendered table (the
+ * `l1RemovalsBytes` counts the L1 removals this pass would act on. `askTableTokens`
+ * is the sum over the pass's tables, each measured at its own rendered table (the
  * heading repeats per table). `total` is `ceil(l1RemovalsBytes / 4) +
  * askTableTokens`: the cost of the pass in the one unit the product reports,
  * with the history and the final instruction line excluded because they are the
@@ -176,11 +171,9 @@ export function estimatePassTokens(plan: PrunePassPlan): {
   readonly askTableTokens: number;
   readonly total: number;
 } {
-  const excluded = new Set(plan.excluded.map(entry => entry.unitId));
   const byId = new Map(plan.units.map(unit => [unit.id, unit] as const));
   let l1RemovalsBytes = 0;
   for (const removal of plan.l1.removals) {
-    if (excluded.has(removal.unitId)) continue;
     l1RemovalsBytes += byId.get(removal.unitId)?.byteLength ?? 0;
   }
   const askTableTokens = plan.tables.reduce(

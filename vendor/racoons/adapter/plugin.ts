@@ -22,27 +22,37 @@
  */
 import { randomUUID } from 'node:crypto';
 import {
-  CharHeuristicTokenMeter, DEFAULT_CONFIG, Meter, RacoonsEngine,
-  createDefaultRules, estimateContent, estimatedContentTokens, sha256Sync,
+  CharHeuristicTokenMeter, DEFAULT_CONFIG, DEFAULT_FLOOR_BYTES, Meter, RacoonsEngine,
+  createDefaultRules, estimateContent, estimatedContentTokens, floorForModel,
 } from '@racoons/core';
 import type {
-  AnchorMode, Clock, EngineResult, FreshZoneConfig, Ledger, ProtocolConfig, ProtectionState,
-  RacoonsConfig, RecallId, RecallRecord, Rule, SourceRange, Thresholds,
+  AnchorMode, Clock, ContentEstimate, EngineResult, FreshZoneConfig, Ledger, ProtocolConfig,
+  RacoonsConfig, RecallId, RecallRecord, RequestPrefix,
+  Rule, SessionSnapshot, Thresholds, ToolResultNode, UnitId, WireRequest,
 } from '@racoons/core';
 import { createDshCapabilities } from './capabilities.js';
 import { createDshAdapter } from './adapter.js';
 import type { DshAdapter } from './adapter.js';
-import { DSH_TOOL_SPECS, recallText } from './tools.js';
-import type { DshToolHost, DshRecallOutput } from './tools.js';
+import { createDshTools } from './tools.js';
+import type { DshToolHost, DshToolRegistration, DshToolSources } from './tools.js';
+import { forgetAnswerText } from './forget-tool.js';
+import type { DshForgetScheduled } from './forget-tool.js';
+import { classifyDshTool } from './evidence.js';
 import type { DshResultFacts, DshPathObservation } from './evidence.js';
 import type { DshToolResultItem, DshTranscriptItem } from './envelope.js';
+import { toCoreEnvelope } from './envelope.js';
 import { createDshPort } from './port.js';
-import type { DshApplicationPort } from './port.js';
+import type { DshApplicationPort, DshAskExchange } from './port.js';
+import type { DshEntryAnswerOutcome } from './adapter.js';
+import { askEntry } from './entry-ask.js';
+import type { EntryAskTurn } from './entry-ask.js';
+import type { EntryAnswer } from '@racoons/core';
+import { readAssistantUsage, usageRequestId } from './usage.js';
 import { revertSessionFromHost } from './mount-revert.js';
 import { DEFAULT_ASK_TIMEOUT_MS } from './llm-ask.js';
-import { createJudgeSeam, judgeRouteOf } from './judge-seam.js';
-import type { JudgeRoute, JudgeSeam, JudgeSettleOutcome } from './judge-seam.js';
-import { createMainWireCapture } from './main-wire.js';
+import { judgeRouteOf } from './route.js';
+import type { JudgeRoute } from './route.js';
+import { captureMainRequest, createMainWireCapture } from './main-wire.js';
 import type { MainWireCapture } from './main-wire.js';
 import { runRecordOnlyPrune, PRUNE_COMMAND } from './prune.js';
 import type { RecordOnlyPruneOutcome } from './prune.js';
@@ -74,8 +84,9 @@ export const RACOONS_PLUGIN_NAME = 'racoons';
  *
  * `llm` is the host's own model seam — the one the shipped compaction plugin
  * declares (`dsh-compaction-basic`: `static inject = ["llm", "tokenMeter",
- * "sessions"]`). ISSUE-024 chunk 2 asks the judge through it; declaring it here
- * makes that dependency a host fact rather than a later guess.
+ * "sessions"]`). Both surviving ask moments read it (ADR-0028): the entry
+ * checkpoint and the bulk prune. Declaring it here makes that dependency a host
+ * fact rather than a later guess.
  */
 export const RACOONS_PLUGIN_INJECT: readonly string[] = Object.freeze(['llm', 'sessions']);
 
@@ -98,10 +109,23 @@ export interface RacoonsPluginConfig {
   readonly episodeNoNewPathSteps?: number | null;
   readonly sealMaxLatencyTurns?: 0 | 1;
   readonly barBytes?: number;
-  readonly advertisedLabelLimit?: number;
-  readonly retryLimit?: number;
+  /**
+   * The size floor in bytes (ADR-0020 Decision 3; ISSUE-058 item 2). A tool
+   * result under it lands whole and is never asked about. Absent means the
+   * per-model table decides (`floorForModel`; authority:
+   * `docs/research/floor-calibration-2026-10-26.md` §6), which is why this is
+   * not a defaulted clone of `barBytes`: the table needs the model id, and only
+   * the adapter sees it. It is never the bulk-pass bar.
+   */
+  readonly floorBytes?: number;
   readonly minCutFreedBytes?: number;
-  readonly revisitShare?: number;
+  /**
+   * Accepted and ignored (ADR-0028). The anchor arm belonged to the removed
+   * judge pass: the entry checkpoint's ask renders its anchors unconditionally,
+   * so no config value selects an arm. The key stays in the host-facing type so
+   * an old config row still mounts.
+   */
+  readonly anchors?: AnchorMode;
   /**
    * Enforcement mode. Absent means `apply`: ADR-0008's owner ruling, the same
    * default `DEFAULT_CONFIG` carries; `record-only` is the explicit opt-out.
@@ -112,13 +136,7 @@ export interface RacoonsPluginConfig {
   readonly enforcement?: RacoonsEnforcement;
   /** The `source.kind` an appended negative fact carries. */
   readonly recordName?: string;
-  /**
-   * The judge's anchor arm (ISSUE-021 point 6). Absent is `off`: the tagless
-   * message the v4.1 contract renders. `on` inserts one anchor line before the
-   * decision line; the history bytes are unchanged either way.
-   */
-  readonly anchors?: AnchorMode;
-  /** The judge stream's deadline in ms; `0` disables it. Default 30 s. */
+  /** The ask stream's deadline in ms; `0` disables it. Default 30 s. */
   readonly judgeTimeoutMs?: number;
   /**
    * The durable storage root (ADR-0013). Session N's ledger lands at
@@ -160,12 +178,10 @@ export interface ResolvedRacoonsConfig {
   readonly episodeNoNewPathSteps: number | null;
   readonly sealMaxLatencyTurns: 0 | 1;
   readonly barBytes: number;
-  readonly advertisedLabelLimit: number;
-  readonly retryLimit: number;
   readonly minCutFreedBytes: number;
-  readonly revisitShare: number;
   readonly enforcement: RacoonsEnforcement;
   readonly recordName: string;
+  /** Accepted and ignored (ADR-0028); see `RacoonsPluginConfig['anchors']`. */
   readonly anchors: AnchorMode;
   readonly judgeTimeoutMs: number;
   readonly racoonsStorageRoot: string;
@@ -181,6 +197,13 @@ export interface ResolvedRacoonsConfig {
    * backstop stays armed and racoons fires earlier than the host's own trigger.
    */
   readonly nativeCompactionBackstop: boolean;
+  /**
+   * The flat floor knob, before the per-session resolution; null means "let the
+   * per-model table decide" (ADR-0020 Decision 3). The model id lives on the
+   * host route, so `resolvePluginConfig` cannot finish this value — the mount
+   * does, once it can see the route (`RacoonsSessionEntry.floorBytes`).
+   */
+  readonly floorBytes: number | null;
 }
 
 /**
@@ -223,9 +246,10 @@ export interface RacoonsPluginOptions {
   readonly tools?: DshToolHost;
   readonly nowMs?: () => number;
   /**
-   * A fixed judge route, when the caller knows the provider/model pair. Absent,
+   * A fixed host route, when the caller knows the provider/model pair. Absent,
    * the mount reads the live session's own request header and refuses with
-   * `not-configured` when neither names a route (ISSUE-024 chunk 2).
+   * `not-configured` when neither names a route. Both surviving asks read it
+   * (ADR-0028): the entry checkpoint and the bulk prune.
    */
   readonly judgeRoute?: JudgeRoute;
 }
@@ -238,13 +262,20 @@ export interface DshMountSession {
   eventAt?(seq: number): DshMountEvent | undefined;
   append(type: string, data: unknown, options?: Record<string, unknown>): DshMountEvent;
   /**
-   * The host's last request header (provider/model), read only to route the
-   * judge call onto the same resolved model the session uses. Absent on a fake
-   * or an old host: the mount then refuses the judge with `not-configured`
-   * rather than inventing a route.
+   * The host's last request header (provider/model), read only to route an ask
+   * onto the same resolved model the session uses. Absent on a fake or an old
+   * host: the mount then refuses the ask with `not-configured` rather than
+   * inventing a route.
    */
   requestHeader?(): { readonly config?: { readonly provider?: string; readonly model?: string } }
     | undefined;
+  /**
+   * The host's own creation metadata. `cwd` is the session's workspace root,
+   * which dsh validates absolute; it is the boundary the recall source lane may
+   * read inside (ISSUE-053; PRD §6.7). Absent means this mount can name no root
+   * and supplies no reader, so a ledger miss stays `not-found`.
+   */
+  header?: { readonly cwd?: string };
 }
 
 export interface DshMountEvent {
@@ -274,7 +305,7 @@ export interface DshMountContext {
   get?(name: string): unknown;
 }
 
-/** The one model call a judge needs: stream a request, read its text deltas. */
+/** The one model call an ask needs: stream a request, read its text deltas. */
 export interface DshLlmService {
   stream(options: DshLlmStreamOptions): AsyncIterable<DshLlmChunk>;
 }
@@ -290,7 +321,7 @@ export interface DshLlmStreamOptions {
 }
 
 /**
- * The chunk shapes the judge reads. Only `text-delta` carries answer text; the
+ * The chunk shapes an ask reads. Only `text-delta` carries answer text; the
  * rest are the host's own framing, kept so a caller can see why a stream ended.
  */
 export type DshLlmChunk =
@@ -365,12 +396,6 @@ export interface RacoonsSessionEntry {
    */
   host: DshMountSession | null;
   /**
-   * The judge seam for this session (ISSUE-024 chunk 2): it remembers the
-   * window the engine presented and posts the answered verdicts back. Present
-   * even when no model seam was wired, where it journals `judge-off`.
-   */
-  judge: JudgeSeam;
-  /**
    * How many prune passes this session has run (ISSUE-022 chunks 5–6). It is
    * the pass's round ordinal, so two passes never share a stamp, and it lives
    * on the entry rather than the engine: a pass mints no engine event of its
@@ -387,12 +412,60 @@ export interface RacoonsSessionEntry {
    */
   readonly pruneTrigger: PruneWindowTrigger;
   /**
-   * Receipts the judge seam produced and the step boundary has yet to append
-   * (ISSUE-026 chunk 3). The seam runs inside `runStep`/`runTurnEnd`, which the
-   * host already calls at a legal append boundary; the queue keeps the seam
-   * itself host-free so a test can read its text before it lands.
+   * The local estimate of the request the last pre-step was about to send, and
+   * the port revision that estimate describes (G8, ISSUE-045 D1). It is the same
+   * `estimateContent` arithmetic the half-window trigger uses — one number, two
+   * readers — held here because a host usage row arrives in the synchronous
+   * `session/event` callback, where no snapshot can be awaited. Null before the
+   * first pre-step; a row arriving before it is journaled missing, never
+   * reconciled against an invented estimate.
    */
-  readonly pendingReceipts: string[];
+  requestEstimate: { readonly revision: string; readonly inputTokens: number } | null;
+  /**
+   * Usage request ids already journaled for this session. One host event is one
+   * request, so a row seen twice must not read as two calls; the engine's own
+   * dedup suppresses only its telemetry, not this mount's line.
+   */
+  readonly usageSeen: Set<string>;
+  /**
+   * Manual forgets the `forget` tool resolved and this session has yet to
+   * apply (PRD §6.2; ISSUE-045 chunk D2). A tool call cannot apply its own
+   * removal — its assistant message is still unanswered on the surface, and
+   * every rebuild from the forgotten node re-emits that call unanswered
+   * (`tool-pair-imbalance`) — so the mount drains this queue at its next legal
+   * boundary, where every other removal applies. One entry per request; a
+   * request that was refused never reaches here.
+   */
+  readonly pendingForgets: DshForgetScheduled[];
+  /**
+   * The size floor this session resolved, in bytes (ADR-0020 Decision 3;
+   * ISSUE-058 item 2). The flat knob wins; otherwise the route's model id picks
+   * the table entry (`floorForModel`), and no route means the default 512. It
+   * is resolved here because core never sees a model id, and it is held on the
+   * entry so the ask lane reads one number instead of re-deriving it.
+   */
+  readonly floorBytes: number;
+  /**
+   * Results whose entry answer SETTLED (ISSUE-058 chunk P3c-2; ADR-0025
+   * §Decision 3–§5). In memory only, keyed by the capture's own result node id:
+   * no ledger row and no marker on bytes, because a de-duplication ledger would
+   * be a second source of truth about content the product deliberately never
+   * keeps. Since the judge pass's removal (ADR-0028) it is the mount's own
+   * "asked exactly once" record: it stops the ASK loop from putting the same
+   * capture to the agent twice. A refused or absent answer settles nothing and
+   * is not recorded here (ADR-0025 §5).
+   */
+  readonly entryJudged: Set<string>;
+  /**
+   * The subset of `entryJudged` whose entry answer was `keepall` AND applied
+   * (ISSUE-073): the results a result checkpoint settled as kept content. The
+   * bulk prune withholds their units from its ask, because a settled keep is
+   * final and re-listing it would ask the agent to decide it twice. Only an
+   * APPLIED keepall lands here: a refusal, a fail-open write and an absent
+   * answer settle nothing, so their unit stays listable. Keyed the same way as
+   * `entryJudged` (the capture's own result node id).
+   */
+  readonly entryKept: Set<string>;
   takePublication(): RacoonsApplicationRequest | null;
 }
 
@@ -400,24 +473,17 @@ export interface StepOutcome {
   readonly entry: RacoonsSessionEntry;
   readonly deliveries: EngineResult[];
   readonly atRest: EngineResult | null;
-  /** The judge pass that followed the presentation, or null when none was offered. */
-  readonly judged: JudgeSettleOutcome | null;
   readonly entryApplications: readonly {
     readonly request: RacoonsApplicationRequest;
     readonly capture: Capture;
   }[];
   readonly appendRequest: RacoonsApplicationRequest | null;
-  /** The receipts this step appended to main (ISSUE-026 chunk 3: at most one). */
-  readonly receipts: readonly DshMountEvent[];
 }
 
 export interface TurnEndOutcome {
   readonly entry: RacoonsSessionEntry;
   readonly atRest: EngineResult | null;
-  readonly judged: JudgeSettleOutcome | null;
   readonly appendRequest: RacoonsApplicationRequest | null;
-  /** The receipts this boundary appended to main (ISSUE-026 chunk 3: at most one). */
-  readonly receipts: readonly DshMountEvent[];
 }
 
 export interface RacoonsMount {
@@ -430,7 +496,7 @@ export interface RacoonsMount {
   /**
    * Record one request the host's `llm/stream` waterfall dispatched as main's
    * last sent request for its session (ISSUE-026 chunk 3). A request this
-   * package sent itself is ignored, so a judge ask never becomes a seed.
+   * package sent itself is ignored, so an ask never becomes a seed.
    */
   observeWire(options: unknown): void;
   runStep(session: DshMountSession, ordinals: { turn: number; step: number }): Promise<StepOutcome>;
@@ -453,6 +519,15 @@ function isCount(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
+/**
+ * The outcome an answer which threw would have reported: nothing planned,
+ * nothing applied. Frozen and shared, because it is a statement about absence
+ * and never a value a caller may mutate into a claim.
+ */
+const UNCHANGED_ENGINE_RESULT: EngineResult = Object.freeze({
+  status: 'unchanged', validation: null, intentId: null, receipt: null, invalidation: null,
+});
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -467,10 +542,10 @@ export function resolvePluginConfig(raw: RacoonsPluginConfig | undefined): Resol
     ? null : config.episodeNoNewPathSteps;
   const sealMaxLatencyTurns = config.sealMaxLatencyTurns ?? 1;
   const barBytes = config.barBytes ?? 8192; // provisional per owner 2026-10-23
-  const advertisedLabelLimit = config.advertisedLabelLimit ?? 40;
-  const retryLimit = config.retryLimit ?? 2;
+  // ADR-0020 Decision 3: absent (null) defers to the per-model table, resolved
+  // where the route is visible. An explicit value wins for every model.
+  const floorBytes = config.floorBytes ?? null;
   const minCutFreedBytes = config.minCutFreedBytes ?? 4096;
-  const revisitShare = config.revisitShare ?? 0.5;
   // ADR-0008: absent means `apply` (owner ruling 2026-10-23 — the same default
   // `DEFAULT_CONFIG` carries); `record-only` is the explicit opt-out. The mount
   // no longer pins the opt-out. That pin was a config statement about a
@@ -481,6 +556,7 @@ export function resolvePluginConfig(raw: RacoonsPluginConfig | undefined): Resol
   // `settleVerdicts`), so this default can never manufacture a removal.
   const enforcement = config.enforcement ?? 'apply';
   const recordName = config.recordName ?? 'racoons/negation';
+  // ADR-0028: accepted and ignored — no ask reads an anchor arm any more.
   const anchors = config.anchors ?? 'off';
   const judgeTimeoutMs = config.judgeTimeoutMs ?? DEFAULT_ASK_TIMEOUT_MS;
   const racoonsStorageRoot = config.racoonsStorageRoot ?? defaultStorageRoot();
@@ -502,16 +578,11 @@ export function resolvePluginConfig(raw: RacoonsPluginConfig | undefined): Resol
   if (!isCount(barBytes) || barBytes < 1) {
     throw new Error('racoons: barBytes must be a positive safe integer');
   }
-  if (!isCount(advertisedLabelLimit) || advertisedLabelLimit < 1) {
-    throw new Error('racoons: advertisedLabelLimit must be a positive safe integer');
+  if (floorBytes !== null && (!isCount(floorBytes) || floorBytes < 1)) {
+    throw new Error('racoons: floorBytes must be a positive safe integer');
   }
-  if (!isCount(retryLimit)) throw new Error('racoons: retryLimit must be a non-negative safe integer');
   if (!isCount(minCutFreedBytes)) {
     throw new Error('racoons: minCutFreedBytes must be a non-negative safe integer');
-  }
-  if (typeof revisitShare !== 'number' || !Number.isFinite(revisitShare)
-    || revisitShare <= 0 || revisitShare > 1) {
-    throw new Error('racoons: revisitShare must be a number greater than 0 and at most 1');
   }
   if (enforcement !== 'record-only' && enforcement !== 'apply') {
     throw new Error('racoons: enforcement must be "record-only" or "apply"');
@@ -533,13 +604,21 @@ export function resolvePluginConfig(raw: RacoonsPluginConfig | undefined): Resol
   }
   return Object.freeze({
     episodeNoNewPathSteps, sealMaxLatencyTurns, barBytes,
-    advertisedLabelLimit, retryLimit, minCutFreedBytes, revisitShare, enforcement, recordName,
+    minCutFreedBytes, enforcement, recordName,
     anchors, judgeTimeoutMs, racoonsStorageRoot, contextWindowTokens, nativeCompactionBackstop,
+    floorBytes,
   });
 }
 
-/** The engine config this mount builds from the flat knobs. */
-export function engineConfig(config: ResolvedRacoonsConfig): RacoonsConfig {
+/**
+ * The engine config this mount builds from the flat knobs.
+ *
+ * `floorBytes` is passed in because it is resolved per session, where the route
+ * (and so the model id) is visible; an absent value falls back to the flat knob
+ * and then to the model-less default, so the engine config always carries one
+ * number (ADR-0020 Decision 3).
+ */
+export function engineConfig(config: ResolvedRacoonsConfig, floorBytes?: number): RacoonsConfig {
   const thresholds: Thresholds = {
     // ADR-0014 (2026-10-23): the entry-time cap is scrapped. The core's
     // Thresholds type still carries both fields for old config files, so the
@@ -552,15 +631,18 @@ export function engineConfig(config: ResolvedRacoonsConfig): RacoonsConfig {
   };
   const freshZone: FreshZoneConfig = { maxNodes: null, maxBytes: null };
   const protocol: ProtocolConfig = {
+    // CHUNK-2 deletes these three from core's `ProtocolConfig`; until then the
+    // core defaults supply them and no caller value reaches the engine. The
+    // judge pass and the turn gate they tuned are gone (ADR-0028), so this
+    // mount neither resolves nor validates them.
+    ...DEFAULT_CONFIG.protocol,
     barBytes: config.barBytes,
-    advertisedLabelLimit: config.advertisedLabelLimit,
-    retryLimit: config.retryLimit,
     minCutFreedBytes: config.minCutFreedBytes,
-    revisitShare: config.revisitShare,
     enforcement: config.enforcement,
   };
   return { thresholds, freshZone, sealMode: 'append', enableSpans: false,
-    validationFailureLimit: 2, protocol };
+    validationFailureLimit: 2, protocol,
+    floorBytes: floorBytes ?? config.floorBytes ?? DEFAULT_FLOOR_BYTES };
 }
 
 /** Rendered text of one host message's content blocks. */
@@ -609,10 +691,32 @@ export function targetFromInput(
 }
 
 /**
+ * The lines a read result's own meta says the call returned, or `null` when the
+ * meta proves none. dsh reports them as `meta.lines` (one `{number, text}` entry
+ * per returned line) with `meta.offset` as the 1-based number of the first —
+ * the shape every live read record this workspace holds agrees on. Only the
+ * count travels: `PathEvidence` states a span's length, never its origin
+ * (ISSUE-051), and the unit's own span comes from the rendered body's bytes.
+ */
+function readCoveredLines(meta: Readonly<Record<string, unknown>>): number | null {
+  const lines = meta['lines'];
+  if (!Array.isArray(lines) || lines.length === 0) return null;
+  // `offset` is where the span starts; a meta without a 1-based origin does not
+  // say which lines these are, so it proves no span here.
+  if (!isCount(meta['offset']) || meta['offset'] < 1) return null;
+  return lines.length;
+}
+
+/**
  * Turn the host's structured `meta` into the `DshResultFacts` the adapter's
  * evidence derivation reads.
  *
- * Only the host's own search projection is treated as proof:
+ * Only the host's own projections are treated as proof:
+ *   - a `read` result names the path it returned and the lines it returned
+ *     (`meta.lines`, 1-based from `meta.offset`): that covered span proves the
+ *     call returned the path's content (ISSUE-051). The call's own spelling and
+ *     the resolved `meta.path` are both recorded, so a request spelled either
+ *     way resolves;
  *   - a `matches`-shaped result with `truncated:false` and `total === 0` proves a
  *     miss;
  *   - a `matches`-shaped result with matches proves a hit, per file;
@@ -632,6 +736,21 @@ export function resultFactsFromMeta(
     return path === null ? [] : [{ path: path.key }];
   };
   if (!isRecord(meta)) return { complete: false, failed: false, paths: observed() };
+  if (classifyDshTool(toolName) === 'read') {
+    const covered = readCoveredLines(meta);
+    if (covered !== null) {
+      const named = targetFromInput(toolName, input);
+      const resolved = typeof meta['path'] === 'string' && meta['path'].length > 0 ? meta['path'] : null;
+      const key = named?.key ?? resolved;
+      if (key !== null) {
+        return { complete: false, failed: false, paths: [{
+          path: key, pathKey: key, lineCount: covered,
+          ...(resolved !== null && resolved !== key ? { displayPath: resolved } : {}) }] };
+      }
+    }
+    // A read whose meta proves no span stays count-free: `unknown`, never a miss.
+    return { complete: false, failed: false, paths: observed() };
+  }
   const files = meta['files'];
   const paths = meta['paths'];
   if (meta['shape'] === 'matches' && Array.isArray(files) && meta['truncated'] === false
@@ -727,15 +846,55 @@ export function toolResultItem(params: {
 }
 
 /**
+ * The ordinal a surface node's own content states, when it states one.
+ *
+ * A `tool/result` (and every other message type the host stamps) carries the
+ * `turn` and `step` it belongs to. That pair is the node's identity; the seq it
+ * currently occupies is a log position and moves when the host replaces it
+ * (ISSUE-064). A pair the fold never saw as a `step/start` yields null, and the
+ * caller falls back to the log position's ordinal.
+ */
+function ownOrdinal(event: DshMountEvent,
+  stepAt: ReadonlyMap<string, number>): { turn: number; step: number } | null {
+  const data = isRecord(event.data) ? event.data : {};
+  if (!isCount(data['turn']) || !isCount(data['step'])) return null;
+  const step = stepAt.get(`${String(data['turn'])}:${String(data['step'])}`);
+  return step === undefined ? null : { turn: data['turn'], step };
+}
+
+/**
+ * The ordinal of the surface position a replace took over, for a node that
+ * states no `(turn, step)` of its own. A replace re-publishes content at a later
+ * seq, so the seq's own log ordinal would stamp it with the publishing step and
+ * the walk would go backwards; the position it replaced is the ordinal it keeps
+ * (ISSUE-064).
+ */
+function inheritedOrdinal(event: DshMountEvent,
+  ordinalAt: ReadonlyMap<number, { turn: number; step: number }>): { turn: number; step: number } | null {
+  const op = event.surfaceOp;
+  if (!isRecord(op)) return null;
+  const startSeq = op['startSeq'];
+  return isCount(startSeq) ? ordinalAt.get(startSeq) ?? null : null;
+}
+
+/**
  * Walk a session's log once and return, for every surface position, the host
  * transcript item the port should hold.
  *
- * Two host facts shape this projection:
+ * Three host facts shape this projection:
  *   - dsh numbers `step` per turn (it restarts at 1 each turn) while the core's
  *     snapshot wants one monotone step ordinal across the transcript, so each
  *     distinct (turn, step) pair gets the next global ordinal.
  *   - a turn is complete only at its `turn/end`, so `completedThroughTurnOrdinal`
  *     is the last `turn/end`'s turn, never "current turn minus one".
+ *   - a surface REPLACE re-publishes a node's content at a later log seq while
+ *     the node keeps the position it occupies (ISSUE-064). An ordinal is a
+ *     property of the content, so a node carrying its own (turn, step) pair
+ *     takes that pair's global ordinal, and a node carrying none takes the
+ *     ordinal of the position it replaced; the log position is only the
+ *     fallback for a node with neither. Stamping the arrival seq instead
+ *     makes the walk decrease (`1:28` then `1:5`) and the guard latches
+ *     `adjacency-changed`.
  *
  * `beforeSeq` cuts the surface at one seq, exclusive. The dsh port grows by
  * appending the result it is handed, so the snapshot it plans against must be
@@ -756,6 +915,16 @@ export function surfaceTranscript(session: DshMountSession, options: {
   const sessionId = options.sessionId ?? session.id;
   const length = typeof session.seq === 'number' ? session.seq : 0;
   const ordinalAt = new Map<number, { turn: number; step: number }>();
+  // The fold's own one-pair-one-ordinal table, so a node that names its own
+  // (turn, step) is stamped from its CONTENT and never from the seq the host
+  // published it at (ISSUE-064: a replace lands at a later seq).
+  const stepAt = new Map<string, number>();
+  // The `tool/call` facts the log itself states, by call id. A `tool/result`
+  // never repeats its call's name or arguments, so a fold that read only the
+  // result would carry no target and no evidence (ISSUE-053). The mount's own
+  // `observe` map wins where it has an entry: it is the same host event, read
+  // once, and a caller that drove `observe` should see what it captured.
+  const loggedCalls = new Map<string, CallFacts>();
   let turn = 0;
   let globalStep = 0;
   let completedThrough = -1;
@@ -768,11 +937,19 @@ export function surfaceTranscript(session: DshMountSession, options: {
     if (event.type === 'step/start' && isCount(data['step'])) {
       const key = `${String(turn)}:${String(data['step'])}`;
       if (key !== lastKey) { globalStep += 1; lastKey = key; }
+      stepAt.set(key, globalStep);
     }
     if (event.type === 'turn/end' && isCount(data['turn'])) {
       completedThrough = Math.max(completedThrough, data['turn']);
     }
-    ordinalAt.set(seq, { turn, step: globalStep });
+    if (event.type === 'tool/call' && typeof data['callId'] === 'string') {
+      loggedCalls.set(data['callId'], { name: data['name'], arguments: data['arguments'] });
+    }
+    // The log position's ordinal is the fallback, never the rule: a replace's
+    // own pair (or the position it took over) decides what it is stamped with,
+    // and the resolved map makes a chain of replaces inherit transitively.
+    ordinalAt.set(seq, ownOrdinal(event, stepAt) ?? inheritedOrdinal(event, ordinalAt)
+      ?? { turn, step: globalStep });
   }
   const nodes = Array.isArray(session.surface?.nodes) ? session.surface.nodes : [];
   const items: DshTranscriptItem[] = [];
@@ -786,7 +963,8 @@ export function surfaceTranscript(session: DshMountSession, options: {
       const callId = callIdOf(event);
       if (callId === null) continue;
       const item = toolResultItem({ eventId: resultNodeId(sessionId, callId), event,
-        call: options.calls?.get(callId) ?? null, turnOrdinal: at.turn, stepOrdinal: at.step });
+        call: options.calls?.get(callId) ?? loggedCalls.get(callId) ?? null,
+        turnOrdinal: at.turn, stepOrdinal: at.step });
       if (item === null) continue;
       items.push(item);
       seqs.push(seq);
@@ -812,129 +990,6 @@ export function surfaceTranscript(session: DshMountSession, options: {
   }
   return { items, seqs, currentTurnOrdinal: turn, currentStepOrdinal: globalStep,
     completedThroughTurnOrdinal: Math.min(completedThrough, turn) };
-}
-
-/**
- * The shortest quotation the feed treats as evidence of use. A shorter run is
- * too likely to be punctuation or a variable name repeated by accident, and
- * every span the feed emits is recomputed on every pass.
- */
-export const QUOTED_SPAN_MIN_BYTES = 8;
-
-/** How many quoted spans one pass may protect; protection is re-derived each time. */
-export const QUOTED_SPAN_LIMIT = 16;
-
-/** The first exact byte occurrence of `needle` in `haystack`, or -1. */
-function indexOfBytes(haystack: Uint8Array, needle: Uint8Array): number {
-  const first = needle[0];
-  if (first === undefined || needle.length > haystack.length) return -1;
-  const last = haystack.length - needle.length;
-  outer: for (let start = 0; start <= last; start += 1) {
-    if (haystack[start] !== first) continue;
-    for (let offset = 1; offset < needle.length; offset += 1) {
-      if (haystack[start + offset] !== needle[offset]) continue outer;
-    }
-    return start;
-  }
-  return -1;
-}
-
-/**
- * The text a user message presents as a quotation: inline code spans and
- * blockquote lines. Both are the shapes an agent uses to quote content back,
- * and both yield an exact string whose bytes can be located in the transcript.
- */
-function quoteCandidates(text: string): readonly string[] {
-  const candidates: string[] = [];
-  for (const match of text.matchAll(/`([^`\n]+)`/gu)) {
-    const value = (match[1] ?? '').trim();
-    if (value.length > 0) candidates.push(value);
-  }
-  for (const line of text.split(/\r?\n/u)) {
-    const match = /^\s*>\s?(.+)$/u.exec(line);
-    const value = (match?.[1] ?? '').trim();
-    if (value.length > 0) candidates.push(value);
-  }
-  return candidates;
-}
-
-/**
- * The spans the newest user message quotes from earlier transcript content
- * (ISSUE-022 chunk 5). Matching is exact: the bytes the guard protects are a
- * byte-identical occurrence in the source node, with that node's own sha256 and
- * length, so `checkProtection` can verify the span instead of refusing it.
- *
- * The newest node that contains the quotation wins: an agent quotes what it
- * just read. A span is emitted once per (node, start) and the list is capped.
- */
-export function quotedSpansOf(items: readonly DshTranscriptItem[]): readonly SourceRange[] {
-  let newestUser = -1;
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    if (items[index]?.role === 'user') { newestUser = index; break; }
-  }
-  if (newestUser <= 0) return [];
-  const message = items[newestUser];
-  if (message === undefined) return [];
-  const text = new TextDecoder('utf-8', { fatal: false }).decode(message.bytes);
-  const encoder = new TextEncoder();
-  const spans: SourceRange[] = [];
-  const seen = new Set<string>();
-  for (const candidate of quoteCandidates(text)) {
-    const needle = encoder.encode(candidate);
-    if (needle.length < QUOTED_SPAN_MIN_BYTES) continue;
-    for (let index = newestUser - 1; index >= 0; index -= 1) {
-      const item = items[index];
-      if (item === undefined) continue;
-      const start = indexOfBytes(item.bytes, needle);
-      if (start < 0) continue;
-      const key = `${item.id}:${String(start)}`;
-      // The same quotation twice in one message protects the same bytes once.
-      if (seen.has(key)) break;
-      seen.add(key);
-      const bytes = new Uint8Array(item.bytes);
-      spans.push({ source: { nodeId: item.id, sha256: sha256Sync(bytes), byteLength: bytes.length },
-        range: { startByte: start, endByteExclusive: start + needle.length } });
-      break;
-    }
-    if (spans.length >= QUOTED_SPAN_LIMIT) break;
-  }
-  return spans;
-}
-
-/**
- * The protection feed for one engine pass (ISSUE-022 chunk 5): the live state
- * the guard must refuse to cut.
- *
- * Populated:
- *   - `inFlightTurnOrdinal` — the turn currently being assembled, i.e. the
- *     surface's newest turn while no `turn/end` for it has been seen. Its bytes
- *     may not be cut, including a tool result the model has just received.
- *   - `quotedThisTurn` — `quotedSpansOf`, the exact earlier bytes the newest
- *     user message quotes.
- *
- * Reported as still unpopulated, never faked:
- *   - `newestTailNodeIds` — the PRD names a "newest tail", but no configured
- *     tail width exists in this repo. Any number chosen here would silently
- *     protect content the owner never sized, so the list stays empty.
- *   - `openApprovalNodeIds` — dsh exposes no approval concept to the mount.
- *   - `policySpans` — the system/developer message nodes are already protected
- *     whole by `computeProtectedRanges` (any `message` node is), so naming
- *     spans would add nothing the guard does not already have.
- */
-export function protectionStateOf(items: readonly DshTranscriptItem[], params: {
-  readonly currentTurnOrdinal: number;
-  readonly completedThroughTurnOrdinal: number;
-}): ProtectionState {
-  const inFlightTurnOrdinal = params.currentTurnOrdinal > 0
-    && params.currentTurnOrdinal > params.completedThroughTurnOrdinal
-    ? params.currentTurnOrdinal : null;
-  return {
-    inFlightTurnOrdinal,
-    newestTailNodeIds: [],
-    openApprovalNodeIds: [],
-    policySpans: [],
-    quotedThisTurn: quotedSpansOf(items),
-  };
 }
 
 /** The journal fields one published application records. */
@@ -988,9 +1043,10 @@ export function createRacoonsMount(options: {
   readonly journal?: RacoonsJournalSink;
   readonly clock?: Clock;
   /**
-   * The host's model seam. Absent means the mount presents to the gate and
-   * never answers it: the judge is journaled `off` with `no-llm-service`, which
-   * is the truthful state of a mount without a model (ISSUE-024 chunk 2).
+   * The host's model seam. Absent means neither ask moment can run: the entry
+   * loop journals `entry-ask-off` with `no-llm-service` and the prune pass keeps
+   * its L1 layer, which is the truthful state of a mount without a model
+   * (ADR-0028: two ask moments, both through this seam).
    */
   readonly llm?: DshLlmService;
   /** A fixed route, when the caller knows one; otherwise the host header decides. */
@@ -1028,8 +1084,9 @@ export function createRacoonsMount(options: {
   /**
    * Main's last dispatched request per session (ISSUE-026 chunk 3, ADR-0010).
    * Filled by the `llm/stream` observer at the only point this package can see
-   * an outgoing request; the judge pass seeds its fork from it. Empty means the
-   * host exposed no waterfall: the pass then fails open with `no-seed`.
+   * an outgoing request; the entry ask and the prune pass both read it. Empty
+   * means the host exposed no waterfall: the pass then fails open with
+   * `no-seed`.
    */
   const mainWire: MainWireCapture = options.mainWire ?? createMainWireCapture();
   const counters = { entries: 0, preSteps: 0, publications: 0, captured: 0 };
@@ -1170,28 +1227,34 @@ export function createRacoonsMount(options: {
     // A retryable open failure throws `RacoonsStorageRetryError` out of here
     // before any state is installed: the caller's next boundary retries, and no
     // half-built entry is ever visible to `sessions`.
+    // ADR-0020 Decision 3 / ISSUE-058 item 2: the size floor is resolved here
+    // because the model id reaches this package and never core. An explicit
+    // `floorBytes` wins for every model; otherwise the route's model picks its
+    // table entry (`floorForModel`), and a mount with no route falls back to the
+    // measured default. The entry carries the number so the ask lane reads one
+    // value instead of re-deriving it.
+    const floorBytes = config.floorBytes
+      ?? floorForModel(judgeRouteOf(host, options.judgeRoute)?.model);
     const publications: unknown[] = [];
     let latestRequest: RacoonsApplicationRequest | null = null;
-    /** The judge pass's receipts, appended by the step boundary (chunk 3). */
-    const pendingReceipts: string[] = [];
-    /**
-     * Recall ids the applied applications minted, drained by the judge receipt
-     * (ISSUE-026 chunk 3). A refused cut mints none, so the pass only quotes
-     * them when the engine reports `applied`.
-     */
-    const mintedRecallIds: string[] = [];
     // ISSUE-024: the revert seam is derived from the live host session, never
     // from a config flag, so `revertHistory` below can only be true when one
     // exists (ISSUE-010's capability-truth law). The seam closes over the host
     // object and reads its surface at apply time, so a later host mutation is
     // seen; only a mount that opens with no host stays revert-less for good.
     const seam = revertSessionFromHost(host);
+    // The workspace root the recall source lane may read inside (ISSUE-053;
+    // PRD §6.7). It is the host's own `header.cwd`, which dsh validates
+    // absolute; a fake or older host that names none leaves the port with no
+    // boundary, so a ledger miss stays `not-found`.
+    const workspaceRoot = typeof host?.header?.cwd === 'string' && host.header.cwd.length > 0
+      ? host.header.cwd : undefined;
     const port = createDshPort({ sessionId, clock,
       ...(seam === null ? {} : { revert: seam }),
+      ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
       publish: (request) => {
         const owned = request as unknown as RacoonsApplicationRequest;
         latestRequest = owned;
-        for (const archive of owned.application.archives) mintedRecallIds.push(archive.recall.id);
         try { publications.push(structuredClone(request)); }
         catch { publications.push(request); }
         counters.publications += 1;
@@ -1207,42 +1270,31 @@ export function createRacoonsMount(options: {
     journal('capabilities', { sessionId, revertHistory: capabilities.revertHistory,
       reason: seam === null ? 'no-host-revert-seam' : 'host-session',
       cacheState: 'unknown' });
-    // The judge seam is built after the engine (it drives `engine.process` for
-    // the verdict batch), while the engine's telemetry needs it to see
-    // `gate-presented`. One forward reference holds the pair together.
-    let capturePresentation: JudgeSeam | null = null;
+    // One config object per session, carrying this session's resolved floor, so
+    // the engine and the default rules cannot read two different numbers.
+    const sessionConfig = engineConfig(config, floorBytes);
     const engine = await RacoonsEngine.open({
       sessionId,
       capabilities: { ...capabilities },
-      config: engineConfig(config),
+      config: sessionConfig,
       clock,
       meter: new Meter(new CharHeuristicTokenMeter()),
       ledger,
-      rules: createDefaultRules(engineConfig(config)) as readonly Rule[],
+      rules: createDefaultRules(sessionConfig) as readonly Rule[],
       port,
       onTelemetry: (event) => {
         journal('telemetry', { sessionId, event });
-        // The gate's own presentation is the judge's only input (ISSUE-024
-        // chunk 2): the ids and round come from the core, never from the mount.
-        capturePresentation?.capture(event);
       },
     });
-    const judge = createJudgeSeam({
-      sessionId, engine, port, barBytes: config.barBytes, journal,
-      ...(options.llm === undefined ? {} : { llm: options.llm }),
-      ...(config.anchors === 'off' ? {} : { anchors: config.anchors }),
-      timeoutMs: config.judgeTimeoutMs,
-      route: () => judgeRouteOf(host, options.judgeRoute),
-      // Main's last dispatched request is the only seed: a re-rendered or
-      // transcript-derived seed shares no prefix with what the provider already
-      // saw. Absent (the host exposed no waterfall, or no main call yet) the
-      // pass seeds nothing and fails open — it never invents a seed.
-      seed: () => mainWire.last(sessionId),
-      recallIds: () => { const ids = mintedRecallIds.slice(); mintedRecallIds.length = 0; return ids; },
-      appendReceipt: (text) => { pendingReceipts.push(text); },
-    });
-    capturePresentation = judge;
+    // The manual forget queue (PRD §6.2; ISSUE-045 chunk D2). A `forget` tool
+    // call resolves its request against the live snapshot and lands here; the
+    // step and turn-end boundaries drain it through `applyForget`, so a forget
+    // applies at the same seam every other removal does and never from inside a
+    // host callback (which forbids appends). The queue is per session and lives
+    // on the entry, so a second session can never apply another's request.
+    const pendingForgets: DshForgetScheduled[] = [];
     const adapter = createDshAdapter({ engine, port, clock,
+      onForget: decision => { pendingForgets.push(decision); },
       ...(seam === null ? {} : { revert: seam }) });
     // The round the last process completed, read back from this session's own
     // directory (ISSUE-022 chunk 6). `':memory:'` answers 0, so tests keep the
@@ -1255,8 +1307,10 @@ export function createRacoonsMount(options: {
       journal('prune-round-resumed', { sessionId, round: persistedRound });
     }
     const entry: RacoonsSessionEntry = { sessionId, engine, adapter, port, ledger, ownedLedger,
-      publications, host: host ?? null, judge, pruneRounds: persistedRound, pendingReceipts,
+      publications, host: host ?? null, pruneRounds: persistedRound,
       pruneTrigger: new PruneWindowTrigger(config.contextWindowTokens),
+      requestEstimate: null, usageSeen: new Set<string>(), pendingForgets, floorBytes,
+      entryJudged: new Set<string>(), entryKept: new Set<string>(),
       takePublication: () => { const value = latestRequest; latestRequest = null; return value; } };
     sessions.set(sessionId, entry);
     return entry;
@@ -1269,9 +1323,8 @@ export function createRacoonsMount(options: {
    * core's `turn-end` at-rest reason exists for exactly that boundary.
    *
    * `surfaceCompletedThroughTurnOrdinal` is the surface's own last `turn/end`,
-   * before that override. Protection derives the in-flight turn from the host
-   * log, not from a caller's boundary intent: the host appends `turn/end` only
-   * after `agent/turn-stopping`, so the turn is still being assembled there.
+   * before that override: the host appends `turn/end` only after
+   * `agent/turn-stopping`, so the turn is still being assembled there.
    */
   function syncTranscript(entry: RacoonsSessionEntry, session: DshMountSession,
     syncOptions: TranscriptSyncOptions = {}) {
@@ -1294,26 +1347,110 @@ export function createRacoonsMount(options: {
   }
 
   /**
-   * Sync the transcript and feed the guard's protection in one call. The mount's
-   * engine passes use this wrapper (ISSUE-022 chunk 5): a pass that planned and
-   * validated against a protection state older than its transcript could either
-   * cut an in-flight result or refuse a legal plan. `syncTranscript` alone stays
-   * a transcript/ordinal projection, so a caller that drives its own engine pass
-   * must feed protection itself.
+   * Sync the transcript and the ordinals in one call. The mount's engine passes
+   * use this wrapper (ISSUE-022 chunk 5): a pass that planned and validated
+   * against a transcript older than its ordinals could cut or refuse on stale
+   * facts. `syncTranscript` alone stays a transcript/ordinal projection, so a
+   * caller that drives its own engine pass keeps using it directly.
+   *
+   * ADR-0020: there is no protection feed. The automatic protection layer is
+   * deleted, so a pass states the transcript and the cache/ordinal facts and
+   * nothing else.
    */
   function syncPass(entry: RacoonsSessionEntry, session: DshMountSession,
     syncOptions: TranscriptSyncOptions = {}) {
-    const synced = syncTranscript(entry, session, syncOptions);
-    entry.port.updateState({ protection: protectionStateOf(synced.items, {
-      currentTurnOrdinal: synced.currentTurnOrdinal,
-      completedThroughTurnOrdinal: synced.surfaceCompletedThroughTurnOrdinal,
-    }) });
-    return synced;
+    return syncTranscript(entry, session, syncOptions);
   }
 
   /**
-   * Observe one host event. Captures a `tool/call`'s facts and queues its
-   * `tool/result` for the next pre-step. Never appends: the host forbids it
+   * Record the estimate of the request the next boundary will send, and return
+   * it (G8, ISSUE-045 D1; ISSUE-022 chunk 6). One function, so the half-window
+   * trigger and the usage reconciliation read the same number by construction:
+   * two callers computing the same arithmetic twice is how an estimate error
+   * count starts measuring the drift between two estimators instead of the
+   * provider's count against ours.
+   *
+   * The estimate is the WHOLE request — main's captured system+tools prefix plus
+   * the live transcript (ADR-0009 §Amendment 2026-10-24) — and the revision is
+   * the port's own, so a reading names the state it belongs to.
+   */
+  function measureRequest(entry: RacoonsSessionEntry, snapshot: SessionSnapshot,
+    prefix: RequestPrefix | null): ContentEstimate {
+    const estimate = estimateContent(estimateMeter, snapshot, null, prefix);
+    entry.requestEstimate = { revision: snapshot.revision, inputTokens: estimate.totalTokens };
+    return estimate;
+  }
+
+  /**
+   * Feed one step's usage row to the engine (G8, ISSUE-045 D1; PRD §6.9).
+   *
+   * Three outcomes, each journaled once per host event:
+   *
+   * - a usable reading → `engine.observe({kind:'usage', …})`, and the mount
+   *   journals `usage-reconciled` with the meter's own reading;
+   * - no row at all → `usage-missing`, no engine call: a step with no
+   *   accounting is a fact, never a zero-token request;
+   * - a row the meter would refuse → `usage-missing` with the refusal's own
+   *   reason. Reconciliation is the meter's, and a value it rejects must not be
+   *   dressed up as a reading it accepted.
+   *
+   * The estimate the row is measured against is the pre-step reading of the
+   * request that produced it (`requestEstimate`), never a fresh estimate
+   * computed after the fact: the point of `estimateErrorTokens` is which
+   * estimate the provider's count disagrees with. Before any pre-step there is
+   * no request this mount measured, so the row is journaled missing rather than
+   * reconciled against a guess.
+   */
+  function observeUsage(session: DshMountSession, event: DshMountEvent): void {
+    const requestId = usageRequestId(session.id, event.seq);
+    const entry = sessions.get(session.id);
+    // A mount that never opened this session's entry has no engine to feed, and
+    // a host can emit a message before the first pre-step.
+    if (entry === undefined) return;
+    // Only append-origin messages are main's own requests; a replacement this
+    // package appended (a receipt) carries no usage and must stay silent.
+    if (event.surfaceOp !== undefined && event.surfaceOp !== 'append') return;
+    if (entry.usageSeen.has(requestId)) return;
+    entry.usageSeen.add(requestId);
+    const read = readAssistantUsage(event);
+    if (read === null) return;
+    const measured = entry.requestEstimate;
+    if (read.kind !== 'usage') {
+      journal('usage-missing', { sessionId: session.id, seq: event.seq, requestId,
+        ...(read.kind === 'invalid' ? { reason: read.reason } : {}) });
+      return;
+    }
+    if (measured === null) {
+      // No pre-step has run, so no request this mount measured exists to answer:
+      // the reading would be authoritative about a request we never estimated,
+      // and the meter's error count would compare two unrelated things.
+      journal('usage-missing', { sessionId: session.id, seq: event.seq, requestId,
+        reason: 'no-request-estimate' });
+      return;
+    }
+    try {
+      entry.engine.observe({ kind: 'usage', requestId, revision: measured.revision,
+        estimatedInputTokens: measured.inputTokens, usage: read.usage });
+    } catch (error) {
+      // The meter refuses an inconsistent row (a cached count above input). The
+      // engine throws before emitting anything, so nothing was recorded.
+      journal('usage-missing', { sessionId: session.id, seq: event.seq, requestId,
+        revision: measured.revision, reason: 'inconsistent-usage',
+        message: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    journal('usage-reconciled', { sessionId: session.id, seq: event.seq, requestId,
+      revision: measured.revision,
+      estimatedInputTokens: measured.inputTokens,
+      inputTokens: read.usage.inputTokens,
+      outputTokens: read.usage.outputTokens,
+      cachedInputTokens: read.usage.cachedInputTokens });
+  }
+
+  /**
+   * Observe one host event. Captures a `tool/call`'s facts, queues its
+   * `tool/result` for the next pre-step, and feeds a step's usage row to the
+   * engine's meter (G8, ISSUE-045 D1). Never appends: the host forbids it
    * inside this callback.
    *
    * Only append-origin results are captured (`surfaceOp === 'append'`), so the
@@ -1326,6 +1463,16 @@ export function createRacoonsMount(options: {
    */
   function observe(session: DshMountSession, event: DshMountEvent): DshToolResultItem | null {
     const data = isRecord(event.data) ? event.data : {};
+    // A step's authoritative accounting (G8, ISSUE-045 D1; PRD §6.9). The host
+    // attaches the model adapter's `usage` row to `assistant/message` and emits
+    // no separate usage event, so this callback is the only place a real count
+    // is visible. The reading goes to `engine.observe` — never to the estimate
+    // lane — and the journal carries one line per request, whether a row
+    // arrived (`usage-reconciled`) or not (`usage-missing`).
+    if (event.type === 'assistant/message') {
+      observeUsage(session, event);
+      return null;
+    }
     if (event.type === 'tool/call' && typeof data['callId'] === 'string') {
       const list = calls.get(session.id) ?? new Map<string, CallFacts>();
       list.set(data['callId'], { name: data['name'], arguments: data['arguments'] });
@@ -1410,25 +1557,405 @@ export function createRacoonsMount(options: {
   }
 
   /**
-   * Answer the gate the at-rest pass just opened (ISSUE-024 chunk 2). The
-   * window and round come from the engine's own `gate-presented` event, which
-   * the telemetry sink above hands to `judge.capture`. A refused ask is
-   * journaled and skipped; nothing here throws into the host's step.
+   * The result an ask loop may put to the agent (ISSUE-058 chunk P3c-2;
+   * ADR-0022 §1, ADR-0025 §1–§2).
+   *
+   * Three facts decide, and each is a reading of the landed capture itself:
+   * the body is at or above this session's resolved floor (`entry.floorBytes` —
+   * the flat knob or the model's table row; ADR-0020 §Decision 3), the capture
+   * is not already settled (`entry.entryJudged`), and — proven by the caller
+   * once the unit has minted — the landed result has a unit id to address.
+   * Nothing else gates it: no bar, no size ceiling, no re-entry heuristic. A
+   * result between the floor and the bar IS asked (the floor is the entry
+   * gate, the bar is the bulk-prune gate), and the caller states that
+   * consequence rather than inventing a second threshold.
    */
-  async function runJudge(entry: RacoonsSessionEntry): Promise<JudgeSettleOutcome | null> {
+  function entryAskable(entry: RacoonsSessionEntry, capture: Capture): boolean {
+    return capture.item.bytes.length >= entry.floorBytes
+      && !entry.entryJudged.has(capture.eventId);
+  }
+
+  /**
+   * The landed result as a core node. The port already holds the host's own
+   * item under this id after `deliverToolResult`, so its transcript is
+   * authoritative; the capture is the fallback for a host that delivered
+   * without the port holding the item.
+   */
+  function landedNodeOf(entry: RacoonsSessionEntry, capture: Capture): ToolResultNode | null {
+    const items = entry.port.transcript();
+    const index = items.findIndex(item => item.id === capture.eventId);
+    if (index >= 0) {
+      const item = items[index];
+      if (item === undefined) return null;
+      return toCoreEnvelope(item, index).node as ToolResultNode;
+    }
+    const direct = toCoreEnvelope(capture.item, items.length).node;
+    return direct.kind === 'tool-result' ? direct : null;
+  }
+
+  /**
+   * Main's wire as the HOST SURFACE stated it at the moment ONE result landed —
+   * every live node up to and including that result's own turn, in the surface's
+   * own order (ISSUE-058 chunk P3d; the live blocker P3c-2 recorded).
+   *
+   * Why a request capture is not enough: a capture holds a REQUEST, and the
+   * assistant turn that made a tool call is a provider RESPONSE, not something
+   * any request carries until the following step. So after a session's first
+   * tool call, main's next dispatched request already ends with the prior
+   * `tool` turn, and appending this result to that capture would put two `tool`
+   * turns in a row — the fork's `role-conflict`, which the entry lane reported
+   * as a silent fail-open `no-seed` (P3c-2's live observation).
+   *
+   * Why the CUT matters: a step may land several results (parallel tool calls)
+   * and the asks for them run one after another against the surface as it
+   * stands at the END of the step. The ask is about the result immediately
+   * above it (ADR-0022 §4), so an ask for all but the last would otherwise sit
+   * under a LATER result. Cutting after this result's own node gives every ask
+   * the wire state the host held when that result landed.
+   *
+   * It is not a second renderer: the surface nodes are re-wrapped in the host's
+   * request-message shape and handed to `captureMainRequest`, the one projection
+   * this package uses for a seed — the same role filter, the same text joining
+   * and the same `[tool call <name> <args>]` rendering, so a surface seed and a
+   * captured seed can never disagree about a shared turn.
+   *
+   * `system` and `tools` come from the capture when one exists: they are the
+   * request's fixed prefix, and the surface carries the prompt as a leading
+   * `system/message` (the loop's `in-history` shape), which the projection keeps
+   * where main put it. No capture means no tool list, and a fork with no tools
+   * would be a different conversation — so this returns null and the caller
+   * keeps its fail-open `no-seed`.
+   *
+   * Returns null when the surface never reaches `stopNodeId`: a prefix that
+   * cannot name its own end is not a seed for that result.
+   */
+  function postLandingWire(session: DshMountSession, sessionId: string,
+    stopNodeId: string,
+  ): WireRequest | null {
+    const captured = mainWire.last(sessionId);
+    if (captured === null) return null;
+    const nodes = Array.isArray(session.surface?.nodes) ? session.surface.nodes : [];
+    const messages: unknown[] = [];
+    let reached = false;
+    for (const seq of nodes) {
+      const event = session.eventAt?.(seq);
+      if (event === undefined) continue;
+      const data = isRecord(event.data) ? event.data : {};
+      if (event.type === 'tool/result') {
+        const callId = callIdOf(event);
+        if (callId === null) continue;
+        const message = isRecord(data['message']) ? data['message'] : {};
+        messages.push({ role: 'tool', toolCallId: callId, content: message['content'] });
+        if (resultNodeId(sessionId, callId) === stopNodeId) { reached = true; break; }
+        continue;
+      }
+      const role = event.type === 'user/message' ? 'user'
+        : event.type === 'assistant/message' ? 'assistant'
+          : event.type === 'system/message' ? 'system'
+            : event.type === 'developer/message' ? 'developer' : null;
+      if (role === null) continue;
+      const message = role === 'user' ? data : isRecord(data['message']) ? data['message'] : {};
+      messages.push({ role, content: message['content'] });
+    }
+    if (!reached || messages.length === 0) return null;
+    return captureMainRequest({ sessionId, system: captured.wire.system,
+      tools: captured.wire.tools, messages })?.wire ?? null;
+  }
+
+  /**
+   * The ask exchange's turns as ONE host append each (ISSUE-058 chunk P3c-2;
+   * ADR-0022 §3, §6, §11). Both are NEW nodes — an append, never an edit — and
+   * they are NOT published to the port as a core application: the question is
+   * not a removal, and the answer only reaches the engine through
+   * `onEntryAnswer`.
+   *
+   * BOTH rows go out as `user/message` (ISSUE-074, scheme A, leader ruling
+   * 2026-10-27). The answer row was an `assistant/message` once; that shape
+   * cannot survive a stored-session replay. dsh's replay validator calls
+   * `requireOpenStep` on EVERY `assistant/message`, and at these two append
+   * seams — `agent/pre-step` (before the host's `step/start`) and
+   * `agent/turn-stopping` (after `step/end`) — no step is open. Stamping a
+   * turn/step pair was measured and every candidate fails; a `user/message`
+   * has no step relationship at all, so the answer is stored as a user turn
+   * and the log resumes (`restoreReleasedV4Artifact` and a real dsh resume,
+   * ISSUE-074). The exchange is still rewound by both applies, so no
+   * model-facing turn reads the answer; a FAILED apply leaves question and
+   * answer as two user turns, which is visible where the old shape left a
+   * corrupt log.
+   *
+   * The node ids the caller records come from the host events these appends
+   * return, so a rewind names the surface's own ids and never a mount-invented
+   * one: `surfaceTranscript` names a message `dsh:<session>:message:<seq>`, and
+   * `mount-revert.ts` repeats that formula, so both agree.
+   */
+  function appendAskTurns(session: DshMountSession,
+    turns: readonly EntryAskTurn[]): readonly DshMountEvent[] {
+    const events: DshMountEvent[] = [];
+    for (const turn of turns) {
+      events.push(session.append('user/message', {
+        content: [{ type: 'text', text: turn.text }],
+        source: { kind: `${config.recordName}/entry-ask` },
+        role: 'user',
+        id: randomUUID(),
+      }, { surfaceOp: 'append' }));
+    }
+    return events;
+  }
+
+  /**
+   * The mount-side id of an appended message node: the same formula
+   * `surfaceTranscript` and `mount-revert.ts` use, so the exchange the port
+   * rewinds later names the nodes the surface actually holds.
+   */
+  function messageNodeId(sessionId: string, seq: number): string {
+    return `dsh:${sessionId}:message:${String(seq)}`;
+  }
+
+  /**
+   * One answered exchange, applied (ISSUE-058 chunk P3c-2; ADR-0022 §11–§14).
+   *
+   * The exchange is recorded under the ANSWERED event id (never the
+   * observation's: the engine answers one event id once, so reusing it would
+   * make the answer a replay), then `onEntryAnswer` decides the surface write:
+   * `rewound` for a keep-all, `landed` for a forget, `fail-open` when core
+   * refused the answer or the host write refused. The journal carries the
+   * outcome with BOTH host seqs P3a's two-append design produces — the exchange
+   * rewind's seq first, then (a forget only) the shaped result turn's seq.
+   *
+   * The seqs are read off the host, never derived from a count this mount
+   * keeps: dsh's `seq === log.length` (`revert.ts`, `nextSeq`), so the appends
+   * one apply makes are exactly `surfaceBefore, surfaceBefore + 1, …`. A
+   * `port` outcome naming another seq would disagree with the log, which is a
+   * host fact a test can pin.
+   */
+  async function applyEntryAnswer(entry: RacoonsSessionEntry, session: DshMountSession,
+    capture: Capture, node: ToolResultNode, exchange: DshAskExchange, answerEventId: string,
+    answer: EntryAnswer, answerText: string,
+  ): Promise<DshEntryAnswerOutcome> {
+    const surfaceBefore = typeof session.seq === 'number' ? session.seq : null;
+    let outcome: DshEntryAnswerOutcome;
     try {
-      return await entry.judge.settle();
+      outcome = await entry.adapter.onEntryAnswer(answerEventId, node, exchange, answer, answerText);
     } catch (error) {
-      journal('judge-error', { sessionId: entry.sessionId,
+      // An answer that throws is a host-side defect, never a claim about the
+      // content: the result stands whole and the journal names the failure.
+      journal('entry-apply-refused', { sessionId: entry.sessionId, eventId: capture.eventId,
+        answerEventId, status: 'fail-open', code: 'host-error',
         message: error instanceof Error ? error.message : String(error) });
-      return null;
+      return { status: 'fail-open', engine: UNCHANGED_ENGINE_RESULT, refusal: null };
+    }
+    // Only an applied answer settles the result (ADR-0025 §4–§5): a keep-all
+    // rewinds the exchange, a forget lands one shaped turn, and both mean the
+    // agent decided this content. A refusal applied nothing and settles
+    // nothing, so a repeated delivery may ask once more.
+    if (outcome.status !== 'fail-open') {
+      entry.entryJudged.add(capture.eventId);
+      // Only an APPLIED keep-all settles the unit as kept content (ISSUE-073):
+      // that is the one answer that leaves the result standing whole and says
+      // the agent decided it stays. Any forget replaced it with a shaped turn.
+      if (answer.action === 'keepall') entry.entryKept.add(capture.eventId);
+    }
+    const write = entry.port.takeEntryWrite();
+    const surfaceAfter = typeof session.seq === 'number' ? session.seq : null;
+    const appends = surfaceBefore === null || surfaceAfter === null ? null : surfaceAfter - surfaceBefore;
+    // The first append one apply makes is the exchange's rewind (§11), and a
+    // forget's second is the shaped result turn (§12). A keep-all makes only
+    // the first, so it names no result seq at all.
+    const exchangeSeq = appends !== null && appends > 0 && surfaceBefore !== null ? surfaceBefore
+      : write?.status === 'applied' ? write.seq : null;
+    const resultSeq = appends !== null && appends > 1 && surfaceBefore !== null
+      ? surfaceBefore + 1 : null;
+    journal('entry-apply', { sessionId: entry.sessionId, eventId: capture.eventId,
+      answerEventId, status: outcome.status, action: answer.action,
+      resultNodeId: exchange.resultNodeId, askNodeId: exchange.askNodeId,
+      answerNodeId: exchange.answerNodeId,
+      exchangeSeq, resultSeq, appends,
+      ...write === null ? {} : { writeStatus: write.status },
+      ...write !== null && 'code' in write ? { code: write.code } : {},
+      engineStatus: outcome.engine.status, intentId: outcome.engine.intentId,
+    });
+    if (outcome.status === 'fail-open') {
+      journal('entry-apply-refused', { sessionId: entry.sessionId, eventId: capture.eventId,
+        answerEventId, status: 'fail-open',
+        code: outcome.refusal?.code ?? null,
+        detail: outcome.refusal?.detail ?? 'core planned nothing to apply',
+        engineStatus: outcome.engine.status });
+    }
+    return outcome;
+  }
+
+  /**
+   * The entry checkpoint's ask loop for one step (ISSUE-058 chunk P3c-2;
+   * ADR-0022 §1–§6, §11–§14; ADR-0025 §Decision 1).
+   *
+   * It runs inside `runStep`, AFTER every queued result has landed and BEFORE
+   * the at-rest pass and the prune see the step: the checkpoint unit is asked
+   * once before any later seam can name it, which is what keeps the two ask
+   * moments disjoint by construction (ADR-0028). One ask per result,
+   * sequentially, and never a re-ask of a settled one.
+   *
+   * The seed is `mainWire.last(...)`'s capture, taken BEFORE the ask turns are
+   * appended: it ends at the assistant turn that made the tool call, and
+   * `askEntry` appends the landed result's own turn to it, so the fork's prefix
+   * is main's wire state after the landing (ADR-0022 §3).
+   *
+   * Fail-open is the loop's shape, not an arm: the breaker is never touched
+   * here (an ask failure is not a completed-validation refusal), and every
+   * early exit journals ONE line naming why the seam did nothing.
+   */
+  async function runEntryAsks(entry: RacoonsSessionEntry, session: DshMountSession,
+    captures: readonly Capture[]): Promise<void> {
+    const llm = options.llm;
+    const route = judgeRouteOf(entry.host ?? session, options.judgeRoute);
+    // One breaker reading for the whole step. A disabled breaker is machinery
+    // health, not a content decision (ADR-0020 §Decision 5b): the ask lane
+    // stands down and the results land whole. An unreadable ledger is not a
+    // breaker reading at all, and says so.
+    const breaker = await breakerReading(entry);
+    for (const capture of captures) {
+      if (!entryAskable(entry, capture)) continue;
+      if (llm === undefined) {
+        journal('entry-ask-off', { sessionId: entry.sessionId, eventId: capture.eventId,
+          callId: capture.item.callId, byteLength: capture.item.bytes.length,
+          reason: 'no-llm-service' });
+        continue;
+      }
+      if (route === null) {
+        journal('entry-ask-off', { sessionId: entry.sessionId, eventId: capture.eventId,
+          callId: capture.item.callId, byteLength: capture.item.bytes.length,
+          reason: 'no-route' });
+        continue;
+      }
+      if (breaker === 'open') {
+        journal('entry-ask-off', { sessionId: entry.sessionId, eventId: capture.eventId,
+          callId: capture.item.callId, byteLength: capture.item.bytes.length,
+          reason: 'breaker-open' });
+        continue;
+      }
+      if (breaker === 'unknown') {
+        journal('entry-ask-off', { sessionId: entry.sessionId, eventId: capture.eventId,
+          callId: capture.item.callId, byteLength: capture.item.bytes.length,
+          reason: 'ledger-unavailable' });
+        continue;
+      }
+      const node = landedNodeOf(entry, capture);
+      // The unit is the address the answer's apply needs (`landedUnitId` mints
+      // it at bar 0, exactly as the guard re-derives it). No unit means no
+      // addressable landed result, so there is nothing to ask about.
+      const unitId = landedUnitIdOf(entry, node);
+      if (node === null || unitId === null) {
+        journal('entry-ask-off', { sessionId: entry.sessionId, eventId: capture.eventId,
+          callId: capture.item.callId, byteLength: capture.item.bytes.length,
+          reason: 'unit-absent' });
+        continue;
+      }
+      const seed = mainWire.last(entry.sessionId)?.wire ?? null;
+      // The surface projection is the seed whenever it can be built: it is the
+      // only wire state that holds the assistant turn which made this result's
+      // tool call, so it is the only one that stays correct past the session's
+      // first tool call (ISSUE-058 chunk P3d).
+      const surface = postLandingWire(session, entry.sessionId, node.id);
+      // No `timeoutMs` is passed: the entry ask's one deadline is
+      // `DEFAULT_ASK_TIMEOUT_MS` in `llm-ask.ts`, which is the bound the step is
+      // held to. `judgeTimeoutMs` belongs to the prune pass; an entry ask that
+      // shared it would let `judgeTimeoutMs: 0` (deadline off) hold a step
+      // indefinitely.
+      const outcome = await askEntry({ resultBytes: node.bytes, seed, surface, llm, route });
+      if (outcome.status === 'off') {
+        journal('entry-ask-off', { sessionId: entry.sessionId, eventId: capture.eventId,
+          callId: capture.item.callId, byteLength: capture.item.bytes.length,
+          reason: 'route-off' });
+        continue;
+      }
+      if (outcome.status === 'refused') {
+        // Fail-open: the result is already landed whole, so nothing is
+        // appended and nothing is marked. One line names the code.
+        journal('entry-ask-refused', { sessionId: entry.sessionId, eventId: capture.eventId,
+          callId: capture.item.callId, unitId, code: outcome.code,
+          ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+          retried: outcome.retried,
+          turns: outcome.turns.length,
+          ...(outcome.usage === undefined ? {} : { usage: outcome.usage }) });
+        continue;
+      }
+      // Answered: append the WHOLE exchange as the turns the ask produced, in
+      // order, then apply the answer over them.
+      const appended = appendAskTurns(session, outcome.turns);
+      const askNode = appended[0], answerNode = appended[appended.length - 1];
+      if (askNode === undefined || answerNode === undefined) {
+        journal('entry-ask-refused', { sessionId: entry.sessionId, eventId: capture.eventId,
+          callId: capture.item.callId, unitId, code: 'no-seed', retried: outcome.retried,
+          turns: outcome.turns.length, reason: 'empty-exchange' });
+        continue;
+      }
+      journal('entry-ask', { sessionId: entry.sessionId, eventId: capture.eventId,
+        callId: capture.item.callId, unitId, answeredInRound: 0,
+        action: outcome.answer.action,
+        ...(outcome.answer.action === 'keepall' ? {} : { summary: outcome.answer.summary }),
+        raw: outcome.raw, retried: outcome.retried, turns: outcome.turns.length,
+        askNodeId: messageNodeId(entry.sessionId, askNode.seq),
+        answerNodeId: messageNodeId(entry.sessionId, answerNode.seq),
+        ...(outcome.usage === undefined ? {} : { usage: outcome.usage }) });
+      // The application event id is the ANSWER turn's own node id, never the
+      // observation's: the engine answers one event id once (port.ts:58-62), so
+      // an id shared with the landing would make this answer a replay.
+      const answerEventId = messageNodeId(entry.sessionId, answerNode.seq);
+      const exchange: DshAskExchange = {
+        resultNodeId: capture.eventId,
+        askNodeId: messageNodeId(entry.sessionId, askNode.seq),
+        answerNodeId: answerEventId,
+        summary: outcome.answer.action === 'keepall' ? '' : outcome.answer.summary,
+      };
+      await applyEntryAnswer(entry, session, capture, node, exchange, answerEventId,
+        outcome.answer, outcome.raw);
+      // The host surface moved (an exchange appended at least, and possibly
+      // rewound), so the port's transcript is re-read before the next result's
+      // seed and before the at-rest pass plans against it.
+      syncPass(entry, session);
     }
   }
 
   /**
-   * Run one prune pass (ISSUE-022 chunks 5–6): the snapshot, the transcript and
-   * the protection all come from the port; the ask goes through the host's own
-   * model seam. The round ordinal is persisted beside the session's ledger, so a
+   * The breaker's current state as the session's own durable record states it
+   * (ISSUE-057; ADR-0020 §Decision 5b). Read-only, through the public `Ledger`
+   * seam: the last `validation` row's own `breaker` is the authoritative
+   * reading (`engine/journal.ts` `breakerState` derives exactly this), and the
+   * ask lane never appends a validation and never increments the streak, so an
+   * ask failure cannot quiet the gate.
+   *
+   * Three answers, not two, because the third is the honest one: a ledger that
+   * cannot be read says nothing about machinery health, so the lane stands down
+   * and journals `ledger-unavailable` rather than claiming the breaker tripped.
+   */
+  async function breakerReading(entry: RacoonsSessionEntry): Promise<'closed' | 'open' | 'unknown'> {
+    try {
+      let disabled = false;
+      for await (const row of entry.ledger.events(entry.sessionId)) {
+        if (row.event.kind === 'validation') disabled = row.event.breaker.disabled;
+      }
+      return disabled ? 'open' : 'closed';
+    } catch {
+      return 'unknown';
+    }
+  }
+
+  /**
+   * The landed result's whole-result unit id, read through the port's own mint
+   * (bar 0: the answered result is one unit whatever its size, ADR-0022 §14's
+   * stamped address). Absent when the transcript holds no tool result under
+   * that id, which the loop journals as `unit-absent`.
+   *
+   * The port's mint is the same one the adapter stamps the answered event with
+   * (`stampFor` → `landedUnitId`) and the same one the guard re-derives, so a
+   * unit id minted here and an applied shape's `unitId` can only agree.
+   */
+  function landedUnitIdOf(entry: RacoonsSessionEntry, node: ToolResultNode | null): UnitId | null {
+    return node === null ? null : entry.port.landedUnitId(node.id);
+  }
+
+  /**
+   * Run one prune pass (ISSUE-022 chunks 5–6): the snapshot and the transcript
+   * come from the port; the ask goes through the host's own model seam. The round ordinal is persisted beside the session's ledger, so a
    * resumed process continues the count instead of starting at round 1.
    *
    * Record-only stays the structural default: a pass with no window configured
@@ -1462,10 +1989,14 @@ export function createRacoonsMount(options: {
         round: entry.pruneRounds,
         barBytes: config.barBytes,
         episodeNoNewPathSteps: config.episodeNoNewPathSteps,
+        // The units a settled entry keep already decided (ISSUE-073): a later
+        // table must not re-list them. The pass reads the invalidation itself,
+        // so a unit a write made stale is still listable.
+        settledNodeIds: entry.entryKept,
         ...(options.llm === undefined ? {} : { llm: options.llm }),
         route: () => judgeRouteOf(entry.host ?? session, options.judgeRoute),
-        // The same capture the judge pass seeds from (ISSUE-027, ADR-0010): a
-        // prune ask is a fork of main's last sent request, never a re-render.
+        // The capture main's last sent request (ISSUE-027, ADR-0010): a prune
+        // ask is a fork of it, never a re-render.
         seed: () => mainWire.last(entry.sessionId),
         journal,
         timeoutMs: config.judgeTimeoutMs,
@@ -1533,6 +2064,43 @@ export function createRacoonsMount(options: {
   }
 
   /**
+   * Apply every manual forget the `forget` tool queued (PRD §6.2; ISSUE-045
+   * chunk D2). Runs at the step and turn-end boundaries, after the transcript
+   * sync, so the engine plans and validates against the surface the host is
+   * about to send.
+   *
+   * A request is drained BEFORE it is applied and never re-queued: the engine
+   * dedupes by event id, so a request it already settled would answer the same
+   * thing again, and keeping it queued would repeat the attempt at every later
+   * boundary. Each outcome is journaled, so an operator can read why a forget
+   * did not apply — including the `unsupported-capability` a build without the
+   * revert seam records, which the adapter answers before queueing whenever it
+   * can tell.
+   */
+  async function applyForgets(entry: RacoonsSessionEntry): Promise<EngineResult[]> {
+    const outcomes: EngineResult[] = [];
+    for (const pending of entry.pendingForgets.splice(0)) {
+      let result: EngineResult;
+      try {
+        result = await entry.engine.process({ kind: 'forget', eventId: pending.eventId,
+          request: pending.request });
+      } catch (error) {
+        journal('forget-error', { sessionId: entry.sessionId, eventId: pending.eventId,
+          unitId: pending.unitId,
+          message: error instanceof Error ? error.message : String(error) });
+        continue;
+      }
+      journal('forget', { sessionId: entry.sessionId, eventId: pending.eventId,
+        unitId: pending.unitId, path: pending.request.source,
+        ranges: pending.request.ranges.length, status: result.status,
+        intentId: result.intentId,
+        issues: result.validation?.ok === false ? result.validation.issues : [] });
+      outcomes.push(result);
+    }
+    return outcomes;
+  }
+
+  /**
    * One step boundary: sync the transcript, deliver every queued result, then
    * run the at-rest pass. Publication is the caller's job, because only it holds
    * the live session.
@@ -1544,6 +2112,7 @@ export function createRacoonsMount(options: {
     buffers.set(session.id, []);
     const deliveries: EngineResult[] = [];
     const entryApplications: { request: RacoonsApplicationRequest; capture: Capture }[] = [];
+    const landed: Capture[] = [];
     for (const capture of queued) {
       let result: EngineResult;
       try {
@@ -1559,22 +2128,38 @@ export function createRacoonsMount(options: {
         continue;
       }
       deliveries.push(result);
+      landed.push(capture);
       const request = entry.takePublication();
       if (request !== null) entryApplications.push({ request, capture });
     }
-    // The at-rest pass sees the whole live surface, including any node the
-    // deliveries added after the last captured result.
+    // The port's transcript must hold every result this loop is about to ask
+    // about, so the landed unit is addressable (`landedUnitId`) and the answer's
+    // apply finds the surface node it addresses.
     syncPass(entry, session);
+    // The entry checkpoint's ask loop (ISSUE-058 chunk P3c-2; ADR-0025 §1): the
+    // results have landed and the at-rest pass and the prune have not seen this
+    // step yet, so a result's unit is asked once before any later seam can name
+    // it. Sequential, one ask per result, and fail-open throughout: the step is
+    // never held past the ask's own deadline.
+    await runEntryAsks(entry, session, landed);
+    // An answered exchange appended turns and may have rewound them: the
+    // at-rest pass must plan against the surface that actually stands now.
+    syncPass(entry, session);
+    // Manual forgets queued by the `forget` tool apply here, before the at-rest
+    // pass plans anything (ISSUE-045 chunk D2). The queue is drained once per
+    // boundary: a forget is one revert, and the engine dedupes by event id, so
+    // two boundaries can never apply the same request twice.
+    const forgets = await applyForgets(entry);
+    // A pass that applied changed the surface the at-rest pass must plan
+    // against, so the transcript is re-read.
+    if (forgets.some(outcome => outcome.status === 'applied')) syncPass(entry, session);
     const atRestId = eventIdFor(session.id, 'step',
       (Number(ordinals.turn) * 1_000_000) + Number(ordinals.step));
     let atRest: EngineResult | null = null;
     let appendRequest: RacoonsApplicationRequest | null = null;
-    let judged: JudgeSettleOutcome | null = null;
     try {
       atRest = await runAtRest(entry, atRestId, 'step');
       appendRequest = takeAppendRequest(entry);
-      judged = await runJudge(entry);
-      appendRequest = takeAppendRequest(entry) ?? appendRequest;
     } catch (error) {
       journal('at-rest-error', { sessionId: entry.sessionId, eventId: atRestId,
         message: error instanceof Error ? error.message : String(error) });
@@ -1593,12 +2178,26 @@ export function createRacoonsMount(options: {
     // `tools` fields — the object the host dispatched — never re-rendered from
     // config. A session whose first main request is not captured yet has no
     // prefix to count, and the journal line says `content` for that reading.
+    //
+    // The same reading is the estimate the NEXT request's usage row is
+    // reconciled against (G8, ISSUE-045 D1): this boundary ends with the state
+    // the host is about to send, and `assistant/message` for that request
+    // arrives after it. One number, two readers, so the drift the meter reports
+    // is never an artefact of two estimators disagreeing.
+    //
+    // What the number does NOT include is the receipt the caller appends after
+    // this function returns (`publishAppend`), and — until the recompute below —
+    // a cut this step's prune applied. The prune is recomputed because it
+    // shrinks the transcript by design: charging its removed bytes to the
+    // estimator would read as drift the meter never measured. The receipt is
+    // left out and stated here: it is one short line, and the alternative is a
+    // second snapshot on every step.
     const prefix = mainWire.last(entry.sessionId)?.wire ?? null;
-    const estimate = entry.pruneTrigger.enabled
-      ? estimateContent(estimateMeter, await entry.port.snapshot(), null, prefix) : null;
-    const estimatedTokens = estimate === null ? null : estimate.totalTokens;
+    const snapshotNow = await entry.port.snapshot();
+    let estimate = measureRequest(entry, snapshotNow, prefix);
+    const estimatedTokens = entry.pruneTrigger.enabled ? estimate.totalTokens : null;
     const crossed = estimatedTokens !== null && entry.pruneTrigger.observe(estimatedTokens);
-    if (crossed && estimate !== null) {
+    if (crossed) {
       // The half-window auto trigger (ISSUE-022 chunk 6; ADR-0009 §Amendment):
       // the SAME seam as the command, one boundary later. The latch fires on a
       // crossing and re-arms when a pass ends or a compaction lands (CRITIC-022
@@ -1610,44 +2209,24 @@ export function createRacoonsMount(options: {
         estimate: prefix === null ? 'content' : 'content+prefix',
         threshold: entry.pruneTrigger.threshold });
     }
-    // A `/prune` message seen during this step runs here, after the at-rest pass
-    // and the judge: both leave the entry's state settled, and a prune reads
-    // that state without writing any.
+    // A `/prune` message seen during this step runs here, after the at-rest
+    // pass: that pass leaves the entry's state settled, and a prune reads that
+    // state without writing any.
     if (pruneRequests.has(session.id) || crossed) {
-      try { await runPrune(session); }
-      catch (error) {
+      try {
+        await runPrune(session);
+        // A pass that applied changed the transcript the next request sends.
+        // Re-read the estimate rather than leave the pre-pass number standing
+        // (G8, ISSUE-045 D1): the row that answers the NEXT request is measured
+        // against what that request will actually carry.
+        const afterPrune = await entry.port.snapshot();
+        estimate = measureRequest(entry, afterPrune, prefix);
+      } catch (error) {
         journal('prune-error', { sessionId: entry.sessionId,
           message: error instanceof Error ? error.message : String(error) });
       }
     }
-    // The judge's one receipt per pass, appended here — the pre-step dispatch is
-    // a serial hook, so appending is legal, and the receipt never enters the
-    // fork (ISSUE-026 chunk 3 / ADR-0010).
-    const receipts = appendReceipts(entry, session);
-    return { entry, deliveries, atRest, judged, entryApplications, appendRequest, receipts };
-  }
-
-  /**
-   * Append every receipt the judge seam queued, one user-role message each. The
-   * pass itself appends exactly one; the queue exists so the seam stays free of
-   * host calls and a test can read the text before it lands.
-   */
-  function appendReceipts(entry: RacoonsSessionEntry, session: DshMountSession): DshMountEvent[] {
-    const events: DshMountEvent[] = [];
-    for (const text of entry.pendingReceipts.splice(0)) {
-      try {
-        events.push(session.append('user/message', {
-          content: [{ type: 'text', text }],
-          source: { kind: `${config.recordName}/judge-receipt` },
-          role: 'user',
-          id: randomUUID(),
-        }, { surfaceOp: 'append' }));
-      } catch (error) {
-        journal('judge-receipt-error', { sessionId: entry.sessionId,
-          message: error instanceof Error ? error.message : String(error) });
-      }
-    }
-    return events;
+    return { entry, deliveries, atRest, entryApplications, appendRequest };
   }
 
   /**
@@ -1659,21 +2238,29 @@ export function createRacoonsMount(options: {
   async function runTurnEnd(session: DshMountSession, turn: number): Promise<TurnEndOutcome> {
     const entry = await sessionFor(session.id, session);
     syncPass(entry, session, { completedThroughTurnOrdinal: Number(turn) });
+    // A forget queued during the turn's last step applies here too: in a
+    // one-shot run no pre-step follows this boundary, so a request left queued
+    // would never land (ISSUE-045 chunk D2). Draining before the at-rest pass
+    // means a sealed episode sees the surface the removal left.
+    const forgets = await applyForgets(entry);
+    if (forgets.some(outcome => outcome.status === 'applied')) {
+      syncPass(entry, session, { completedThroughTurnOrdinal: Number(turn) });
+    }
     const eventId = eventIdFor(session.id, 'turn', Number(turn));
     let atRest: EngineResult | null = null;
     let appendRequest: RacoonsApplicationRequest | null = null;
-    let judged: JudgeSettleOutcome | null = null;
     try {
       atRest = await runAtRest(entry, eventId, 'turn-end');
       appendRequest = takeAppendRequest(entry);
-      judged = await runJudge(entry);
-      appendRequest = takeAppendRequest(entry) ?? appendRequest;
     } catch (error) {
       journal('at-rest-error', { sessionId: entry.sessionId, eventId,
         message: error instanceof Error ? error.message : String(error) });
     }
-    const receipts = appendReceipts(entry, session);
-    return { entry, atRest, judged, appendRequest, receipts };
+    // The turn is closed and the next request follows this boundary: record the
+    // estimate that request will be measured against (G8, ISSUE-045 D1).
+    measureRequest(entry, await entry.port.snapshot(),
+      mainWire.last(entry.sessionId)?.wire ?? null);
+    return { entry, atRest, appendRequest };
   }
 
   return { sessions, counters, sessionFor, syncTranscript, observe, observeWire,
@@ -1746,6 +2333,21 @@ export function singleLiveSession(ctx: DshMountContext): DshMountSession | undef
 }
 
 /**
+ * The mount entry a tool call answers from: the single live session's entry,
+ * else the only one the mount has opened. Both tools resolve their session this
+ * way, so a test that drives the mount directly (no `ctx.sessions` store) still
+ * gets the same wiring a live host gets.
+ */
+function liveEntry(mount: RacoonsMount, ctx: DshMountContext): RacoonsSessionEntry | undefined {
+  const named = singleLiveSession(ctx);
+  if (named !== undefined) {
+    const entry = mount.sessions.get(named.id);
+    if (entry !== undefined) return entry;
+  }
+  return [...mount.sessions.values()][0];
+}
+
+/**
  * The host tool registry, when the context provides one. Resolved through
  * `ctx.get` so an unavailable service is a miss, not a proxy throw.
  */
@@ -1767,49 +2369,33 @@ export function resolveToolHost(ctx: DshMountContext,
 
 /**
  * Register the handler-backed tools once, at mount, and return one disposer.
- * `DSH_TOOL_SPECS` declares `forget`, `expand` and `recall`, but only `recall`
- * has an execution path, so only `recall` is registered: no model is ever
- * offered a tool that would fail (design-protocol §4).
+ * `DSH_TOOL_SPECS` declares `forget`, `expand` and `recall`; `forget` and
+ * `recall` have execution paths, so both are registered and `expand` stays out
+ * — no model is ever offered a tool that would fail (design-protocol §4;
+ * ISSUE-045 chunk D2 added the forget handler).
  *
  * The host's `register` takes a `ToolDefinition` (schema plus a mandatory
  * `output` declaration), while the adapter's seam is `{ spec, execute }`. The
  * mapping lives here so the package still carries no dsh dependency, and so the
  * unregister the host returns is the only disposal contract this file relies on.
  *
- * `execute` must return the projected output, never the raw ledger record: the
+ * Registration is all-or-nothing: a host that refuses the second tool leaves
+ * neither registered, so a mount can never advertise half its inventory.
+ *
+ * `execute` must return the projected output, never a raw ledger record: the
  * record carries `Uint8Array` bodies, and the host snapshots every tool value
  * as lossless JSON (`snapshotJsonValue`; non-JSON is `INVALID_TOOL_OUTPUT`).
- * `recallText` is the projection — verified bytes decoded as UTF-8 — so it is
- * also the second hash check between the ledger and the model.
+ * `recallText` is the recall projection — verified bytes decoded as UTF-8, so it
+ * is also the second hash check between the ledger and the model — and
+ * `forgetAnswerText` is the forget projection: a scheduled request or the
+ * lookup's own refusal, never archived bytes.
  */
-export function registerPluginTools(
-  host: DshToolHost, recall: (id: string) => Promise<RecallRecord>,
-): () => void {
+export function registerPluginTools(host: DshToolHost, sources: DshToolSources): () => void {
+  const registrations = createDshTools(sources);
   const registered: (() => void)[] = [];
   try {
-    for (const spec of DSH_TOOL_SPECS) {
-      // Handler-filtered by construction: only the tool with an execution path.
-      if (spec.name !== 'recall') continue;
-      registered.push(host.register({
-        name: spec.name,
-        description: spec.description,
-        parameters: spec.parameters,
-        output: {
-          // The recall payload is an object; this unconstrained schema accepts
-          // it and `render` turns it into the one text block the model reads.
-          schema: {},
-          render: (_args: unknown, value: unknown): unknown => {
-            const text = isRecord(value) && typeof value['text'] === 'string' ? value['text'] : '';
-            return [{ type: 'text', text }];
-          },
-        },
-        execute: async (args: unknown): Promise<DshRecallOutput> => {
-          const id = isRecord(args) && typeof args['id'] === 'string' ? args['id'] : null;
-          if (id === null) throw new Error('recall expects a non-empty id');
-          const record = await recall(id);
-          return recallText(record, id as RecallId);
-        },
-      } as never));
+    for (const tool of registrations) {
+      registered.push(host.register(hostTool(tool) as never));
     }
   } catch (error) {
     for (const unregister of registered.reverse()) {
@@ -1825,6 +2411,59 @@ export function registerPluginTools(
       try { unregister(); } catch { /* teardown only */ }
     }
   };
+}
+
+/**
+ * The host's `ToolDefinition` as this package reads it: the adapter seam plus
+ * the mandatory `output` declaration. Structural, so the package still carries
+ * no dsh dependency.
+ */
+interface DshHostTool {
+  readonly name: string;
+  readonly description: string;
+  readonly parameters: Readonly<Record<string, unknown>>;
+  readonly output: {
+    readonly schema: Readonly<Record<string, unknown>>;
+    render(args: unknown, value: unknown): unknown;
+  };
+  execute(args: unknown): Promise<unknown>;
+}
+
+/**
+ * One registration as the host's `ToolDefinition`. `render` turns the canonical
+ * JSON value into the one text block the model reads, so the raw value never
+ * reaches it. The adapter's seam is `{spec, execute}`; the mandatory `output`
+ * declaration is dsh's, so it lives here and not in `tools.ts`.
+ */
+function hostTool(tool: DshToolRegistration): DshHostTool {
+  return {
+    name: tool.spec.name,
+    description: tool.spec.description,
+    parameters: tool.spec.parameters,
+    output: {
+      // Both payloads are objects; this unconstrained schema accepts them.
+      schema: {},
+      render: (_args: unknown, value: unknown): unknown => [{ type: 'text',
+        text: tool.spec.name === 'forget' ? forgetAnswerText(value) : recallBodyText(value) }],
+    },
+    execute: async (args: unknown): Promise<unknown> => tool.execute(args),
+  };
+}
+
+/**
+ * The recall answer's one text block: its restored body, every part of a
+ * multi-part restore, or nothing. The projection (`tools.ts` `recallText`) sets
+ * `text` only when exactly one part exists; a multi-part record has no single
+ * body, so it renders as JSON naming each part separately — the same shape the
+ * opencode mount's `recallOutputText` produces — and never a join (ADR-0003).
+ */
+function recallBodyText(value: unknown): string {
+  if (!isRecord(value)) return '';
+  if (typeof value['text'] === 'string') return value['text'];
+  const parts = value['parts'];
+  if (!Array.isArray(parts) || parts.length === 0) return '';
+  return JSON.stringify({ recallId: value['recallId'], text: null,
+    byteLength: value['byteLength'], parts });
 }
 
 /**
@@ -1851,8 +2490,9 @@ export function createRacoonsPlugin(options: RacoonsPluginOptions = {}): {
       const ledgerSource = options.openLedger !== undefined ? 'host'
         : storage.databasePath === ':memory:' ? 'memory' : 'durable';
       // The host's model seam: the same `llm` service dsh-compaction-basic
-      // drives. Absent, the mount presents to the gate and journals `judge-off`
-      // instead of pretending it asked (ISSUE-024 chunk 2).
+      // drives. Absent, both surviving asks (ADR-0028: the entry checkpoint
+      // and the bulk prune) journal their own off-lines instead of pretending
+      // they asked.
       const llm = ctx.llm ?? undefined;
       const warn = (message: string): void => {
         try { ctx.logger?.warn?.(`racoons: ${message}`); } catch { /* logging only */ }
@@ -1878,7 +2518,6 @@ export function createRacoonsPlugin(options: RacoonsPluginOptions = {}): {
           ? { storage: storage.databasePath } : { storageRoot: storage.root },
         // ADR-0013 ruling 8: runtime evidence comes from inside the mount.
         ledgerSource, node: process.version,
-        judge: llm === undefined ? 'off' : 'on', anchors: config.anchors,
         judgeTimeoutMs: config.judgeTimeoutMs,
         // ISSUE-022 chunks 5–6: both entry points are wired. `command` is the
         // `/prune` message; `threshold` is the half-window auto trigger, and it
@@ -1896,19 +2535,28 @@ export function createRacoonsPlugin(options: RacoonsPluginOptions = {}): {
       });
       options.journal?.(mountedLine);
 
-      // The recall handler needs a session, resolved lazily at call time: the
-      // registration must not depend on a session existing when the plugin mounts.
+      // Both handlers need a session, resolved lazily at call time: the
+      // registration must not depend on a session existing when the plugin
+      // mounts. `forget` answers from the session's own live snapshot and
+      // queues the request for that session's next boundary; `recall` reads the
+      // ledger of the one live session.
       const toolHost = resolveToolHost(ctx, options.tools);
       let unregisterTools: (() => void) | undefined;
       if (toolHost !== undefined) {
         try {
-          unregisterTools = registerPluginTools(toolHost, async (id) => {
-            const named = singleLiveSession(ctx);
-            const entry = named === undefined
-              ? [...mount.sessions.values()][0]
-              : mount.sessions.get(named.id) ?? [...mount.sessions.values()][0];
-            if (entry === undefined) throw new Error('racoons: recall has no live session to read from');
-            return entry.adapter.recall(id as RecallId);
+          unregisterTools = registerPluginTools(toolHost, {
+            recall: async (id) => {
+              const entry = liveEntry(mount, ctx);
+              if (entry === undefined) throw new Error('racoons: recall has no live session to read from');
+              return entry.adapter.recall(id as RecallId);
+            },
+            forget: async (request) => {
+              const entry = liveEntry(mount, ctx);
+              if (entry === undefined) {
+                throw new Error('racoons: forget has no live session to read from');
+              }
+              return entry.adapter.forget(request);
+            },
           });
         } catch (error) {
           warn(`tool registration: ${error instanceof Error ? error.message : String(error)}`);

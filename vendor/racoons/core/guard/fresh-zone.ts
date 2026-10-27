@@ -1,39 +1,16 @@
 import type { RacoonsConfig } from "../config.js";
-import type { ByteRange, NodeId } from "../types/identity.js";
 import type { FreshZone, SessionSnapshot } from "../types/transcript.js";
 
-export interface ProtectedSet {
-  readonly ranges: ReadonlyMap<NodeId, readonly ByteRange[]>;
-  readonly recordRanges: ReadonlyMap<NodeId, readonly ByteRange[]>;
-}
-export function computeProtectedRanges(snapshot: SessionSnapshot): ProtectedSet {
-  const ranges = new Map<NodeId, ByteRange[]>();
-  const recordRanges = new Map<NodeId, ByteRange[]>();
-  const add = (id: NodeId, range: ByteRange): void => {
-    ranges.set(id, [...(ranges.get(id) ?? []), { ...range }]);
-  };
-  const ids = new Set([
-    ...snapshot.protection.newestTailNodeIds,
-    ...snapshot.protection.openApprovalNodeIds,
-  ]);
-  for (const node of snapshot.nodes) {
-    const whole = { startByte: 0, endByteExclusive: node.bytes.length };
-    if (node.kind === "message" || ids.has(node.id)
-      || node.turnOrdinal === snapshot.protection.inFlightTurnOrdinal) add(node.id, whole);
-    const records = node.kind === "racoons-record" ? [whole]
-      : node.kind === "tool-result" ? node.embeddedRecords.map(r => ({ ...r })) : [];
-    if (records.length > 0) recordRanges.set(node.id, records);
-    for (const record of records) add(node.id, record);
-  }
-  // Explicit IDs remain protected even when the snapshot is malformed or incomplete.
-  for (const id of ids) if (!ranges.has(id)) {
-    add(id, { startByte: 0, endByteExclusive: Number.MAX_SAFE_INTEGER });
-  }
-  for (const span of [...snapshot.protection.policySpans, ...snapshot.protection.quotedThisTurn]) {
-    add(span.source.nodeId, span.range);
-  }
-  return { ranges, recordRanges };
-}
+/**
+ * The fresh-zone and cold-boundary arithmetic the guard and the planner share.
+ *
+ * This module is measurement only (ADR-0020). It answers where the live suffix
+ * of the transcript begins and whether a cold boundary can be believed; it
+ * never decides which content is kept or forgotten. The automatic protection
+ * layer that used to live beside it is deleted: above the size floor the
+ * agent's own answer is the only decider, and no class of content is refused.
+ */
+
 export function verifiedCold(snapshot: SessionSnapshot, nowMs?: number): boolean {
   if (snapshot.cache.kind !== "cold") return false;
   const boundary = snapshot.cache.boundary;

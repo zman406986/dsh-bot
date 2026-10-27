@@ -10,12 +10,13 @@
  * the index table and the final instruction line ride inside one APPENDED user
  * turn, and the fork's system slot is main's, never replaced. The history is the
  * fork's message prefix: nothing in it is tagged, reordered, re-rendered or
- * repeated. Unlike `composeJudgeMessages`, that prefix need not end with a tool
- * result: this ask reviews every unit, not "the last result".
+ * repeated. That prefix need not end with a tool result: this ask reviews every
+ * unit, not "the last result" (the judge's own per-unit assembly is gone,
+ * ADR-0028).
  *
  * Each row comes from `./anchor.ts`, never from here:
  *
- *     2. [Read] config.ts (call #2) — "…excerpt A…" … "…excerpt B…"
+ *     2. [Read] config.ts (call #2) — line 60 of 201 ends with "retries: 3" · line 140 of 201 ends with "exit 1"
  *
  * `buildPruneAskRows` numbers rows 1, 2, 3… in transcript order and computes the
  * occurrence ordinal over the whole list with `assignCallOrdinals`, so two

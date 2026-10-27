@@ -1,73 +1,53 @@
 import { Guard } from '../guard/guard.js';
 import type { BreakerState, ValidationResult } from '../guard/types.js';
-import type { LedgerEntry } from '../ledger/types.js';
-import type { EpisodeId, RecallId, UnitId } from '../types/identity.js';
+import type { LedgerEntry, RecallOptions } from '../ledger/types.js';
+import type { EpisodeId, RecallId } from '../types/identity.js';
 import type { HarnessObservation, TelemetryEvent } from '../types/telemetry.js';
 import type { SessionSnapshot } from '../types/transcript.js';
 import type { RulePlan } from '../rules/types.js';
 import { sha256 } from '../util/hash.js';
+import { computeInvalidation, withoutStaleCoverage } from '../units/invalidation.js';
+import type { Invalidation } from '../units/invalidation.js';
 import { UnitTracker } from '../units/tracker.js';
-import type { ProcessingUnit } from '../units/types.js';
-import { descriptorWordCount } from '../verdicts/labels.js';
-import type { Verdict } from '../verdicts/types.js';
 import { applyApplication } from './application.js';
 import { committedState } from './committed.js';
 import { breakerState, metadata, readEntries } from './journal.js';
 import { announceBreaker, persistBreaker } from './notice.js';
 import { detectEpisodes, planApplication } from './planning.js';
-import { askableUnits, estimatedContentTokens, mergeUnits, protocolGates } from './protocol.js';
-import type { ProtocolGates } from './protocol.js';
 import { recoverPending } from './recovery.js';
 import { TranscriptTelemetry } from './telemetry.js';
-import type { EngineInput, EngineOptions, EngineResult, ReceiptConflict } from './types.js';
+import type {
+  EngineInput, EngineOptions, EngineResult, PassInvalidation, ReceiptConflict,
+} from './types.js';
 
 type EventPayload<T = TelemetryEvent> = T extends TelemetryEvent
   ? Omit<T, 'sessionId' | 'atMs'> : never;
-const result = (status: EngineResult['status'], validation: ValidationResult | null = null): EngineResult =>
-  ({ status, validation, intentId: null, receipt: null });
+const result = (status: EngineResult['status'], validation: ValidationResult | null = null,
+  invalidation: PassInvalidation | null = null): EngineResult =>
+  ({ status, validation, intentId: null, receipt: null, invalidation });
 
-/**
- * The gate window the engine has open: which gate asked, and every unit it has
- * listed since the window opened. The window survives an incomplete settle (the
- * gate re-lists only the unanswered units, and the settled batch still names
- * the earlier answers); it closes on `settled`, on `failed-open`, and when the
- * other gate takes the seam.
- */
-interface OpenWindow {
-  readonly kind: 'turn' | 'revisit';
-  readonly units: readonly ProcessingUnit[];
-}
+/** The pass-wide invalidation fact a result reports, or `null` when nothing was written. */
+const passInvalidation = (invalidation: Invalidation): PassInvalidation | null =>
+  invalidation.units.length === 0 && invalidation.staleMaps.length === 0 ? null : {
+    unitIds: invalidation.units.map(row => row.unit.id),
+    stalePathKeys: invalidation.staleMaps.map(row => row.pathKey),
+  };
 
 export class RacoonsEngine {
   private readonly telemetry: TranscriptTelemetry;
   private readonly options: EngineOptions;
-  private readonly gates: ProtocolGates;
   private queue: Promise<void> = Promise.resolve();
   private readonly unchangedEvents = new Set<string>();
   private readonly seenRefetches = new Set<string>();
   /** One `receipt-conflict` per intent and host; `committedState` runs every pass (R4). */
   private readonly reportedConflicts = new Set<string>();
   private faulted = false;
-  /** The ledger's breaker verdict, refreshed each run; gates consult it in `present`. */
-  private gateEnabled = true;
-  private window: OpenWindow | null = null;
-  private outstanding = false;
-  /**
-   * Units that received a settled verdict in this session, from either gate.
-   * The turn gate asks units that reached its seam *unjudged*, so a unit a
-   * revisit already judged is not put again. A revisit ignores this set: a full
-   * sweep asks all live content by definition.
-   */
-  private readonly judged = new Set<UnitId>();
+  /** The session's guard, created on first use; see `guardFor`. */
+  private guard: Guard | null = null;
 
   private constructor(options: EngineOptions) {
     this.options = options;
     this.telemetry = new TranscriptTelemetry(options.onTelemetry);
-    this.gates = protocolGates({
-      sessionId: options.sessionId, config: options.config, clock: options.clock,
-      onTelemetry: event => this.telemetry.emit(event),
-      enabled: () => this.gateEnabled && !this.faulted,
-    });
   }
 
   static async open(options: EngineOptions): Promise<RacoonsEngine> {
@@ -96,8 +76,14 @@ export class RacoonsEngine {
     }
   }
 
-  async recall(id: RecallId) {
-    const record = await this.options.ledger.recall(id);
+  /**
+   * Exact bytes for one recall id, through the ledger. `options.reader` is the
+   * source lane a mount may supply (PRD §6.7; ISSUE-053): absent, a ledger miss
+   * stays `not-found` exactly as before. It is a parameter of the call, never
+   * engine state, so one engine serves a mount with a reader and one without.
+   */
+  async recall(id: RecallId, options?: RecallOptions) {
+    const record = await this.options.ledger.recall(id, options);
     this.emit({ kind: 'recall', recallId: id,
       restoredBytes: record.parts.reduce((sum, part) => sum + part.bytes.length, 0) });
     return record;
@@ -144,13 +130,16 @@ export class RacoonsEngine {
     this.reportConflicts(committed.conflicts);
     if (committed.blocked) return result('recovery-pending');
     const state = breakerState(entries);
-    // The breaker is the live gate switch: a disabled session asks nothing.
-    this.gateEnabled = !state.disabled;
+    // A disable read from the ledger is history: it asks for its one notice and
+    // never ends the pass, because ending it would leave no validation able to
+    // clear it.
     if (state.disabled) {
       await persistBreaker(o, snapshot.currentTurnOrdinal, entries);
       const notice = await announceBreaker(o, this.telemetry, snapshot,
         await readEntries(o.ledger, o.sessionId), committed.notices);
-      return result(notice === 'blocked' ? 'recovery-pending' : 'disabled');
+      if (notice === 'blocked') return result('recovery-pending');
+      // The notice is a host application: plan against the surface it produced.
+      if (notice === 'appended') snapshot = structuredClone(await o.port.snapshot());
     }
     const prior = committed.events.get(input.eventId);
     if (committed.events.has(input.eventId)) {
@@ -169,90 +158,61 @@ export class RacoonsEngine {
     await this.refetch(input, entries);
     if (input.kind === 'at-rest' && !o.capabilities.atRest) return result('unchanged');
     const nowMs = o.clock.nowMs();
-    // A verdict event settles the open gate window; it never runs the rules.
-    if (input.kind === 'verdict') {
-      return this.settleVerdicts(input, snapshot, state, committed.sealedEpisodeIds, nowMs);
-    }
+    // The write invalidation this pass plans against (PRD §6.7; ISSUE-045 chunk
+    // C6). It is derived once per pass from the snapshot's own bytes, and the
+    // snapshot the planners and the guard see drops the per-path coverage views
+    // a write made stale. Transcript nodes are untouched: the invalidation is a
+    // fact about them, not a change to them, so revisions and bases still hold.
+    const invalidation = this.invalidationFor(snapshot);
+    const planning = withoutStaleCoverage(snapshot, invalidation);
+    const fact = passInvalidation(invalidation);
     // A prune event carries a pass already asked and merged; it never runs the
-    // rules and never opens or settles a gate window.
+    // rules.
     if (input.kind === 'prune') {
-      return this.settlePrune(input, snapshot, state, committed.sealedEpisodeIds, nowMs);
+      return { ...await this.settlePrune(input, planning, state,
+        committed.sealedEpisodeIds, nowMs), invalidation: fact };
     }
-    // 3–4. Fresh zone, protection, and isolated rules share one base revision.
-    const plans = planApplication(o, input, snapshot, episodes, committed.sealedEpisodeIds, nowMs);
+    // A forget event is the human's own request; it never runs the rules either
+    // (ISSUE-045 chunk C1). A refused request still reaches the guard, so the
+    // refusal is recorded and counts on the breaker.
+    if (input.kind === 'forget') {
+      return { ...await this.settleForget(input, planning, state,
+        committed.sealedEpisodeIds, nowMs), invalidation: fact };
+    }
+    // 3–4. Fresh zone and isolated rules share one base revision.
+    //
+    // An entry event under the land-first protocol (ISSUE-058 chunk P3a;
+    // ADR-0022 §2): the host wrote the result BEFORE RACOONS saw it, so an
+    // OBSERVATION plans nothing in place. The result is already a snapshot node,
+    // so any unit over it is the tracker's ordinary mint from the snapshot's own
+    // bytes, and the result stays landed whole. The rules never see this event,
+    // and nothing is asked, marked or rewritten here; the entry checkpoint's ask
+    // is the mount's, at its next legal append point. A DECISION exists only
+    // when the mount collected an answer and hands it in on the same kind of
+    // event; even then it is one shape over the LANDED unit, never an in-place
+    // rewrite of a node on its way in (ADR-0022 §11–§12).
+    const plans = input.kind === 'entry' && input.answer === undefined ? []
+      : planApplication(o, input, planning, episodes, committed.sealedEpisodeIds, nowMs);
     if (plans.length === 0) {
       this.emit({ kind: 'skip', eventId: input.eventId, ruleId: null, reason: 'no-plan' });
       this.unchangedEvents.add(input.eventId);
-      this.presentGates(input, snapshot);
-      return result('unchanged');
+      return { ...result('unchanged'), invalidation: fact };
     }
-    // 5–9. Guard, apply, then offer the seam's units to the gate.
-    const outcome = await this.guardAndApply(input, snapshot, plans, state,
+    // 5–9. Guard, apply.
+    const outcome = await this.guardAndApply(input, planning, plans, state,
       committed.sealedEpisodeIds, nowMs);
-    this.presentGates(input, outcome.status === 'applied' ? await o.port.snapshot() : snapshot);
-    return outcome;
+    return { ...outcome, invalidation: fact };
   }
 
   /**
-   * Settles the outstanding gate presentation and, unless enforcement is the
-   * explicit `record-only`, plans and applies the revert. An absent value is
-   * `apply` (ADR-0008; owner ruling 2026-10-23): only the exact opt-out records
-   * the answers as telemetry and plans nothing.
+   * Every unit and per-path view a write invalidated in this snapshot (PRD
+   * §6.7; ISSUE-045 chunk C6). The tracker's own bar decides which units exist;
+   * a below-bar result has no unit, so nothing about it can be refused.
    */
-  private async settleVerdicts(
-    input: Extract<EngineInput, { kind: 'verdict' }>, snapshot: SessionSnapshot,
-    state: BreakerState, sealedEpisodeIds: readonly EpisodeId[], nowMs: number,
-  ): Promise<EngineResult> {
-    const o = this.options;
-    const open = this.window;
-    // A verdict without a presentation this engine made answers nothing: a
-    // fresh gate re-asks live units rather than trusting an unpaired batch.
-    if (open === null || !this.outstanding) return this.unpaired(input);
-    const gate = open.kind === 'revisit' ? this.gates.revisit : this.gates.turn;
-    let settled;
-    try {
-      settled = gate.settle(input.verdicts);
-    } catch {
-      return this.unpaired(input);
-    }
-    this.outstanding = false;
-    if (settled.status === 'failed-open') {
-      // Bounded enforcement reached its cap: nothing applies, the window is
-      // silent for its units, and the session keeps running (PRD §6.2).
-      this.window = null;
-      this.unchangedEvents.add(input.eventId);
-      return result('unchanged');
-    }
-    if (settled.status === 'incomplete') {
-      // Keep the window: the re-ask lists the unanswered units and the final
-      // settle still reports the answers already given in this window.
-      this.unchangedEvents.add(input.eventId);
-      return result('unchanged');
-    }
-    this.window = null;
-    this.recordVerdicts(settled.batch, open.units);
-    for (const verdict of settled.batch.verdicts) this.judged.add(verdict.unitId);
-    if (o.config.protocol.enforcement === 'record-only') {
-      // Explicit opt-out: the answers are recorded, no plan, no guard call.
-      this.unchangedEvents.add(input.eventId);
-      return result('unchanged');
-    }
-    if (o.capabilities.revertHistory !== true) {
-      // The seam is not declared: record the answers, apply nothing.
-      this.emit({ kind: 'skip', eventId: input.eventId, ruleId: null, reason: 'unsupported-capability' });
-      this.unchangedEvents.add(input.eventId);
-      return result('unchanged');
-    }
-    const event: EngineInput = { kind: 'verdict', eventId: input.eventId,
-      verdicts: settled.batch, window: open.units.map(unit => unit.id) };
-    const plans = planApplication(o, event, snapshot, [], sealedEpisodeIds, nowMs);
-    if (plans.length === 0) {
-      // A keep-only window strips the decision tail and reverts nothing (§7 Q2).
-      this.emit({ kind: 'skip', eventId: input.eventId, ruleId: null, reason: 'no-plan' });
-      this.unchangedEvents.add(input.eventId);
-      return result('unchanged');
-    }
-    return this.guardAndApply(event, snapshot, plans, state, sealedEpisodeIds, nowMs);
+  private invalidationFor(snapshot: SessionSnapshot): Invalidation {
+    const units = new UnitTracker({ sessionId: this.options.sessionId,
+      barBytes: this.options.config.protocol.barBytes }).units(snapshot);
+    return computeInvalidation({ snapshot, units });
   }
 
   /**
@@ -295,44 +255,60 @@ export class RacoonsEngine {
     return this.guardAndApply(input, snapshot, plans, state, sealedEpisodeIds, nowMs);
   }
 
-  /** A batch no presentation asked for: reported, never applied, never replayed. */
-  private unpaired(input: EngineInput): EngineResult {
-    this.outstanding = false;
-    this.window = null;
-    this.emit({ kind: 'skip', eventId: input.eventId, ruleId: null, reason: 'no-plan' });
-    this.unchangedEvents.add(input.eventId);
-    return result('unchanged');
-  }
-
-  /** One `verdict-recorded` per answer, in listing order: the protocol's trace. */
-  private recordVerdicts(
-    batch: { readonly round: number; readonly verdicts: readonly Verdict[] },
-    units: readonly ProcessingUnit[],
-  ): void {
-    const byId = new Map(units.map(unit => [unit.id, unit]));
-    for (const verdict of batch.verdicts) {
-      const unit = byId.get(verdict.unitId);
-      if (unit === undefined) continue;
-      this.emit({ kind: 'verdict-recorded', round: batch.round, unitId: verdict.unitId,
-        nodeId: unit.nodeId, action: verdict.action,
-        descriptorWords: verdict.action === 'forgetall'
-          ? (verdict.summary === null ? null : descriptorWordCount(verdict.summary))
-          : null,
-        keptSpans: verdict.action === 'keeplines' ? verdict.ranges.length : null });
+  /**
+   * Applies one manual forget request (PRD §6.2; ISSUE-045 chunk C1). The
+   * human's request is planned by `engine/forget.ts` and applied through the
+   * same `guardAndApply` every other removal uses, so a forget is one
+   * checkpoint-revert with one receipt — and any refusal removes nothing and
+   * counts on the breaker like every validation failure.
+   *
+   * A request that resolves to no unit still reaches the guard: its
+   * `checks-forget` re-derives the resolution independently and records
+   * `unresolved-request`, and the breaker sees the refusal. Planning nothing
+   * and skipping the guard would let a bad request pass silently.
+   *
+   * `record-only` is the session's explicit opt-out of enforcement, so it takes
+   * a forget exactly as it takes a prune pass: recorded, applied nothing.
+   */
+  private async settleForget(
+    input: Extract<EngineInput, { kind: 'forget' }>, snapshot: SessionSnapshot,
+    state: BreakerState, sealedEpisodeIds: readonly EpisodeId[], nowMs: number,
+  ): Promise<EngineResult> {
+    const o = this.options;
+    if (o.config.protocol.enforcement === 'record-only') {
+      // The session's explicit opt-out of enforcement takes a forget exactly as
+      // it takes a prune pass: nothing applies, and no replay applies it.
+      this.unchangedEvents.add(input.eventId);
+      return result('unchanged');
     }
+    const plans = planApplication(o, input, snapshot, [], sealedEpisodeIds, nowMs);
+    return this.guardAndApply(input, snapshot, plans, state, sealedEpisodeIds, nowMs);
   }
 
   /**
-   * The guard and apply block shared by rule events and verdict events. It
-   * persists the validation event before deciding, applies nothing on a
-   * rejection, and reports the approved revert when the host accepted it.
+   * The session's one guard. The breaker is session state, so rebuilding the
+   * guard per pass would throw its accounting away; the injected guard wins when
+   * a host supplies one. The ledger seeds it once, at the first pass.
+   */
+  private guardFor(state: BreakerState): Guard {
+    const injected = this.options.guard;
+    if (injected !== undefined) return injected;
+    this.guard ??= new Guard({ ledger: this.options.ledger, initialState: state });
+    return this.guard;
+  }
+
+  /**
+   * The guard and apply block shared by rule events and the prune/forget
+   * applications. It persists the validation event before deciding, applies
+   * nothing on a rejection, and reports the approved revert when the host
+   * accepted it.
    */
   private async guardAndApply(
     input: EngineInput, snapshot: SessionSnapshot, plans: readonly RulePlan[],
     state: BreakerState, sealedEpisodeIds: readonly EpisodeId[], nowMs: number,
   ): Promise<EngineResult> {
     const o = this.options;
-    const guard = o.guard ?? new Guard({ ledger: o.ledger, initialState: state });
+    const guard = this.guardFor(state);
     const validation = await guard.validate({ input, snapshot,
       capabilities: o.capabilities, config: o.config, plans,
       sealedEpisodeIds, nowMs });
@@ -346,7 +322,6 @@ export class RacoonsEngine {
       issues: validationEvent.issues, breaker: validation.breaker });
     if (!validation.ok) {
       if (validation.breaker.disabled) {
-        this.gateEnabled = false;
         await persistBreaker(o, snapshot.currentTurnOrdinal, await readEntries(o.ledger, o.sessionId));
         this.emit({ kind: 'breaker-disabled', consecutiveValidationFailures: 2 });
       }
@@ -371,71 +346,6 @@ export class RacoonsEngine {
         message: error instanceof Error ? error.message : 'Ledger preparation failed' });
       return result('recovery-pending', validation);
     }
-  }
-
-  /**
-   * The units the gates judge: every live unit in transcript order, plus the
-   * incoming result at an entry seam when the host has not added it yet.
-   */
-  private presentationUnits(snapshot: SessionSnapshot, input: EngineInput): readonly ProcessingUnit[] {
-    const { sessionId } = this.options;
-    const barBytes = this.options.config.protocol.barBytes;
-    // Protected bytes are never askable: a verdict on them cannot be applied.
-    const units = askableUnits(snapshot, sessionId, barBytes);
-    if (input.kind !== 'entry') return units;
-    // An incoming result is never protected (it is not in the snapshot yet), so
-    // its units are askable as they stand; skip it once the host has added it.
-    if (snapshot.nodes.some(node => node.id === input.result.id)) return units;
-    return mergeUnits(units,
-      new UnitTracker({ sessionId, barBytes }).unitsFor(input.result));
-  }
-
-  /**
-   * Which gate owns this seam. An explicit revisit event is the manual command;
-   * a due mark wins next (`revisitShare` against the host's window); the turn
-   * gate takes every other seam.
-   */
-  private gateFor(input: EngineInput, snapshot: SessionSnapshot): 'turn' | 'revisit' {
-    if (input.kind !== 'at-rest') return 'turn';
-    if (input.reason === 'revisit') return 'revisit';
-    // A disabled protocol consumes no due mark: the revisit stays armed for the
-    // next seam a live gate reaches.
-    if (!this.gateEnabled || this.faulted) return 'turn';
-    const windowTokens = this.options.windowTokens;
-    if (typeof windowTokens !== 'number') return 'turn';
-    // Core holds no wire capture, so the engine's own revisit reading is
-    // transcript content only; the mount's half-window trigger adds the
-    // captured system+tools prefix (ADR-0009 §Amendment 2026-10-24).
-    const estimated = estimatedContentTokens(this.options.meter, snapshot, null, null);
-    return this.gates.revisit.due(estimated, windowTokens) ? 'revisit' : 'turn';
-  }
-
-  /**
-   * Offers the seam's units to its gate. One presentation is outstanding at a
-   * time, so a verdict event can always be paired with the gate that asked. A
-   * disabled gate presents nothing: the `enabled` probe runs inside `present`.
-   */
-  private presentGates(input: EngineInput, snapshot: SessionSnapshot): void {
-    if (this.outstanding || input.kind === 'verdict') return;
-    const all = this.presentationUnits(snapshot, input);
-    if (all.length === 0) return;
-    const kind = this.gateFor(input, snapshot);
-    // A manual revisit opens a new visit cycle, so the one-shot mark re-arms
-    // (design: the integration step decides when a cycle begins; `reset` names
-    // the manual command). An automatic `due` mark stays latched until then.
-    if (input.kind === 'at-rest' && input.reason === 'revisit') this.gates.revisit.reset();
-    // The turn gate asks only units that reached this seam unjudged; a revisit
-    // asks everything (a full sweep), and `GateCore` re-lists only the units its
-    // own open window has not answered.
-    const units = kind === 'turn' ? all.filter(unit => !this.judged.has(unit.id)) : all;
-    if (units.length === 0) return;
-    const presentation = kind === 'revisit'
-      ? this.gates.revisit.present(units) : this.gates.turn.present(units);
-    if (presentation === null) return;
-    // The same gate's open window gains units; the other gate starts a new one.
-    const prior = this.window?.kind === kind ? this.window.units : [];
-    this.window = { kind, units: mergeUnits(prior, presentation.units) };
-    this.outstanding = true;
   }
 
   private async refetch(input: EngineInput, entries: readonly LedgerEntry[]): Promise<void> {

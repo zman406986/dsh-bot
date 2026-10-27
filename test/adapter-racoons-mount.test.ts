@@ -7,13 +7,21 @@
  *
  * 1. FULL COVERAGE — a dispatcher-activated session, a worker id that never
  *    entered the lifecycle map, and a plain chat are all processed the same
- *    way: a tool result over the 8192-byte bar is captured (journal `entry`),
- *    the at-rest pass presents it and the applied verdict becomes one
- *    content-only `surfaceOp: replace` naming a minted recall id, and each
- *    session gets its own durable `sessions/<id>/ledger.sqlite` + `blobs/`.
+ *    way: a tool result above the entry floor is captured (journal `entry`),
+ *    the entry checkpoint asks one question about it (journal `entry-ask`), the
+ *    answer applies (journal `entry-apply`), and a forget becomes one
+ *    content-only `surfaceOp: replace` naming a minted recall id; each session
+ *    gets its own durable `sessions/<id>/ledger.sqlite` + `blobs/`.
  *    The library's built-in GLOBAL recall stays suppressed: the mount's
  *    context tool host receives no registration, and the plugin-level registry
  *    only gains `recall` when a session activates as a dispatcher.
+ *
+ * Vocabulary note (ticket 148 re-sync to upstream b5f95cb): upstream ADR-0028
+ * removed the judge pass, so the `judge-*` and `verdict-*` journal kinds no
+ * longer exist. The entry checkpoint's `entry-ask` / `entry-ask-off` /
+ * `entry-ask-refused` / `entry-apply` / `entry-apply-refused` replace them, and
+ * the shaped turn's text uses core's `[racoons] kept …` marker instead of the
+ * prune lane's `[not retained]` receipt.
  * 2. DURABILITY — after a capping pass the per-session tree exists; the prune
  *    round file is written; after dispose + a fresh `registerRacoonsMount` on
  *    the same root, the archived id recalls the ORIGINAL bytes byte-exactly
@@ -33,15 +41,15 @@
  *
  * Offline only (S8): a stub Cordis context, fake dsh sessions shaped like the
  * host's public surface, real SQLite ledgers under the OS temp directory. The
- * judge needs a model only to produce a verdict, so the stream stub below is
- * the same canned wire answer the vendored adapter's own tests use
- * (`{"1":{"forgetall":"…"}}`), read by the core's own answer parser; no
- * network, no provider, no real model.
+ * entry checkpoint needs a model only to answer one question about one result,
+ * so the stream stub below returns the entry lane's own answer grammar
+ * (`{"forgetall":"…"}`, `{"keepall":true}`), read by the core's own answer
+ * parser; no network, no provider, no real model.
  *
  * Fake-vs-host: the fake session mirrors the shape the vendored mount is
  * written against (`vendor/racoons/adapter/plugin.ts` and its
- * `test/plugin.test.ts`): append-only log, `surfaceOp` splicing,
- * `seq === log.length`, frozen payloads, `requestHeader()` for the judge route.
+ * `test/mount-entry.test.ts`): append-only log, `surfaceOp` splicing,
+ * `seq === log.length`, frozen payloads, `requestHeader()` for the ask route.
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -375,8 +383,18 @@ function cannedLlm(answer: string): CannedLlm {
   };
 }
 
-/** The one judge/prune answer this file's passes read. */
-const VERDICT_ANSWER = '{"1":{"forgetall":"oversized read"}}';
+/**
+ * The one entry-checkpoint answer this file's passes read.
+ *
+ * The entry lane's grammar is one action object per ask (`core/verdicts/
+ * entry-wire.ts`): `{"forgetall": "<summary ≤ 25 words>"}` drops the whole
+ * landed result and banks it, `{"keepall": true}` keeps it whole. The old
+ * index-keyed prune table (`{"1":{"forgetall":"…"}}`) is not an entry answer
+ * at all — the parser refuses it `unknown-action`.
+ */
+const FORGET_ALL_ANSWER = '{"forgetall":"oversized read"}';
+/** The keep-all answer: the exchange is rewound and the result keeps its bytes. */
+const KEEP_ALL_ANSWER = '{"keepall":true}';
 
 function emptyStream(): AsyncIterable<never> {
   return (async function* none() {})();
@@ -728,12 +746,15 @@ function recallIdOf(text: string): string {
 }
 
 /**
- * Assert the full capture→replace flow for one session, and return what the
- * replacement said. The verdict path publishes through the host's revert
- * append (`applyValidatedRevert`), so the evidence is the `entry` journal line
- * plus the applied `verdict-settled`, then the one `surfaceOp: replace` event —
- * there is no `publish` line on this path (`publish` is the entry/append
- * application's journal kind).
+ * Assert the full capture→ask→apply→replace flow for one session, and return
+ * what the replacement said.
+ *
+ * At upstream b5f95cb (ticket 148) the entry checkpoint is the one seam that
+ * decides a landed result, so the evidence is the `entry` journal line, the
+ * `entry-ask` line naming the landed unit and the answer, the `entry-apply`
+ * line naming the surface write, and then the one `surfaceOp: replace` event.
+ * There is no `publish` line on this path, and the judge's old
+ * `verdict-settled` no longer exists (ADR-0028).
  */
 function assertCapped(
   records: readonly JournalRecord[],
@@ -742,13 +763,25 @@ function assertCapped(
 ): string {
   const sessionId = session.id;
   assert.equal(forSession(records, "entry", sessionId).length, 1, `entry for ${sessionId}`);
-  const settled = firstRecord(
+
+  const asked = firstRecord(
     records,
-    "verdict-settled",
+    "entry-ask",
     (fields) => fields["sessionId"] === sessionId,
   );
-  assert.ok(settled, `verdict-settled for ${sessionId}`);
-  assert.equal(settled.fields["status"], "applied", `${sessionId}: the verdict applied`);
+  assert.ok(asked, `entry-ask for ${sessionId}`);
+  assert.equal(asked.fields["action"], "forgetall", `${sessionId}: the answer drops the result`);
+  assert.equal(typeof asked.fields["unitId"], "string", `${sessionId}: the ask names the unit`);
+
+  const applied = firstRecord(
+    records,
+    "entry-apply",
+    (fields) => fields["sessionId"] === sessionId,
+  );
+  assert.ok(applied, `entry-apply for ${sessionId}`);
+  assert.equal(applied.fields["status"], "landed", `${sessionId}: a forget lands its shape`);
+  assert.equal(applied.fields["engineStatus"], "applied", `${sessionId}: the engine applied it`);
+  assert.equal(applied.fields["action"], "forgetall", `${sessionId}: the applied action`);
 
   const origin = appendedResults(session)[0];
   assert.ok(origin, `${sessionId}: the original result is in the log`);
@@ -763,7 +796,11 @@ function assertCapped(
   });
   assert.deepEqual([...(replacement.sourceEventSeqs ?? [])], [origin.seq]);
   const text = messageText(replacement);
-  assert.match(text, /^\[not retained\] /u, "the shipped receipt form");
+  // The shaped turn is the answer's summary above core's own marker
+  // (`SHAPE_MARKER_*` in core/rules/assets-templates.ts): a forgetall keeps no
+  // line, so the marker is the empty-keep form and names the recall id.
+  assert.match(text, /^oversized read\n\n\[racoons\] kept 0 of \d+ lines · recall /u,
+    "the shipped shaped-turn form");
   assert.ok(text.length < body.length / 2, "the body itself is not retained");
   return recallIdOf(text);
 }
@@ -812,7 +849,7 @@ describe("ticket 145 — the mount has no session filter", () => {
     const journal = captureJournal();
     t.after(journal.restore);
 
-    const ctx = createMountCtx({ llm: cannedLlm(VERDICT_ANSWER) });
+    const ctx = createMountCtx({ llm: cannedLlm(FORGET_ALL_ANSWER) });
     const mount = mountSession(ctx, root);
     t.after(() => {
       void mount.dispose();
@@ -887,7 +924,7 @@ describe("ticket 145 — the mount has no session filter", () => {
     const journal = captureJournal();
     t.after(journal.restore);
 
-    const ctx = createApplyCtx({ llm: cannedLlm(VERDICT_ANSWER) });
+    const ctx = createApplyCtx({ llm: cannedLlm(FORGET_ALL_ANSWER) });
     applyPlugin(ctx, {
       enabled: true,
       racoonsStorageRoot: root,
@@ -999,7 +1036,7 @@ describe("ticket 145 — durable per-session storage", () => {
 
     const sessionId = "sess-durable";
     const body = oversizedBody(40 * 1024, "DURABLE");
-    const firstCtx = createMountCtx({ llm: cannedLlm(VERDICT_ANSWER) });
+    const firstCtx = createMountCtx({ llm: cannedLlm(FORGET_ALL_ANSWER) });
     const first = mountSession(firstCtx, root);
     const session = fakeSession(sessionId);
     attachSession(session, firstCtx);
@@ -1118,7 +1155,7 @@ describe("ticket 145 — per-session recall", () => {
     const journal = captureJournal();
     t.after(journal.restore);
 
-    const ctx = createMountCtx({ llm: cannedLlm(VERDICT_ANSWER) });
+    const ctx = createMountCtx({ llm: cannedLlm(FORGET_ALL_ANSWER) });
     const mount = mountSession(ctx, root);
     t.after(() => {
       void mount.dispose();
@@ -1194,7 +1231,7 @@ describe("ticket 145 — per-session recall", () => {
     const journal = captureJournal();
     t.after(journal.restore);
 
-    const ctx = createMountCtx({ llm: cannedLlm(VERDICT_ANSWER) });
+    const ctx = createMountCtx({ llm: cannedLlm(FORGET_ALL_ANSWER) });
     const mount = mountSession(ctx, root);
     t.after(() => {
       void mount.dispose();
@@ -1273,12 +1310,12 @@ describe("ticket 145 — per-session recall", () => {
 // ── 4. config mapping ─────────────────────────────────────────────────────
 
 describe("ticket 145 — config mapping", () => {
-  it("record-only records entries and applies nothing", async (t) => {
+  it("record-only records the entry checkpoint's answer and applies nothing at rest", async (t) => {
     const root = scratchRoot();
     const journal = captureJournal();
     t.after(journal.restore);
 
-    const ctx = createMountCtx({ llm: cannedLlm(VERDICT_ANSWER) });
+    const ctx = createMountCtx({ llm: cannedLlm(KEEP_ALL_ANSWER) });
     // The plugin maps racoonsRecordOnly:true to this value; the mount option
     // is the seam that decides.
     const mount = mountSession(ctx, root, { enforcement: "record-only" });
@@ -1298,21 +1335,80 @@ describe("ticket 145 — config mapping", () => {
     await cappingPass(ctx, session, "c-ro", body);
 
     const records = journal.records();
-    // The entry IS recorded: the pass ran and the answer was journaled.
+    // The entry IS recorded and the checkpoint IS asked: `record-only` is the
+    // engine's opt-out for the APPLY legs it owns (the bulk prune's
+    // `settlePrune` and a manual forget's `settleForget`), not a gate on the
+    // entry ask. A keep-all plans no engine application at all, so the only
+    // write is the exchange's own rewind.
     assert.equal(forSession(records, "entry", sessionId).length, 1);
-    assert.ok(firstRecord(records, "judge-ask"), "the judge answered");
-    const settled = firstRecord(
-      records,
-      "verdict-settled",
-      (fields) => fields["sessionId"] === sessionId,
-    );
-    assert.ok(settled);
-    assert.equal(settled.fields["status"], "unchanged", "record-only applies nothing");
-    // No publication, no replacement: the transcript keeps the original bytes.
+    const asked = firstRecord(records, "entry-ask",
+      (fields) => fields["sessionId"] === sessionId);
+    assert.ok(asked, "the entry checkpoint asked");
+    assert.equal(asked.fields["action"], "keepall", "the answer kept the result whole");
+    const applied = firstRecord(records, "entry-apply",
+      (fields) => fields["sessionId"] === sessionId);
+    assert.ok(applied);
+    assert.equal(applied.fields["status"], "rewound", "a keep-all rewinds its own exchange");
+    assert.equal(applied.fields["engineStatus"], "unchanged", "a keep-all plans nothing");
+    assert.equal(applied.fields["resultSeq"], null, "a keep-all writes no result turn");
+    // No replacement and no publication: the transcript keeps the original bytes.
     assert.equal(forSession(records, "publish", sessionId).length, 0);
     assert.equal(replacementEvents(session).length, 0);
     const origin = appendedResults(session)[0];
     assert.equal(messageText(origin), body, "the result still carries the original text");
+  });
+
+  /**
+   * The behavior CHANGE this re-sync brings, pinned so it cannot pass unnoticed.
+   *
+   * At upstream `70c99ef` the judge's `settleVerdicts` read
+   * `protocol.enforcement === 'record-only'` and dropped the batch, so
+   * `racoonsRecordOnly: true` really did mean "no context edits". At the pinned
+   * `b5f95cb` the judge is gone (ADR-0028) and `enforcement` is checked in only
+   * two places — `settlePrune` and `settleForget` — neither of which is on the
+   * entry-checkpoint path. The entry apply therefore runs whatever the mode
+   * says, and a `forgetall` answer rewrites the result turn under
+   * `record-only` exactly as it does under `apply`.
+   *
+   * This test states that fact rather than the product promise it used to
+   * carry. If dsh-bot wants "record-only means no context edits" to stay true
+   * (its settings card and README both say so), the mount must gate the entry
+   * apply itself; until then this is what the vendored library does.
+   */
+  it("record-only does NOT gate the entry checkpoint's forget at upstream b5f95cb", async (t) => {
+    const root = scratchRoot();
+    const journal = captureJournal();
+    t.after(journal.restore);
+
+    const ctx = createMountCtx({ llm: cannedLlm(FORGET_ALL_ANSWER) });
+    const mount = mountSession(ctx, root, { enforcement: "record-only" });
+    t.after(() => {
+      void mount.dispose();
+    });
+
+    const sessionId = "sess-record-only-forget";
+    const body = oversizedBody(40 * 1024, "RECORD-ONLY-FORGET");
+    const session = fakeSession(sessionId);
+    attachSession(session, ctx);
+    await cappingPass(ctx, session, "c-rof", body);
+
+    const records = journal.records();
+    const applied = firstRecord(records, "entry-apply",
+      (fields) => fields["sessionId"] === sessionId);
+    assert.ok(applied, "the entry checkpoint applied something");
+    assert.equal(applied.fields["action"], "forgetall");
+    assert.equal(applied.fields["engineStatus"], "applied",
+      "the engine applied it despite `record-only`: enforcement does not gate this path");
+    assert.equal(applied.fields["status"], "landed");
+
+    // The surface write happened under `record-only`.
+    const replacements = replacementEvents(session);
+    assert.equal(replacements.length, 1, "record-only rewrote the result turn");
+    const text = messageText(replacements[0]);
+    assert.match(text, /\[racoons\] kept 0 of \d+ lines · recall /u);
+    assert.ok(text.length < body.length / 2, "the body left the transcript");
+    // ...and the archive still holds the original bytes byte-exactly.
+    await assertRecallIsExact(mount.recallFor(sessionId), recallIdOf(text), body, sessionId);
   });
 
   it("maps an empty root to the library default and window 0 to off", async (t) => {
@@ -1359,7 +1455,9 @@ describe("ticket 145 — config mapping", () => {
     const journal = captureJournal();
     t.after(journal.restore);
 
-    const ctx = createApplyCtx({ llm: cannedLlm(VERDICT_ANSWER) });
+    // A keep-all answer is the one class that never writes a replacement, so
+    // this proves the plugin-level wiring without leaning on the entry applier.
+    const ctx = createApplyCtx({ llm: cannedLlm(KEEP_ALL_ANSWER) });
     applyPlugin(ctx, {
       enabled: true,
       racoonsRecordOnly: true,
@@ -1394,7 +1492,7 @@ describe("ticket 145 — teardown", () => {
     const journal = captureJournal();
     t.after(journal.restore);
 
-    const ctx = createMountCtx({ llm: cannedLlm(VERDICT_ANSWER) });
+    const ctx = createMountCtx({ llm: cannedLlm(FORGET_ALL_ANSWER) });
     const baselines = new Map<string, number>();
     const events = ["session/event", "llm/stream", "agent/pre-step", "agent/turn-stopping"];
     for (const name of events) baselines.set(name, ctx.listenerCount(name));
