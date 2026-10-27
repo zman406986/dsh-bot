@@ -2,6 +2,7 @@ import type {
   CompactionBoundary,
   CompactionBoundaryStore,
   DurableDispatcherMark,
+  DurableDispatcherMarkAnswer,
   DurableWorkerMarker,
   DurableWorkerSession,
   DurabilityPort,
@@ -444,6 +445,14 @@ export function createStorageDomainDurability(
   storageDomain: StorageDomainLike,
 ): StorageDomainDurability {
   let domainPromise: Promise<DomainLike> | null = null;
+  /**
+   * Ticket 140 review fix: the SAME domain, once open, kept in a plain
+   * variable so a synchronous peek can read a table without awaiting. The
+   * assignment rides the open promise itself, so any caller that awaited a
+   * read/write observes it, and no peek ever opens the store (that is the
+   * `"unknown"` answer).
+   */
+  let openedDomain: DomainLike | null = null;
   let disposed = false;
 
   function ensureDomain(): Promise<DomainLike> {
@@ -451,7 +460,10 @@ export function createStorageDomainDurability(
       return Promise.reject(new Error("marker store disposed"));
     }
     if (domainPromise === null) {
-      domainPromise = storageDomain.open(markerDomainSpec());
+      domainPromise = storageDomain.open(markerDomainSpec()).then((domain) => {
+        openedDomain = domain;
+        return domain;
+      });
     }
     return domainPromise;
   }
@@ -589,6 +601,36 @@ export function createStorageDomainDurability(
         out.push(mark);
       }
       return out;
+    },
+
+    // Ticket 140 review fix: the SYNCHRONOUS single-row peek the projection
+    // unit's `init` needs. It never opens the store (that open is async): an
+    // unopened domain answers "unknown", which the unit treats as "abstain,
+    // re-ask later" instead of "not a dispatcher". An open domain answers
+    // from the table's in-memory state — the same state every write mutated,
+    // so the answer can never be older than the last resolved write.
+    peekDispatcherMark(sessionId: string): DurableDispatcherMarkAnswer {
+      const domain = openedDomain;
+      if (domain === null) {
+        return { kind: "unknown" };
+      }
+      let mark: DurableDispatcherMark | undefined;
+      try {
+        // Same localized cast the async table helpers use: the stub domain's
+        // `table` is typed by the worker markers it was born with.
+        const table = domain.table(
+          DISPATCHER_SESSION_TABLE_NAME,
+        ) as unknown as KvTableLike<DurableDispatcherMark>;
+        mark = table.get(sessionId);
+      } catch (error) {
+        // A table read must never break a session's create path; an
+        // unreadable table is exactly the "cannot answer" case.
+        void error;
+        return { kind: "unknown" };
+      }
+      return mark === undefined
+        ? { kind: "not-dispatcher" }
+        : { kind: "dispatcher", mark };
     },
 
     // Ticket 142: the worker wake identity, in the SAME domain. Keyed by

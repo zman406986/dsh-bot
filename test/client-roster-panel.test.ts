@@ -974,7 +974,7 @@ describe("roster panel — apply() registers only the additive entries; the over
     );
   });
 
-  it("fiber teardown (HMR) frees every registration; re-apply restores three waits", () => {
+  it("fiber teardown (HMR) frees every registration; re-apply restores four waits", () => {
     const ctx = createClientCtx();
     apply(ctx);
     // Four declaration waits: tool.call.toolview (ticket 24),

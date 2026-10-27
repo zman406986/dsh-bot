@@ -521,21 +521,38 @@ describe("session-kind — dispatcher glyph rendering (jsdom)", () => {
 });
 
 describe("session-kind — the header chip (ticket 140 ruling, 2026-10-28)", () => {
-  it("resolves the header seat from projectionValues.sessionKind alone", () => {
-    assert.equal(
-      resolveHeaderDispatcherKind({
-        projectionValues: { sessionKind: DISPATCHER_PROJECTION_VALUE },
-      }),
-      "dispatcher",
-    );
-    // A spawned dispatcher IS a subagent child: `origin` must not veto the
-    // mark at this seat (the sidebar rule still does — next assertion).
+  it("resolves the header seat only for a SUBAGENT that projects dispatcher", () => {
+    // The spawned child: origin 'subagent' + projection 'dispatcher'.
     assert.equal(
       resolveHeaderDispatcherKind({
         origin: "subagent",
         projectionValues: { sessionKind: DISPATCHER_PROJECTION_VALUE },
       }),
       "dispatcher",
+    );
+    // Review fix: a USER-started dispatcher also projects "dispatcher", but it
+    // has a sidebar row and its glyph — no second mark in its header.
+    assert.equal(
+      resolveHeaderDispatcherKind({
+        projectionValues: { sessionKind: DISPATCHER_PROJECTION_VALUE },
+      }),
+      "normal",
+      "a top-level dispatcher must not grow a header chip",
+    );
+    assert.equal(
+      resolveHeaderDispatcherKind({
+        origin: "top-level",
+        projectionValues: { sessionKind: DISPATCHER_PROJECTION_VALUE },
+      }),
+      "normal",
+    );
+    // A plain worker child (no dispatcher projection) stays unmarked.
+    assert.equal(
+      resolveHeaderDispatcherKind({
+        origin: "subagent",
+        projectionValues: { sessionKind: null },
+      }),
+      "normal",
     );
     assert.equal(
       resolveSessionKind({
@@ -614,6 +631,29 @@ describe("session-kind — the header chip (ticket 140 ruling, 2026-10-28)", () 
     await bare.unmount();
   });
 
+  it("renders NO mark for a user-started dispatcher (it has the sidebar glyph)", async () => {
+    const store = fakeUseSessions(
+      snapshot({
+        "s-user-disp": {
+          projectionValues: { sessionKind: DISPATCHER_PROJECTION_VALUE },
+        },
+      }),
+    );
+    const HeaderChip = createSessionHeaderKindGlyph(t);
+    const mounted = await mount(
+      createElement(HeaderChip, {
+        sessionId: "s-user-disp",
+        useSessions: store.useSessions,
+      }),
+    );
+    assert.equal(
+      mounted.container.querySelector("[data-session-kind]"),
+      null,
+      "a top-level dispatcher's header must stay bare",
+    );
+    await mounted.unmount();
+  });
+
   it("declares an additive entry above the stock subagent catalog", () => {
     const registration = dispatcherHeaderGlyphRegistration();
     assert.deepEqual(registration, {
@@ -622,8 +662,10 @@ describe("session-kind — the header chip (ticket 140 ruling, 2026-10-28)", () 
       order: DISPATCHER_HEADER_GLYPH_ORDER,
       locale: LOCALE_NAMESPACE,
     });
-    // Stock `subagent-catalog` sits at order 10; a higher order is additive.
-    assert.ok(registration.order > 10);
+    // Stock occupants: `subagent-catalog` at 10 and `job-list` at 20. A
+    // higher order keeps both in front, so the entry is additive.
+    assert.equal(registration.order, 30);
+    assert.ok(registration.order > 20);
   });
 });
 // ── The composition (the fake mirrors test/client-toolviews.test.ts's seam)

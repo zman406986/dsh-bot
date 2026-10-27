@@ -373,9 +373,10 @@ describe("session-kind projection — state durability", () => {
 describe("session-kind projection — registration", () => {
   it("declares the contract's key, wire view, and state version", () => {
     assert.equal(SESSION_KIND_PROJECTION_KEY, "sessionKind");
-    // v2 (ticket 140): `init` also consults the dispatcher-mark mirror, which
-    // changes what a v1 row would have cached for a spawned child.
-    assert.equal(SESSION_KIND_PROJECTION_STATE_VERSION, 2);
+    // Stays 1 (ticket 140 review fix): the abstain rides per-row state
+    // (`resolved: false`), not a unit version bump, so a user-started
+    // dispatcher's cached glyph is never discarded on upgrade.
+    assert.equal(SESSION_KIND_PROJECTION_STATE_VERSION, 1);
     assert.equal(
       SESSION_KIND_PROJECTION_DEFINITION.key,
       SESSION_KIND_PROJECTION_KEY,

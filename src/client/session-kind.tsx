@@ -307,17 +307,19 @@ export function resolveSessionKind(
 }
 
 /**
- * Header-chip resolution (ticket 140 ruling, 2026-10-28): reads
- * `projectionValues.sessionKind` DIRECTLY and ignores `origin`.
+ * Header-chip resolution (ticket 140 ruling, 2026-10-28; review fix 2026-10-28):
+ * `origin === "subagent"` AND `projectionValues.sessionKind === "dispatcher"`.
  *
- * This seat is the session's OWN conversation, not a list row: the projection
- * is per-session (the fold reads that session's own log plus the adapter's
- * dispatcher-mark mirror), so a worker's row can never say `"dispatcher"`.
- * `origin`-first exists to stop a worker INHERITING a parent's mark in the
- * sidebar; there is nothing to inherit here. The spawned dispatcher IS a
- * subagent child, so routing this seat through {@link resolveSessionKind}
- * would resolve it `"worker"` and render nothing — the exact bug this
- * ticket fixes.
+ * The `origin` gate is REQUIRED, not inherited: `resolveSessionKind` uses
+ * origin-first to stop a worker inheriting a dispatcher's mark, and this seat
+ * would otherwise be the mirror image of that bug — a USER-started dispatcher
+ * (origin unset) also projects `"dispatcher"`, so an origin-blind chip would
+ * grow a second mark in its header beside the sidebar glyph. Exactly the
+ * spawned child (`origin: 'subagent'`, projection `"dispatcher"`) renders.
+ *
+ * That pair is safe because the projection is decided per session by that
+ * session's OWN log plus its own durable mark — a worker child never projects
+ * `"dispatcher"`, so the gate cannot hide a real dispatcher.
  *
  * Never throws; anything unexpected resolves `normal` (renders nothing).
  */
@@ -325,6 +327,7 @@ export function resolveHeaderDispatcherKind(
   facts: SessionKindFactsLike | null | undefined,
 ): SessionKind {
   if (typeof facts !== "object" || facts === null) return "normal";
+  if (facts.origin !== "subagent") return "normal";
   const kind =
     typeof facts.projectionValues === "object" &&
     facts.projectionValues !== null

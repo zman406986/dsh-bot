@@ -320,10 +320,10 @@ export function applyClientModule(
   // from the sidebar — so the licensed sidebar cell never mounts for it. Its
   // own conversation header is the only reachable seat. Additive in the same
   // list band, above every stock occupant (`subagent-catalog` at 10,
-  // `job-list` at 20); it reads `projectionValues.sessionKind` directly
-  // (per-session, no `origin` gate), because the child IS a subagent and the
-  // sidebar's origin-first rule would resolve it "worker".
-  // `resolveSessionKind` is untouched.
+  // `job-list` at 20). Resolved from `projectionValues.sessionKind` AND
+  // `origin === 'subagent'` (review fix): the child IS a subagent, and the
+  // origin gate is what keeps a user-started dispatcher's header from growing
+  // a second mark beside its sidebar glyph. `resolveSessionKind` untouched.
   ctx.slots.inject(
     dispatcherHeaderGlyphRegistration().name,
     () => {

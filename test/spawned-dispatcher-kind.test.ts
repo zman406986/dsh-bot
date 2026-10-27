@@ -35,13 +35,21 @@ import {
   type AgentLike,
 } from "../src/adapter/cordis-dsh-host.js";
 import {
+  applySessionKindProjection,
   DISPATCHER_SESSION_KIND,
+  initSessionKindProjection,
+  INITIAL_SESSION_KIND_STATE,
   registerSessionKindProjection,
+  resolveSessionKindState,
   SESSION_KIND_PROJECTION_KEY,
   SESSION_KIND_PROJECTION_STATE_VERSION,
   sessionKindProjectionDefinition,
+  UNRESOLVED_SESSION_KIND_STATE,
+  type DispatcherMarkAnswer,
+  type DispatcherMarkProbe,
   type SessionKindProjectionState,
   type SessionProjectionDefinitionLike,
+  type SessionProjectionEventLike,
 } from "../src/adapter/session-kind-projection.js";
 
 interface StubSessionHeader {
@@ -95,6 +103,16 @@ function createFakeRegistry() {
       const state = states.get(sessionId);
       if (state === undefined) return undefined;
       return definition!.wire.view(state);
+    },
+    /** One committed event through the registered fold. */
+    append(sessionId: string, event: SessionProjectionEventLike): void {
+      assert.notEqual(definition, null);
+      const current = states.get(sessionId);
+      assert.ok(current, `cell for ${sessionId} was never created`);
+      states.set(sessionId, definition!.apply(current, event));
+    },
+    stateOf(sessionId: string): SessionKindProjectionState | undefined {
+      return states.get(sessionId);
     },
     states,
   };
@@ -229,8 +247,7 @@ describe("ticket 140: spawned dispatcher resolves to kind dispatcher", () => {
     });
     host = createCordisDshHost(ctx);
     registerSessionKindProjection({ sessionProjections: registry }, () =>
-      host === null ? undefined : (sessionId) =>
-        host.isDurablyMarkedDispatcher(sessionId),
+      host === null ? undefined : (sessionId) => host.dispatcherMarkAnswer(sessionId),
     );
     host.bindParent(createAgent("disp-1"), "disp-1");
 
@@ -257,13 +274,11 @@ describe("ticket 140: spawned dispatcher resolves to kind dispatcher", () => {
 
   it("a normal session still projects null — the probe only answers for marked ids", () => {
     const registry = createFakeRegistry();
-    let marked = false;
-    registerSessionKindProjection({ sessionProjections: registry }, () =>
-      () => marked,
-    );
+    let answer: DispatcherMarkAnswer = "not-dispatcher";
+    registerSessionKindProjection({ sessionProjections: registry }, () => () => answer);
     registry.sessionCreated({ id: "chat-1" });
     assert.equal(registry.kindOf("chat-1"), null);
-    marked = true;
+    answer = "dispatcher";
     registry.sessionCreated({ id: "child-1" });
     assert.equal(registry.kindOf("child-1"), DISPATCHER_SESSION_KIND);
   });
@@ -322,21 +337,27 @@ describe("ticket 140: spawned dispatcher resolves to kind dispatcher", () => {
   });
 
   it("(3) the probe is LATE-BOUND: the unit registered before the host exists still sees it", () => {
-    let probe: ((sessionId: string) => boolean) | null = null;
+    let probe: DispatcherMarkProbe | null = null;
     const definition = sessionKindProjectionDefinition(() => probe ?? undefined);
 
-    assert.equal(definition.init({ id: "child-1" }, 0).active, false);
+    // No probe yet -> the log is the only source (resolved, empty).
+    const before = definition.init({ id: "child-1" }, 0);
+    assert.equal(before.active, false);
+    assert.equal(before.resolved, undefined);
     // The host binding arrives after registration, exactly like `apply`.
-    probe = (sessionId) => sessionId === "child-1";
+    probe = (sessionId) =>
+      sessionId === "child-1" ? "dispatcher" : "not-dispatcher";
     assert.equal(definition.init({ id: "child-1" }, 0).active, true);
     assert.equal(definition.init({ id: "chat-1" }, 0).active, false);
   });
 
-  it("fails closed: a throwing probe, a bad header, or no probe all read as not-dispatcher", () => {
+  it("fails closed: a throwing probe or a bad header never claims a kind", () => {
     const throwing = sessionKindProjectionDefinition(() => () => {
       throw new Error("mirror exploded");
     });
     assert.equal(throwing.init({ id: "child-1" }, 0).active, false);
+    // A throw is "cannot answer", not "definitely not a dispatcher".
+    assert.equal(throwing.init({ id: "child-1" }, 0).resolved, false);
     assert.equal(throwing.init(null, 0).active, false);
     assert.equal(throwing.init({}, 0).active, false);
     assert.equal(
@@ -354,3 +375,131 @@ describe("ticket 140: spawned dispatcher resolves to kind dispatcher", () => {
     );
   });
 });
+
+describe("ticket 140 review fix: the cold case and the abstain rule", () => {
+  /** A durable table that answers only once opened, like the real store. */
+  function createPeekStore() {
+    const marks = new Map<string, { sessionId: string }>();
+    let opened = false;
+    return {
+      marks,
+      open(): void {
+        opened = true;
+      },
+      peekDispatcherMark(sessionId: string):
+        | { kind: "dispatcher"; mark: { sessionId: string } }
+        | { kind: "not-dispatcher" }
+        | { kind: "unknown" } {
+        if (!opened) return { kind: "unknown" };
+        const mark = marks.get(sessionId);
+        return mark === undefined
+          ? { kind: "not-dispatcher" }
+          : { kind: "dispatcher", mark };
+      },
+    };
+  }
+
+  function markerStore(store: ReturnType<typeof createPeekStore>) {
+    return {
+      writeWorkerMarker() {},
+      readWorkerMarkers: () => [],
+      deleteWorkerMarker() {},
+      peekDispatcherMark: (id: string) => store.peekDispatcherMark(id),
+    };
+  }
+
+  it("(a) cold mirror + durable mark present -> the child projects dispatcher", () => {
+    const store = createPeekStore();
+    // The row exists from a previous process; the in-memory mirror is cold
+    // (no spawn ran, no warm-up read yet).
+    store.marks.set("resumed-child", { sessionId: "resumed-child" });
+    store.open();
+
+    const host = createCordisDshHost(createStubCtx(), {
+      markers: markerStore(store),
+    });
+    const probe: DispatcherMarkProbe = (id) => host.dispatcherMarkAnswer(id);
+
+    const state = initSessionKindProjection({ id: "resumed-child" }, probe);
+    assert.equal(state.active, true, "the durable row settles the kind");
+    assert.equal(sessionKindView(state), DISPATCHER_SESSION_KIND);
+    assert.equal(host.isDurablyMarkedDispatcher("resumed-child"), false);
+  });
+
+  it("(b) cold store (not yet open) -> UNRESOLVED, nothing definitive cached", () => {
+    const store = createPeekStore(); // deliberately not opened
+    const host = createCordisDshHost(createStubCtx(), {
+      markers: markerStore(store),
+    });
+    const probe: DispatcherMarkProbe = (id) => host.dispatcherMarkAnswer(id);
+
+    const state = initSessionKindProjection({ id: "later-child" }, probe);
+    assert.equal(state.active, false);
+    assert.equal(state.resolved, false, "abstains instead of claiming 'no'");
+    assert.equal(state.sessionId, "later-child", "remembers what to re-ask");
+    // The wire value is still null — an unknown kind is never displayed.
+    assert.equal(sessionKindView(state), null);
+
+    // The row (from a previous process) becomes readable; the next event
+    // re-derives it with no new log evidence.
+    store.marks.set("later-child", { sessionId: "later-child" });
+    store.open();
+    const settled = applySessionKindProjection(
+      state,
+      { type: "turn/end" },
+      probe,
+    );
+    assert.equal(settled.active, true);
+    assert.equal(settled.resolved, undefined, "settled state drops the marker");
+    assert.equal(settled.sessionId, undefined);
+    assert.equal(sessionKindView(settled), DISPATCHER_SESSION_KIND);
+  });
+
+  it("(c) genuinely absent mark with the store open -> resolved not-dispatcher", () => {
+    const store = createPeekStore();
+    store.open();
+    const host = createCordisDshHost(createStubCtx(), {
+      markers: markerStore(store),
+    });
+    const state = initSessionKindProjection(
+      { id: "plain-chat" },
+      (id) => host.dispatcherMarkAnswer(id),
+    );
+    assert.equal(state.active, false);
+    assert.equal(state.resolved, undefined, "a real 'no' is cached as resolved");
+  });
+
+  it("(d) an unresolved cell also settles on the WIRE read", () => {
+    const store = createPeekStore();
+    const host = createCordisDshHost(createStubCtx(), {
+      markers: markerStore(store),
+    });
+    const definition = sessionKindProjectionDefinition(() => (id) =>
+      host.dispatcherMarkAnswer(id),
+    );
+    const state = definition.init({ id: "wire-child" }, 0);
+    assert.equal(state.resolved, false);
+    assert.equal(definition.wire.view(state), null);
+    store.marks.set("wire-child", { sessionId: "wire-child" });
+    store.open();
+    assert.equal(definition.wire.view(state), DISPATCHER_SESSION_KIND);
+    // The read never mutates the stored state.
+    assert.equal(state.active, false);
+  });
+
+  it("(e) resolveSessionKindState is reference-stable once resolved or unknown", () => {
+    const resolved = initSessionKindProjection(
+      { id: "child-1" },
+      () => "dispatcher",
+    );
+    assert.equal(resolveSessionKindState(resolved, () => "not-dispatcher"), resolved);
+    const unresolved = UNRESOLVED_SESSION_KIND_STATE;
+    assert.equal(resolveSessionKindState(unresolved, () => "unknown"), unresolved);
+    assert.equal(resolveSessionKindState(unresolved), unresolved);
+    assert.equal(resolveSessionKindState(INITIAL_SESSION_KIND_STATE), INITIAL_SESSION_KIND_STATE);
+  });
+});
+
+function sessionKindView(state: SessionKindProjectionState): unknown {
+  return sessionKindProjectionDefinition().wire.view(state);
+}
