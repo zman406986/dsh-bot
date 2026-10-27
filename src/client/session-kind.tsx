@@ -60,6 +60,21 @@
  *
  * Keys are read defensively: the slot payload is only `{sessionId}`, and a
  * snapshot that has not learned the session yet yields `normal`.
+ *
+ * ## The dispatcher mark is a small bot portrait (ticket 146)
+ *
+ * The owner's 2026-10-27 instruction fixed the mark's visual form (ADR-0024's
+ * rider had left it TBD): the dispatcher cell renders a tiny **bot portrait**
+ * as an inline SVG, not a text character. The drawing is authored here from
+ * scratch — no asset file, no data URI, no copied path table — and painted
+ * only with `currentColor` plus the host's `--dsw-alias-*` tokens, so it
+ * follows the shell's light/dark setting.
+ *
+ * Motion is CSS `@keyframes` emitted by the component through a `<style>`
+ * element (the roster panel's idiom, `panel.tsx:303`): a slow bob and a
+ * quicker blink. Both are disabled under `prefers-reduced-motion: reduce`,
+ * leaving the static portrait. The seat is idle-only (the host unmounts the
+ * leading cell while a session runs), so no running state is chased here.
  */
 
 import type { JSX } from "react";
@@ -83,13 +98,122 @@ export const DISPATCHER_GLYPH_ORDER = 20;
 /** Entry id the dispatcher cell entry carries. */
 export const DISPATCHER_GLYPH_ENTRY_ID = "multitask-dispatcher-kind";
 
-/** A single character is the only safe fit for the 16px sidebar cell. */
-export const DISPATCHER_GLYPH = "◆";
 /**
  * Worker marker glyph, retained but NOT composed: the header seat it belongs to
  * is not licensed by ADR-0024's rider (ticket 123 records it as declined).
  */
 export const WORKER_GLYPH = "↳";
+
+/**
+ * Stylesheet for the dispatcher bot portrait (ticket 146). Emitted by the
+ * component itself through a `<style>` element — exactly the roster panel's
+ * idiom (`panel.tsx:303`) — so the mark needs no build-toolchain change and
+ * unmounts with the row. Every class and keyframe name is
+ * `multitask-dispatcher-` prefixed; the only colours are `currentColor` and
+ * the host's `--dsw-alias-*` token layer; both animations turn off under
+ * `prefers-reduced-motion: reduce`, leaving the static portrait.
+ *
+ * Motion is a slow vertical bob of the whole portrait plus a rarer blink of
+ * the two eyes. Nothing is state-driven: the leading cell is idle-only (the
+ * host unmounts it while a session runs), so the portrait only has to look
+ * alive while at rest.
+ */
+export const SESSION_KIND_GLYPH_CSS = `
+.multitask-dispatcher-kind-glyph{display:inline-flex;align-items:center;justify-content:center;width:16px;height:20px;line-height:0;overflow:hidden}
+.multitask-dispatcher-kind-glyph__bot{display:block;transform-origin:center;animation:multitask-dispatcher-kind-glyph-bob 3.2s ease-in-out infinite}
+.multitask-dispatcher-kind-glyph__eye{fill:var(--dsw-alias-label-primary);transform-box:fill-box;transform-origin:center;animation:multitask-dispatcher-kind-glyph-blink 4.8s ease-in-out infinite}
+@keyframes multitask-dispatcher-kind-glyph-bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-.75px)}}
+@keyframes multitask-dispatcher-kind-glyph-blink{0%,90%,96%,100%{transform:scaleY(1)}93%{transform:scaleY(.15)}}
+@media (prefers-reduced-motion: reduce){.multitask-dispatcher-kind-glyph__bot,.multitask-dispatcher-kind-glyph__eye{animation:none}}
+`;
+
+/**
+ * The dispatcher portrait: an original 16×16 inline-SVG bot head — antenna
+ * with a tip dot, a rounded head with small side ears, two eyes and a short
+ * mouth line. Authored here from scratch (ticket 146 constraints): no asset
+ * file, no data URI, no copied path table, no motion table.
+ *
+ * `aria-hidden` is deliberate: the wrapping span carries `role="img"` and the
+ * localized label, so the drawing adds no second announcement. Colours are
+ * the row's inherited `currentColor` plus one host token for the eyes
+ * (`SESSION_KIND_GLYPH_CSS`), never a raw literal.
+ */
+function DispatcherPortrait(): JSX.Element {
+  return (
+    <svg
+      className="multitask-dispatcher-kind-glyph__bot"
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      focusable="false"
+    >
+      {/* Antenna: a short stem and a tip dot. */}
+      <line
+        x1="8"
+        y1="1.4"
+        x2="8"
+        y2="3.6"
+        stroke="currentColor"
+        strokeWidth="1.1"
+        strokeLinecap="round"
+      />
+      <circle cx="8" cy="1.3" r=".9" fill="currentColor" />
+      {/* Head: a rounded shell with a whisper of fill so it reads as a face. */}
+      <rect
+        x="1.9"
+        y="3.8"
+        width="12.2"
+        height="9.6"
+        rx="3.2"
+        fill="currentColor"
+        fillOpacity=".1"
+        stroke="currentColor"
+        strokeWidth="1.2"
+      />
+      {/* Side ears. */}
+      <rect
+        x=".8"
+        y="7.1"
+        width="1.1"
+        height="2.6"
+        rx=".55"
+        fill="currentColor"
+      />
+      <rect
+        x="14.1"
+        y="7.1"
+        width="1.1"
+        height="2.6"
+        rx=".55"
+        fill="currentColor"
+      />
+      {/* Eyes: the only animated parts (the blink). */}
+      <circle
+        className="multitask-dispatcher-kind-glyph__eye"
+        cx="5.8"
+        cy="8.1"
+        r="1.05"
+      />
+      <circle
+        className="multitask-dispatcher-kind-glyph__eye"
+        cx="10.2"
+        cy="8.1"
+        r="1.05"
+      />
+      {/* Mouth: one short, calm line. */}
+      <line
+        x1="6.3"
+        y1="11"
+        x2="9.7"
+        y2="11"
+        stroke="currentColor"
+        strokeWidth="1.1"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
 
 /**
  * The projection key our adapter registers for dispatcher identity
@@ -210,7 +334,6 @@ type MarkedKind = Exclude<SessionKind, "normal">;
  */
 function KindGlyphBody(props: {
   readonly kind: MarkedKind;
-  readonly glyph: string;
   readonly label: string;
   readonly sessionId: string;
   readonly useSessions: UseSessionsLike;
@@ -219,7 +342,7 @@ function KindGlyphBody(props: {
     resolveSessionKind(state?.byId?.[props.sessionId]),
   );
   if (resolved !== props.kind) return null;
-  return (
+  const mark = (
     <span
       className="multitask-dispatcher-kind-glyph"
       data-session-kind={props.kind}
@@ -227,8 +350,18 @@ function KindGlyphBody(props: {
       aria-label={props.label}
       title={props.label}
     >
-      {props.glyph}
+      {props.kind === "dispatcher" ? <DispatcherPortrait /> : WORKER_GLYPH}
     </span>
+  );
+  // The worker mark stays a bare text node; only the dispatcher portrait brings
+  // its stylesheet, as a sibling of the mark so the mark's own text content
+  // stays empty (the cell is glyph-only).
+  if (props.kind !== "dispatcher") return mark;
+  return (
+    <>
+      <style>{SESSION_KIND_GLYPH_CSS}</style>
+      {mark}
+    </>
   );
 }
 
@@ -239,14 +372,14 @@ function KindGlyphBody(props: {
  *
  * - missing `sessionId` or `useSessions` → `null` (no hook called);
  * - a session of another kind → `null`;
- * - the matching kind → one `<span role="img">` with the glyph, its
- *   accessible label, and a `data-session-kind` hook for styling/tests.
+ * - the matching kind → one `<span role="img">` carrying the mark (the
+ *   dispatcher bot portrait, or the worker character), its accessible label,
+ *   and a `data-session-kind` hook for styling/tests.
  */
 export function createSessionKindGlyph(
   kind: MarkedKind,
   t: TranslateFn,
 ): (props: SessionKindGlyphProps) => JSX.Element | null {
-  const glyph = kind === "dispatcher" ? DISPATCHER_GLYPH : WORKER_GLYPH;
   const label = t(SESSION_KIND_COPY_KEYS[kind]);
   return function SessionKindGlyph(
     props: SessionKindGlyphProps,
@@ -262,7 +395,6 @@ export function createSessionKindGlyph(
     return (
       <KindGlyphBody
         kind={kind}
-        glyph={glyph}
         label={label}
         sessionId={sessionId}
         useSessions={useSessions}

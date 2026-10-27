@@ -1,7 +1,8 @@
 /**
- * Ticket 123 — session-kind indicators (ADR-0024 rider + rider addendum).
+ * Ticket 123 — session-kind indicators (ADR-0024 rider + rider addendum),
+ * extended by ticket 146 (the dispatcher mark is an animated bot portrait).
  *
- * Three claims pinned here:
+ * Four claims pinned here:
  *
  * 1. **Kind resolution is a pure function over client-visible session
  *    facts.** Workers are `origin === 'subagent'` (durable header, ADR-0027
@@ -22,6 +23,11 @@
  *    `sidebar.session.row.leading` dispatcher cell. The worker marker in the
  *    conversation header is declined (ticket 123 §B, 2026-10-22) and is NOT
  *    composed — the seat needs a fresh dated human ruling extending the rider.
+ * 4. **The dispatcher mark is an inline SVG bot portrait with CSS motion**
+ *    (ticket 146, owner ruling 2026-10-27): the wrapper's text body is gone,
+ *    an `svg` is inside the mark, and the stylesheet carries `@keyframes`
+ *    plus a `prefers-reduced-motion: reduce` override. jsdom cannot run
+ *    animations, so the pins are structural only.
  *
  * Rendering is jsdom + react-dom (the established `test/client-*.test.ts`
  * idiom). Everything is offline (S8): no network, no LLM, no live seam.
@@ -62,10 +68,10 @@ import {
 import {
   DISPATCHER_PROJECTION_KEY,
   DISPATCHER_PROJECTION_VALUE,
-  DISPATCHER_GLYPH,
   DISPATCHER_GLYPH_ENTRY_ID,
   DISPATCHER_GLYPH_ORDER,
   SESSION_KIND_COPY_KEYS,
+  SESSION_KIND_GLYPH_CSS,
   SIDEBAR_LEADING_SLOT,
   WORKER_GLYPH,
   createSessionKindGlyph,
@@ -215,8 +221,18 @@ describe("session-kind — registration contracts", () => {
     );
   });
 
-  it("the two glyphs and entry ids are distinct and plugin-prefixed", () => {
-    assert.notEqual(DISPATCHER_GLYPH, WORKER_GLYPH);
+  it("the two kinds' marks are distinct: the worker types a character, the dispatcher is drawn", async () => {
+    const sessionKind = await import("../src/client/session-kind.js");
+    // Ticket 146: the dispatcher body left the text-glyph seat — no text
+    // constant is exported for it any more — while the retained worker marker
+    // stays one character. The structural difference is rendered in the DOM
+    // suite below.
+    assert.equal(
+      "DISPATCHER_GLYPH" in sessionKind,
+      false,
+      "the dispatcher mark is an SVG portrait, not a character",
+    );
+    assert.equal(WORKER_GLYPH.length, 1);
     assert.match(DISPATCHER_GLYPH_ENTRY_ID, /^multitask-dispatcher-/);
   });
 
@@ -331,14 +347,73 @@ describe("session-kind — dispatcher glyph rendering (jsdom)", () => {
       '[data-session-kind="dispatcher"]',
     );
     assert.ok(mark, "the dispatcher mark renders");
-    assert.equal(mark.textContent, DISPATCHER_GLYPH);
-    // One character is the only safe fit for the stock 16px cell.
-    assert.equal(DISPATCHER_GLYPH.length, 1);
+    // Ticket 146: the body is an inline SVG bot portrait, not a text glyph.
+    const portrait = mark.querySelector("svg");
+    assert.ok(portrait, "the mark carries an inline SVG portrait");
+    assert.equal(portrait.getAttribute("width"), "16");
+    assert.equal(portrait.getAttribute("height"), "16");
+    assert.equal(portrait.getAttribute("aria-hidden"), "true");
+    assert.equal(
+      portrait.getAttribute("viewBox"),
+      "0 0 16 16",
+      "the drawing is authored on the 16×16 cell",
+    );
+    // The drawing is ours: eyes + head are present, so the portrait is not an
+    // empty shell. No asset file, no data URI — inline shapes only.
+    assert.ok(portrait.querySelectorAll("circle").length >= 1, "eyes drawn");
+    assert.ok(portrait.querySelector("rect"), "head drawn");
+    assert.equal(
+      mark.querySelector("img"),
+      null,
+      "no raster/static asset smuggled in",
+    );
+    // The accessible name stays on the wrapper, so the wrapper's text content
+    // is empty and the cell is glyph-only.
+    assert.equal(mark.textContent, "");
     assert.equal(
       mark.getAttribute("aria-label"),
       localeDictionary.en["indicator.dispatcher"],
     );
+    assert.equal(mark.getAttribute("role"), "img");
     await mounted.unmount();
+  });
+
+  it("the dispatcher mark differs structurally from the worker mark", async () => {
+    const store = fakeUseSessions(
+      snapshot({
+        "s-disp": {
+          projectionValues: { sessionKind: DISPATCHER_PROJECTION_VALUE },
+        },
+        "s-worker": { origin: "subagent" },
+      }),
+    );
+    const DispatcherGlyph = createSessionKindGlyph("dispatcher", t);
+    const WorkerGlyph = createSessionKindGlyph("worker", t);
+    const dispatcher = await mount(
+      createElement(DispatcherGlyph, {
+        sessionId: "s-disp",
+        useSessions: store.useSessions,
+      }),
+    );
+    const worker = await mount(
+      createElement(WorkerGlyph, {
+        sessionId: "s-worker",
+        useSessions: store.useSessions,
+      }),
+    );
+    const dispatcherMark = dispatcher.container.querySelector(
+      '[data-session-kind="dispatcher"]',
+    );
+    const workerMark = worker.container.querySelector(
+      '[data-session-kind="worker"]',
+    );
+    assert.ok(dispatcherMark && workerMark);
+    assert.notEqual(dispatcherMark.outerHTML, workerMark.outerHTML);
+    assert.ok(dispatcherMark.querySelector("svg"), "dispatcher is drawn");
+    assert.equal(workerMark.querySelector("svg"), null, "worker stays a character");
+    assert.equal(workerMark.textContent, WORKER_GLYPH);
+    await dispatcher.unmount();
+    await worker.unmount();
   });
 
   it("renders nothing on a worker or a normal session", async () => {
@@ -359,6 +434,84 @@ describe("session-kind — dispatcher glyph rendering (jsdom)", () => {
       assert.equal(mounted.container.querySelector("[data-session-kind]"), null);
       await mounted.unmount();
     }
+  });
+
+  it("emits its own stylesheet; the reduced-motion override disables the motion", () => {
+    // Ticket 146, structural only — jsdom cannot run animations, so the pins
+    // are: our prefix everywhere, keyframes present, a reduced-motion
+    // override that turns the animation off, and no raw colour literal.
+    const bareClassSelectors = [
+      ...SESSION_KIND_GLYPH_CSS.matchAll(/\.([a-zA-Z][\w-]*)/g),
+    ]
+      .map((match) => match[1])
+      .filter((name) => !name.startsWith("multitask-dispatcher-"));
+    assert.deepEqual(bareClassSelectors, [], "no shipped kit classes");
+
+    const keyframes = [
+      ...SESSION_KIND_GLYPH_CSS.matchAll(/@keyframes\s+([\w-]+)/g),
+    ].map((match) => match[1]!);
+    assert.deepEqual(
+      [...keyframes].sort(),
+      [
+        "multitask-dispatcher-kind-glyph-blink",
+        "multitask-dispatcher-kind-glyph-bob",
+      ],
+      "bob + blink keyframes, both prefixed",
+    );
+
+    // Every animation declaration names one of our keyframes, except the
+    // reduced-motion override that switches motion off.
+    const animations = [
+      ...SESSION_KIND_GLYPH_CSS.matchAll(/animation:([^;}]+)/g),
+    ].map((match) => match[1]!.trim());
+    const running = animations.filter((value) => value !== "none");
+    assert.equal(running.length, 2, "bob + blink: base animations only");
+    for (const animation of running) {
+      assert.match(animation, /^multitask-dispatcher-kind-glyph-/);
+    }
+
+    const reduced = SESSION_KIND_GLYPH_CSS.match(
+      /@media\s*\(prefers-reduced-motion:\s*reduce\)\{([^}]*)\}/,
+    );
+    assert.ok(reduced, "the reduced-motion override exists");
+    assert.match(reduced[1]!, /animation:none/);
+    // Both animated parts are covered, so nothing keeps moving.
+    assert.match(reduced[1]!, /multitask-dispatcher-kind-glyph__bot/);
+    assert.match(reduced[1]!, /multitask-dispatcher-kind-glyph__eye/);
+
+    // Theme contract (mirrors client-theme-tokens.test.ts's rules).
+    assert.doesNotMatch(SESSION_KIND_GLYPH_CSS, /#[0-9a-fA-F]{3,8}\b/);
+    assert.doesNotMatch(SESSION_KIND_GLYPH_CSS, /(?<![a-z])rgba?\(/);
+    assert.doesNotMatch(SESSION_KIND_GLYPH_CSS, /hsla?\(/);
+    assert.ok(!SESSION_KIND_GLYPH_CSS.includes("var(--dsw-alias-brand-primary)"));
+    for (const token of SESSION_KIND_GLYPH_CSS.matchAll(/var\((--dsw-[a-z0-9-]+)\)/g)) {
+      assert.match(token[1]!, /^--dsw-(alias|elevation)-[a-z0-9-]+$/);
+    }
+  });
+
+  it("renders the stylesheet with the mark so the portrait is never unstyled", async () => {
+    const store = fakeUseSessions(
+      snapshot({
+        "s-disp": {
+          projectionValues: { sessionKind: DISPATCHER_PROJECTION_VALUE },
+        },
+      }),
+    );
+    const DispatcherGlyph = createSessionKindGlyph("dispatcher", t);
+    const mounted = await mount(
+      createElement(DispatcherGlyph, {
+        sessionId: "s-disp",
+        useSessions: store.useSessions,
+      }),
+    );
+    const style = mounted.container.querySelector("style");
+    assert.ok(style, "the component emits its own <style>");
+    assert.equal(style.textContent, SESSION_KIND_GLYPH_CSS);
+    // The mark's own text body stays empty: the cell is glyph-only.
+    const mark = mounted.container.querySelector('[data-session-kind="dispatcher"]');
+    assert.ok(mark);
+    assert.equal(mark.textContent, "");
+    await mounted.unmount();
   });
 });
 
