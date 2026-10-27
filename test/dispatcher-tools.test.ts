@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { createInMemoryDurability } from "../src/core/durability.js";
 import { FakeDshHost } from "../src/core/fake-host.js";
 import { createMultitask, type Multitask } from "../src/core/multitask.js";
 import {
@@ -71,6 +72,11 @@ async function setup(options?: {
 describe("dispatcher tools — spawn_worker", () => {
   it("maps 1:1 onto Multitask.spawnWorker and returns a do-not-wait ack", async () => {
     const { host, multitask, tools } = await setup();
+    multitask.createTodo({
+      sessionId: "session-1",
+      id: "t-1",
+      title: "Summarize RFCs",
+    });
     const spawn = byName(tools, SPAWN_WORKER_TOOL);
     const result = (await spawn.execute({
       stream_key: "todo-1",
@@ -93,20 +99,227 @@ describe("dispatcher tools — spawn_worker", () => {
   });
 
   it("duplicate stream key is refused without a host call", async () => {
-    const { host, tools } = await setup();
+    const { host, multitask, tools } = await setup();
     const spawn = byName(tools, SPAWN_WORKER_TOOL);
     const args = {
       stream_key: "s-1",
       title: "First",
       prompt: "Do it.",
     };
-    await spawn.execute(args);
+    const first = (await spawn.execute(args)) as SpawnWorkerToolResult;
+    assert.ok(first.ok);
+    if (!first.ok) return;
     const second = (await spawn.execute(args)) as SpawnWorkerToolResult;
     assert.ok(!second.ok);
     if (second.ok) return;
     assert.equal(second.reason, "duplicate-stream-key");
     assert.ok(second.detail.includes("s-1"));
     assert.equal(host.spawnCalls.length, 1);
+    // The refusal prunes the entry the SECOND call created; the first
+    // call's entry is untouched and stays linked to the live worker.
+    const todos = multitask.listTodos("session-1");
+    assert.equal(todos.length, 1);
+    assert.equal(todos[0]?.workerId, first.worker_id);
+  });
+
+  // Ticket 151: the dispatcher ledger was never written in live use, so the
+  // per-turn reminder stayed `(empty)`. Ruling 2026-10-28: the spawn itself
+  // creates the linked entry from the title it is already given.
+  it("without todo_id, creates exactly one linked ledger entry from the title", async () => {
+    const { host, multitask, tools } = await setup();
+    const result = (await byName(tools, SPAWN_WORKER_TOOL).execute({
+      stream_key: "rfc-work",
+      title: "Summarize RFCs",
+      prompt: "Summarize the three auth RFCs.",
+    })) as SpawnWorkerToolResult;
+
+    assert.ok(result.ok);
+    if (!result.ok) return;
+    assert.equal(host.spawnCalls.length, 1);
+    const todos = multitask.listTodos("session-1");
+    assert.equal(todos.length, 1);
+    const todo = todos[0];
+    assert.ok(todo);
+    assert.equal(todo.title, "Summarize RFCs");
+    assert.equal(todo.streamKey, "rfc-work");
+    assert.equal(todo.workerId, result.worker_id);
+    assert.equal(todo.status, "pending");
+  });
+
+  it("an unknown todo_id is refused before spawn and the ledger stays untouched", async () => {
+    const { host, multitask, tools } = await setup();
+    const result = (await byName(tools, SPAWN_WORKER_TOOL).execute({
+      stream_key: "rfc-work",
+      title: "Summarize RFCs",
+      prompt: "Summarize the three auth RFCs.",
+      todo_id: "typo-1",
+    })) as SpawnWorkerToolResult;
+
+    assert.ok(!result.ok);
+    if (result.ok) return;
+    assert.equal(result.reason, "unknown-todo-id");
+    assert.ok(result.detail.includes("typo-1"));
+    assert.equal(host.spawnCalls.length, 0);
+    assert.deepEqual(multitask.listTodos("session-1"), []);
+  });
+
+  it("a failed spawn leaves no ledger entry behind", async () => {
+    const host = new FakeDshHost();
+    host.spawnWorker = async () => {
+      throw new Error("host exploded");
+    };
+    const multitask = createMultitask(host);
+    const tools = createDispatcherTools({
+      multitask,
+      getSessionId: () => "session-1",
+    });
+    await assert.rejects(
+      () =>
+        byName(tools, SPAWN_WORKER_TOOL).execute({
+          stream_key: "rfc-work",
+          title: "Summarize RFCs",
+          prompt: "Summarize the three auth RFCs.",
+        }),
+      /host exploded/,
+    );
+    assert.deepEqual(multitask.listTodos("session-1"), []);
+    assert.equal(multitask.listWorkers("session-1").length, 0);
+  });
+
+  // Ticket 151 review blocker: restore re-creates entries with their explicit
+  // id (`multitask.ts` rebuild), which advances the ledger's generated
+  // sequence. Without that, the next auto-created spawn would throw
+  // "todo already exists: todo-1" before the host call and every spawn after
+  // a restart would fail.
+  it("after a restart that restored todo-1, a spawn with no todo_id creates todo-2", async () => {
+    const durability = createInMemoryDurability();
+    const hostBefore = new FakeDshHost();
+    const before = createMultitask(hostBefore, { durability });
+    before.createTodo({ sessionId: "session-1", id: "todo-1", title: "Old" });
+    const oldWorker = unwrapSpawn(
+      await before.spawnWorker({
+        parentSessionId: "session-1",
+        streamKey: "old-stream",
+        title: "Old",
+        prompt: "Old work.",
+        todoId: "todo-1",
+      }),
+    );
+    before.noteTurnStarted(oldWorker);
+    hostBefore.fireSettled({
+      workerId: oldWorker,
+      status: "completed",
+      report: "Old result.",
+    });
+
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host, { durability });
+    const report = await multitask.rebuildFromDurability("session-1");
+    assert.equal(report.restored.length, 1);
+    assert.equal(multitask.listTodos("session-1")[0]?.id, "todo-1");
+
+    const tools = createDispatcherTools({
+      multitask,
+      getSessionId: () => "session-1",
+    });
+    const result = (await byName(tools, SPAWN_WORKER_TOOL).execute({
+      stream_key: "new-stream",
+      title: "Fresh work",
+      prompt: "Do the new thing.",
+    })) as SpawnWorkerToolResult;
+
+    assert.ok(result.ok, result.ok ? "" : result.detail);
+    if (!result.ok) return;
+    // The new host reuses ids from `fake-worker-1`, so match the ENTRY, not
+    // the worker id: the restored todo-1 plus exactly one new item.
+    const todos = multitask.listTodos("session-1");
+    assert.equal(todos.length, 2);
+    const created = todos.find((todo) => todo.id !== "todo-1");
+    assert.ok(created);
+    assert.equal(created.id, "todo-2");
+    assert.equal(created.title, "Fresh work");
+    assert.equal(created.streamKey, "new-stream");
+  });
+
+  it("a todo_id from another session is refused", async () => {
+    const { host, multitask, tools } = await setup();
+    multitask.createTodo({ sessionId: "session-2", id: "t-other", title: "Else" });
+    const result = (await byName(tools, SPAWN_WORKER_TOOL).execute({
+      stream_key: "rfc-work",
+      title: "Summarize RFCs",
+      prompt: "Summarize the three auth RFCs.",
+      todo_id: "t-other",
+    })) as SpawnWorkerToolResult;
+
+    assert.ok(!result.ok);
+    if (result.ok) return;
+    assert.equal(result.reason, "unknown-todo-id");
+    assert.equal(host.spawnCalls.length, 0);
+    assert.deepEqual(multitask.listTodos("session-1"), []);
+    assert.equal(multitask.listTodos("session-2")[0]?.workerId, null);
+  });
+
+  it("a todo_id already linked to a worker is refused", async () => {
+    const { host, multitask, tools } = await setup();
+    const spawn = byName(tools, SPAWN_WORKER_TOOL);
+    const first = (await spawn.execute({
+      stream_key: "first-stream",
+      title: "First",
+      prompt: "Do it.",
+    })) as SpawnWorkerToolResult;
+    assert.ok(first.ok);
+    if (!first.ok) return;
+    const linkedId = multitask
+      .listTodos("session-1")
+      .find((todo) => todo.workerId === first.worker_id)?.id;
+    assert.ok(linkedId);
+
+    const second = (await spawn.execute({
+      stream_key: "second-stream",
+      title: "Second",
+      prompt: "Do it too.",
+      todo_id: linkedId,
+    })) as SpawnWorkerToolResult;
+    assert.ok(!second.ok);
+    if (second.ok) return;
+    assert.equal(second.reason, "todo-already-linked");
+    assert.equal(host.spawnCalls.length, 1);
+    // The first entry still points at its own worker and its own stream.
+    const todo = multitask.listTodos("session-1").find((t) => t.id === linkedId);
+    assert.equal(todo?.workerId, first.worker_id);
+    assert.equal(todo?.streamKey, "first-stream");
+  });
+
+  // Ticket 151 review fix: a throw AFTER the worker was registered and the
+  // entry linked (the durability marker write) must not prune the entry —
+  // the worker is live and the marker/roster point at it.
+  it("a spawn that fails after linking keeps its ledger entry", async () => {
+    const durability = createInMemoryDurability();
+    durability.writeWorkerMarker = () => {
+      throw new Error("marker store failed");
+    };
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host, { durability });
+    const tools = createDispatcherTools({
+      multitask,
+      getSessionId: () => "session-1",
+    });
+
+    await assert.rejects(
+      () =>
+        byName(tools, SPAWN_WORKER_TOOL).execute({
+          stream_key: "rfc-work",
+          title: "Summarize RFCs",
+          prompt: "Summarize the three auth RFCs.",
+        }),
+      /marker store failed/,
+    );
+    assert.equal(host.spawnCalls.length, 1);
+    const todos = multitask.listTodos("session-1");
+    assert.equal(todos.length, 1);
+    const workerId = host.spawnCalls[0]?.workerId;
+    assert.equal(todos[0]?.workerId, workerId);
+    assert.equal(multitask.getWorker(workerId ?? "")?.todoId, todos[0]?.id);
   });
 
   it("requires a bound dispatcher session", async () => {

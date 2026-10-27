@@ -68,6 +68,7 @@ import {
 import type {
   DispatcherSpawnOptions,
   DispatcherSpawnResult,
+  SpawnResult,
   WorkerSummary,
 } from "./types.js";
 
@@ -709,6 +710,21 @@ export function createDispatcherTools(
     return sessionId;
   }
 
+  /**
+   * Ticket 151 review fix: drop the entry this spawn created, but only when
+   * it is still UNLINKED. `multitask.spawnWorker` links the entry before the
+   * durability marker write, so a throw from that write comes from a spawn
+   * that already started a live worker — pruning then would leave the worker
+   * pointing at a missing entry. Never touches a caller-given id.
+   */
+  function pruneIfUnlinked(createdTodoId: string | null): void {
+    if (createdTodoId === null) return;
+    const entry = multitask.todos.get(createdTodoId);
+    if (entry === undefined) return;
+    if (entry.workerId !== null) return;
+    multitask.todos.prune(createdTodoId);
+  }
+
   const spawnWorker: DispatcherToolDef = {
     name: SPAWN_WORKER_TOOL,
     description: TOOL_DESCRIPTIONS[SPAWN_WORKER_TOOL],
@@ -723,7 +739,8 @@ export function createDispatcherTools(
           type: "string",
           required: false,
           description:
-            "Links the worker to a ledger entry. Prefer always setting it.",
+            "Links an existing ledger entry; an unknown id is refused. " +
+            "When omitted, the spawn creates the entry from the title.",
         },
       },
     },
@@ -733,6 +750,34 @@ export function createDispatcherTools(
       const title = requireString(args, "title");
       const prompt = requireString(args, "prompt");
       const todoId = optionalString(args, "todo_id");
+
+      // Ticket 151 (ruling 2026-10-28): a GIVEN todo_id must be usable.
+      // Existence alone is not enough (review): a foreign session's id must
+      // not leak in, and an id already linked to a worker must not be
+      // re-pointed (linkWorker would overwrite workerId and keep the old
+      // streamKey). A typo is a refusal, never a silent new entry.
+      if (todoId !== undefined) {
+        const existing = multitask.todos.get(todoId);
+        if (existing === undefined || existing.sessionId !== parentSessionId) {
+          return {
+            ok: false,
+            reason: "unknown-todo-id",
+            detail:
+              `todo entry "${todoId}" does not exist in this session; omit ` +
+              `todo_id to let the spawn create the entry, or pass an existing id`,
+          };
+        }
+        if (existing.workerId !== null) {
+          return {
+            ok: false,
+            reason: "todo-already-linked",
+            detail:
+              `todo entry "${todoId}" is already linked to worker ` +
+              `${existing.workerId}; steer that worker or omit todo_id for a ` +
+              `new entry`,
+          };
+        }
+      }
 
       // Ticket 69 (chunk A, design §4): worker-dispatch posture gate.
       // Miss → spawn proceeds exactly as shipped, no approval-seam call.
@@ -780,15 +825,44 @@ export function createDispatcherTools(
         postureGated = true;
       }
 
+      // Ticket 151 (ruling 2026-10-28, PM under owner grant): no todo_id →
+      // the spawn itself creates the linked ledger entry. The entry is
+      // system-authored and lifecycle-bound (ADR-0007 / DD-164: no
+      // model-invoked create tool), built from the title the model already
+      // passes. Created BEFORE the spawn so §6.1's "todo entry before spawn"
+      // holds; `noteTurnStarted` later promotes it to in_progress.
+      let createdTodoId: string | null = null;
+      if (todoId === undefined) {
+        createdTodoId = multitask.createTodo({
+          sessionId: parentSessionId,
+          title,
+          streamKey,
+        }).id;
+      }
+      const linkedTodoId = todoId ?? createdTodoId ?? undefined;
       const request = {
         parentSessionId,
         streamKey,
         title,
         prompt,
-        ...(todoId !== undefined ? { todoId } : {}),
+        ...(linkedTodoId !== undefined ? { todoId: linkedTodoId } : {}),
       };
-      const result = await multitask.spawnWorker(request);
+      let result: SpawnResult;
+      try {
+        result = await multitask.spawnWorker(request);
+      } catch (error) {
+        // A failed spawn must leave the ledger untouched — but only a spawn
+        // that failed BEFORE the worker was registered/linked (review): the
+        // durability marker write at the end of a successful spawn can still
+        // throw, and a live worker must not have its entry pruned out from
+        // under it. `linkWorker` is the observable moment the live worker
+        // starts referencing the entry, so an unlinked entry is the only one
+        // safe to drop.
+        pruneIfUnlinked(createdTodoId);
+        throw error;
+      }
       if (!result.ok) {
+        pruneIfUnlinked(createdTodoId);
         return {
           ok: false,
           reason: "duplicate-stream-key",

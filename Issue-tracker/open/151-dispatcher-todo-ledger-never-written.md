@@ -1,8 +1,8 @@
 # 151 — The dispatcher todo ledger is never written in live use, so the per-turn reminder is always empty
 
-**Status:** open
+**Status:** open (review pending)
 **Labels:** needs-ruling
-**Blocked by:** the shape ruling (research running separately: auto-create the entry on spawn, or add a dispatcher todo tool). Ruling must be weighed against `reference-deviations/DD-164-todo-tool-vs-internal-ledger.md` (agent-authored lists ruled out).
+**Blocked by:** — the shape ruling was recorded 2026-10-28 (see `## Ruling`); research answered.
 **Origin:** PRD gap scan 2026-10-28 — verified against the tree in a read-only pass; nothing implemented.
 **Related:** PRD §6.1 (todo entry before spawn), §6.5 (todo queue semantics), §7.5 (data model), §13 M3 (S6 marked shipped), `docs/adr/README.md` ADR-0007 (the ledger belongs to the dispatcher alone), `reference-deviations/DD-164-todo-tool-vs-internal-ledger.md` (verdict DO-NOT-INCORPORATE for the reference's agent-authored tool), ticket 113 (file inbox, the only live creator).
 
@@ -27,6 +27,19 @@ The two obvious repairs contradict each other's recorded reasoning, and DD-164 r
 2. **A dispatcher todo tool** — a narrow create/update verb for ledger entries. Closest to what the policy prose already asks the model to do, but DD-164 rejects the reference's agent-authored todo list, and this could be read as its return under another name. Needs a ruling that states the distinction explicitly.
 3. **Do nothing** — record S6 as file-inbox-only in the PRD and drop "todo entry before spawn" from §6.1. Lowest risk, but it deletes a success criterion.
 
+## Ruling (2026-10-28, PM under owner full-rein grant, subject to reversal)
+
+**Chosen shape: auto-create on spawn — option 1.**
+
+- `spawn_worker` with **no** `todo_id` creates the linked ledger entry itself, between reading `todo_id` and building the spawn request (`src/core/tools.ts`, spawn handler). The entry is system-authored and lifecycle-bound: title and `stream_key` come from the call the model already makes; `in_progress` still comes from the existing `noteTurnStarted` path; retirement stays with delivery/reconcile.
+- `spawn_worker` **with** a `todo_id` that names no entry **refuses** (`unknown-todo-id`, no spawn, ledger untouched). A typo must not silently become a new entry — the downside the ticket named in option 1 is closed by refusing.
+- **No new create tool.** Option 2 is exactly what DD-164 rules out. The deviation record's own framing: *"The reference's is agent-authored, general-purpose, self-directed … The build's is dispatcher-owned and lifecycle-bound — entries are created by a spawn call and retired by delivery, and the model does not author or maintain them at all."* Verdict there: **DO-NOT-INCORPORATE**. A model-invoked create tool is the agent-authored list's first half under another name; auto-create keeps the model supplying only the title it already passes.
+- Created in the tool handler, not inside `Multitask.spawnWorker`'s `register()`: the comment at `src/core/multitask.ts:1029-1030` requires a failed spawn to leave the ledger untouched, and reconcile prunes stale pending items, so an entry created before a spawn that then fails would be a phantom. The handler creates the entry, and prunes only the entry it created if the spawn fails.
+- `linkWorker` silently returning `false` on an unknown id (`src/core/todo-reconciler.ts:602`) stops being reachable from the tool: the unknown case is refused before `multitask.spawnWorker` is called.
+- Copy: the dispatcher prompt's "Write a todo entry first" line (`src/core/policy/prompts.ts:79`) now says the spawn records its own entry, so the model gives each spawn a clear title instead of trying to author a list.
+
+**PRD §6.3 note:** the "Todos | existing todo tools" row was read as pointing at machinery that already exists (the ledger and its call sites), not as a requirement for a model-facing todo tool. Nothing in the PRD requires the reference's tool, and DD-164's verdict stands.
+
 ## Acceptance
 
 - [ ] A live `spawn_worker` call produces a linked ledger entry with no file inbox enabled (test drives the tool, not `createTodo` by hand).
@@ -48,3 +61,7 @@ The two obvious repairs contradict each other's recorded reasoning, and DD-164 r
 The blocking research is running separately; this ticket stays unclaimed until its answer lands.
 
 Label note: `needs-ruling` is not one of the five role strings listed in `agent.md`; it is used here because the filing instruction names it for this ticket. If the human prefers the canonical set, the nearest label is `needs-info` (the precedent on ticket 140).
+
+2026-10-28 (implementation, ticket-151-auto-ledger): auto-create implemented in the `spawn_worker` handler; an unknown explicit `todo_id` now refuses with `unknown-todo-id` before any spawn; a failed spawn prunes only the entry that call created. `test/dispatcher-tools.test.ts` gained the three cases (auto-create/linked, unknown-id refusal with ledger untouched, failed-spawn no phantom); file plus typecheck green. The S6/§13 "shipped" wording still needs the recording amendment if review wants it — not touched here.
+
+2026-10-28 (review round): blocker + four should-fixes landed on the same branch. (1) Ledger id sequence: `create()` with an explicit `todo-N` id now advances the generated counter past it (`src/core/todo-reconciler.ts`), so a restored `todo-1` no longer makes the next auto-created spawn throw — restart test added (`restored todo-1 → new spawn creates todo-2`). (2) EN policy copy at `prompts.ts:181-182` and the standing-rules line 218 reworded to "each spawn records its own todo entry"; ZH untouched. (3) Prune-on-failure is now conditional (`pruneIfUnlinked`): a throw from the durability marker write happens AFTER the worker was registered and the entry linked, so that entry is kept; test pins it. (4) The explicit-id refusal now also requires the entry to belong to the calling session and to have no linked worker (`todo-already-linked`); tests for both. (5) The duplicate-stream-key test now asserts the ledger (one entry, still linked to the first worker). Accepted reviewer notes 6-9 (result omits created id, wake-drain cosmetic reminder, mislabeled stream-key-held error, edited-case scope) are untouched. Tests: `dispatcher-tools` + `policy-assembler` + `todo-reconciler` + `durable-roster` = 87/87; adjacent `inbox-core`/`policy-peer-roster`/`adapter-policy-inject`/`delivery-obligation` = 62/62; typecheck core+client clean. The ticket-141 sha256 pin in `test/policy-assembler.test.ts` was re-pinned to the new intentional text, with the reason recorded beside it.

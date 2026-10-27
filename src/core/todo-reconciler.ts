@@ -570,6 +570,17 @@ export function createTodoLedger(options?: {
   return {
     create(input: CreateTodoInput): TodoItem {
       const at = input.nowMs ?? now();
+      // Ticket 151 (review blocker): an explicit id — restore passes the
+      // marker's id, tests hand-create `todo-N` — must advance the generated
+      // sequence past it. Otherwise a restored `todo-1` leaves nextId at 1
+      // and the next generated create throws "todo already exists", killing
+      // every auto-created spawn after a restart.
+      if (input.id !== undefined) {
+        const generated = /^todo-(\d+)$/.exec(input.id);
+        if (generated !== null) {
+          nextId = Math.max(nextId, Number(generated[1]) + 1);
+        }
+      }
       const id = input.id ?? `todo-${nextId++}`;
       if (items.has(id)) {
         throw new Error(`todo already exists: ${id}`);
