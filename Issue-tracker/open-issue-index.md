@@ -2,7 +2,7 @@
 
 # Open ticket index
 
-Generated from `Issue-tracker/open/*.md` — 7 open tickets. The row set is owned by the folder, so a ticket that moves cannot leave a stale row behind (ticket 96). Titles and labels mirror each ticket's own lines.
+Generated from `Issue-tracker/open/*.md` — 8 open tickets. The row set is owned by the folder, so a ticket that moves cannot leave a stale row behind (ticket 96). Titles and labels mirror each ticket's own lines.
 
 | # | Ticket | Title | Status | Labels |
 |---|---|---|---|---|
@@ -13,3 +13,4 @@ Generated from `Issue-tracker/open/*.md` — 7 open tickets. The row set is owne
 | 147 | [147-dispatcher-status-persists-across-restart](open/147-dispatcher-status-persists-across-restart.md) | Dispatcher status persists across dsh restart (user-started dispatchers re-activate on session resume) | open | ready-for-agent |
 | 148 | [148-racoons-resync-latest](open/148-racoons-resync-latest.md) | Re-sync vendored racoons to upstream latest (b5f95cb) | open | ready-for-agent |
 | 149 | [149-marker-store-version-mismatch](open/149-marker-store-version-mismatch.md) | Marker store version mismatch: every storageDomain.open throws since DOMAIN_VERSION 2 | open | ready-for-agent |
+| 150 | [150-racoons-record-only-semantics](open/150-racoons-record-only-semantics.md) | Upstream change: racoonsRecordOnly no longer prevents context edits (entry checkpoint applies under record-only) | open | needs-info |
