@@ -437,6 +437,19 @@ export interface CordisDshHost extends DshHost {
    */
   lastActivityAtMs(workerId: string): number | null;
   /**
+   * Ticket 155: the latest `tool/call` a DISPATCHER session was observed
+   * making, from the same `session/event` firehose the worker activity feed
+   * rides (`{ tool, target }`; the target is null when unreadable).
+   *
+   * Deliberately a SEPARATE map from the worker activity ring: the ring is
+   * keyed by worker id and every existing reader (`recentActivity`,
+   * `lastActivityAtMs`, `recentActivities`, `check_workers`) must never see a
+   * dispatcher key. Null when nothing was observed for that session — never
+   * polled, never guessed, and cleared when the session's turn ends, because
+   * a finished turn has no current tool.
+   */
+  peerToolActivity(sessionId: string): PeerToolActivity | null;
+  /**
    * Ticket 110: the bounded per-worker activity ring, newest-first — up to
    * `n` of the last firehose-observed phrases with their observation
    * moments, from the same subscription as `recentActivity` (no new seam,
@@ -599,13 +612,31 @@ export function dispatcherUserMessageSession(
  * Null for anything unreadable — never invented.
  */
 export function describeToolActivity(data: unknown): string | null {
+  const call = describeToolCall(data);
+  if (call === null || call.tool === null) return null;
+  return clampActivity(
+    call.target === null ? call.tool : `${call.tool}: ${call.target}`,
+  );
+}
+
+/**
+ * Ticket 155: the tool NAME and the primary-argument hint of one `tool/call`
+ * body, kept apart instead of joined into a phrase. Null only when the
+ * payload names no tool at all — the caller may still get a `null` target
+ * when the arguments carry no readable string.
+ *
+ * This is the peer roster's source: `describeToolActivity` is the worker
+ * phrase (one joined string, `tool: hint`); a peer row needs the pair so the
+ * shared renderer can print `using <tool> on <target>`.
+ */
+export function describeToolCall(data: unknown): PeerToolActivity | null {
   if (typeof data !== "object" || data === null) return null;
   const record = data as Record<string, unknown>;
   if (typeof record.name !== "string" || record.name.length === 0) {
     return null;
   }
   const hint = primaryArgumentHint(record.arguments);
-  return clampActivity(hint === null ? record.name : `${record.name}: ${hint}`);
+  return { tool: record.name, target: hint };
 }
 
 /**
@@ -706,6 +737,20 @@ export const WORKER_ACTIVITY_RING_CAPACITY = 5;
 export interface WorkerActivityEntry {
   readonly phrase: string;
   readonly atMs: number;
+}
+
+/**
+ * Ticket 155: the current tool a dispatcher peer was observed calling, split
+ * into the two halves the peer roster renders (`using <tool> on <target>`).
+ * The tool NAME is always present (a payload without one is unreadable and
+ * yields no record at all); the target is the first non-empty string
+ * argument — the same generic "primary argument" hint the worker phrase uses
+ * — and is null when the arguments carry nothing readable, never an invented
+ * value.
+ */
+export interface PeerToolActivity {
+  readonly tool: string;
+  readonly target: string | null;
 }
 
 /**
@@ -959,6 +1004,16 @@ export function createCordisDshHost(
   // `workerActivity`: adapter-side projection of host-observed truth —
   // the core stores no report text and no second transcript exists.
   const workerResults = new Map<string, RosterRecentResultSource>();
+  /**
+   * Ticket 155: current `tool/call` per DISPATCHER session, keyed by session
+   * id — a map of its own, never the worker ring. A peer row's activity is
+   * "what is it doing right now", so an entry is dropped when that session's
+   * turn ends (`turn/end` on the same firehose): a finished turn has no
+   * current tool, and the roster must not keep showing one. Only sessions
+   * whose parent is bound here (`parents`) are recorded — the dispatchers
+   * this host serves — so an ordinary chat never enters it.
+   */
+  const peerToolCalls = new Map<string, PeerToolActivity>();
   let wakeMissingLogged = false;
 
   /**
@@ -1222,10 +1277,29 @@ export function createCordisDshHost(
         }
       }
     }
-    if (event.type !== "tool/call") return;
+    if (event.type !== "tool/call" && event.type !== "turn/end") return;
     const session = sessionRef as SessionRefLike | null;
     if (typeof session !== "object" || session === null) return;
     const workerId = String(session.id);
+    // Ticket 155: the dispatcher branch. It records the CURRENT tool of a
+    // bound dispatcher session for the peer roster and returns — the worker
+    // path below stays exactly as it was, so no ring or count ever sees a
+    // dispatcher key. `turn/end` clears the entry: a closed turn has no
+    // current tool, and a stale one would be an invented activity.
+    if (parents.has(workerId)) {
+      if (event.type === "turn/end") {
+        peerToolCalls.delete(workerId);
+        return;
+      }
+      const call = describeToolCall(event.data);
+      if (call === null) {
+        peerToolCalls.delete(workerId);
+      } else {
+        peerToolCalls.set(workerId, call);
+      }
+      return;
+    }
+    if (event.type !== "tool/call") return;
     if (!workers.has(workerId)) return;
     // Ticket 75: an observed `tool/call` is a tool call whether or not the
     // payload was readable — the count advances unconditionally, while the
@@ -1689,9 +1763,13 @@ export function createCordisDshHost(
     unbindParent(sessionId?: string): void {
       if (sessionId === undefined) {
         parents.clear();
+        // Ticket 155: a deactivated dispatcher has no current tool, and the
+        // peer input map is keyed by the same live-parent fact.
+        peerToolCalls.clear();
         return;
       }
       parents.delete(sessionId);
+      peerToolCalls.delete(sessionId);
     },
 
     hasParent(): boolean {
@@ -1811,6 +1889,10 @@ export function createCordisDshHost(
 
     owns(workerId: string): boolean {
       return workers.has(workerId);
+    },
+
+    peerToolActivity(sessionId: string): PeerToolActivity | null {
+      return peerToolCalls.get(sessionId) ?? null;
     },
 
     recentActivity(workerId: string): string | null {
@@ -2246,6 +2328,7 @@ export function createCordisDshHost(
       activityRing.clearAll();
       settledWorkerIds.clear();
       workerResults.clear();
+      peerToolCalls.clear();
       settledCallbacks.length = 0;
       stepBoundaryCallbacks.length = 0;
       accessRequestCallbacks.length = 0;

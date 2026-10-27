@@ -111,6 +111,8 @@ export {
 } from "./inbox-watcher.js";
 export {
   createCordisDshHost,
+  describeToolActivity,
+  describeToolCall,
   dispatcherUserMessageSession,
   listGlobalToolNames,
   mapStopReason,
@@ -129,6 +131,7 @@ export {
   type CordisDshHost,
   type CordisDshHostOptions,
   type JobSnapshotLike,
+  type PeerToolActivity,
   type ToolsLike,
   type WorkerAgentDef,
 } from "./cordis-dsh-host.js";
@@ -169,6 +172,10 @@ export {
   type SessionProjectionsRegistryLike,
 } from "./session-kind-projection.js";
 export { SETTINGS_NAMESPACE } from "./settings-section.js";
+export {
+  subagentLabelOf,
+  SUBAGENT_PROJECTION_KEY,
+} from "./peer-label.js";
 export {
   applyWorkerComposition,
   globalToolNames,
