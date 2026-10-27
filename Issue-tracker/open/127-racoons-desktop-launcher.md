@@ -6,13 +6,16 @@
 
 ## What to do
 
-Create `desh-bot-RACOON.bat` on the owner's Desktop. Use the exact spelling.
-Launch the integration worktree with the README's transient web patch command.
-Set `racoonsEnabled: true` in a new worktree patch; keep the plugin default false.
+Create `dsh-bot-RACOONS.bat` on the owner's Desktop. Use the exact spelling.
+Launch the main checkout with the README's transient web patch command.
+RACOONS has no on/off switch any more: it mounts whenever the plugin is enabled
+(ticket 145). The launcher pins `racoonsRecordOnly`,
+`racoonsStorageRoot`, and `racoonsContextWindowTokens` in
+`dev/cordis.racoons.patch.yml`.
 
 Desktop roots are `C:\Users\TZhen\Desktop\` and `C:\Users\TZ\Desktop\`.
-The launcher must select the adjacent `dsh-bot-racoons` directory on either device.
-Its branch is `racoons-integration`.
+The launcher must select the adjacent `dsh-bot` directory on either device.
+Its branch is `main`.
 
 ## Constraints
 
@@ -47,3 +50,16 @@ correct command. Source default stays false; the patch sets true at line 10.
 README lines 44–51 document the launch command; the committed PowerShell
 launcher constructs the same command at lines 242–245. No dsh boot, browser,
 API key, model contact, or commit. No owner working-tree file was written.
+
+2026-10-28: Launcher re-pointed (agent-run, subject to owner reversal). The
+`dsh-bot-racoons` worktree and `racoons-integration` branch no longer exist;
+racoons now lives on `main` in the main checkout, so the Desktop
+`dsh-bot-RACOONS.bat` targets `%~dp0dsh-bot` on branch `main`. Its comment block
+was rewritten from the deleted `racoonsEnabled` switch to the current options
+(`racoonsRecordOnly`, `racoonsStorageRoot`, `racoonsContextWindowTokens`,
+confirmed in `src/plugin.ts`). The required build output check moved from
+`lib/adapter/racoons.js` to `lib/adapter/racoons-mount.js`; all listed paths
+exist in the main checkout. Syntax checked with a neutered copy
+(`.scratch/testing/2026-10-28-t127-launcher/`); no dsh start, no live test.
+The bat is outside git; only this ticket file is committed. Human launch check
+still open, so status stays open.
