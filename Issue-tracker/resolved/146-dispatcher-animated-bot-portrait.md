@@ -1,6 +1,6 @@
 # 146 — Upgrade the dispatcher glyph to a small animated bot portrait
 
-**Status:** claimed
+**Status:** resolved
 **Labels:** ready-for-agent
 **Origin:** owner 2026-10-27: "dispatcher glyph needs to be upgraded to a small animated bot portrait, something like what dshbot or grokbot does".
 **Blocked by:** nothing — the dated owner instruction (2026-10-27) rules the glyph's visual form, which ADR-0024's rider had left TBD.
@@ -144,3 +144,13 @@ exact token set to `--dsw-alias-label-primary`.
 
 Gates (worktree, offline): `build:client` then `check:client` fresh; `typecheck` clean; full suite
 1566/1566 pass, 0 fail; `lint:docs` clean (0 findings, both indexes fresh). No live/browser run.
+
+## Resolution — 2026-10-28
+
+Implemented at commit `b90746b` ("Ticket 146: dispatcher glyph upgraded to animated bot portrait
+(inline SVG + keyframes, reduced-motion safe)"), merged into `main` via `39bed3b` ("Merge branch
+'ticket-146-dispatcher-portrait' into main"). Already on `main`; no code change in this bookkeeping
+pass.
+
+Bookkeeping: `**Status:**` → `resolved`; moved
+`Issue-tracker/open/146-dispatcher-animated-bot-portrait.md` → `Issue-tracker/resolved/`.

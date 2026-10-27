@@ -1,6 +1,6 @@
 # 148 — Re-sync vendored racoons to upstream latest (b5f95cb)
 
-**Status:** claimed
+**Status:** resolved
 **Labels:** ready-for-agent
 **Origin:** owner 2026-10-27: "racoons updated, re-integrate their latest version".
 **Blocked by:** nothing — owner instruction 2026-10-27 names this work directly.
@@ -167,3 +167,12 @@ when `enforcement === 'record-only'` — a behavior decision, hence not taken si
 build reopen byte-exactly). Separately probe-verified that `SqliteLedger.open` on a hand-built
 schema-2 file rewrites it to `user_version = 3`, writes `ledger.sqlite.v2.bak`, and widens
 `application_removals.operation_kind` to include `proof` and `forget`.
+
+## Resolution — 2026-10-28
+
+Implemented at commit `2b53e6c` ("Ticket 148: re-sync vendored racoons to upstream b5f95cb"), already
+on `main`; no code change in this bookkeeping pass. The record-only behavior question raised in this
+ticket's comments stays open under ticket 150.
+
+Bookkeeping: `**Status:**` → `resolved`; moved
+`Issue-tracker/open/148-racoons-resync-latest.md` → `Issue-tracker/resolved/`.
