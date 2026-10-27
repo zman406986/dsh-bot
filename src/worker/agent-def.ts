@@ -1,5 +1,5 @@
 import { REPLY_TO_DISPATCHER_TOOL } from "../core/tools.js";
-import { buildWorkerSystemPrompt } from "./prompt.js";
+import { buildWorkerSystemPrompt, type WorkerPromptLanguage } from "./prompt.js";
 import {
   buildWorkerToolFilter,
   type WorkerToolFilter,
@@ -107,9 +107,11 @@ export function dispatcherSpawnMaxDepth(parentDelegationDepth: number): number {
 }
 
 /** Create the default worker agent definition. */
-export function createWorkerAgentDef(): WorkerAgentDef {
+export function createWorkerAgentDef(
+  language: WorkerPromptLanguage = "en",
+): WorkerAgentDef {
   return {
-    persona: buildWorkerSystemPrompt(),
+    persona: buildWorkerSystemPrompt(language),
     resolveToolFilter: buildWorkerToolFilter,
     maxDepth: WORKER_MAX_DEPTH,
   };

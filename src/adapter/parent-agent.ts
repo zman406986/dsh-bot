@@ -7,7 +7,7 @@ import {
 import { textBlocks } from "./content-blocks.js";
 import type { AdapterContext, AgentLike, CordisDshHost } from "./cordis-dsh-host.js";
 import { WAKE_SOURCE_KIND, wakeUserMessage } from "./wake-copy.js";
-import type { DispatcherOrigin } from "../core/policy/prompts.js";
+import type { DispatcherOrigin, PolicyLanguage } from "../core/policy/prompts.js";
 
 /**
  * Top-level dispatcher: no parent lineage, delegation depth 0.
@@ -214,6 +214,12 @@ export interface BindDispatcherLifecycleOptions {
    */
   readonly policyEnabled?: boolean;
   /**
+   * Ticket 153: which face the model-facing policy copy ships in. Read once
+   * from the host locale preference at apply (`resolveHostPolicyLanguage`);
+   * omitted means EN, the byte-stable face every pre-153 caller produced.
+   */
+  readonly policyLanguage?: PolicyLanguage;
+  /**
    * Fired after a successful activation (parent bound + policy injected).
    * The plugin registers that session's dispatcher tool surface here.
    */
@@ -256,6 +262,7 @@ export function bindDispatcherLifecycle(
   options?: BindDispatcherLifecycleOptions,
 ): BindDispatcherLifecycleResult {
   const policyEnabled = options?.policyEnabled ?? true;
+  const policyLanguage: PolicyLanguage = options?.policyLanguage ?? "en";
   const onActivated = options?.onActivated;
   const onDeactivated = options?.onDeactivated;
   /**
@@ -352,6 +359,7 @@ export function bindDispatcherLifecycle(
               assembleTurnReminder(
                 multitask.listTodos(agentSessionId),
                 peerRosterFor(agentSessionId),
+                policyLanguage,
               ),
             );
           }
@@ -419,7 +427,10 @@ export function bindDispatcherLifecycle(
     host.bindParent(agent, sessionId);
     // ADR-0005: policy is fixed for this session's lifetime.
     if (policyEnabled) {
-      tryInject(agent, assembleSessionPolicy(true, origin, generation));
+      tryInject(
+        agent,
+        assembleSessionPolicy(true, origin, generation, policyLanguage),
+      );
     }
     onActivated?.(sessionId);
   }

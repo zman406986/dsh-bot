@@ -79,6 +79,7 @@ import type {
   AccessRequestBody,
   AccessTicket,
 } from "../core/access-types.js";
+import type { PolicyLanguage } from "../core/policy/prompts.js";
 
 /** Option label for approving the ask (design-16 §6). */
 export const ACCESS_PROMPT_ALLOW = "Allow";
@@ -92,6 +93,28 @@ export const ACCESS_PROMPT_ALWAYS_ALLOW = "Always allow (this session)";
 
 /** Option label for refusing the ask (design-16 §6). */
 export const ACCESS_PROMPT_DENY = "Deny";
+
+/**
+ * ZH option labels (ticket 153). Same three choices, same wildcard fence.
+ * The parser accepts either face's labels, so a UI that renders one
+ * language still routes an answer phrased in the other.
+ */
+export const ACCESS_PROMPT_ALLOW_ZH = "允许";
+export const ACCESS_PROMPT_ALWAYS_ALLOW_ZH = "始终允许（本次会话）";
+export const ACCESS_PROMPT_DENY_ZH = "拒绝";
+
+const ALLOW_LABELS: readonly string[] = [
+  ACCESS_PROMPT_ALLOW,
+  ACCESS_PROMPT_ALLOW_ZH,
+];
+const ALWAYS_ALLOW_LABELS: readonly string[] = [
+  ACCESS_PROMPT_ALWAYS_ALLOW,
+  ACCESS_PROMPT_ALWAYS_ALLOW_ZH,
+];
+const DENY_LABELS: readonly string[] = [ACCESS_PROMPT_DENY, ACCESS_PROMPT_DENY_ZH];
+
+/** ZH detail recorded on a ZH-face prompt denial (ticket 153). */
+export const ACCESS_PROMPT_DENY_DETAIL_ZH = "在访问提示里被拒绝";
 
 /**
  * Worker-facing detail recorded on a prompt denial. Rendered inside the
@@ -119,6 +142,10 @@ export const APPROVAL_LOCATION_LOCAL = "Runs on your computer.";
  */
 export const APPROVAL_LOCATION_REMOTE =
   "Runs on the product's computer (remote box).";
+
+/** ZH faces of the two location lines (ticket 153). */
+export const APPROVAL_LOCATION_LOCAL_ZH = "在你的电脑上运行。";
+export const APPROVAL_LOCATION_REMOTE_ZH = "在产品的电脑（远程机器）上运行。";
 
 /**
  * Producer kinds the location map admits (ticket 71 AC-4). `"worker"` is the
@@ -150,15 +177,17 @@ export const APPROVAL_PRODUCER_KINDS = {
  */
 export function approvalLocationLineFor(
   producerKind: string | null | undefined,
+  language: PolicyLanguage = "en",
 ): string {
+  const zh = language === "zh";
   switch (producerKind) {
     case APPROVAL_PRODUCER_KINDS.computerWorker:
     case APPROVAL_PRODUCER_KINDS.browserWorker:
-      return APPROVAL_LOCATION_REMOTE;
+      return zh ? APPROVAL_LOCATION_REMOTE_ZH : APPROVAL_LOCATION_REMOTE;
     default:
       // "worker" and every unrecognized kind: the local line — never a
       // remote claim for an unverified kind (71's honesty rider).
-      return APPROVAL_LOCATION_LOCAL;
+      return zh ? APPROVAL_LOCATION_LOCAL_ZH : APPROVAL_LOCATION_LOCAL;
   }
 }
 
@@ -258,8 +287,27 @@ export function accessPromptQuestionId(requestId: string): string {
  * metadata only — for credentials this is the credential NAME, never a
  * value (ticket 13 invariant).
  */
-export function describeAccessAction(body: AccessRequestBody): string {
-  const target = body.target.length > 0 ? body.target : "(unnamed)";
+export function describeAccessAction(
+  body: AccessRequestBody,
+  language: PolicyLanguage = "en",
+): string {
+  const zh = language === "zh";
+  const target =
+    body.target.length > 0 ? body.target : zh ? "（未命名）" : "(unnamed)";
+  if (zh) {
+    switch (body.class) {
+      case "tool":
+        return `使用工具“${target}”`;
+      case "credential":
+        return `使用凭据“${body.credentialName ?? target}”`;
+      case "network":
+        return `访问网络目标“${target}”`;
+      case "filesystem":
+        return `访问路径“${target}”`;
+      default:
+        return `执行“${target}”`;
+    }
+  }
   switch (body.class) {
     case "tool":
       return `use the tool "${target}"`;
@@ -303,22 +351,27 @@ export function accessPromptQuestion(
     body: AccessRequestBody;
   },
   producerKind: string = APPROVAL_PRODUCER_KINDS.worker,
+  language: PolicyLanguage = "en",
 ): AccessPromptQuestionLike {
+  const zh = language === "zh";
   const reason = clampApprovalDetail(ticket.body.reason);
-  const locationLine = approvalLocationLineFor(producerKind);
+  const locationLine = approvalLocationLineFor(producerKind, language);
   const detail =
     reason.length > 0 ? `${reason}\n\n${locationLine}` : locationLine;
+  const allow = zh ? ACCESS_PROMPT_ALLOW_ZH : ACCESS_PROMPT_ALLOW;
+  const alwaysAllow = zh
+    ? ACCESS_PROMPT_ALWAYS_ALLOW_ZH
+    : ACCESS_PROMPT_ALWAYS_ALLOW;
+  const deny = zh ? ACCESS_PROMPT_DENY_ZH : ACCESS_PROMPT_DENY;
   return {
     id: accessPromptQuestionId(ticket.requestId),
-    question: `Worker ${ticket.workerId} needs approval to ${describeAccessAction(ticket.body)}.`,
+    question: zh
+      ? `工作者 ${ticket.workerId} 需要批准才能${describeAccessAction(ticket.body, language)}。`
+      : `Worker ${ticket.workerId} needs approval to ${describeAccessAction(ticket.body, language)}.`,
     detail,
     options: isWildcardAccessTarget(ticket.body.target)
-      ? [{ label: ACCESS_PROMPT_ALLOW }, { label: ACCESS_PROMPT_DENY }]
-      : [
-          { label: ACCESS_PROMPT_ALLOW },
-          { label: ACCESS_PROMPT_ALWAYS_ALLOW },
-          { label: ACCESS_PROMPT_DENY },
-        ],
+      ? [{ label: allow }, { label: deny }]
+      : [{ label: allow }, { label: alwaysAllow }, { label: deny }],
   };
 }
 
@@ -340,10 +393,19 @@ export function parseAccessPromptAnswer(
   for (const item of answers) {
     if (item === null || typeof item !== "object") continue;
     if (item.id !== questionId) continue;
-    const selected = Array.isArray(item.selected) ? item.selected : [];
-    const allow = selected.includes(ACCESS_PROMPT_ALLOW);
-    const always = selected.includes(ACCESS_PROMPT_ALWAYS_ALLOW);
-    const deny = selected.includes(ACCESS_PROMPT_DENY);
+    const selected: readonly unknown[] = Array.isArray(item.selected)
+      ? item.selected
+      : [];
+    const allow = selected.some(
+      (label) => typeof label === "string" && ALLOW_LABELS.includes(label),
+    );
+    const always = selected.some(
+      (label) =>
+        typeof label === "string" && ALWAYS_ALLOW_LABELS.includes(label),
+    );
+    const deny = selected.some(
+      (label) => typeof label === "string" && DENY_LABELS.includes(label),
+    );
     // Single-select in practice; if a UI ever returns several, fail closed:
     // deny wins over any allow shape (ADR-0008 spirit — never allow on
     // ambiguity), and "always" wins over plain allow (the stronger consent).
@@ -399,6 +461,11 @@ export interface AccessPromptPumpOptions {
    * (ticket 23 fallback clause).
    */
   readonly userQuestions?: UserQuestionsLike;
+  /**
+   * Model/UI language of the rendered prompt copy (ticket 153). Omitted
+   * means EN — the byte-stable output every pre-153 caller produced.
+   */
+  readonly language?: PolicyLanguage;
   /** Whether a dispatcher session is currently activated. */
   readonly isActive: () => boolean;
   /** Pending asks of the activated dispatcher session (may be empty). */
@@ -497,8 +564,9 @@ export function createAccessPromptPump(
     try {
       if (seam === undefined) return;
       const agent = options.getAgent?.();
+      const language = options.language ?? "en";
       const answer = await seam.ask({
-        questions: [accessPromptQuestion(ticket)],
+        questions: [accessPromptQuestion(ticket, APPROVAL_PRODUCER_KINDS.worker, language)],
         ...(agent === undefined ? {} : { agent }),
         signal: controller.signal,
       });
@@ -542,7 +610,10 @@ export function createAccessPromptPump(
           : options.resolve(ticket.workerId, {
               kind: "deny",
               reason: "user-denied",
-              detail: ACCESS_PROMPT_DENY_DETAIL,
+              detail:
+                language === "zh"
+                  ? ACCESS_PROMPT_DENY_DETAIL_ZH
+                  : ACCESS_PROMPT_DENY_DETAIL,
             });
       if (!allowed) {
         options.notifyExpired?.(ticket);

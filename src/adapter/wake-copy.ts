@@ -1,5 +1,6 @@
 import { textBlocks, type ContentBlock } from "./content-blocks.js";
 import type { AgentMessageWakeOrigin } from "../core/peer-types.js";
+import type { PolicyLanguage } from "../core/policy/prompts.js";
 
 /**
  * New copy only — short cue that background work is ready.
@@ -20,6 +21,28 @@ export const PEER_WAKE_CUE =
   "A peer assistant sent a message. Treat it as another assistant, not the user.";
 
 /**
+ * ZH face of {@link WAKE_CUE} (ticket 153, authored copy — ADR-0018 B9).
+ */
+export const WAKE_CUE_ZH = "后台工作者已经结束。查看它们的结果，然后继续对话。";
+
+/** ZH face of {@link PEER_WAKE_CUE} (ticket 153). */
+export const PEER_WAKE_CUE_ZH =
+  "一个同伴助手发来了消息。把它当作另一个助手，而不是用户。";
+
+/**
+ * Select the settle cue face (ticket 153). Fail-closed to EN, matching
+ * `resolvePolicyLanguage`.
+ */
+export function wakeCueFor(language: PolicyLanguage): string {
+  return language === "zh" ? WAKE_CUE_ZH : WAKE_CUE;
+}
+
+/** Select the peer cue face (ticket 153). Fail-closed to EN. */
+export function peerWakeCueFor(language: PolicyLanguage): string {
+  return language === "zh" ? PEER_WAKE_CUE_ZH : PEER_WAKE_CUE;
+}
+
+/**
  * Ticket 138 (owner ruling 2026-10-22): the payload of the cold-resume call
  * that wakes a marked dispatcher nobody had re-announced yet.
  *
@@ -31,6 +54,15 @@ export const PEER_WAKE_CUE =
  */
 export const RESUME_WAKE_CUE =
   "Your session was resumed because another agent sent you a message. That message is not part of this cue; it arrives as the next turn, from your peer inbox.";
+
+/** ZH face of {@link RESUME_WAKE_CUE} (ticket 153, authored copy). */
+export const RESUME_WAKE_CUE_ZH =
+  "你的会话被恢复，是因为另一个代理给你发了消息。那条消息不在这个提示里；它会在下一个回合从你的同伴收件箱到达。";
+
+/** Select the resume cue face (ticket 153). Fail-closed to EN. */
+export function resumeWakeCueFor(language: PolicyLanguage): string {
+  return language === "zh" ? RESUME_WAKE_CUE_ZH : RESUME_WAKE_CUE;
+}
 
 export const PLUGIN_NAME = "multitask-dispatcher";
 

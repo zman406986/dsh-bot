@@ -25,7 +25,8 @@ import {
 import { applyWorkerComposition } from "../worker/preset.js";
 import { blocksToText, textBlocks, type ContentBlock } from "./content-blocks.js";
 import type { StorageDomainLike } from "./durable-marker.js";
-import { RESUME_WAKE_CUE, wakeUserMessage } from "./wake-copy.js";
+import { resumeWakeCueFor, wakeCueFor, wakeUserMessage } from "./wake-copy.js";
+import type { PolicyLanguage } from "../core/policy/prompts.js";
 
 export type { WorkerAgentDef };
 
@@ -235,6 +236,12 @@ export interface CordisDshHostOptions {
   markers?: DurabilityPort;
   /** Worker agent definition; T10 supplies the real one. */
   workerAgentDef?: WorkerAgentDef;
+  /**
+   * Ticket 153: the model-facing copy language, resolved once at apply from
+   * the host locale preference. Omitted means EN — no cue or block changes
+   * bytes for a pre-153 caller.
+   */
+  language?: PolicyLanguage;
   /**
    * Compose the user-visible wake follow-up text for a background settle.
    * Return null to fall back to the short cue. The plugin supplies this so
@@ -755,6 +762,10 @@ export function createCordisDshHost(
   options?: CordisDshHostOptions,
 ): CordisDshHost {
   const workerAgentDef = options?.workerAgentDef;
+  /** Ticket 153: the cue faces this host renders (EN unless exactly "zh"). */
+  const hostLanguage: PolicyLanguage = options?.language ?? "en";
+  const resumeWakeCue = resumeWakeCueFor(hostLanguage);
+  const settleWakeCue = wakeCueFor(hostLanguage);
   const markers = options?.markers;
   const composeWakeText = options?.composeWakeText;
   const workerLocalTools = options?.workerLocalTools;
@@ -988,7 +999,7 @@ export function createCordisDshHost(
         text = null;
       }
     }
-    agent.followup(wakeUserMessage(text ?? undefined, origin));
+    agent.followup(wakeUserMessage(text ?? settleWakeCue, origin));
   }
 
   /**
@@ -1035,7 +1046,7 @@ export function createCordisDshHost(
         ctx.subagents.sendMessage(
           sender,
           sessionId,
-          textBlocks(RESUME_WAKE_CUE),
+          textBlocks(resumeWakeCue),
           { signal: controller.signal },
         ),
       )
@@ -1093,7 +1104,7 @@ export function createCordisDshHost(
         ctx.subagents.sendMessage(
           sender,
           workerId,
-          textBlocks(RESUME_WAKE_CUE),
+          textBlocks(resumeWakeCue),
           { signal: controller.signal },
         ),
       )

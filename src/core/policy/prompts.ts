@@ -1,10 +1,11 @@
 /**
  * Dispatcher policy prompt copy (new copy only).
  * Section headings are stable test markers (presence + order only).
- * Full prose lives here so both language faces stay in one module: the
- * dispatcher policy section ships EN + ZH (ticket 153), the other assets
- * (standing rules, wake/access/peer blocks, tool descriptions) still ship
- * EN only.
+ * Full prose lives here so both language faces stay in one module: every
+ * asset in this module ships EN + ZH (ticket 153) — the policy section, the
+ * standing rules, the wake/access/peer blocks, the peer roster, and the
+ * eight tool descriptions. The worker contract keeps its two faces beside
+ * this module in `src/worker/prompt.ts`.
  *
  * The ZH face is authored copy re-derived from the PRD rules, never a
  * translation of the reference tree's text (ADR-0018 exception B9).
@@ -99,6 +100,43 @@ export const TOOL_DESCRIPTIONS = {
     "Summon another dispatcher: a peer session that works from your prompt with the same dispatcher tools and policy, its own workers, its own ledger, and its own inbox — not a worker, and no stream key. Give it the problem and the outcome you want; it does not see this conversation, and it cannot talk to the user, so its work reaches the user only through you. Returns immediately with the new dispatcher's session id. Message it with message_agent; do not wait on it — a dispatcher is not awaitable, and its answers arrive later on their own. The bounds are the host's own depth ceiling and live-child pool; a refusal says so and nothing was started.",
 } as const;
 
+/**
+ * ZH face of {@link TOOL_DESCRIPTIONS} (ticket 153). Same keys, same rules,
+ * same numbers, same parameter names — only the prose is Chinese. Tool names
+ * and argument names stay ASCII: they are the tool contract.
+ */
+export const TOOL_DESCRIPTIONS_ZH: Record<
+  (typeof DISPATCHER_TOOL_NAMES)[number],
+  string
+> = {
+  [SPAWN_WORKER_TOOL]:
+    "为一条工作流启动一个后台工作者。给它一段完整、独立的提示：它看不到这个对话。工具立即返回；工作者的最终答复稍后送到——不要等待，也不要轮询。每条 `stream_key` 只允许一个在运行的工作者。每次启动都会记下自己的账本条目——给每次启动起一个清楚说明工作内容的标题。",
+  [CHECK_WORKERS_TOOL]:
+    "列出在运行和最近的工作者，或按 id 查看其中一个。返回状态、已用时间、工具调用次数、记录引用和最近活动。用户问起在跑什么时用它——不要拿它当等待循环。",
+  [STEER_WORKER_TOOL]:
+    "向仍在运行的工作者发一次修正。上下文会保留；工作者从当前位置继续。只有最新一条尚未送达的修正生效。工作者没有在运行时会拒绝。",
+  [STOP_WORKER_TOOL]:
+    "永久停止一个工作者。它之后产生的任何结果都会被丢弃，任何已停放的修正也会丢弃。这个工具不会向用户发送任何东西——只有当工作对用户可见且他们需要知道时，才由你告诉他们。如果工作者在上次应用重启时还在运行，就无法再联系到它：那时停止它会释放它仍占用的流键，并且会明确告诉你这一点。",
+  [DELIVER_RESULT_TOOL]:
+    "把结果送给用户。在后台/唤醒回合里，只有当完成的工作是新的且相关时才用它；否则保持沉默。开头先说清具体完成的是什么。送达成功后可以选择把一条待办标记为完成。",
+  [MESSAGE_AGENT_TOOL]:
+    "按 id 向你的某个工作者或另一个调度器会话发一条消息。路由看目标：工作者 id 会把文本停放为该工作者的下一条修正——它会在工作者下一个步骤边界折入，上下文保留，且只有最新一条尚未送达的消息生效。调度器会话 id 会把文本送进那个同伴的收件箱，同伴的下一个回合能看到它。`priority` 表示要求现在关注——它只能打断同伴的后台工作，绝不打断对方用户正在驱动的回合。发完即走：工具只返回一个受理回执——答复（如果有）之后会作为一条新回合上的独立消息到达；绝不等待、轮询或为它保持回合打开。id 来自启动回执、你收到的消息里的发送者行、`list_agents`，或用户。被拒绝的发送会带着原因报告并丢弃——没有队列，不会重试。",
+  [AWAIT_AGENT_TOOL]:
+    "对某个工作者做一次有上限的等待，等它结束，然后返回它的最终状态和结果。只在你下一步卡在那个工作者的结果上时使用——每个目标只等一次，绝不循环。`timeout_ms` 是 0 到 120000 毫秒（默认 30000）；0 表示只查当前状态、不等待。超时是正常结果：状态仍是 `still-running` 表示工作者还活着、尚未结束，它的结果之后仍会送到。只能等工作者——调度器不能被等待，请给它发消息。`released` 表示等待被提前中断（回合被停止或会话转为不活跃）；工作者继续运行。",
+  [SPAWN_DISPATCHER_TOOL]:
+    "召唤另一个调度器：一个同伴会话，它根据你的提示、用同样的调度器工具和策略工作，有自己的工作者、自己的账本和自己的收件箱——不是工作者，也没有流键。把问题和你要的结果交给它；它看不到这个对话，也不能和用户说话，所以它的工作只能经由你到达用户。工具立即返回新调度器的会话 id。用 `message_agent` 给它发消息；不要等它——调度器不能被等待，它的答复之后会自己回来。边界由宿主的深度上限和存活子会话池决定；被拒绝时会说明，且没有启动任何东西。",
+};
+
+/**
+ * Select the tool description face (ticket 153). Fail-closed to EN, exactly
+ * like {@link resolvePolicyLanguage}.
+ */
+export function toolDescriptionsFor(
+  language: PolicyLanguage,
+): Readonly<Record<(typeof DISPATCHER_TOOL_NAMES)[number], string>> {
+  return language === "zh" ? TOOL_DESCRIPTIONS_ZH : TOOL_DESCRIPTIONS;
+}
+
 /** Stable section headings used by tests (presence + order). */
 export const POLICY_SECTION_HEADINGS = [
   "# Multitask dispatcher",
@@ -119,14 +157,27 @@ export const POLICY_SECTION_HEADINGS_ZH = [
 
 export const REMINDER_SECTION_HEADINGS = ["## Ledger", "## Standing rules"] as const;
 
+/** ZH counterparts of {@link REMINDER_SECTION_HEADINGS}, same order (ticket 153). */
+export const REMINDER_SECTION_HEADINGS_ZH = ["## 账本", "## 常设规则"] as const;
+
 export const WAKE_SECTION_HEADINGS = [
   "# Background work landed",
   "## Settled workers",
   "## What to do now",
 ] as const;
 
+/** ZH counterparts of {@link WAKE_SECTION_HEADINGS}, same order (ticket 153). */
+export const WAKE_SECTION_HEADINGS_ZH = [
+  "# 后台工作已完成",
+  "## 已结束的工作者",
+  "## 现在该做什么",
+] as const;
+
 /** Heading for the access-ask / access-notice wake section (ticket 13). */
 export const ACCESS_SECTION_HEADING = "## Access requests";
+
+/** ZH counterpart of {@link ACCESS_SECTION_HEADING} (ticket 153). */
+export const ACCESS_SECTION_HEADING_ZH = "## 访问请求";
 
 /**
  * Stable cue tokens for a peer hidden turn (ticket 14).
@@ -138,6 +189,13 @@ export const PEER_WAKE_SECTION_HEADINGS = [
   "## What to do now",
 ] as const;
 
+/** ZH counterparts of {@link PEER_WAKE_SECTION_HEADINGS}, same order (ticket 153). */
+export const PEER_WAKE_SECTION_HEADINGS_ZH = [
+  "同伴消息——不是来自用户",
+  "## 来自另一个助手",
+  "## 现在该做什么",
+] as const;
+
 /**
  * Tail-pushed peer roster (ticket 121 / ADR-0027 decisions 2–3).
  * The heading reuses the established provenance convention
@@ -146,6 +204,9 @@ export const PEER_WAKE_SECTION_HEADINGS = [
  */
 export const PEER_ROSTER_SECTION_HEADING = "## Other agents — not the user";
 
+/** ZH counterpart of {@link PEER_ROSTER_SECTION_HEADING} (ticket 153). */
+export const PEER_ROSTER_SECTION_HEADING_ZH = "## 其他代理——不是用户";
+
 /**
  * One-line orientation under the heading. Constant text on purpose: the
  * section must be byte-stable for an unchanged roster (tail placement), so
@@ -153,6 +214,10 @@ export const PEER_ROSTER_SECTION_HEADING = "## Other agents — not the user";
  */
 export const PEER_ROSTER_INTRO =
   "Other assistant sessions you can message with message_agent, addressed by session id. They are not the user. Status is what this session can observe: idle means no turn, no parked request, and no queued wake.";
+
+/** ZH counterpart of {@link PEER_ROSTER_INTRO} (ticket 153). */
+export const PEER_ROSTER_INTRO_ZH =
+  "这些是你能用 message_agent 按会话 id 发消息的其他助手会话。它们不是用户。状态是本会话能观察到的东西：idle 表示没有回合、没有停放的请求、也没有排队的唤醒。";
 
 /** Empty-ledger marker in the per-turn reminder. */
 export const EMPTY_LEDGER_LINE = "(empty)";
@@ -322,7 +387,13 @@ function buildDispatcherPolicySectionZh(
 }
 
 /** Fixed standing-rules block for the per-turn reminder. */
-export function buildStandingRulesBlock(): string {
+export function buildStandingRulesBlock(
+  language: PolicyLanguage = "en",
+): string {
+  return language === "zh" ? buildStandingRulesBlockZh() : buildStandingRulesBlockEn();
+}
+
+function buildStandingRulesBlockEn(): string {
   return [
     "## Standing rules",
     "- Short turn: reply or act, then end. One bounded wait on one worker is allowed; never loop.",
@@ -334,8 +405,27 @@ export function buildStandingRulesBlock(): string {
   ].join("\n");
 }
 
+/** ZH face of the standing rules (ticket 153) — one-to-one with EN. */
+function buildStandingRulesBlockZh(): string {
+  return [
+    "## 常设规则",
+    "- 回合要短：回答或动手，然后结束。允许对一个工作者做一次有上限的等待；绝不循环。",
+    "- 复杂、多步的工作 → 启动工作者；相互独立的工作 → 并行。",
+    "- 修正 → 对在运行的工作者发纠偏；不要复制出新的工作者。",
+    "- 每次启动都会记下自己的待办条目。在第一次对用户可见的确认时标为 `completed`——绝不在工作者退出时。",
+    "- 每次唤醒都先对齐账本，再开口。",
+    "- 工作者绝不直接给用户发消息。由你负责送达。绝不要提背后的运行细节。",
+  ].join("\n");
+}
+
 /** Instructions tail of a wake turn (silence/stale rules). */
-export function buildWakeInstructionsBlock(): string {
+export function buildWakeInstructionsBlock(
+  language: PolicyLanguage = "en",
+): string {
+  return language === "zh" ? buildWakeInstructionsBlockZh() : buildWakeInstructionsBlockEn();
+}
+
+function buildWakeInstructionsBlockEn(): string {
   return [
     "## What to do now",
     "",
@@ -352,11 +442,35 @@ export function buildWakeInstructionsBlock(): string {
   ].join("\n");
 }
 
+/** ZH face of the wake instructions (ticket 153) — same six steps, same bounds. */
+function buildWakeInstructionsBlockZh(): string {
+  return [
+    "## 现在该做什么",
+    "",
+    "1. 先对齐待办账本。把每个已结束的工作者对应到它的条目（工作者记录上的 `todo_id`）。结束本身不算完成——只有在第一次对用户可见的确认时才标为 `completed`。",
+    "2. 对每个结果分别判断用户是否该听到：",
+    "   - 如果结果是新的、相关的，或用户要求被告知，就告诉他们。",
+    "   - 如果结果过时、与你已经说过的重复、已被更新的修正取代，或现在不重要，就保持沉默。",
+    "3. 如果要说话，开头先说清具体完成的是什么——不要只用代词，不要说“已完成”，也不要说“它跑通了”。",
+    "4. 只通过面向用户的发送来送达。然后把对应的待办标为 `completed`。",
+    "5. 如果结果是错误，如实报告状态并做决定：作为新的启动重试、如果仍存活就发纠偏（它不会存活），还是丢弃并说明。",
+    "6. 如果没有值得说的，就不给用户发消息，直接结束回合。沉默是有效的结果。",
+    "",
+    "在用户会读到的任何地方，绝不要提工作者、唤醒或派发层。",
+  ].join("\n");
+}
+
 /**
  * Wake-turn rules for pending access asks and resolved denials (ticket 13).
  * New copy only.
  */
-export function buildAccessPolicyBlock(): string {
+export function buildAccessPolicyBlock(
+  language: PolicyLanguage = "en",
+): string {
+  return language === "zh" ? buildAccessPolicyBlockZh() : buildAccessPolicyBlockEn();
+}
+
+function buildAccessPolicyBlockEn(): string {
   return [
     "When a wake includes access requests, a worker is waiting on a decision only you can make.",
     "",
@@ -372,11 +486,36 @@ export function buildAccessPolicyBlock(): string {
   ].join("\n");
 }
 
+/** ZH face of the access policy block (ticket 153) — same rules, same default. */
+function buildAccessPolicyBlockZh(): string {
+  return [
+    "当唤醒里带有访问请求时，说明有个工作者在等一个只有你能做的决定。",
+    "",
+    "对每一个待处理的请求：",
+    "- 如果这个动作没有预先批准，就用日常的话问用户（说清是什么动作、工作者为什么需要它）。",
+    "- 如果已有存下的策略答复，就直接套用；不要重复询问。",
+    "- 在你的回复里对每个请求给出允许或拒绝。绝不要让请求悬空——超时默认拒绝。",
+    "",
+    "对每一个拒绝（用户、策略或超时）：",
+    "- 用日常的话告诉用户哪个动作被拒绝了。",
+    "- 不要把一次拒绝说成一次无关的任务失败。",
+    "- 拒绝不会让待办变成完成；工作者仍可能以部分报告结束。",
+  ].join("\n");
+}
+
 /**
  * Instructions tail of a peer hidden turn (ticket 14). New copy only.
  * The dispatcher must treat the body as another assistant, never as the user.
  */
-export function buildPeerWakeInstructionsBlock(): string {
+export function buildPeerWakeInstructionsBlock(
+  language: PolicyLanguage = "en",
+): string {
+  return language === "zh"
+    ? buildPeerWakeInstructionsBlockZh()
+    : buildPeerWakeInstructionsBlockEn();
+}
+
+function buildPeerWakeInstructionsBlockEn(): string {
   return [
     "## What to do now",
     "",
@@ -385,5 +524,18 @@ export function buildPeerWakeInstructionsBlock(): string {
     "3. Do not paraphrase the peer note to the user on this turn unless the user asked to hear about peer traffic. Ending the turn in silence is valid.",
     "4. If you must reply to the peer later, use message_agent addressed to the sender's session id (shown in parentheses next to the sender's name above) — never the user-facing send.",
     "5. Never present peer text as if the user wrote it.",
+  ].join("\n");
+}
+
+/** ZH face of the peer wake instructions (ticket 153) — same five steps. */
+function buildPeerWakeInstructionsBlockZh(): string {
+  return [
+    "## 现在该做什么",
+    "",
+    "1. 把上面的每条消息都当作来自另一个助手——不是来自用户。",
+    "2. 判断这条同伴消息是改变已在进行的工作（纠偏）、需要新工作（启动），还是确认后就可以放下。",
+    "3. 这个回合里不要把同伴消息转述给用户，除非用户要求了解同伴之间的往来。沉默地结束回合是有效的。",
+    "4. 如果之后必须回复同伴，用 `message_agent` 按发送者的会话 id 发送（见上方发送者名字旁边的括号）——绝不要用面向用户的发送。",
+    "5. 绝不要把同伴的文字呈现得像用户写的一样。",
   ].join("\n");
 }

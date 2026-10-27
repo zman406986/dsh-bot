@@ -13,6 +13,7 @@ import type { TerminalWorkerStatus } from "../types.js";
 import type { SettledWorkerNotice } from "../wake-bus.js";
 import {
   ACCESS_SECTION_HEADING,
+  ACCESS_SECTION_HEADING_ZH,
   buildAccessPolicyBlock,
   buildDispatcherPolicySection,
   buildPeerWakeInstructionsBlock,
@@ -20,8 +21,15 @@ import {
   buildWakeInstructionsBlock,
   EMPTY_LEDGER_LINE,
   PEER_ROSTER_INTRO,
+  PEER_ROSTER_INTRO_ZH,
   PEER_ROSTER_SECTION_HEADING,
+  PEER_ROSTER_SECTION_HEADING_ZH,
   PEER_WAKE_SECTION_HEADINGS,
+  PEER_WAKE_SECTION_HEADINGS_ZH,
+  REMINDER_SECTION_HEADINGS,
+  REMINDER_SECTION_HEADINGS_ZH,
+  WAKE_SECTION_HEADINGS,
+  WAKE_SECTION_HEADINGS_ZH,
   type DispatcherOrigin,
   type PolicyLanguage,
 } from "./prompts.js";
@@ -86,18 +94,21 @@ export function formatLedgerLine(todo: TodoItem): string {
 export function assembleTurnReminder(
   todos: readonly TodoItem[],
   peers?: PeerRosterSnapshot | null,
+  language: PolicyLanguage = "en",
 ): string {
+  const headings =
+    language === "zh" ? REMINDER_SECTION_HEADINGS_ZH : REMINDER_SECTION_HEADINGS;
   const ledgerLines =
     todos.length === 0
       ? [`- ${EMPTY_LEDGER_LINE}`]
       : todos.map(formatLedgerLine);
   const sections: string[] = [
-    "## Ledger",
+    headings[0],
     ...ledgerLines,
     "",
-    buildStandingRulesBlock(),
+    buildStandingRulesBlock(language),
   ];
-  const roster = renderPeerRoster(peers);
+  const roster = renderPeerRoster(peers, language);
   if (roster !== null) {
     sections.push("");
     sections.push(roster);
@@ -295,8 +306,9 @@ export function buildPeerRosterSnapshot(
 export function appendPeerRosterTail(
   text: string,
   snapshot?: PeerRosterSnapshot | null,
+  language: PolicyLanguage = "en",
 ): string {
-  const roster = renderPeerRoster(snapshot);
+  const roster = renderPeerRoster(snapshot, language);
   return roster === null ? text : `${text}\n\n${roster}`;
 }
 
@@ -315,6 +327,7 @@ export function appendPeerRosterTail(
  */
 export function renderPeerRoster(
   snapshot: PeerRosterSnapshot | null | undefined,
+  language: PolicyLanguage = "en",
 ): string | null {
   if (snapshot === null || snapshot === undefined) return null;
   const peers = snapshot.peers;
@@ -342,9 +355,9 @@ export function renderPeerRoster(
 
   const shown = entries.slice(0, PEER_ROSTER_MAX_ROWS);
   const lines: string[] = [
-    PEER_ROSTER_SECTION_HEADING,
+    language === "zh" ? PEER_ROSTER_SECTION_HEADING_ZH : PEER_ROSTER_SECTION_HEADING,
     "",
-    PEER_ROSTER_INTRO,
+    language === "zh" ? PEER_ROSTER_INTRO_ZH : PEER_ROSTER_INTRO,
     "",
     ...shown.map((entry) => {
       const name = peerDisplayName(entry);
@@ -360,8 +373,11 @@ export function renderPeerRoster(
     }),
   ];
   if (entries.length > PEER_ROSTER_MAX_ROWS) {
+    const more = entries.length - PEER_ROSTER_MAX_ROWS;
     lines.push(
-      `- … and ${entries.length - PEER_ROSTER_MAX_ROWS} more (${entries.length} total; ${PEER_ROSTER_MAX_ROWS} shown).`,
+      language === "zh"
+        ? `- …… 还有 ${more} 个（共 ${entries.length} 个；显示 ${PEER_ROSTER_MAX_ROWS} 个）。`
+        : `- … and ${more} more (${entries.length} total; ${PEER_ROSTER_MAX_ROWS} shown).`,
     );
   }
   return lines.join("\n");
@@ -391,26 +407,31 @@ export function assembleWakeTurn(
     readonly requests?: readonly AccessRequestNotice[];
     readonly resolved?: readonly AccessNotice[];
   },
+  language: PolicyLanguage = "en",
 ): string {
+  const zh = language === "zh";
+  const headings = zh ? WAKE_SECTION_HEADINGS_ZH : WAKE_SECTION_HEADINGS;
   const sections: string[] = [
-    "# Background work landed",
+    headings[0],
     "",
-    "One or more of your workers has finished. Details are below.",
+    zh
+      ? "你有一个或多个工作者已经结束。详情在下面。"
+      : "One or more of your workers has finished. Details are below.",
     "",
-    "## Settled workers",
+    headings[1],
   ];
 
   if (notices.length === 0) {
-    sections.push("(none)");
+    sections.push(zh ? "（无）" : "(none)");
   } else {
     for (const notice of notices) {
       sections.push("");
       sections.push(`### ${notice.title} — ${notice.status}`);
-      sections.push(`Worker: ${notice.workerId}`);
+      sections.push(`${zh ? "工作者" : "Worker"}: ${notice.workerId}`);
       sections.push(
         notice.transcriptRef !== null
-          ? `Transcript: ${notice.transcriptRef}`
-          : "Transcript: (none)",
+          ? `${zh ? "记录" : "Transcript"}: ${notice.transcriptRef}`
+          : `${zh ? "记录" : "Transcript"}: ${zh ? "（无）" : "(none)"}`,
       );
       sections.push("");
       sections.push(
@@ -422,6 +443,7 @@ export function assembleWakeTurn(
   const accessText = assembleAccessSection(
     access?.requests ?? [],
     access?.resolved ?? [],
+    language,
   );
   if (accessText.length > 0) {
     sections.push("");
@@ -429,7 +451,7 @@ export function assembleWakeTurn(
   }
 
   sections.push("");
-  sections.push(buildWakeInstructionsBlock());
+  sections.push(buildWakeInstructionsBlock(language));
   return sections.join("\n");
 }
 
@@ -440,32 +462,57 @@ export function assembleWakeTurn(
 export function assembleAccessSection(
   requests: readonly AccessRequestNotice[],
   resolved: readonly AccessNotice[],
+  language: PolicyLanguage = "en",
 ): string {
   if (requests.length === 0 && resolved.length === 0) return "";
-  const lines: string[] = [ACCESS_SECTION_HEADING, ""];
+  const zh = language === "zh";
+  const lines: string[] = [
+    zh ? ACCESS_SECTION_HEADING_ZH : ACCESS_SECTION_HEADING,
+    "",
+  ];
   if (requests.length > 0) {
-    lines.push("### Pending asks");
+    lines.push(zh ? "### 待处理的请求" : "### Pending asks");
     for (const req of requests) {
       lines.push("");
-      lines.push(`- Worker: ${req.workerId} · ${req.title}`);
-      lines.push(`  Class: ${req.body.class} · Target: ${req.body.target}`);
+      lines.push(
+        zh
+          ? `- 工作者：${req.workerId} · ${req.title}`
+          : `- Worker: ${req.workerId} · ${req.title}`,
+      );
+      lines.push(
+        zh
+          ? `  类别：${req.body.class} · 目标：${req.body.target}`
+          : `  Class: ${req.body.class} · Target: ${req.body.target}`,
+      );
       if (req.body.credentialName !== undefined) {
-        lines.push(`  Credential name: ${req.body.credentialName}`);
+        lines.push(
+          zh
+            ? `  凭据名称：${req.body.credentialName}`
+            : `  Credential name: ${req.body.credentialName}`,
+        );
       }
-      lines.push(`  Reason: ${req.body.reason}`);
-      lines.push(`  Request id: ${req.requestId}`);
+      lines.push(zh ? `  原因：${req.body.reason}` : `  Reason: ${req.body.reason}`);
+      lines.push(
+        zh
+          ? `  请求 id：${req.requestId}`
+          : `  Request id: ${req.requestId}`,
+      );
     }
   }
   if (resolved.length > 0) {
     if (requests.length > 0) lines.push("");
-    lines.push("### Resolved");
+    lines.push(zh ? "### 已处理" : "### Resolved");
     for (const notice of resolved) {
       lines.push("");
       const decision = notice.decision;
       const label =
         decision.kind === "allow"
-          ? "allowed"
-          : `denied (${decision.reason})`;
+          ? zh
+            ? "已允许"
+            : "allowed"
+          : zh
+            ? `已拒绝（${decision.reason}）`
+            : `denied (${decision.reason})`;
       lines.push(
         `- ${notice.title}: ${notice.body.class} "${notice.body.target}" ${label}`,
       );
@@ -485,7 +532,7 @@ export function assembleAccessSection(
     }
   }
   lines.push("");
-  lines.push(buildAccessPolicyBlock());
+  lines.push(buildAccessPolicyBlock(language));
   return lines.join("\n");
 }
 
@@ -496,37 +543,50 @@ export function assembleAccessSection(
  */
 export function assemblePeerWakeTurn(
   notices: readonly PeerNotice[],
+  language: PolicyLanguage = "en",
 ): string {
+  const zh = language === "zh";
+  const headings = zh
+    ? PEER_WAKE_SECTION_HEADINGS_ZH
+    : PEER_WAKE_SECTION_HEADINGS;
   const sections: string[] = [
-    `# ${PEER_WAKE_SECTION_HEADINGS[0]}`,
+    `# ${headings[0]}`,
     "",
-    "This turn was opened by the peer inbox. The text below is not from the user.",
+    zh
+      ? "这个回合由同伴收件箱打开。下面的文字不是来自用户。"
+      : "This turn was opened by the peer inbox. The text below is not from the user.",
     "",
-    PEER_WAKE_SECTION_HEADINGS[1],
+    headings[1],
   ];
 
   if (notices.length === 0) {
     sections.push("");
-    sections.push("(none)");
+    sections.push(zh ? "（无）" : "(none)");
   } else {
     for (const notice of notices) {
       sections.push("");
       sections.push(`### ${notice.fromName} (${notice.fromAgentId})`);
-      sections.push(`- Target: ${peerTargetLabel(notice.to)}`);
+      sections.push(
+        `- ${zh ? "目标" : "Target"}: ${peerTargetLabel(notice.to)}`,
+      );
       // Ticket 70 §3: `conversationId` is FENCED — kept in the schema,
       // never surfaced (a threading concept is U-B-excluded). The reply
       // address a peer turn needs is the sender's session id above.
-      sections.push(`- Priority: ${notice.priority ? "yes" : "no"}`);
-      sections.push(`- Received: ${notice.createdAtMs}`);
-      sections.push(`- Message id: ${notice.messageId}`);
+      sections.push(
+        `- ${zh ? "优先级" : "Priority"}: ${notice.priority ? (zh ? "是" : "yes") : zh ? "否" : "no"}`,
+      );
+      sections.push(`- ${zh ? "收到时间" : "Received"}: ${notice.createdAtMs}`);
+      sections.push(
+        `- ${zh ? "消息 id" : "Message id"}: ${notice.messageId}`,
+      );
       sections.push("");
       sections.push(notice.text);
     }
   }
 
   sections.push("");
-  sections.push(PEER_WAKE_SECTION_HEADINGS[2]);
+  sections.push(headings[2]);
   sections.push("");
-  sections.push(buildPeerWakeInstructionsBlock());
+  sections.push(buildPeerWakeInstructionsBlock(language));
   return sections.join("\n");
 }

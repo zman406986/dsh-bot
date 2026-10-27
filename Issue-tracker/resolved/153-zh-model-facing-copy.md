@@ -1,6 +1,6 @@
 # 153 — Model-facing copy ships in English only while the client dictionary ships en + zh
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Origin:** PRD gap scan 2026-10-28 — verified against the tree; nothing implemented. This is the recorded M4 remainder (PRD:394).
 **Related:** PRD §10 (prompt assets), §13 M4 (exit: adapted-copy review; ZH/EN prompts), ADR-0018 B9 (re-derive independently — ZH is new copy, never a translation of reference text), ticket 154 (the review that must cover the new copy).
@@ -71,3 +71,25 @@ Wiring the live preference read (`ctx.settings` / `locale.preference`) into `src
 **Tests.** New `dispatcher policy — ZH face (ticket 153)` suite in `test/policy-assembler.test.ts` (13 cases): fail-closed selection, EN byte stability, ZH heading presence/order via `POLICY_SECTION_HEADINGS_ZH`, 25 EN↔ZH directive pairs, literal tool identifiers, the bounded-wait bound, no EN leftovers outside backticks, no forbidden vocabulary, exactly three origin-dependent lines, spawned generation line, EN/ZH line-shape equality, and no CJK in the EN face. The ticket-141 sha256 pin did **not** move — the EN face is byte-identical, which is exactly what that pin proves.
 
 **Still to do (step 2).** The PRD M4 row and `docs/surfaces.md` still say EN only; both move with step 2, when the whole table is covered. The live preference read on the activation path also lands there, once the last asset has a ZH face.
+
+2026-10-28 — **Step 2 of 2 done; all acceptance items met.** Branch `ticket-153-zh-rest`.
+
+**Assets translated.** Every row of the table now has an EN and a ZH face, same seam as step 1 (`PolicyLanguage`, exact `"zh"` only, everything else EN):
+
+- `src/core/policy/prompts.ts` — standing rules, wake instructions, access block, peer wake instructions (`buildStandingRulesBlock` / `buildWakeInstructionsBlock` / `buildAccessPolicyBlock` / `buildPeerWakeInstructionsBlock` each take the language as their now-trailing argument); the eight `TOOL_DESCRIPTIONS` gained a `TOOL_DESCRIPTIONS_ZH` sibling selected by `toolDescriptionsFor`; heading marker lists gained ZH counterparts (`REMINDER_`, `WAKE_`, `PEER_WAKE_SECTION_HEADINGS_ZH`, `ACCESS_SECTION_HEADING_ZH`, `PEER_ROSTER_SECTION_HEADING_ZH`, `PEER_ROSTER_INTRO_ZH`).
+- `src/core/policy/assembler.ts` — `assembleTurnReminder`, `assembleWakeTurn`, `assembleAccessSection`, `assemblePeerWakeTurn`, `renderPeerRoster`, `appendPeerRosterTail` take the language and pick headings, section labels and the roster overflow line from it. `EMPTY_LEDGER_LINE` stays `(empty)` in both faces: it is a marker, not prose.
+- `src/worker/prompt.ts` — the worker contract ships `buildWorkerSystemPrompt(language)` with `WORKER_CONTRACT_HEADINGS_ZH`; `createWorkerAgentDef(language)` passes it to `persona`.
+- `src/adapter/wake-copy.ts` — `WAKE_CUE_ZH`, `PEER_WAKE_CUE_ZH`, `RESUME_WAKE_CUE_ZH` with `wakeCueFor` / `peerWakeCueFor` / `resumeWakeCueFor`.
+- `src/adapter/access-prompt.ts` — ZH option labels, ZH question and location lines (`describeAccessAction`, `accessPromptQuestion`, `approvalLocationLineFor` take the language), ZH deny detail. `parseAccessPromptAnswer` accepts EITHER face's label, so a UI rendering one language still routes an answer phrased in the other; the deny-wins ambiguity rule is unchanged.
+
+Tool names, parameter names (`stream_key`, `timeout_ms`, `class`, `target`), status literals (`in_progress`, `completed`, `still-running`, `released`) and ids stay ASCII in both faces. ZH copy is authored from the PRD rules, never translated from the reference tree (ADR-0018 B9); terminology matches the client dictionary (调度器 / 工作者 / 待办 / 纠偏 / 流 / 送达 / 唤醒 / 会话 / 代理).
+
+**Seam wiring (option 1, the choice recorded in step 1).** `src/adapter/locale-preference.ts` reads the host's one language switch through `ctx.get("settings").describe()`: namespace `locale`, field `preference` (`dsh-client-locale/lib/index.js:5-11`). No new config option, no second store. It is read ONCE at `apply` (`src/plugin.ts`), like every other volatile setting (ADR-0005) — a language flip applies from the next session. The resolved value feeds: the session policy + per-turn reminder (`bindDispatcherLifecycle` `policyLanguage`), the wake body (`composeWakeText`), the worker contract (`createWorkerAgentDef`), the tool descriptions (`activateToolSurface`), the access-prompt pump, and the host's resume cue (`createCordisDshHost` `language`). Every unreadable shape — service absent, `describe()` throwing, a malformed descriptor, `"zh-CN"`, `"ja"`, a non-string — fails CLOSED to EN.
+
+**Tests.** New `test/policy-zh-assets.test.ts` (10 cases): per-asset EN-byte stability and ZH line/bullet/step parity, ZH heading presence + order, no EN leftovers outside backticks, no EN heading leaking into a ZH block, literal identifiers, the wildcard fence in both faces, either-face label parsing, and a sweep proving no CJK reaches any EN face. New `test/locale-preference.test.ts` (4 cases): the read across 12 unreadable shapes, plus the activation path — a mocked `zh` preference makes the injected session policy the ZH block (`buildDispatcherPolicySection("user", 1, "zh")`), while `en` / absent / no service / unknown all inject the EN block. Grouped run of the affected suites: 198 pass, 0 fail; full offline suite: 1658 pass, 0 fail; `npm run typecheck` clean.
+
+**The ticket-141 sha256 pin did not move.** The EN face is byte-identical, which is what that pin proves.
+
+**Docs.** `docs/surfaces.md` locale row now says the same preference selects the model-facing copy and lists the four files. PRD §13 M4 row moves from "Partly done / EN only" to **Done**, naming what ships and the fail-closed rule.
+
+**Remaining, by design:** ticket 154 still has to re-run the adapted-copy review over the new text — its own scope says "cover the ZH copy if ticket 153 lands first". That is 154's work, not a remainder here.

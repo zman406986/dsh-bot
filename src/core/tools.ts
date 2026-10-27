@@ -30,6 +30,8 @@ import {
   AWAIT_AGENT_TOOL,
   SPAWN_DISPATCHER_TOOL,
   TOOL_DESCRIPTIONS,
+  toolDescriptionsFor,
+  type PolicyLanguage,
 } from "./policy/prompts.js";
 import { AWAIT_INVALID_TIMEOUT_DETAIL } from "./settle-records.js";
 import {
@@ -226,6 +228,11 @@ export interface DispatcherToolDeps {
    * Default `Date.now`. The other tools' timestamps are unaffected.
    */
   readonly now?: () => number;
+  /**
+   * Model-facing language of the tool descriptions (ticket 153). Omitted
+   * means EN — the byte-stable text every pre-153 caller produced.
+   */
+  readonly language?: PolicyLanguage;
 }
 
 /**
@@ -694,6 +701,8 @@ export function createDispatcherTools(
 ): DispatcherToolDef[] {
   const { multitask, getSessionId } = deps;
   const nowMs = deps.now ?? (() => Date.now());
+  /** Ticket 153: the selected description face; EN unless exactly "zh". */
+  const descriptions = toolDescriptionsFor(deps.language ?? "en");
   /**
    * Ticket 116: this registration's draw on the shared agent-message
    * budget, keyed by the sender's own session id (the registration closure
@@ -727,7 +736,7 @@ export function createDispatcherTools(
 
   const spawnWorker: DispatcherToolDef = {
     name: SPAWN_WORKER_TOOL,
-    description: TOOL_DESCRIPTIONS[SPAWN_WORKER_TOOL],
+    description: descriptions[SPAWN_WORKER_TOOL],
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -887,7 +896,7 @@ export function createDispatcherTools(
 
   const checkWorkers: DispatcherToolDef = {
     name: CHECK_WORKERS_TOOL,
-    description: TOOL_DESCRIPTIONS[CHECK_WORKERS_TOOL],
+    description: descriptions[CHECK_WORKERS_TOOL],
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -984,7 +993,7 @@ export function createDispatcherTools(
 
   const steerWorker: DispatcherToolDef = {
     name: STEER_WORKER_TOOL,
-    description: TOOL_DESCRIPTIONS[STEER_WORKER_TOOL],
+    description: descriptions[STEER_WORKER_TOOL],
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -1023,7 +1032,7 @@ export function createDispatcherTools(
 
   const stopWorker: DispatcherToolDef = {
     name: STOP_WORKER_TOOL,
-    description: TOOL_DESCRIPTIONS[STOP_WORKER_TOOL],
+    description: descriptions[STOP_WORKER_TOOL],
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -1078,7 +1087,7 @@ export function createDispatcherTools(
 
   const deliverResult: DispatcherToolDef = {
     name: DELIVER_RESULT_TOOL,
-    description: TOOL_DESCRIPTIONS[DELIVER_RESULT_TOOL],
+    description: descriptions[DELIVER_RESULT_TOOL],
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -1171,7 +1180,7 @@ export function createDispatcherTools(
    */
   const messageAgent: DispatcherToolDef = {
     name: MESSAGE_AGENT_TOOL,
-    description: TOOL_DESCRIPTIONS[MESSAGE_AGENT_TOOL],
+    description: descriptions[MESSAGE_AGENT_TOOL],
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -1375,7 +1384,7 @@ export function createDispatcherTools(
    */
   const awaitAgent: DispatcherToolDef = {
     name: AWAIT_AGENT_TOOL,
-    description: TOOL_DESCRIPTIONS[AWAIT_AGENT_TOOL],
+    description: descriptions[AWAIT_AGENT_TOOL],
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -1447,7 +1456,7 @@ export function createDispatcherTools(
    */
   const spawnDispatcher: DispatcherToolDef = {
     name: SPAWN_DISPATCHER_TOOL,
-    description: TOOL_DESCRIPTIONS[SPAWN_DISPATCHER_TOOL],
+    description: descriptions[SPAWN_DISPATCHER_TOOL],
     parameters: {
       type: "object",
       additionalProperties: false,

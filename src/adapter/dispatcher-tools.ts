@@ -30,6 +30,7 @@ import {
   type RecentActivityFn,
 } from "../core/tools.js";
 import type { ToolsLike } from "./cordis-dsh-host.js";
+import type { PolicyLanguage } from "../core/policy/prompts.js";
 
 /** Structural tool registration shape (mirrors dsh ToolRuntime.register). */
 export interface RegisterableTool {
@@ -215,6 +216,11 @@ export interface RegisterDispatcherToolsOptions {
   readonly spawnDispatcher?: (
     opts: DispatcherSpawnOptions,
   ) => Promise<DispatcherSpawnResult>;
+  /**
+   * Ticket 153: model-facing copy language. Omitted means EN, so every
+   * pre-153 caller keeps byte-identical descriptions.
+   */
+  readonly language?: PolicyLanguage;
 }
 
 /**
@@ -243,6 +249,7 @@ export function registerDispatcherTools(
     ...(options.spawnDispatcher !== undefined
       ? { spawnDispatcher: options.spawnDispatcher }
       : {}),
+    ...(options.language !== undefined ? { language: options.language } : {}),
   });
   const disposers: Array<() => void> = [];
   for (const def of defs) {

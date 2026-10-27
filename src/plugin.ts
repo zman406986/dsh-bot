@@ -12,6 +12,7 @@ import {
   noticeFromSettled,
   type WakeNotice,
 } from "./core/policy/assembler.js";
+import type { PolicyLanguage } from "./core/policy/prompts.js";
 import {
   accessExpiredNotice,
   assembleRestartNotice,
@@ -60,6 +61,7 @@ import {
 import { clampActivity, clampReport } from "./core/report-clamp.js";
 import { createWorkerLocalToolDefs } from "./core/tools.js";
 import { createWorkerAgentDef } from "./worker/agent-def.js";
+import { resolveHostPolicyLanguage } from "./adapter/locale-preference.js";
 
 /**
  * Plugin config (ADR-0005 / ticket 12).
@@ -350,6 +352,7 @@ export function composeWakeText(
   sessionId: string,
   suppressPromptedAccessAsk?: (requestId: string) => boolean,
   recentActivities?: WakeActivitySource,
+  language: PolicyLanguage = "en",
 ): string | null {
   const drained = multitask.drainWake(sessionId);
   if (drained === undefined) return null;
@@ -359,7 +362,7 @@ export function composeWakeText(
     drained.wake.source === "peer" &&
     (drained.wake.peerMessages ?? []).length > 0
   ) {
-    return assemblePeerWakeTurn(drained.wake.peerMessages ?? []);
+    return assemblePeerWakeTurn(drained.wake.peerMessages ?? [], language);
   }
 
   const roster = multitask.listWorkers(sessionId);
@@ -414,11 +417,19 @@ export function composeWakeText(
     return null;
   }
 
-  const reminder = assembleTurnReminder(multitask.listTodos(sessionId));
-  const wake = assembleWakeTurn(notices, {
-    requests: accessRequests,
-    resolved: drained.wake.accessNotices ?? [],
-  });
+  const reminder = assembleTurnReminder(
+    multitask.listTodos(sessionId),
+    null,
+    language,
+  );
+  const wake = assembleWakeTurn(
+    notices,
+    {
+      requests: accessRequests,
+      resolved: drained.wake.accessNotices ?? [],
+    },
+    language,
+  );
   const inboxSection =
     externalJobs.length > 0
       ? [
@@ -472,6 +483,18 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     // no policy, no wake handling, no worker agent type.
     return;
   }
+
+  // ── Ticket 153: model-facing copy language ───────────────────────────
+  // The product has exactly ONE language switch — the host `locale` settings
+  // namespace's `preference` field (`dsh-client-locale/lib/index.js:5-11`;
+  // the client dictionary is keyed by the same two ids). It is read here,
+  // once, like every other volatile setting (ADR-0005): a flip applies to
+  // the next session, never mid-session. Every unreadable/absent/unknown
+  // value fails CLOSED to EN, so the bytes for a user who never touched the
+  // switch are unchanged.
+  const language: PolicyLanguage = resolveHostPolicyLanguage(
+    typeof ctx.get === "function" ? (name: string) => ctx.get?.(name) : undefined,
+  );
 
   // Ticket 123: the session-kind projection — the durable host-side marker
   // the client reads as `projectionValues.sessionKind`. It folds the host's
@@ -644,7 +667,10 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   let racoonsMount: RacoonsMountHandle | null = null;
   const host: CordisDshHost = createCordisDshHost(ctx, {
     markers,
-    workerAgentDef: createWorkerAgentDef(),
+    // Ticket 153: the worker contract ships in the same language as the
+    // dispatcher policy.
+    workerAgentDef: createWorkerAgentDef(language),
+    language,
     composeWakeText: (sessionId) => {
       if (multitaskRef === null) return null;
       // Ticket 23: `pumpFor` is declared below — this closure only runs once
@@ -659,6 +685,7 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
         (requestId) =>
           pumpFor(sessionId).suppressesConversational(requestId),
         (workerId, n) => host.recentActivities(workerId, n),
+        language,
       );
     },
     // Ticket 122: the child's mid-task reply channel. Registered on the
@@ -835,6 +862,8 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
         ...(ctx.userQuestions !== undefined
           ? { userQuestions: ctx.userQuestions }
           : {}),
+        // Ticket 153: prompt copy and option labels follow the same language.
+        language,
         isActive: () => lifecycle.isDispatcherSession(sessionId),
         getAgent: () => host.parentAgentOf(sessionId),
         listPending: () => multitask.listPendingAccess(sessionId),
@@ -1018,6 +1047,8 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       // Agent and applies the depth ceiling (parent depth + 2).
       spawnDispatcher: (opts: DispatcherSpawnOptions) =>
         host.spawnDispatcher(opts),
+      // Ticket 153: the tool descriptions follow the same language.
+      language,
     };
     // ADR-0019: register through the activated agent's own scoped context
     // (`agent.ctx.tools` — the host's per-agent scope seam). Agents without
@@ -1156,6 +1187,9 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
 
   const lifecycle = bindDispatcherLifecycle(ctx, host, multitask, {
     policyEnabled: enabled,
+    // Ticket 153: the session policy and the per-turn reminder follow the
+    // same language as every other model-facing asset.
+    policyLanguage: language,
     onActivated: (sessionId) => {
       activateToolSurface(sessionId);
       // Ticket 31: the restart notice and redrive ride the durability
