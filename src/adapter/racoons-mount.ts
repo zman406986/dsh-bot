@@ -325,7 +325,7 @@ export function createRacoonsMountHandle(
             return () => {};
           },
         },
-        recallFor(sessionId),
+        { recall: recallFor(sessionId) },
       );
       return captured;
     },
@@ -335,7 +335,7 @@ export function createRacoonsMountHandle(
       }
       return registerPluginTools(
         { register: (definition) => (surface.register as (d: unknown) => () => void)(definition) },
-        recallFor(sessionId),
+        { recall: recallFor(sessionId) },
       );
     },
     dispose() {

@@ -2,7 +2,7 @@ import type { Operation, Removal } from "../rules/types.js";
 import type { Episode } from "../episodes/types.js";
 import type { CheckContext, Report } from "./context.js";
 import { sameRanges } from "./bytes.js";
-import { verifiedCold } from "./protection.js";
+import { verifiedCold } from "./fresh-zone.js";
 
 export function checkEpisode(
   c: CheckContext, op: Operation, removal: Removal | undefined, report: Report,

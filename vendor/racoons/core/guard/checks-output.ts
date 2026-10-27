@@ -1,9 +1,11 @@
 import type { TranscriptNode } from "../types/transcript.js";
 import type { ByteRange } from "../types/identity.js";
+import type { RulePlan, ShapeOp } from "../rules/types.js";
 import type { CheckContext, Report } from "./context.js";
 import { reporter } from "./context.js";
 import type { Candidate } from "./candidate.js";
 import { checkRevertApplication } from "./checks-revert.js";
+import { checkShapeReplacement } from "./checks-entry-shape.js";
 import {
   canonicalApplicationBytes, complement, digest, equal, join, length, sameRanges, validRange,
 } from "./bytes.js";
@@ -18,7 +20,10 @@ function partition(ranges: readonly ByteRange[], size: number): boolean {
   }
   return cursor === size;
 }
-function checkReplacement(c: CheckContext, r: Replacement, expected: Uint8Array | undefined, report: Report): void {
+function checkReplacement(
+  c: CheckContext, r: Replacement, expected: Uint8Array | undefined,
+  candidate: Candidate, report: Report,
+): void {
   const node = c.nodes.get(r.source.nodeId);
   if (node === undefined) { report("unknown-source", "Rendered replacement names an unknown source", r.source.nodeId); return; }
   if (r.source.sha256 !== node.sha256) report("source-hash-mismatch", "Rendered source hash changed", node.id);
@@ -57,23 +62,97 @@ function checkReplacement(c: CheckContext, r: Replacement, expected: Uint8Array 
     || !equal(join(r.generatedRanges.map(range => r.bytes.slice(range.startByte, range.endByteExclusive))), expected)) {
     report("invalid-generated-record", "Generated replacement bytes differ from the trusted template", node.id);
   }
-  const cap = c.value.plans.flatMap(p => p.operations.map(op => ({ p, op }))).find(({ p, op }) =>
-    op.kind === "cap" && p.removals.find(rem => rem.id === op.removalId)?.sources.some(s => s.source.nodeId === node.id));
-  if (cap?.op.kind === "cap") {
-    const head = cap.op.keepHeadEndByte;
-    const expectedCopies = head === 0 ? [] : [{ startByte: 0, endByteExclusive: head }];
-    if (!sameRanges(sourceRanges, expectedCopies) || !sameRanges(copies.map(copy => copy.outputRange), expectedCopies)
-      || r.generatedRanges.length !== 1 || r.generatedRanges[0]?.startByte !== head
-      || r.generatedRanges[0]?.endByteExclusive !== r.bytes.length) {
-      report("invalid-generated-record", "Cap output must contain its exact head followed by one complete marker", node.id);
+  // The entry-shape arm (ISSUE-056 chunk C5, reworked to the landed-node contract
+  // by ISSUE-058 chunk P3b; ADR-0022 §12). The generic arithmetic above proves
+  // the output tiles and that every copy is its source slice; this arm says the
+  // tiling is the PLAN's — exactly the kept ranges of the ORIGINAL body as
+  // retained copies and one marker in each dropped gap. A kept-range list with no
+  // gap is a full keep that would append a turn restating the landed body, so it
+  // is refused by name. The marker bytes, the archive coverage and the unit
+  // binding live in `checks-entry-shape.ts`.
+  const shape = shapeFor(c, node.id);
+  if (shape !== undefined) {
+    checkShapedPartition(c, shape.plan, shape.op, r, sourceRanges, candidate, report);
+  }
+}
+
+/**
+ * The shape operation whose removal names this node, and the plan it rides.
+ * One shape per plan is the planner's own contract, so the first match is the
+ * claim; a second would also collide on the node's replacement (`checkOutput`).
+ */
+function shapeFor(c: CheckContext, nodeId: string): { plan: RulePlan; op: ShapeOp } | undefined {
+  for (const plan of c.value.plans) for (const op of plan.operations) {
+    if (op.kind !== "shape") continue;
+    const removal = plan.removals.find(candidate => candidate.id === op.removalId);
+    if (removal?.sources.length === 1 && removal.sources[0]?.source.nodeId === nodeId) {
+      return { plan, op };
     }
   }
+  return undefined;
+}
+
+/**
+ * The shaped output's partition (ISSUE-056 chunk C5, reworked to the landed-node
+ * contract by ISSUE-058 chunk P3b; ADR-0022 §12). The retained copies are
+ * exactly the plan's kept ranges of the ORIGINAL body — not widened, not merged,
+ * not shifted — and the marker appears once in every dropped gap. A kept-range
+ * list with no gap is a full keep, refused by name (`invalid-line-span`) rather
+ * than tolerated: it would append a turn restating the landed body.
+ */
+function checkShapedPartition(
+  c: CheckContext, plan: RulePlan, op: ShapeOp, r: Replacement,
+  sourceRanges: readonly ByteRange[], candidate: Candidate, report: Report,
+): void {
+  // The retained copies are read against the ORIGINAL body's ranges; the length
+  // the partition must tile is the plan's own original, never the shaped turn.
+  const originalLength = op.originalBytes.length;
+  if (!sameRanges(sourceRanges, op.keptRanges)) {
+    report("retained-bytes-changed",
+      "A shaped output's retained copies must be exactly the plan's kept ranges", r.source.nodeId);
+  }
+  let gaps: readonly ByteRange[];
+  try { gaps = complement(op.keptRanges, originalLength); }
+  catch {
+    report("invalid-line-span", "Kept ranges are not a usable byte partition", r.source.nodeId);
+    return;
+  }
+  if (gaps.length === 0) {
+    report("invalid-line-span",
+      "A shape that keeps every line gives up nothing; no turn may follow it", r.source.nodeId);
+    return;
+  }
+  if (r.generatedRanges.length !== gaps.length) {
+    report("invalid-generated-record",
+      "A shaped output carries one marker in each dropped gap and none elsewhere", r.source.nodeId);
+  }
+  const removal = plan.removals.find(entry => entry.id === op.removalId);
+  if (removal === undefined) return; // `checkOperations` speaks.
+  checkShapeReplacement(c, plan, op, removal, r, candidate, report);
+}
+
+/**
+ * The transcript an application starts from, before any replacement.
+ *
+ * Under the land-first protocol (ADR-0022 §2) the host writes the result before
+ * RACOONS sees it, so the snapshot usually ALREADY holds the entry event's
+ * `result`. A host that has not added it yet is still legal — the entry event's
+ * own node is the landed result either way — so the node is added only when the
+ * snapshot does not carry it. Adding it twice would report a spurious
+ * `adjacency-changed` on the honest path.
+ */
+function preApplicationNodes(c: CheckContext): TranscriptNode[] {
+  const before = [...c.value.snapshot.nodes];
+  if (c.value.input.kind === "entry") {
+    const result = c.value.input.result;
+    if (!before.some(node => node.id === result.id)) before.push(result);
+  }
+  return before;
 }
 
 export function checkOutputTopology(c: CheckContext, output: readonly TranscriptNode[]): void {
   const report = reporter(c, null, null);
-  const before = [...c.value.snapshot.nodes];
-  if (c.value.input.kind === "entry") before.push(c.value.input.result);
+  const before = preApplicationNodes(c);
   if (before.length !== output.length || before.some((node, i) => node.id !== output[i]?.id)) {
     report("adjacency-changed", "Application changed node count, order or neighboring node identities");
   }
@@ -115,13 +194,13 @@ export function checkOutput(c: CheckContext, candidate: Candidate): void {
   for (const replacement of candidate.replacements) {
     if (seen.has(replacement.source.nodeId)) report("conflicting-operations", "Multiple replacements for one source", replacement.source.nodeId);
     seen.add(replacement.source.nodeId);
-    checkReplacement(c, replacement, candidate.expectedGenerated.get(replacement.source.nodeId), report);
+    checkReplacement(c, replacement, candidate.expectedGenerated.get(replacement.source.nodeId), candidate, report);
   }
-  // A verdict removal is applied by checkpoint-revert: its bytes leave the
-  // transcript and the appended receipt takes their place, so it has no
-  // in-place replacement to demand (design-protocol §3, §5 Slice 3).
+  // A verdict or proof removal is applied by checkpoint-revert: its bytes leave
+  // the transcript and the appended receipt takes their place, so it has no
+  // in-place replacement to demand (design-protocol §3, §5 Slice 3; ADR-0018 §2).
   const reverted = new Set(c.value.plans.flatMap(plan => plan.operations.flatMap(op =>
-    op.kind === "verdict" ? [op.removalId] : [])));
+    op.kind === "verdict" || op.kind === "proof" ? [op.removalId] : [])));
   for (const plan of c.value.plans) for (const removal of plan.removals) {
     if (reverted.has(removal.id)) continue;
     for (const source of removal.sources) if (!seen.has(source.source.nodeId)) {
@@ -145,7 +224,7 @@ export function checkOutput(c: CheckContext, candidate: Candidate): void {
         if (reverted.has(removal.id)) {
           // A reverted unit's evidence is the receipt, never a rewritten body.
           if (replacement !== undefined) {
-            report("conflicting-operations", "A verdict removal cannot also rewrite its source in place",
+            report("conflicting-operations", "A reverted removal cannot also rewrite its source in place",
               source.source.nodeId);
           }
         } else if (replacement?.evidenceRecallId !== archive.recall.id) {
@@ -172,8 +251,7 @@ export function checkOutput(c: CheckContext, candidate: Candidate): void {
     checkRevertApplication(c, candidate);
     return;
   }
-  const before = [...c.value.snapshot.nodes];
-  if (c.value.input.kind === "entry") before.push(c.value.input.result);
+  const before = preApplicationNodes(c);
   const output = before.map(node => {
     const replacement = candidate.replacements.find(r => r.source.nodeId === node.id);
     return replacement === undefined ? node : { ...node, bytes: replacement.bytes, sha256: replacement.sha256,

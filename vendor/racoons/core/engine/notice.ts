@@ -1,5 +1,4 @@
-import { applicationBytes } from '../guard/application.js';
-import type { ApplicationBody } from '../guard/application.js';
+import { makeApplication } from '../guard/application.js';
 import type { ValidatedApplication } from '../guard/types.js';
 import type { LedgerEntry } from '../ledger/types.js';
 import type { SessionSnapshot } from '../types/transcript.js';
@@ -21,13 +20,19 @@ export async function persistBreaker(
     turnOrdinal: turn, reason: 'two-validation-failures' });
 }
 
+/**
+ * The one record that tells the model (and the operator) the judge was stopped.
+ * It is owed once per disable: the pass that trips the breaker writes the
+ * `breaker-disabled` marker, and the next boundary appends the notice. The
+ * notice never waits for a turn to advance — a single-turn record is exactly
+ * where it is needed (ISSUE-057 defect 3), so no ordinal is consulted.
+ */
 export async function announceBreaker(
   options: EngineOptions, telemetry: TranscriptTelemetry, snapshot: SessionSnapshot,
   entries: readonly LedgerEntry[], confirmedNotices: ReadonlySet<string>,
-): Promise<'done' | 'blocked'> {
+): Promise<'done' | 'appended' | 'blocked'> {
   const disabled = entries.find(({ event }) => event.kind === 'breaker-disabled');
-  if (disabled?.event.kind !== 'breaker-disabled'
-    || snapshot.currentTurnOrdinal <= disabled.event.turnOrdinal) return 'done';
+  if (disabled?.event.kind !== 'breaker-disabled') return 'done';
   const recordId = `racoons:breaker-disabled:${options.sessionId}`;
   if (entries.some(({ event }) => event.kind === 'breaker-announced' && event.recordId === recordId)) return 'done';
   if (confirmedNotices.has(recordId)
@@ -44,20 +49,24 @@ export async function announceBreaker(
   })) return 'done';
   const bytes = new TextEncoder().encode('RACOONS disabled after two validation failures. Recall remains available.');
   const record = { recordId, bytes, sha256: await sha256(bytes) };
-  const content: ApplicationBody = {
-    sessionId: options.sessionId, eventId: recordId, baseRevision: snapshot.revision,
-    phase: 'at-rest', mode: 'append',
+  // The disabled Guard cannot issue a notice, so the engine states this
+  // application itself. It contains no source replacements, archive removals or
+  // rule-provided bytes; the application body is built by the guard's own
+  // builder, which is the only place the validated-application brand is
+  // installed (no cast here).
+  const application = makeApplication({
+    input: { kind: 'at-rest', eventId: recordId, reason: 'step' },
+    snapshot, capabilities: options.capabilities, config: options.config,
+    plans: [], sealedEpisodeIds: [], nowMs: disabled.event.atMs,
+  }, {
     replacements: [], appendRecords: [record], archives: [], sealedEpisodeIds: [],
-    createdAtMs: disabled.event.atMs,
-  };
-  // The disabled Guard cannot issue a notice. This narrowly scoped application
-  // contains no source replacements, archive removals, or rule-provided bytes.
-  const application = { ...content,
-    applicationSha256: await sha256(applicationBytes(content)),
-  } as ValidatedApplication;
+    expectedGenerated: new Map(), expectedRecords: new Map([[recordId, record.bytes]]),
+    revert: null,
+  });
   const outcome = await applyApplication(options, telemetry, application, recordId);
   if (outcome.status === 'applied') await markAnnounced(options, recordId);
-  return outcome.status === 'recovery-pending' ? 'blocked' : 'done';
+  if (outcome.status === 'recovery-pending') return 'blocked';
+  return outcome.status === 'applied' ? 'appended' : 'done';
 }
 
 async function markAnnounced(options: EngineOptions, recordId: string): Promise<void> {

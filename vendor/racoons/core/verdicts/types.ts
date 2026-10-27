@@ -2,15 +2,17 @@ import type { UnitId } from "../types/identity.js";
 import type { ProcessingUnit } from "../units/types.js";
 
 /**
- * The three answers one judgment can give (ISSUE-017). The judge names what it
- * keeps, or it forgets the unit whole and describes what it removed.
+ * The four answers one judgment can give (ISSUE-017; `forgetlines` added by
+ * ISSUE-061 chunk F-1a, ADR-0026). The judge names what it keeps
+ * (`keeplines`), names what it drops (`forgetlines`), or it forgets the unit
+ * whole and describes what it removed (`forgetall`).
  *
- * There is no free-text field on `keepall` or `keeplines`. A verdict carries
- * only what the protocol acts on: the unit, the action, its payload and the
- * round it answers (owner ruling 2026-10-23). `forgetall` keeps its `summary`
- * alone, because the receipt needs that one descriptor.
+ * There is no free-text field on `keepall`, `keeplines` or `forgetlines`. A
+ * verdict carries only what the protocol acts on: the unit, the action, its
+ * payload and the round it answers (owner ruling 2026-10-23). `forgetall` keeps
+ * its `summary` alone, because the receipt needs that one descriptor.
  */
-export type VerdictAction = "keepall" | "keeplines" | "forgetall";
+export type VerdictAction = "keepall" | "keeplines" | "forgetall" | "forgetlines";
 
 /**
  * One kept span inside a unit, 1-based inclusive. `from` and `to` count lines
@@ -45,6 +47,19 @@ export interface KeepLinesVerdict extends VerdictBase {
   readonly ranges: readonly KeptLineSpan[];
 }
 
+/**
+ * Named spans are REMOVED; their complement inside the unit is kept. The mirror
+ * of `KeepLinesVerdict` with the opposite polarity and the same wire shape
+ * (ADR-0026 §2–§5). The same both-ends rule binds: naming no line is a
+ * `keepall`, naming every line is a `forgetall` without a descriptor, and a
+ * span past the unit's last line is refused, never clamped.
+ */
+export interface ForgetLinesVerdict extends VerdictBase {
+  readonly action: "forgetlines";
+  /** Ordered, non-overlapping, in-bounds spans; these are the removal. Never empty. */
+  readonly ranges: readonly KeptLineSpan[];
+}
+
 /** The whole unit is removed; the receipt carries the descriptor. */
 export interface ForgetAllVerdict extends VerdictBase {
   readonly action: "forgetall";
@@ -59,7 +74,7 @@ export interface ForgetAllVerdict extends VerdictBase {
  * The agent's explicit structured answer for one processing unit (ADR-0006).
  * There are no defaults: every unit above the bar receives one of these.
  */
-export type Verdict = KeepAllVerdict | KeepLinesVerdict | ForgetAllVerdict;
+export type Verdict = KeepAllVerdict | KeepLinesVerdict | ForgetAllVerdict | ForgetLinesVerdict;
 
 export interface VerdictBatch {
   readonly round: number;

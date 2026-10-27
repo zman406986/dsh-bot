@@ -10,6 +10,8 @@ const array = (v: unknown, check: (item: unknown) => boolean): boolean =>
   Array.isArray(v) && Array.from(v as readonly unknown[]).every(check);
 const range = (v: unknown): boolean => object(v) && keys(v, ["startByte", "endByteExclusive"])
   && number(v.startByte) && number(v.endByteExclusive);
+/** A body of bytes: the landed original and the shaped turn both travel as one. */
+const body = (v: unknown): boolean => v instanceof Uint8Array;
 const lines = (v: unknown): boolean => object(v) && keys(v, ["startLine", "endLineInclusive"])
   && number(v.startLine) && number(v.endLineInclusive);
 const source = (v: unknown): boolean => object(v) && keys(v, ["nodeId", "sha256", "byteLength"])
@@ -28,11 +30,23 @@ function note(v: unknown): boolean {
       && text(v.episodeId) && text(v.removalId);
     case "span-marker": return keys(v, ["id", "kind", "removalId", "path", "keepLines"])
       && text(v.removalId) && text(v.path) && array(v.keepLines, lines);
+    // A shaped entry's note declares the one marker the plan accounts for and
+    // nothing else: the rendered bytes come from the pinned template, never from
+    // the note (ISSUE-056 chunk C4/C5).
+    case "shape-marker": return keys(v, ["id", "kind", "removalId"]) && text(v.removalId);
     case "receipt": return keys(v, ["id", "kind", "removalId", "unitId", "path", "ranges", "label"])
       && text(v.removalId) && text(v.unitId) && text(v.path) && array(v.ranges, lines)
       && (v.label === null || typeof v.label === "string");
+    // A proof receipt carries the byte fact that justified the burn and no
+    // label at all: a proven removal has nothing to describe (ADR-0018).
+    case "proof-receipt": return keys(v, ["id", "kind", "proofKind", "removalId", "unitId", "path", "ranges"])
+      && proofKind(v.proofKind) && text(v.removalId) && text(v.unitId) && text(v.path)
+      && array(v.ranges, lines);
     default: return false;
   }
+}
+function proofKind(v: unknown): boolean {
+  return v === "stale-read" || v === "superseded-read";
 }
 function op(v: unknown): boolean {
   if (!object(v) || !text(v.noteId)) return false;
@@ -48,6 +62,18 @@ function op(v: unknown): boolean {
       && text(v.removalId) && array(v.keepLines, lines);
     case "verdict": return keys(v, ["kind", "removalId", "unitId", "noteId"])
       && text(v.removalId) && text(v.unitId);
+    case "proof": return keys(v, ["kind", "proofKind", "removalId", "unitId", "noteId"])
+      && proofKind(v.proofKind) && text(v.removalId) && text(v.unitId);
+    // One shaped entry (ISSUE-056 chunk C4, reworked to the landed-node contract
+    // by ISSUE-058 chunk P3b; the validator is C5's). The kept ranges are the
+    // ANSWER's claim over the landed body, and the two byte fields are the
+    // original the archive covers and the turn the append lands. All three are
+    // re-derived from the plan and the landed node in
+    // `guard/checks-entry-shape.ts`; this only proves the closed key set.
+    case "shape": return keys(v, ["kind", "removalId", "unitId", "keptRanges",
+      "replacementBytes", "originalBytes", "noteId"])
+      && text(v.removalId) && text(v.unitId) && array(v.keptRanges, range)
+      && body(v.replacementBytes) && body(v.originalBytes);
     default: return false;
   }
 }

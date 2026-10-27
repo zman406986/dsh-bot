@@ -1,8 +1,8 @@
 import { validateConfig } from "../config.js";
+import { ENTRY_SHAPE_RULE_ID, PROOF_RULE_IDS } from "../rules/types.js";
 import type { ValidationInput } from "./types.js";
-import type { CheckContext, Report } from "./context.js";
-import { digest, validRange } from "./bytes.js";
-import { verifiedCold } from "./protection.js";
+import type { Report } from "./context.js";
+import { verifiedCold } from "./fresh-zone.js";
 
 const count = (n: number): boolean => Number.isSafeInteger(n) && n >= 0;
 export function checkInput(value: ValidationInput, report: Report): void {
@@ -24,8 +24,8 @@ export function checkInput(value: ValidationInput, report: Report): void {
     report("invalid-plan", "Capability revertHistory must be boolean when declared");
   }
   if (value.input.kind !== "entry" && value.input.kind !== "at-rest"
-    && value.input.kind !== "verdict" && value.input.kind !== "prune") {
-    report("unsupported-capability", "An application phase must be entry, at-rest, verdict or prune");
+    && value.input.kind !== "prune" && value.input.kind !== "forget") {
+    report("unsupported-capability", "An application phase must be entry, at-rest, prune or forget");
   }
   if (value.input.kind === "at-rest" && !["step", "turn-end", "resume", "idle-past-ttl", "model-switch", "revisit"].includes(value.input.reason)) {
     report("unsupported-capability", "Unsupported at-rest application reason");
@@ -40,19 +40,14 @@ export function checkInput(value: ValidationInput, report: Report): void {
     report("invalid-plan", "Cache watermark must name a complete node boundary");
   }
   if (!["warm", "cold", "unknown"].includes(s.cache.kind)) report("invalid-plan", "Unknown cache-state tag");
-  for (const plan of value.plans) if (!["cap", "seal", "evict", "span", "verdict"].includes(plan.ruleId)) {
+  // The proof rule ids, `forget` and `entry-shape` are shared vocabulary
+  // (ISSUE-045 chunk V0; ISSUE-056 chunk C4/C5). C3 registers a rule per proof
+  // kind, C1 plans a manual forget under a `forget` rule id, and the entry
+  // checkpoint plans a shape under `entry-shape`. The guard must know those ids
+  // are plans, not typos; whether such a plan is applicable is
+  // `checkOperations`' judgement.
+  for (const plan of value.plans) if (!["cap", "seal", "evict", "span", "verdict",
+    "forget", ENTRY_SHAPE_RULE_ID, ...PROOF_RULE_IDS].includes(plan.ruleId)) {
     report("wrong-rule", `Unknown rule ID ${plan.ruleId}`);
-  }
-}
-export function checkProtection(c: CheckContext): void {
-  const report: Report = (code, detail, nodeId = null) => c.issues.push({ code, detail, nodeId,
-    ruleId: null, operationIndex: null });
-  for (const span of [...c.value.snapshot.protection.policySpans, ...c.value.snapshot.protection.quotedThisTurn]) {
-    const node = c.nodes.get(span.source.nodeId);
-    if (node === undefined) report("unknown-source", "Protection names a missing node", span.source.nodeId);
-    else if (!validRange(span.range, node.bytes.length) || span.source.sha256 !== digest(node.bytes)
-      || span.source.byteLength !== node.bytes.length) {
-      report("protected-content", "Protection source identity or range is invalid; refusing to weaken protection", node.id);
-    }
   }
 }

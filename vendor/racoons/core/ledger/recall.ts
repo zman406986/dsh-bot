@@ -1,20 +1,24 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { RecallId } from "../types/identity.js";
+import type { Bytes, RecallId } from "../types/identity.js";
 import type { BlobStore } from "./blob-store.js";
-import type { RecallPart, RecallRecord } from "./manifest.js";
-import { manifestSha256, parseRecallManifest, recallIdFor } from "./manifest.js";
+import type { RecallManifest, RecallPart, RecallRecord } from "./manifest.js";
+import { buildRecallManifest, manifestSha256, parseRecallManifest, recallIdFor } from "./manifest.js";
+import type { RecallOptions } from "./types.js";
 import { LedgerError } from "./types.js";
 import { assertHash, verifyBytes } from "./integrity.js";
+import { asIndexedSourceReader } from "./source-reader.js";
 import { asRow, asRows, integer, text } from "./rows.js";
 
 export async function readRecall(
-  db: DatabaseSync, store: BlobStore, id: RecallId,
+  db: DatabaseSync, store: BlobStore, id: RecallId, options?: RecallOptions,
 ): Promise<RecallRecord> {
   if (!/^recall:sha256:[0-9a-f]{64}$/.test(id)) {
     throw new LedgerError("not-found", `Invalid recall id ${id}`);
   }
   const row = db.prepare("SELECT * FROM recalls WHERE recall_id = ?").get(id);
-  if (row === undefined) throw new LedgerError("not-found", `Missing recall ${id}`);
+  // One narrow gate: only an absent row is a miss. A row that exists but whose
+  // manifest or body is gone is corruption, and the fallback never touches it.
+  if (row === undefined) return recallFromSource(id, options);
   const hash = text(asRow(row, "recalls"), "manifest_sha256");
   assertHash(hash);
   if (id !== recallIdFor(hash)) mismatch("Recall id does not match manifest hash");
@@ -55,6 +59,53 @@ export async function readRecall(
           integer(storedSpan, "start_byte") !== span.range.startByte ||
           integer(storedSpan, "end_byte_exclusive") !== span.range.endByteExclusive ||
           text(storedSpan, "slice_sha256") !== span.sha256) mismatch("Span metadata differs");
+      await verifyBytes(bytes.slice(span.range.startByte, span.range.endByteExclusive), span.sha256);
+    }
+    parts.push({ source: { ...part.source }, bytes, removedRanges: part.removedRanges });
+  }
+  return { id, manifestSha256: hash, manifest, parts };
+}
+
+/**
+ * The second lane a recall takes when the ledger holds no row for the id
+ * (PRD §6.7, the two-device safety rule; ISSUE-045 chunk C7). The source index
+ * names, per recall, the manifest that produced the id and the file each part
+ * came from, so this lane answers with the same `RecallRecord` the ledger lane
+ * would have returned.
+ *
+ * Every byte is re-proven here, not by the reader: the body must hash to the
+ * manifest's own `source.sha256` and length, and every removed range must hash
+ * to its manifest slice. A changed file therefore refuses (`hash-mismatch`) and
+ * is never a substitute; an id the index does not know, or no index at all,
+ * stays `not-found` exactly as before. `blobSha256` is not re-derived: the
+ * manifest already requires it to equal `source.sha256` (`buildRecallManifest`).
+ */
+async function recallFromSource(id: RecallId, options: RecallOptions | undefined): Promise<RecallRecord> {
+  const reader = options?.reader === undefined ? null : asIndexedSourceReader(options.reader);
+  const indexed = reader?.locate(id) ?? null;
+  if (reader === null || indexed === null) throw new LedgerError("not-found", `Missing recall ${id}`);
+  // Rebuild from the index's own facts: this normalises and validates the
+  // manifest, and the id proves it is the manifest the caller asked for.
+  const manifest: RecallManifest = buildRecallManifest(indexed.manifest);
+  const hash = await manifestSha256(manifest);
+  if (recallIdFor(hash) !== id) {
+    throw new LedgerError("hash-mismatch", "Source index record does not match its recall id");
+  }
+  if (indexed.paths.length !== manifest.parts.length) {
+    throw new LedgerError("hash-mismatch", "Source index names a different number of files");
+  }
+  const parts: RecallPart[] = [];
+  for (const [index, part] of manifest.parts.entries()) {
+    const path = indexed.paths[index];
+    if (path === undefined || path.trim() === "") {
+      throw new LedgerError("hash-mismatch", "Source index names no file for a part");
+    }
+    const bytes: Bytes = new Uint8Array(await reader.read({
+      source: { ...part.source }, path,
+      ranges: part.removedRanges.map(span => ({ ...span.range })),
+    }));
+    await verifyBytes(bytes, part.source.sha256, part.source.byteLength);
+    for (const span of part.removedRanges) {
       await verifyBytes(bytes.slice(span.range.startByte, span.range.endByteExclusive), span.sha256);
     }
     parts.push({ source: { ...part.source }, bytes, removedRanges: part.removedRanges });

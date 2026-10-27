@@ -9,9 +9,11 @@ export function checkSources(c: CheckContext, plans: readonly RulePlan[]): void 
   // On a verdict event a removal's node index *is* the revert cut: the card
   // `candidate.ts` applies reverts to just before the read. A removal below the
   // watermark is therefore a cut below it, and it is refused here before any
-  // candidate is built (design-protocol §3; the fence is the cut rule).
-  const reverted = new Set<string>(plans.flatMap(plan => plan.operations.flatMap(op =>
-    op.kind === "verdict" ? [op.removalId] : [])));
+  // candidate is built (design-protocol §3; the fence is the cut rule). A proof
+  // removal travels the same lane and cuts at its own node index (ADR-0018 §6),
+  // so it is fenced identically and speaks the cut's name.
+  const cuts = new Map<string, string>(plans.flatMap(plan => plan.operations.flatMap(op =>
+    op.kind === "verdict" || op.kind === "proof" ? [[op.removalId, op.kind] as const] : [])));
   for (const plan of plans) {
     const report = reporter(c, plan.ruleId, null);
     if (plan.baseRevision !== c.value.snapshot.revision) {
@@ -47,19 +49,14 @@ export function checkSources(c: CheckContext, plans: readonly RulePlan[]): void 
             report("overlapping-removals", "Two declared removal ranges overlap", node.id);
           }
           all.push({ nodeId: node.id, range });
-          if ((c.protection.ranges.get(node.id) ?? []).some(r => overlaps(r, range))) {
-            report("protected-content", "Removal intersects live protected bytes", node.id);
-          }
-          if ((c.protection.recordRanges.get(node.id) ?? []).some(r => overlaps(r, range))) {
-            report("recursive-removal", "Removal intersects a RACOONS record", node.id);
-          }
           if (c.value.input.kind === "entry") {
             if (node.id !== c.value.input.result.id) {
               report("outside-fresh-zone", "Entry application may replace only the incoming result", node.id);
             }
           } else {
             const index = c.value.snapshot.nodes.findIndex(n => n.id === node.id);
-            const revertedRemoval = reverted.has(removal.id);
+            const cutKind = cuts.get(removal.id);
+            const revertedRemoval = cutKind !== undefined;
             // ADR-0012: the fence is a watermark fence, so a verdict cut is
             // refused only against a real warm watermark. An unknown cache has
             // none, so there is nothing for the cut to violate and it applies.
@@ -69,11 +66,11 @@ export function checkSources(c: CheckContext, plans: readonly RulePlan[]): void 
               ? c.value.snapshot.cache.kind === "warm" && index < c.freshStart
               : index < c.freshStart || index < 0;
             if (fenced) {
-              // One fact, one code: a verdict removal's index is its cut, so the
+              // One fact, one code: a reverted removal's index is its cut, so the
               // same fence speaks the cut's name for it.
               report(revertedRemoval ? "cut-below-watermark" : "outside-fresh-zone",
                 revertedRemoval
-                  ? "A verdict removal below the cache watermark would cut below it"
+                  ? `A ${cutKind} removal below the cache watermark would cut below it`
                   : "At-rest removal is below the live fresh-zone fence", node.id);
             }
           }
@@ -93,7 +90,16 @@ export function checkTranscript(c: CheckContext): void {
   const report = reporter(c, null, null);
   const seen = new Set<string>(), calls = new Set<string>(), results = new Set<string>();
   const nodes = [...c.value.snapshot.nodes];
-  if (c.value.input.kind === "entry") nodes.push(c.value.input.result);
+  // The land-first protocol (ISSUE-058 chunk P3a; ADR-0022 §2) means the
+  // snapshot normally ALREADY holds the entry event's result: the host wrote it
+  // before RACOONS saw the event. Appending it again would report a duplicate
+  // id and a doubly-consumed call id — `adjacency-changed` on the honest path —
+  // so the event's node joins the walk only when the snapshot lacks that id. A
+  // host that has not landed it yet is equally legal and takes the same path.
+  if (c.value.input.kind === "entry") {
+    const result = c.value.input.result;
+    if (!nodes.some(node => node.id === result.id)) nodes.push(result);
+  }
   let previousTurn = -1, previousStep = -1;
   for (const node of nodes) {
     if (seen.has(node.id)) report("adjacency-changed", "Duplicate node ID makes transcript order ambiguous", node.id);

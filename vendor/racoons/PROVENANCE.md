@@ -1,11 +1,29 @@
 # Vendored racoons — provenance
 
-- Upstream repo: `C:\Users\TZhen\Desktop\racoons` (branch `main`; tracked files clean at copy time — the only dirty entries are `docs/plans/` and an untracked ledger, neither under `packages/`)
-- Upstream commit: `70c99ef64056d517708fd0a5d70c71310700ff34`
-- Commit subject: `035: item 10 design — critic fixes (verdict authority, W source, milestones, snapshot, labels)`
-- Upstream commit date: 2026-10-24
-- Copy date: 2026-10-24
-- Re-sync date: 2026-10-24 — re-synced from `af78642e0a6154fc5fc26ef77aca6508382b198d` to `70c99ef64056d517708fd0a5d70c71310700ff34`. The re-sync covered a single changed source file, `packages/adapters/dsh/src/plugin.ts` (+10/−6 across commits `af78642..70c99ef`, landing commit `c05646b`), which flips the `nativeCompactionBackstop` default from `false` to `true` (owner ruling 2026-10-24). Every other vendored source file was verified byte-identical to `70c99ef`.
+- Upstream repo: `C:\Users\TZhen\Desktop\racoons` (branch `main`)
+- Upstream commit: `b5f95cbbd6f2dff8b25fce4c0208050ecd6fa2e6`
+- Commit subject: `060: paper amendments — the six-page draft records the settled set and the recall source lane`
+- Upstream commit date: 2026-10-27
+- Copy date: 2026-10-27
+- Re-sync date: 2026-10-27 — re-synced from `70c99ef64056d517708fd0a5d70c71310700ff34` to
+  `b5f95cbbd6f2dff8b25fce4c0208050ecd6fa2e6` (ticket 148). The range is 259 commits, 50 of them
+  touching vendored paths; the source diff for `packages/core/src` + `packages/adapters/dsh/src` +
+  `LICENSE` is 101 files, +8475/−3560. Every vendored source file was verified byte-identical to
+  `b5f95cb` at copy time.
+
+## Copy discipline
+
+The copy was taken from the pinned commit, never from the upstream working tree:
+`git -C <clone> -c core.autocrlf=false -c core.eol=lf archive b5f95cb… packages/core/src
+packages/adapters/dsh/src LICENSE | tar -x -C <staging>` and then a flat copy into `vendor/racoons`.
+Each staged file was byte-compared (`cmp`) against `git cat-file -p b5f95cb:<path>` before it landed,
+so no working-tree state can enter the vendor. The upstream clone keeps moving while work is in
+flight (it committed four more commits during ticket 148's own life), so the pin — not "whatever
+`HEAD` is now" — is what these files match.
+
+The `autocrlf=false, eol=lf` override matters: this repo and the clone both set
+`core.autocrlf=true`, so a plain `git archive` would write CRLF and diverge from the committed
+blobs. Vendored sources are LF, matching the upstream blobs byte for byte.
 
 ## What was copied
 
@@ -40,13 +58,21 @@ repo's build.
 Do not use upstream's `resync-vendor.mjs`: it has a wrong hardcoded target and
 only updates files that already exist, so it silently leaves stale files behind.
 
-1. Pin upstream: in `C:\Users\TZhen\Desktop\racoons`, confirm `git status --short`
-   is empty and record `git rev-parse HEAD`.
-2. Delete `vendor/racoons` entirely (including untracked `lib/` build output).
-3. Full copy: `packages/core/src/**` -> `vendor/racoons/core/`,
+1. Pin upstream: in `C:\Users\TZhen\Desktop\racoons`, record `git rev-parse HEAD`
+   and copy from that hash, not from the working tree (upstream is often dirty
+   and is often still moving).
+2. Delete `vendor/racoons` entirely (including untracked `lib/` build output),
+   after stashing the host-owned files outside the tree.
+3. Full copy from the pin, with line-ending conversion disabled so the bytes match
+   the committed blobs:
+   `git -C <clone> -c core.autocrlf=false -c core.eol=lf archive <hash>
+   packages/core/src packages/adapters/dsh/src LICENSE | tar -x -C <staging>`,
+   then `packages/core/src/**` -> `vendor/racoons/core/`,
    `packages/adapters/dsh/src/**` -> `vendor/racoons/adapter/`, upstream root
    `LICENSE` -> `vendor/racoons/LICENSE`.
-4. Restore the host-owned `package.json` / `tsconfig.json` files listed above
+4. Byte-compare each staged file against `git cat-file -p <hash>:<path>` before it
+   lands.
+5. Restore the host-owned `package.json` / `tsconfig.json` files listed above
    (they are not upstream files).
-5. Update `PROVENANCE.md` with the new hash, subject and copy date.
-6. Run `npm install` at the repo root, then `npm run build:vendor`.
+6. Update `PROVENANCE.md` with the new hash, subject and copy date.
+7. Run `npm install` at the repo root, then `npm run build:vendor`.

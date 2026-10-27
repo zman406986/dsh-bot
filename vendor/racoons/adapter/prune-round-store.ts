@@ -32,7 +32,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { ResolvedRacoonsStorage } from './storage.js';
-import type { MountJournal } from './judge-seam.js';
+import type { MountJournal } from './journal-kinds.js';
 
 /** The counter's file name, beside `ledger.sqlite` and `blobs/`. */
 export const PRUNE_ROUND_FILE = 'prune-round.json';

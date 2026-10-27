@@ -8,13 +8,16 @@ import type {
   SearchTarget,
   SessionId,
   Sha256,
-  SourceRange,
   SourceRef,
   ToolCallId,
 } from "./identity.js";
 
 export interface ToolEvidence {
-  readonly kind: "read" | "search" | "glob" | "other";
+  /**
+   * What the call did. `write` proves a path changed — never that a search
+   * space was empty (PRD §6.6, §6.7; ISSUE-045 chunk E0 derives it, C6 uses it).
+   */
+  readonly kind: "read" | "search" | "glob" | "write" | "other";
   readonly target: SearchTarget | null;
   readonly paths: readonly PathEvidence[];
   readonly source: SourceRef;
@@ -85,12 +88,22 @@ export interface FreshZone {
   readonly endNodeIndexExclusive: number;
 }
 
-export interface ProtectionState {
-  readonly inFlightTurnOrdinal: number | null;
-  readonly newestTailNodeIds: readonly NodeId[];
-  readonly openApprovalNodeIds: readonly NodeId[];
-  readonly policySpans: readonly SourceRange[];
-  readonly quotedThisTurn: readonly SourceRange[];
+/**
+ * Per-path byte coverage across every result-producing call, tool-name
+ * agnostic (PRD §6.6; ISSUE-045 chunk C5 measures it). The shape is the meter's
+ * `PathCoverage` row, so a meter's `bytesByPath()` is assignable here without
+ * either side importing the other. Bytes are facts: no threshold, bar or score
+ * rides on them (ADR-0006).
+ */
+export interface PathCoverageFact {
+  readonly pathKey: string;
+  /** Every byte recorded for this path: hit + miss + unknown. */
+  readonly bytes: number;
+  readonly hitBytes: number;
+  readonly missBytes: number;
+  /** Bytes whose outcome is unknown: counted, but proof of nothing. */
+  readonly unknownBytes: number;
+  readonly observations: number;
 }
 
 export interface RetentionEvidence {
@@ -108,8 +121,13 @@ export interface SessionSnapshot {
   readonly currentStepOrdinal: number;
   readonly nodes: readonly TranscriptNode[];
   readonly cache: CacheState;
-  readonly protection: ProtectionState;
   readonly retentionEvidence: readonly RetentionEvidence[];
+  /**
+   * Per-path byte coverage the harness (or the meter) already observed, one row
+   * per path, in the meter's order (PRD §6.6; ISSUE-045 chunk C5). Absent means
+   * "not measured here"; nothing sums this field, and no rule reads it.
+   */
+  readonly pathCoverage?: readonly PathCoverageFact[];
 }
 
 export interface CapabilityFlags {

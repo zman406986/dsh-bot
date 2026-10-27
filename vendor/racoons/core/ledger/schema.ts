@@ -4,18 +4,22 @@ import { storageError } from "./integrity.js";
 import { asRow } from "./rows.js";
 
 /**
- * Schema 2 exists for one reason: SQLite cannot alter a CHECK constraint in
- * place, and `application_removals.operation_kind` must admit `'verdict'`, the
- * archive kind a checkpoint-revert writes. A version-1 file therefore cannot be
- * upgraded on itself; `migration.ts` rebuilds it into a fresh v2 file.
+ * Schema 3 exists for the same reason schema 2 did: SQLite cannot alter a CHECK
+ * constraint in place, and `application_removals.operation_kind` must admit
+ * `'proof'` (a proof burn) and `'forget'` (a manual forget) beside the five
+ * kinds schema 2 carried. A version-1 or version-2 file therefore cannot be
+ * upgraded on itself; `migration.ts` rebuilds it into a fresh v3 file.
  */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 /** The pre-revert schema. Only `migration.ts` may read a file carrying it. */
 export const LEGACY_SCHEMA_VERSION = 1;
+/** The revert-only schema (no `'proof'`/`'forget'`). Only `migration.ts` reads it. */
+export const PREVIOUS_SCHEMA_VERSION = 2;
 /**
  * Header marker (`PRAGMA application_id`, ASCII "RAC2") naming the file as a
  * RACOONS ledger. `user_version` alone cannot distinguish "not ours" from
- * "ours"; the pair is the explicit file version.
+ * "ours"; the pair is the explicit file version. The marker names the product,
+ * not the schema, so it does not move with `SCHEMA_VERSION`.
  */
 export const LEDGER_APPLICATION_ID = 0x52414332;
 
@@ -73,7 +77,8 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
     rule_id TEXT NOT NULL,
     removal_id TEXT NOT NULL,
     recall_id TEXT NOT NULL REFERENCES recalls(recall_id),
-    operation_kind TEXT NOT NULL CHECK (operation_kind IN ('cap', 'seal', 'evict', 'span', 'verdict')),
+    operation_kind TEXT NOT NULL CHECK (operation_kind IN (
+      'cap', 'seal', 'evict', 'span', 'verdict', 'proof', 'forget')),
     episode_id TEXT,
     title TEXT NOT NULL,
     PRIMARY KEY (intent_id, rule_id, removal_id)
@@ -115,16 +120,18 @@ function pragmaValue(db: DatabaseSync, pragma: string): number | null {
 }
 
 /**
- * Creates or verifies the schema on an open handle. A version-1 handle is
- * refused here: only `migrateLegacyLedgerFile` may read it, and only to rebuild
- * a fresh file. `SqliteLedger.open` migrates before this runs.
+ * Creates or verifies the schema on an open handle. An older handle (schema 1
+ * or 2) is refused here: only `prepareLedgerFile` may read one, and only to
+ * rebuild a fresh file. `SqliteLedger.open` migrates before this runs.
  */
 export function initializeSchema(db: DatabaseSync): void {
   const version = pragmaValue(db, "user_version");
   if (version !== 0 && version !== SCHEMA_VERSION) {
     throw new LedgerError("unsupported-schema", version === LEGACY_SCHEMA_VERSION
       ? "Legacy trash ledger schema 1 can only be rebuilt through SqliteLedger.open"
-      : `Unsupported trash ledger schema ${String(version)}`);
+      : version === PREVIOUS_SCHEMA_VERSION
+        ? "Trash ledger schema 2 can only be rebuilt through SqliteLedger.open"
+        : `Unsupported trash ledger schema ${String(version)}`);
   }
   db.exec("BEGIN IMMEDIATE");
   try {
@@ -137,7 +144,7 @@ export function initializeSchema(db: DatabaseSync): void {
       throw new LedgerError("unsupported-schema",
         `Database is not a RACOONS trash ledger (application id ${String(applicationId)})`);
     }
-    assertCheckAdmitsVerdicts(db);
+    assertCheckAdmitsOperations(db);
     db.exec(`PRAGMA application_id = ${LEDGER_APPLICATION_ID}`);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec("COMMIT");
@@ -149,13 +156,13 @@ export function initializeSchema(db: DatabaseSync): void {
 
 /**
  * `CREATE TABLE IF NOT EXISTS` leaves a pre-existing table untouched, so a file
- * whose `user_version` is 0 but whose `application_removals` predates v2 would
- * otherwise be stamped v2 over a v1 CHECK. Refuse instead; the rollback removes
- * anything this call created.
+ * whose `user_version` is 0 but whose `application_removals` carries an older
+ * CHECK would otherwise be stamped with the current version over that CHECK.
+ * Refuse instead; the rollback removes anything this call created.
  *
- * @internal Exported for the migration test that plants a v1-shaped table.
+ * @internal Exported for the migration test that plants an old-shaped table.
  */
-export function assertCheckAdmitsVerdicts(db: DatabaseSync): void {
+export function assertCheckAdmitsOperations(db: DatabaseSync): void {
   const row = db.prepare(
     "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'application_removals'").get();
   const sql = row === undefined ? undefined : asRow(row, "sqlite_master")["sql"];
@@ -163,9 +170,16 @@ export function assertCheckAdmitsVerdicts(db: DatabaseSync): void {
     OPERATION_KINDS.every(kind => sql.includes(`'${kind}'`));
   if (!complete) {
     throw new LedgerError("unsupported-schema",
-      "application_removals predates schema 2; rebuild the file through SqliteLedger.open");
+      `application_removals predates schema ${SCHEMA_VERSION}; rebuild the file through SqliteLedger.open`);
   }
 }
 
-/** The archive kinds schema 2 admits, the CHECK's own list. */
-export const OPERATION_KINDS = ["cap", "seal", "evict", "span", "verdict"] as const;
+/** The archive kinds schema 3 admits, the CHECK's own list. */
+export const OPERATION_KINDS = [
+  "cap", "seal", "evict", "span", "verdict", "proof", "forget",
+] as const;
+
+/** One owner for "is this kind admitted": the writer and the verifier both ask it. */
+export function isOperationKind(value: string): boolean {
+  return OPERATION_KINDS.some(kind => kind === value);
+}

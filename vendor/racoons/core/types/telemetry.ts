@@ -4,13 +4,11 @@ import type {
   EpisodeId,
   EventId,
   IntentId,
-  NodeId,
   RecallId,
   Revision,
   RuleId,
   SessionId,
   Sha256,
-  UnitId,
 } from "./identity.js";
 
 export interface ApiUsage {
@@ -114,38 +112,6 @@ export type TelemetryEvent = TelemetryBase & (
   | {
       readonly kind: "breaker-disabled";
       readonly consecutiveValidationFailures: 2;
-    }
-  | {
-      readonly kind: "gate-presented";
-      readonly gate: "turn" | "revisit";
-      readonly round: number;
-      readonly unitIds: readonly UnitId[];
-      readonly advertisedLabelLimit: number;
-    }
-  | {
-      readonly kind: "gate-settled";
-      readonly gate: "turn" | "revisit";
-      readonly round: number;
-      /** `failed-open` is bounded enforcement reaching its cap; nothing applied. */
-      readonly outcome: "settled" | "incomplete" | "failed-open";
-      readonly answered: number;
-      readonly unanswered: number;
-    }
-  | {
-      readonly kind: "verdict-recorded";
-      readonly round: number;
-      readonly unitId: UnitId;
-      readonly nodeId: NodeId;
-      /** The three-action format of ISSUE-017: what answer the judge gave. */
-      readonly action: "keepall" | "keeplines" | "forgetall";
-      /**
-       * Measured descriptor length in words after normalisation, for a
-       * `forgetall`; null when the answer carried no descriptor or is not a
-       * `forgetall` (a `keeplines` receipt names ranges, not a description).
-       */
-      readonly descriptorWords: number | null;
-      /** Kept spans the answer named; null unless the action is `keeplines`. */
-      readonly keptSpans: number | null;
     }
   | {
       readonly kind: "revert-applied";

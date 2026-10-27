@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
 import type {
-  ApplyRequest, RenderedRecord, SessionSnapshot, ToolResultNode, ValidatedRevert,
+  ApplyRequest, RenderedRecord, SessionSnapshot, ValidatedRevert,
 } from '@racoons/core';
-import { createDshRecord, fromCoreEnvelope, toCoreEnvelope } from './envelope.js';
-import type { DshToolResultItem, DshTranscriptItem } from './envelope.js';
+import { createDshRecord } from './envelope.js';
+import type { DshTranscriptItem } from './envelope.js';
 
 function hashBody(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex');
@@ -12,41 +12,18 @@ function hashBody(bytes: Uint8Array): string {
 /** Builds a complete private candidate. It has no access to the live port state. */
 export function stageApplication(
   request: ApplyRequest, items: readonly DshTranscriptItem[],
-  pending: DshToolResultItem | undefined, context: Omit<SessionSnapshot, 'nodes' | 'revision'>,
+  context: Omit<SessionSnapshot, 'nodes' | 'revision'>,
 ): DshTranscriptItem[] {
   const application = request.application;
   if (application.mode === 'revert') throw new Error('A revert stages through the host append, not this path');
-  const candidate = structuredClone([...items]);
-  const entry = application.mode === 'entry';
-  if ((entry && pending === undefined) || (!entry && application.replacements.length > 0)) {
+  // The entry mode has no staging path any more: an answered checkpoint is
+  // applied by the port's own rewind-and-append host write (ISSUE-058 chunk
+  // P3a; ADR-0022 §12), never by a pre-landing replacement of a node. Only the
+  // append mode reaches this builder.
+  if (application.mode !== 'append' || application.replacements.length > 0) {
     throw new Error('Application does not match an available M1 seam');
   }
-  if (entry && pending !== undefined) {
-    const existingIndex = candidate.findIndex(item => item.id === pending.id);
-    const existing = candidate[existingIndex];
-    if (existing !== undefined && (existing.role !== 'tool' || existing.callId !== pending.callId
-      || hashBody(existing.bytes) !== hashBody(pending.bytes))) {
-      throw new Error('Visible entry changed after staging');
-    }
-    const envelope = toCoreEnvelope(pending, existingIndex < 0 ? candidate.length : existingIndex);
-    if (application.replacements.length > 1) throw new Error('Entry replaces one result only');
-    const replacement = application.replacements[0];
-    let node: ToolResultNode = envelope.node;
-    if (replacement !== undefined) {
-      if (replacement.source.nodeId !== node.id || replacement.source.sha256 !== node.sha256
-        || replacement.source.byteLength !== node.byteLength
-        || hashBody(replacement.bytes) !== replacement.sha256) {
-        throw new Error('Replacement source or output changed');
-      }
-      node = { ...node, bytes: new Uint8Array(replacement.bytes), sha256: replacement.sha256,
-        byteLength: replacement.bytes.byteLength,
-        embeddedRecords: structuredClone(replacement.generatedRanges),
-        evidence: { ...node.evidence, sourceRecallId: replacement.evidenceRecallId } };
-    }
-    const published = fromCoreEnvelope({ ...envelope, node });
-    if (existingIndex < 0) candidate.push(published);
-    else candidate[existingIndex] = published;
-  }
+  const candidate = structuredClone([...items]);
   for (const record of application.appendRecords) {
     if (hashBody(record.bytes) !== record.sha256) throw new Error('Record hash changed');
     candidate.push(createDshRecord({ kind: 'racoons-record', id: record.recordId,

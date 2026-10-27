@@ -26,7 +26,7 @@
  *   bracketed line. Non-text blocks and roles the fork cannot carry (`developer`,
  *   anything unknown) are counted as dropped, never invented.
  *
- * A request this package sent itself (a judge or prune ask) is skipped: it is
+ * A request this package sent itself (an entry or a prune ask) is skipped: it is
  * not main, and seeding from it would replay the wrong conversation.
  *
  * So is a request the host stamped `purpose: 'session-title'` (ISSUE-031): the
@@ -47,7 +47,7 @@ export interface CapturedMainRequest {
   /**
    * Always false since CRITIC-026 chunk B: the capture no longer lifts a leading
    * `system` message into the slot, so the slot never comes from a message. Kept
-   * because the `judge-seed` journal line names it.
+   * because the `prune-seed` journal line names it.
    */
   readonly systemFromMessage: boolean;
   readonly droppedMessages: number;
@@ -84,7 +84,7 @@ function messageText(content: unknown): { text: string; dropped: number } {
 const SEED_ROLES: ReadonlySet<string> = new Set(['system', 'user', 'assistant', 'tool']);
 
 /**
- * Main's role, copied verbatim. The fork's `WireMessage` role is the judge
+ * Main's role, copied verbatim. The fork's `WireMessage` role is the ask
  * history's vocabulary — `user`, `assistant`, `tool` — and has no `system`,
  * while main's list can carry one. Nothing in the fork reads a role on seed (it
  * copies and hashes the message) and the send seam passes the role through, so
@@ -143,7 +143,7 @@ export interface MainWireCapture {
 /**
  * A capture store keyed by the session id the request was stamped with. The
  * loop stamps every main request, so the map holds one entry per conversation.
- * A request with no session id is ignored: without the key, a judge pass could
+ * A request with no session id is ignored: without the key, an ask could
  * only guess whose conversation it is holding.
  */
 export function createMainWireCapture(): MainWireCapture {

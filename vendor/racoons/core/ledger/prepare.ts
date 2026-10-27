@@ -5,6 +5,7 @@ import { snapshotApplicationHash } from "./application-integrity.js";
 import {
   buildRecallManifest, encodeRecallManifest, manifestSha256, recallIdFor,
 } from "./manifest.js";
+import { isOperationKind } from "./schema.js";
 import type { ArchiveRecord, PreparableApplication, PreparedIntent } from "./types.js";
 import { LedgerError } from "./types.js";
 import { assertHash, stableJson, verifyBytes } from "./integrity.js";
@@ -29,6 +30,11 @@ export async function verifyApplication(application: PreparableApplication): Pro
   const fullHash = snapshotApplicationHash(application);
   const archives: ArchiveRecord[] = application.archives.map(archive => {
     if (archive.recall.manifest.version !== 1) mismatch("Unsupported manifest version");
+    // The CHECK's list is the one owner of the admitted kinds; a kind this
+    // schema does not carry is refused here, never by the INSERT's CHECK.
+    if (!isOperationKind(archive.operationKind)) {
+      mismatch(`Unsupported operation kind ${String(archive.operationKind)}`);
+    }
     return {
       ruleId: archive.ruleId, removalId: archive.removalId,
       operationKind: archive.operationKind, episodeId: archive.episodeId, title: archive.title,

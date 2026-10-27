@@ -15,14 +15,23 @@ export type ValidationCode =
   | "unknown-source" | "source-hash-mismatch" | "source-length-mismatch"
   | "invalid-range" | "overlapping-removals" | "conflicting-operations"
   | "unaccounted-removal" | "unused-removal" | "invalid-note"
-  | "protected-content" | "outside-fresh-zone" | "pairing-changed"
+  | "outside-fresh-zone" | "pairing-changed"
   | "adjacency-changed" | "retained-bytes-changed" | "invalid-line-range"
   | "unsupported-capability" | "episode-open" | "episode-not-sealed"
   | "episode-evidence-missing" | "hit-removal" | "late-seal"
-  | "cold-boundary-required" | "recursive-removal" | "recall-manifest-mismatch"
+  | "cold-boundary-required" | "recall-manifest-mismatch"
   | "invalid-generated-record" | "breaker-disabled"
   | "unknown-unit" | "incomplete-verdicts" | "label-too-long"
-  | "descriptor-too-long" | "invalid-line-span" | "cut-below-watermark";
+  | "descriptor-too-long" | "invalid-line-span" | "cut-below-watermark"
+  // A proof removal the snapshot's own bytes do not prove (PRD §6.6; chunk C4):
+  // the plan claims stale or superseded, the snapshot disagrees.
+  | "proof-unproven"
+  // An edit landing outside the ranges the agent actually holds as kept
+  // (PRD §6.7; chunk C6). The detail names the write that invalidated them.
+  | "edit-outside-coverage"
+  // A manual forget request that names no single held unit (PRD §6.2; chunk C1).
+  // An ambiguous or absent unit is refused, never guessed.
+  | "unresolved-request";
 
 export interface ValidationIssue {
   readonly code: ValidationCode;

@@ -1,6 +1,11 @@
 /**
- * The table loop of a judge pass (ISSUE-026 chunk 3, ADR-0010 + ADR-0009's
- * second amendment; CRITIC-026 chunk A).
+ * The bulk prune's table loop: the ONE table send engine left (ADR-0028).
+ *
+ * ADR-0028 removed the judge pass, so this file has a single caller — the
+ * record-only prune pass in `./prune.ts` — and its journal lines are the
+ * literal `prune-*` spellings. Everything the loop does is unchanged from
+ * ADR-0009's contract; only the second caller and its `stage`/`gate` arms are
+ * gone.
  *
  * This file owns the SENDING, not the scheduling. Core's `planCarryOver` is the
  * one carry scheduler: it decides what the next table carries (front of the
@@ -26,7 +31,7 @@
  * reads it as refusals, and those rows take the pass's one re-ask like any other
  * refused row. Every stop is fail-open: every row still pending keeps its unit
  * under the core's halt code (`answer-unreadable`, the parser's own empty-answer
- * code), never a judge-local `missing-index` claim, and the pass still settles
+ * code), never a local `missing-index` claim, and the pass still settles
  * its round.
  */
 import {
@@ -38,19 +43,16 @@ import type {
   PruneAnswerRefusalCode, PruneAnswerRejection, PruneAskRow, PruneCarryOverPlan,
   PrunePassAttemptTotals, PruneTableAttempt, WireFork, WireVerdictErrorCode,
 } from '@racoons/core';
-import type { MountJournal } from './judge-seam.js';
+import type { MountJournal } from './journal-kinds.js';
 import { askWire } from './llm-ask.js';
 import type { StreamOutcome } from './llm-ask.js';
-import type { JudgeRoute } from './judge-seam.js';
+import type { JudgeRoute } from './route.js';
 import type { DshLlmService } from './plugin.js';
-
-/** ADR-0009 amendment: one table addresses at most this many units. */
-export const JUDGE_TABLE_UNITS = PRUNE_ASK_MAX_TABLE_UNITS;
 
 /**
  * The code every row a halted pass leaves unanswered reports. It is the core's
  * own halt code (`planCarryOver` uses it for a table with no readable reply),
- * not a judge-local spelling of the same condition.
+ * not a local spelling of the same condition.
  */
 const HALT_CODE: PruneAnswerRefusalCode = 'answer-unreadable';
 
@@ -86,13 +88,6 @@ export interface RowRefusal {
 
 export interface TableLoopOptions {
   readonly sessionId: string;
-  /**
-   * Whose loop this is: the journal kinds are named after it (`judge-table`,
-   * `prune-table`). ONE loop serves both; the scheduler is core's.
-   */
-  readonly stage: 'judge' | 'prune';
-  /** The judge's gate window; a prune pass has none and omits it. */
-  readonly gate?: 'turn' | 'revisit';
   readonly round: number;
   readonly fork: WireFork;
   readonly rows: readonly TableRow[];
@@ -178,10 +173,7 @@ function attemptGroups(table: readonly PendingRow[]): readonly (readonly Pending
  * reach), then report what each assigned index got.
  */
 export async function runTables(options: TableLoopOptions): Promise<TableLoopOutcome> {
-  const { sessionId, stage, round, journal, stamps } = options;
-  // One journal vocabulary for both callers: the judge keeps its names, the
-  // prune pass names its own lines. `gate` exists only for the judge.
-  const window = options.gate === undefined ? {} : { gate: options.gate };
+  const { sessionId, round, journal, stamps } = options;
   let fork = options.fork;
   const kept = new Map<number, AnsweredRow>();
   const refused = new Map<number, RowRefusal>();
@@ -194,7 +186,7 @@ export async function runTables(options: TableLoopOptions): Promise<TableLoopOut
   const settled: PruneCarryOverPlan[] = [];
   const attempts: PruneTableAttempt[] = [];
   while (pending.length > 0) {
-    const table = pending.splice(0, JUDGE_TABLE_UNITS);
+    const table = pending.splice(0, PRUNE_ASK_MAX_TABLE_UNITS);
     const tableRows = table.map(item => item.row);
     const indices = tableRows.map(row => row.index);
     try {
@@ -203,7 +195,7 @@ export async function runTables(options: TableLoopOptions): Promise<TableLoopOut
       // With consecutive user turns legal, this is a drifted byte, not a role
       // repeat: a seed whose last turn is the user's appends fine (CRITIC-026
       // P2#5). The journal keeps the fork's own code for the drift.
-      journal(`${stage}-seed-refused`, { sessionId, ...window, round,
+      journal('prune-seed-refused', { sessionId, round,
         code: error instanceof ForkError ? error.code : null, message: messageOf(error) });
       halted = true;
       // The spliced table goes back so the halt drain reports every row.
@@ -222,14 +214,14 @@ export async function runTables(options: TableLoopOptions): Promise<TableLoopOut
     } catch (error) {
       // The send seam re-asserted the fork's system/tool hashes and refused the
       // send; nothing left this process. Fail open like every other refusal.
-      journal(`${stage}-send-refused`, { sessionId, ...window, round,
+      journal('prune-send-refused', { sessionId, round,
         code: error instanceof ForkError ? error.code : null, message: messageOf(error) });
       halted = true;
       pending.unshift(...table);
       break;
     }
     if (reply.status === 'refused') {
-      journal(`${stage}-skip`, { sessionId, ...window, round, reason: reply.reason,
+      journal('prune-skip', { sessionId, round, reason: reply.reason,
         code: reply.code, message: reply.message, indices });
       halted = true;
       pending.unshift(...table);
@@ -245,7 +237,7 @@ export async function runTables(options: TableLoopOptions): Promise<TableLoopOut
     // halt, and that path broke out above.
     const unreadable = unreadableCode(parsed);
     if (unreadable !== null) {
-      journal(`${stage}-skip`, { sessionId, ...window, round, reason: 'no-verdict', code: unreadable,
+      journal('prune-skip', { sessionId, round, reason: 'no-verdict', code: unreadable,
         message: 'the reply was not one JSON object; its rows are carried to the next table.',
         indices });
     }
@@ -268,14 +260,14 @@ export async function runTables(options: TableLoopOptions): Promise<TableLoopOut
       // counters feed the pass record (ISSUE-022 chunk 6).
       const reading = summarizeTableAttempt(groupRows, parsed.rows, attempt);
       attempts.push(reading);
-      journal(`${stage}-table`, { sessionId, ...window, round, tables,
+      journal('prune-table', { sessionId, round, tables,
         carried: plan.carry.length, ...reading });
     }
     pending.unshift(...next);
   }
   // Every row still pending was either asked in a table whose reply never came
   // back, or never reached a table: a halted pass has no readable answer for
-  // it. That is the core's halt code, never a judge-local "missing" claim.
+  // it. That is the core's halt code, never a local "missing" claim.
   for (const item of pending) {
     refused.set(item.row.index, { code: HALT_CODE, wireCode: null, table: null,
       message: `Index ${String(item.row.index)} was not answered; the pass halted and that unit is kept.` });

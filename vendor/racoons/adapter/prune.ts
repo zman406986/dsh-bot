@@ -4,17 +4,17 @@
  * (ISSUE-027; ADR-0010).
  *
  * One pass over the mount's own state: units and nodes from the authoritative
- * snapshot, episodes from the tracker the engine already uses, protection from
- * the guard's own rule. `planPrunePass` runs L1, numbers every remaining unit,
+ * snapshot, episodes from the tracker the engine already uses. `planPrunePass`
+ * runs L1, numbers every remaining unit,
  * and splits the display; this module seeds ONE fork from main's last captured
  * request (`seedFork`, byte-copied, hash-asserted) and grows it through
- * `./judge-tables.ts` — the judge's own table loop — appending each prune table
+ * `./judge-tables.ts` — the shared table loop — appending each prune table
  * as a new user turn and reading each reply through the core's
  * `parsePruneAnswer`. The contract, the table and the final line ride INSIDE the
  * ask text: the fork's system slot is main's, untouched, because replacing it
  * would change byte 0 of the prefix the fork exists to have served from cache.
  *
- * The tables are the judge's: at most `PRUNE_ASK_MAX_TABLE_UNITS` (12) units,
+ * The tables are the pass's: at most `PRUNE_ASK_MAX_TABLE_UNITS` (12) units,
  * carried-over rows re-asked at the front of the next table. `plan.tables`
  * stays ACCOUNTING ONLY: its token estimate is the record's `estTokens`, not
  * the send split.
@@ -29,19 +29,19 @@
  * re-ask, and only inside itself: the next table of the same pass is that one
  * re-ask (ADR-0009's second amendment), never a retry across passes.
  */
-import { computeProtectedRanges, EpisodeTracker, UnitTracker } from '@racoons/core';
+import { EpisodeTracker, UnitTracker } from '@racoons/core';
 import {
-  applyPruneAnswers, ForkError, planPrunePass, seedFork,
+  applyPruneAnswers, computeInvalidation, ForkError, planPrunePass, seedFork,
 } from '@racoons/core';
 import type {
-  ByteRange, Episode, NextTableOptions, ProcessingUnit, PruneCallFacts,
-  PrunePassApplication, PrunePassPlan, SessionSnapshot, ToolResultNode, UnitId,
-  WireAnswer, WireFork,
+  Episode, NextTableOptions, PruneCallFacts,
+  PrunePassApplication, PrunePassPlan, ProcessingUnit, SessionSnapshot, ToolResultNode,
+  UnitId, WireAnswer, WireFork,
 } from '@racoons/core';
 import type { DshTranscriptItem } from './envelope.js';
 import { runTables } from './judge-tables.js';
 import type { TableLoopOutcome } from './judge-tables.js';
-import type { MountJournal } from './judge-seam.js';
+import type { MountJournal } from './journal-kinds.js';
 import { messageOf } from './llm-ask.js';
 import type { CapturedMainRequest } from './main-wire.js';
 import type { DshLlmService } from './plugin.js';
@@ -53,7 +53,7 @@ export { PRUNE_COMMAND } from './prune-record.js';
 
 export interface RecordOnlyPruneOptions {
   readonly sessionId: string;
-  /** The authoritative snapshot the units, nodes and protection all come from. */
+  /** The authoritative snapshot the units and nodes come from. */
   readonly snapshot: SessionSnapshot;
   /** The port's items: the history the ask renders and the whole calls it names. */
   readonly transcript: readonly DshTranscriptItem[];
@@ -65,7 +65,7 @@ export interface RecordOnlyPruneOptions {
   readonly episodeNoNewPathSteps: number | null;
   /** The host's model seam; absent means the pass records its L1 layer only. */
   readonly llm?: DshLlmService;
-  /** The route the judge uses, resolved at call time. */
+  /** The host route the table asks go to, resolved at call time. */
   readonly route: () => { readonly provider: string; readonly model: string } | null;
   /**
    * Main's last captured sent request; null means no fork can be seeded, so the
@@ -78,27 +78,44 @@ export interface RecordOnlyPruneOptions {
   readonly signal?: AbortSignal;
   /** Table-builder options; production passes none. ACCOUNTING ONLY (the record's estimate). */
   readonly tableOptions?: NextTableOptions;
-}
-
-/** Which of a node's protected byte ranges a unit's span touches; see below. */
-function overlaps(ranges: readonly ByteRange[] | undefined,
-  span: ByteRange): boolean {
-  if (ranges === undefined) return false;
-  return ranges.some(range => range.startByte < span.endByteExclusive
-    && span.startByte < range.endByteExclusive);
+  /**
+   * Result node ids whose ENTRY ask answered `keepall` and applied (ISSUE-073).
+   * The mount's `entryJudged` is not enough: it marks every settled answer, and
+   * only a keep settles the unit as content still worth asking about later. A
+   * `forget` replaced its node, so its id names no unit here anyway.
+   * Omitted means "the mount settled nothing": every unit stays listable.
+   */
+  readonly settledNodeIds?: ReadonlySet<string>;
 }
 
 /**
- * The units protection covers, derived from the guard's own rule rather than a
- * second copy of it. A unit is protected when its span touches any protected
- * range on its node — the guard would refuse a removal there, so the pass must
- * not ask either (`protected-content` is an impossible answer).
+ * The units a settled entry keep withholds from this pass (ISSUE-073).
+ *
+ * Two readings, both the product's existing ones rather than new ones:
+ *
+ *   - the settled set is the plan's own units whose node is a settled keep. A
+ *     result below the bar has no unit, so nothing about it can be withheld;
+ *   - a unit a later WRITE invalidated is not settled any more: the entry kept
+ *     bytes that are now a stale copy, so the unit is ordinary content again and
+ *     stays listable. `computeInvalidation` is the one rule for that (PRD §6.7),
+ *     read here rather than restated.
+ *
+ * Fail-open and refused entry asks never reach `settledNodeIds`: their `keepall`
+ * was never established, so they are never in this set.
  */
-export function protectedUnitIdsOf(snapshot: SessionSnapshot,
-  units: readonly ProcessingUnit[]): readonly UnitId[] {
-  const protection = computeProtectedRanges(snapshot);
-  return units.filter(unit => overlaps(protection.ranges.get(unit.nodeId),
-    unit.span.byteRange)).map(unit => unit.id);
+function settledUnitsOf(units: readonly ProcessingUnit[], snapshot: SessionSnapshot,
+  settledNodeIds: ReadonlySet<string> | undefined,
+): ReadonlySet<UnitId> | undefined {
+  if (settledNodeIds === undefined || settledNodeIds.size === 0) return undefined;
+  const kept = units.filter(unit => settledNodeIds.has(unit.nodeId));
+  if (kept.length === 0) return undefined;
+  const invalidated = computeInvalidation({ snapshot, units }).byUnit;
+  const settled = new Set<UnitId>();
+  for (const unit of kept) {
+    if (invalidated.has(unit.id)) continue;
+    settled.add(unit.id);
+  }
+  return settled.size === 0 ? undefined : settled;
 }
 
 /**
@@ -142,16 +159,17 @@ export async function runRecordOnlyPrune(
   }).detect({ sessionId, results: nodes,
     currentStepOrdinal: snapshot.currentStepOrdinal,
     completedThroughTurnOrdinal: snapshot.completedThroughTurnOrdinal });
-  const protectedUnitIds = protectedUnitIdsOf(snapshot, units);
+  const settled = settledUnitsOf(units, snapshot, options.settledNodeIds);
   const plan = planPrunePass({
-    units, nodes, episodes, protectedUnitIds,
+    units, nodes, episodes,
     callFacts: callFactsOf(options.transcript),
     round: options.round,
     ...(options.tableOptions === undefined ? {} : { tableOptions: options.tableOptions }),
+    ...(settled === undefined ? {} : { settled }),
   });
   journal('prune-plan', { sessionId, round: plan.round, units: units.length,
     askRows: plan.askRows.length, tables: plan.tables.length,
-    l1Removals: plan.l1.removals.length, protectedUnitIds });
+    l1Removals: plan.l1.removals.length, settledWithheld: plan.settledWithheld.length });
 
   const refusedFor = refusalOf(options);
   if (refusedFor !== null || options.llm === undefined) {
@@ -189,7 +207,7 @@ export async function runRecordOnlyPrune(
     return outcome;
   }
 
-  const loop = await runTables({ sessionId, stage: 'prune', round: plan.round, fork,
+  const loop = await runTables({ sessionId, round: plan.round, fork,
     rows: plan.askRows, stamps: plan.stamps, llm: options.llm,
     route: options.route(), journal,
     ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
@@ -237,12 +255,19 @@ function mergeSettled(plan: PrunePassPlan, loop: TableLoopOutcome): PrunePassApp
 /**
  * One settled answer back in the wire notation `applyPruneAnswers` reads. This
  * is the verdict's transport into core's merge, not a re-render of the ask: the
- * spans are the parser's normalized ones, so the second read is idempotent.
+ * spans are the parser's normalized ones, so the second read is idempotent. Each
+ * partial class is re-encoded under its OWN key: re-encoding a `forgetlines`
+ * answer as `keeplines` would flip its polarity and drop the kept lines instead
+ * of the dropped ones (ADR-0026 §4).
  */
 function wireAnswerOf(answer: WireAnswer): Readonly<Record<string, unknown>> {
   const verdict = answer.verdict;
   if (verdict.action === 'keepall') return { keepall: true };
   if (verdict.action === 'forgetall') return { forgetall: verdict.summary ?? '' };
+  if (verdict.action === 'forgetlines') {
+    return { forgetlines: [...verdict.ranges.map(range => [range.from, range.to]),
+      answer.forgetlinesSummary ?? ''] };
+  }
   return { keeplines: [...verdict.ranges.map(range => [range.from, range.to]),
     answer.keeplinesSummary ?? ''] };
 }

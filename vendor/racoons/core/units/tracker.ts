@@ -1,10 +1,30 @@
 import type { Removal } from "../rules/types.js";
 import type { SessionId, UnitId } from "../types/identity.js";
-import type { SessionSnapshot, ToolResultNode } from "../types/transcript.js";
+import type { SessionSnapshot, ToolResultNode, TranscriptNode } from "../types/transcript.js";
 import { canonicalManifestBytes } from "../util/bytes.js";
 import { sha256Sync } from "../util/hash.js";
 import { WholeResultSegmenter } from "./segmenter.js";
 import type { ProcessingUnit, UnitSegmenter, UnitSpan } from "./types.js";
+
+/**
+ * ADR-0020 scope as selection: a candidate is a tool-result node or a
+ * processing unit cut from one.
+ *
+ * A `message` node (system, developer, user or assistant — the human's input and
+ * the agent's own output) and a `racoons-record` node are **not candidates**.
+ * They are not a protected class; they are simply never units, so no unit id
+ * exists for them and no rule, verdict, prune ask, manual forget or entry
+ * decision can name one. This predicate is the one selection rule: the tracker
+ * below mints from it, and every other lane resolves through the tracker
+ * (`engine/protocol.ts`'s askable set, `units/lookup.ts`'s forget resolution,
+ * the guard's verdict, proof and invalidation checks).
+ *
+ * It is a type predicate because a unit addresses bytes through a
+ * `ToolResultNode`; the type and the runtime check say the same thing.
+ */
+export function isCandidateNode(node: TranscriptNode): node is ToolResultNode {
+  return node.kind === "tool-result";
+}
 
 /**
  * Stable identity for one span of one node in one session. The hash covers the
@@ -64,20 +84,33 @@ export class UnitTracker {
     this.#segmenter = options.segmenter ?? new WholeResultSegmenter();
   }
 
-  /** Every unit of one node, in byte order. Below the bar: none. */
-  unitsFor(node: ToolResultNode): readonly ProcessingUnit[] {
+  /**
+   * Every unit of one node, in byte order. Below the bar: none.
+   *
+   * The scope rule lands here, at the one place units are minted (ADR-0020): a
+   * node that is not a toolcall result yields no unit whatever its size, so a
+   * caller cannot hand a message or a RACOONS record to a rule, a verdict, a
+   * prune ask, a manual forget or an entry decision. The check is runtime, not
+   * only typographic: the parameter is the whole node union, and a host that
+   * mislabels a message as a result still gets nothing.
+   */
+  unitsFor(node: TranscriptNode): readonly ProcessingUnit[] {
+    if (!isCandidateNode(node)) return [];
     return this.#segmenter.split(node, this.#barBytes).map(span => this.#unit(node, span));
   }
 
   /**
    * Every unit of every tool-result node in transcript order, deduplicated by
-   * id. A second snapshot of the same content returns the same ids.
+   * id. This is the product's one candidate set (ADR-0020 decision 1): a
+   * message — system, developer, user or assistant — and a RACOONS record are
+   * never units, so nothing downstream can name them. A second snapshot of the
+   * same content returns the same ids.
    */
   units(snapshot: SessionSnapshot): readonly ProcessingUnit[] {
     const seen = new Set<UnitId>();
     const result: ProcessingUnit[] = [];
     for (const node of snapshot.nodes) {
-      if (node.kind !== "tool-result") continue;
+      if (!isCandidateNode(node)) continue;
       for (const unit of this.unitsFor(node)) {
         if (seen.has(unit.id)) continue;
         seen.add(unit.id);

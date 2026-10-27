@@ -94,9 +94,10 @@ export function checkRevertApplication(c: CheckContext, candidate: Candidate): v
 }
 
 /**
- * Maps each forgotten node index to its unit and rendered receipt. The verdict
- * plans are the only source of removals on a verdict event; `checkVerdicts` has
- * already proven each removal is exactly one unit's span.
+ * Maps each reverted node index to its unit and rendered receipt. The verdict
+ * and proof plans are the only sources of removals on such an event;
+ * `checkVerdicts` and `checkProofs` have already proven each removal is exactly
+ * one unit's span.
  *
  * The candidate renames a note id to its rendered record id, so the lookup key
  * is that derived id, never the plan's own note id.
@@ -108,17 +109,17 @@ function forgottenUnits(
   const nodes = c.value.snapshot.nodes;
   const result = new Map<number, ForgottenUnit>();
   for (const plan of c.value.plans) for (const op of plan.operations) {
-    if (op.kind !== "verdict") continue;
+    if (op.kind !== "verdict" && op.kind !== "proof") continue;
     const removal = plan.removals.find(candidate => candidate.id === op.removalId);
     const source = removal?.sources[0];
     const index = source === undefined ? -1 : nodes.findIndex(node => node.id === source.source.nodeId);
     const receipt = receipts.get(renderedNoteId(c.value, plan.ruleId, op.noteId));
     if (source === undefined || index < 0 || receipt === undefined) {
-      report("invalid-note", "A verdict removal lacks its node or its rendered receipt", source?.source.nodeId ?? null);
+      report("invalid-note", `A ${op.kind} removal lacks its node or its rendered receipt`, source?.source.nodeId ?? null);
       return null;
     }
     if (result.has(index)) {
-      report("invalid-plan", "Two forgotten units share one node; a revert anchors one receipt per node",
+      report("invalid-plan", "Two reverted units share one node; a revert anchors one receipt per node",
         nodes[index]?.id ?? null);
       return null;
     }

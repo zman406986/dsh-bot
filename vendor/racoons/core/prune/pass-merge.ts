@@ -8,9 +8,8 @@
  * transcript byte appears anywhere — those are claims only an archive can make
  * true, and record-only archives none.
  *
- * An excluded unit is always kept, even when L1 proved it removable: protection
- * wins over every layer. The only throws are caller bugs, and they are the
- * reader's, not this module's. Answer data never throws.
+ * The only throws are caller bugs, and they are the reader's, not this module's.
+ * Answer data never throws.
  */
 
 import type { UnitId } from "../types/identity.js";
@@ -40,6 +39,16 @@ export type PruneL2Removal =
       readonly ranges: readonly KeptLineSpan[];
       /** The `keeplines` trailer summary, carried verbatim when the answer had one. */
       readonly keeplinesSummary?: string;
+      readonly answeredInRound: number;
+    }
+  | {
+      readonly unitId: UnitId;
+      readonly origin: "l2";
+      readonly action: "forgetlines";
+      /** 1-based line spans the unit DROPS, as the wire parser normalised them. */
+      readonly ranges: readonly KeptLineSpan[];
+      /** The `forgetlines` trailer summary, carried verbatim when the answer had one. */
+      readonly forgetlinesSummary?: string;
       readonly answeredInRound: number;
     }
   | {
@@ -86,7 +95,6 @@ export interface PrunePassApplication {
  * The decision document. L1's removals go in first, and an L2 answer never
  * overrides one: a byte proof outranks a verdict (today the ask cannot offer a
  * unit L1 proved, so the guard is a second lock). `keepall` produces nothing.
- * Excluded units drop out of removals and refusals alike; protection wins.
  *
  * `@internal` — `applyPruneAnswers` is the entry point; this is the second half
  * of it, exported so the answer reader and this document share one module graph.
@@ -110,15 +118,10 @@ export function mergePass(
     if (removal !== null) removed.set(unitId, removal);
   }
 
-  const excluded = new Set(plan.excluded.map(entry => entry.unitId));
   const removals: PruneRemoval[] = [];
   const kept: UnitId[] = [];
   const denied: PrunePassRefusal[] = [];
   for (const unit of plan.units) {
-    if (excluded.has(unit.id)) {
-      kept.push(unit.id);
-      continue;
-    }
     const removal = removed.get(unit.id);
     if (removal !== undefined) removals.push(removal);
     else kept.push(unit.id);
@@ -137,6 +140,14 @@ function l2Removal(unitId: UnitId, answer: WireAnswer): PruneL2Removal | null {
       unitId, origin: "l2", action: "keeplines", ranges: verdict.ranges,
       answeredInRound: verdict.answeredInRound,
       ...(answer.keeplinesSummary === undefined ? {} : { keeplinesSummary: answer.keeplinesSummary }),
+    };
+  }
+  if (verdict.action === "forgetlines") {
+    return {
+      unitId, origin: "l2", action: "forgetlines", ranges: verdict.ranges,
+      answeredInRound: verdict.answeredInRound,
+      ...(answer.forgetlinesSummary === undefined
+        ? {} : { forgetlinesSummary: answer.forgetlinesSummary }),
     };
   }
   return {

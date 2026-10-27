@@ -1,14 +1,12 @@
 import type { Episode } from "../episodes/types.js";
 import type { ByteRange } from "../types/identity.js";
 import type { TranscriptNode } from "../types/transcript.js";
-import type { ProtectedSet } from "./protection.js";
 import type { ValidationCode, ValidationInput, ValidationIssue } from "./types.js";
 
 export interface CheckContext {
   readonly value: ValidationInput;
   readonly nodes: ReadonlyMap<string, TranscriptNode>;
   readonly episodes: readonly Episode[];
-  readonly protection: ProtectedSet;
   readonly freshStart: number;
   readonly issues: ValidationIssue[];
 }
