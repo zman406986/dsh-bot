@@ -282,6 +282,39 @@ export interface CordisDshHostOptions {
    */
   dispatcherGenerationOf?: (sessionId: string) => number | null;
   /**
+   * Ticket 147: activate a USER-STARTED (generation-1) dispatcher that the
+   * host has resumed from durable state. The host calls this from its
+   * `agent/created` listener for a session with NO parent when the durable
+   * `sessionKind` projection says `"dispatcher"` — the same session the
+   * sidebar has been drawing a dispatcher glyph for since the restart.
+   *
+   * It routes into the same activation path the `/dsh-bot` command uses
+   * (`lifecycle.activate`, hence `bindActivation` → `onActivated` →
+   * `activateToolSurface`), so role, the 8 scoped tools, `recall`,
+   * `request_access`, the policy inject and the durability rebuild all come
+   * back together. The plugin's activation path is idempotent per session
+   * (`parent-agent.ts` `sessions` membership), and the host additionally
+   * deduplicates by session id before calling.
+   *
+   * Absent means "no reactivation path exists" — a stub host keeps the
+   * pre-147 dormant behavior.
+   */
+  onUserDispatcherResumed?: (agent: AgentLike, sessionId: string) => void;
+  /**
+   * Ticket 147: the session's durable dispatcher kind, as the host's
+   * session-projection registry answers it — `"dispatcher"` or `null`.
+   *
+   * The plugin supplies this because the registry is resolved through a
+   * guarded `ctx.get` on the plugin's own context (a bare `ctx.sessionProjections`
+   * read throws on a live cordis context that never injected the service),
+   * and because the projection key belongs to the plugin, not to the host.
+   * The host only asks; it never interprets the answer.
+   *
+   * Absent means "no durable kind readable" — the resumed-dispatcher check
+   * then does nothing, exactly as before ticket 147.
+   */
+  sessionKindOf?: (session: unknown) => "dispatcher" | null;
+  /**
    * Ticket 142 (owner ruling 2026-10-22 — children half): a worker this
    * plugin spawned was adopted back into the host's registry after the host
    * re-created its session (a cold resume on send). The plugin wires this to
@@ -728,6 +761,8 @@ export function createCordisDshHost(
   const onDispatcherSpawned = options?.onDispatcherSpawned;
   const dispatcherGenerationOf = options?.dispatcherGenerationOf;
   const onWorkerReattachedRaw = options?.onWorkerReattached;
+  const onUserDispatcherResumed = options?.onUserDispatcherResumed;
+  const sessionKindOfSession = options?.sessionKindOf;
 
   /**
    * Ticket 142: fire the re-attachment hook, never letting it break the
@@ -840,6 +875,16 @@ export function createCordisDshHost(
    * so one request is enough. Cleared when the resume call fails.
    */
   const resumeRequested = new Set<string>();
+  /**
+   * Ticket 147: user-started dispatchers this process already re-activated
+   * from the durable `sessionKind` projection. A host that announces the same
+   * resumed session twice must not run the activation path twice — the
+   * plugin's path is idempotent, but the projection read is the only authority
+   * here and one answered yes is enough. Never cleared for the process
+   * lifetime: the set is tiny (one entry per resumed top-level dispatcher) and
+   * a later re-announcement is the same session.
+   */
+  const resumedUserDispatchers = new Set<string>();
   /**
    * Ticket 138: wake turns the host was asked to open for a session that was
    * NOT live. They are parked here and re-opened by the activation hook — the
@@ -1468,6 +1513,61 @@ export function createCordisDshHost(
   }
 
   /**
+   * Ticket 147: re-activate a USER-STARTED dispatcher whose chat the host has
+   * resumed after a restart.
+   *
+   * The identity is the durable `sessionKind` projection, never a guess: it
+   * folds the session's own `/dsh-bot` command pair out of its persisted log
+   * (`sessionKindOf`, fail-closed) and is the same value the sidebar renders
+   * as a dispatcher glyph. A session whose projection says anything else — a
+   * normal chat, a worker, a session the fold never saw — is left alone, and
+   * so is every session while no registry answers.
+   *
+   * Why here rather than in the plugin: the listener is the one seam that
+   * hands us the live Agent at the moment its scope can still take
+   * registrations, and it is synchronous, so the activation lands before the
+   * resumed chat's first request builds its tool list. That is exactly what
+   * stops the host's "10 removed" notice: the previous request's header named
+   * the dispatcher surface, and the surface must exist again by the next one.
+   *
+   * Deduplication is by session id (`resumedUserDispatchers`), because a host
+   * may announce a session more than once and `onActivated` would otherwise
+   * run twice; the plugin's own activation path is idempotent as well, so both
+   * layers agree.
+   *
+   * A generation-1 dispatcher carries no `dispatcher_sessions` mark by design
+   * (`durable-marker.ts` `parseDispatcherMark` rejects generation 1), so the
+   * projection is the ONLY durable signal for this case — it is the primary
+   * route, not a fallback.
+   */
+  function resumeUserStartedDispatcher(
+    session: unknown,
+    agent: AgentLike,
+    sessionId: string,
+  ): void {
+    if (onUserDispatcherResumed === undefined) return;
+    if (sessionKindOfSession === undefined) return;
+    if (resumedUserDispatchers.has(sessionId)) return;
+    if (sessionKindOfSession(session) !== "dispatcher") return;
+    resumedUserDispatchers.add(sessionId);
+    try {
+      onUserDispatcherResumed(agent, sessionId);
+    } catch (error) {
+      // The agent is already live; a failed activation must not turn the
+      // host's resume into an error. The id stays recorded so a second
+      // announcement does not retry a path that just threw.
+      try {
+        console.warn(
+          `[multitask-dispatcher] resumed dispatcher ${sessionId} could not be re-activated:`,
+          error,
+        );
+      } catch {
+        // A broken console must not break the create path either.
+      }
+    }
+  }
+
+  /**
    * Worker composition for a child we are about to publish, plus (ticket
    * 118) dispatcher activation for a child WE reserved.
    *
@@ -1493,15 +1593,38 @@ export function createCordisDshHost(
   const offAgentCreated = ctx.on("agent/created", (payload: never) => {
     const record = payload as {
       agent?: {
-        session?: { header?: { parentSession?: unknown }; id?: unknown };
+        session?: {
+          header?: { parentSession?: unknown; delegationDepth?: unknown };
+          id?: unknown;
+        };
         ctx?: unknown;
       };
     };
     const child = record.agent;
     if (child === undefined) return;
     const parentSessionId = String(child.session?.header?.parentSession ?? "");
-    if (parentSessionId === "") return;
     const childSessionId = String(child.session?.id ?? "");
+    if (parentSessionId === "") {
+      // Ticket 147: a session with NO parent is never a subagent, so none of
+      // the child paths below apply — but it CAN be a user-started dispatcher
+      // the host just resumed, whose live activation died with the process.
+      // The durable projection is the only authority here; a normal chat, a
+      // worker, or a session whose kind cannot be read stays dormant.
+      if (childSessionId !== "") {
+        const depth = child.session?.header?.delegationDepth;
+        // A top-level session has no parent and depth 0 (absent means 0, the
+        // same reading `isTopLevel` uses). Anything else is not a chat the
+        // user could have run `/dsh-bot` in.
+        if (depth === undefined || depth === null || Number(depth) === 0) {
+          resumeUserStartedDispatcher(
+            child.session,
+            child as AgentLike,
+            childSessionId,
+          );
+        }
+      }
+      return;
+    }
     // Ticket 130: durable identity first — a resumed dispatcher is matched by
     // its mark, not by anything this process remembers.
     if (childSessionId !== "") {

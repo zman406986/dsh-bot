@@ -30,8 +30,10 @@ import {
   registerMicrocompact,
   resolveExecSessionId,
   resolveInboxJobText,
+  resolveSessionProjections,
   RESTART_DEGRADED_NOTICE,
   secretStoredAccessNotice,
+  sessionKindOf,
   startInboxWatcher,
   writeInboxCancelled,
   writeInboxFailed,
@@ -700,6 +702,32 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     // during apply (same deferred-closure rule as `pumpFor`).
     dispatcherGenerationOf: (sessionId) =>
       lifecycle.dispatcherGeneration(sessionId),
+    // Ticket 147: a USER-STARTED dispatcher the host resumed after a restart.
+    // The host asks for the durable kind of a parentless session; this closure
+    // answers it from the host's projection registry and routes a `dispatcher`
+    // answer into the SAME activation path `/dsh-bot` uses, so the 10-tool
+    // surface (8 scoped + recall + request_access), the policy and the
+    // durability rebuild all return with the chat.
+    //
+    // Both closures below run only from `agent/created`, long after apply —
+    // `lifecycle` is assigned by then (the deferred-closure rule above).
+    sessionKindOf: (session) =>
+      sessionKindOf(resolveSessionProjections(ctx), session),
+    onUserDispatcherResumed: (agent) => {
+      const outcome = lifecycle.activate(agent);
+      if (outcome.ok) return;
+      // `already-active-here` is the normal repeat case. Anything else means
+      // the durable answer and the live state disagree, and a silent no-op
+      // would leave the chat without its tools again — say so.
+      if (outcome.reason === "already-active-here") return;
+      try {
+        console.warn(
+          `[multitask-dispatcher] resumed dispatcher ${String(agent.session.id)} was not re-activated: ${outcome.reason}`,
+        );
+      } catch {
+        // A broken console must not break the create path either.
+      }
+    },
     // Ticket 142 (owner ruling 2026-10-22 — children half): the host adopted a
     // worker session it re-created. Resolve the ticket-59 unknown-state hold
     // into a live roster record so the worker is visible and stoppable again.

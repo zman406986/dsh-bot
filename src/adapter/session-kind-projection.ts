@@ -144,9 +144,25 @@ export interface SessionProjectionDefinitionLike<S> {
   readonly stateVersion: number;
 }
 
-/** Structural `ctx.sessionProjections` view (the `register` overload with a wire view). */
+/**
+ * Structural `ctx.sessionProjections` view: the `register` overload with a
+ * wire view, plus the synchronous state read added by ticket 147.
+ *
+ * `stateOf(session, key)` materializes every registered unit at the session's
+ * current log cursor and returns this unit's state, or `undefined` when the
+ * key is not registered (`dsh-session-projection/lib/index.js:126-131`). It is
+ * fully synchronous — that is why the resumed-dispatcher check rides it
+ * instead of the asynchronous marker-store read.
+ *
+ * Optional member so stub registries in tests stay minimal; a registry
+ * without it simply cannot answer the ticket-147 check.
+ */
 export interface SessionProjectionsRegistryLike {
   register(definition: SessionProjectionDefinitionLike<SessionKindProjectionState>): () => void;
+  stateOf?(
+    session: unknown,
+    key: string,
+  ): SessionKindProjectionState | undefined;
 }
 
 /** The child context `ctx.inject` hands back once the service is available. */
@@ -322,6 +338,90 @@ export function parseDispatcherSessionKind(
   throw new Error(
     `sessionKind wire value must be "${DISPATCHER_SESSION_KIND}" or null`,
   );
+}
+
+/**
+ * Structural `ctx.sessionProjections` view as the RESUME path reads it
+ * (ticket 147): just the synchronous state read. Kept separate from
+ * {@link SessionProjectionsRegistryLike} so the registration side and the
+ * read side can be stubbed independently.
+ */
+export interface HostSessionProjectionsLike {
+  stateOf?(session: unknown, key: string): unknown;
+}
+
+/**
+ * Context surface for the READ side (ticket 147). `get` is cordis's guarded
+ * service read — the same route the microcompact pass uses for `tokenMeter`,
+ * and the reason a live plugin context must not touch `ctx.sessionProjections`
+ * directly: cordis throws for a property the context never injected, and this
+ * service is optional by design. The direct property is the stub-test fallback.
+ */
+export interface SessionProjectionReadHostLike {
+  get?(name: string): unknown;
+  readonly sessionProjections?: HostSessionProjectionsLike;
+}
+
+/**
+ * Ticket 147: resolve the host's projection registry without ever throwing.
+ * `undefined` means "no registry" — the resumed-dispatcher check then does
+ * nothing, which is the pre-147 behavior.
+ */
+export function resolveSessionProjections(
+  ctx: SessionProjectionReadHostLike,
+): HostSessionProjectionsLike | undefined {
+  if (typeof ctx.get === "function") {
+    try {
+      const service = ctx.get("sessionProjections");
+      if (typeof service === "object" && service !== null) {
+        return service as HostSessionProjectionsLike;
+      }
+    } catch {
+      // Absent (or not yet active): fall through to the direct stub property.
+    }
+  }
+  try {
+    return ctx.sessionProjections;
+  } catch {
+    // A live cordis context throws on an un-injected property read.
+    return undefined;
+  }
+}
+
+/**
+ * Ticket 147: the durable dispatcher kind of one session, read from the
+ * host's projection registry — `"dispatcher"` only when the projection says
+ * so; `null` for anything else (no registry, key not registered, inactive,
+ * unreadable).
+ *
+ * This is the resume seam's authority, and it is deliberately fail-CLOSED: a
+ * registry without `stateOf`, a throw inside the fold, or any state that does
+ * not answer `active: true` all read as "not a dispatcher", so a resumed
+ * session is never activated on a guess. The durable fact itself comes from
+ * the session's own command log, folded by
+ * {@link applySessionKindProjection} — the same unit whose wire value draws
+ * the client glyph, so the sidebar and the tool surface cannot disagree.
+ *
+ * `session` is the live host `Session` (its log is the fold source). The
+ * structural view keeps this file free of host imports.
+ */
+export function sessionKindOf(
+  registry: HostSessionProjectionsLike | undefined,
+  session: unknown,
+): DispatcherSessionKind | null {
+  if (registry === undefined || typeof registry.stateOf !== "function") {
+    return null;
+  }
+  let state: unknown;
+  try {
+    state = registry.stateOf(session, SESSION_KIND_PROJECTION_KEY);
+  } catch {
+    // A projection that cannot answer must never activate a session.
+    return null;
+  }
+  if (typeof state !== "object" || state === null) return null;
+  const active = (state as { active?: unknown }).active;
+  return active === true ? DISPATCHER_SESSION_KIND : null;
 }
 
 /**
