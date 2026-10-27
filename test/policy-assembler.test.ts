@@ -157,7 +157,9 @@ describe("per-turn reminder assembler", () => {
       "short turn",
       "spawn",
       "steer",
-      "todo before spawn",
+      // Ticket 151: the reminder no longer orders a todo entry BEFORE the
+      // spawn (the spawn creates it); it states that each spawn records one.
+      "each spawn records its own todo entry",
       "reconcile",
       "never message the user",
       "never name the machinery",
@@ -255,8 +257,14 @@ describe("spawned dispatcher policy variant (ticket 141)", () => {
     // Computed from `git show HEAD:src/core/policy/prompts.ts` BEFORE the
     // first ticket-141 edit (2026-10-24): the user-started prompt must not
     // change, not even by one byte.
+    //
+    // Re-pinned by ticket 151 (2026-10-28): the review required the
+    // "write a todo entry before you spawn" line to describe the shipped
+    // behavior — the spawn creates the entry. That is an intentional,
+    // ticket-scoped copy change; the pin moves with it so any OTHER drift
+    // still fails here.
     const SHIPPED_SHA256 =
-      "a60de604503c46b31b34b4adebf01839c6a49030be32ddaa24db32476dea09e5";
+      "2be8e8c792e170d2c56605ee5094ce078c882e85a4aaf557b7133bd1099c7371";
     const text = buildDispatcherPolicySection("user");
     assert.equal(
       createHash("sha256").update(text, "utf8").digest("hex"),

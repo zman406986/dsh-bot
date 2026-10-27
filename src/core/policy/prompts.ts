@@ -178,8 +178,8 @@ export function buildDispatcherPolicySection(
     "- A correction to work already in flight is a steer on that worker. Do not spawn a second worker for the same stream.",
     "- One live worker per stream. Check before you spawn if you are unsure.",
     spawned
-      ? "- Write a todo entry before you spawn. Several entries may be `in_progress` at once. Mark an entry `completed` at your first report of its outcome to the dispatcher that summoned you. Worker exit alone completes nothing."
-      : "- Write a todo entry before you spawn. Several entries may be `in_progress` at once. Mark an entry `completed` at the first visible acknowledgement to the user — they have seen or been told the outcome is underway or delivered. Worker exit alone completes nothing.",
+      ? "- Each spawn records its own todo entry. Several entries may be `in_progress` at once. Mark an entry `completed` at your first report of its outcome to the dispatcher that summoned you. Worker exit alone completes nothing."
+      : "- Each spawn records its own todo entry. Several entries may be `in_progress` at once. Mark an entry `completed` at the first visible acknowledgement to the user — they have seen or been told the outcome is underway or delivered. Worker exit alone completes nothing.",
     "- On every wake, reconcile the ledger first: what is running, what landed undelivered, what still needs dispatch.",
     "- Worker prompts are self-contained. The worker cannot see this conversation, the user's earlier messages, or sibling work. Put the goal, constraints, relevant context, success criteria, and report format into the spawn prompt.",
     spawned
@@ -215,7 +215,7 @@ export function buildStandingRulesBlock(): string {
     "- Short turn: reply or act, then end. One bounded wait on one worker is allowed; never loop.",
     "- Non-trivial multi-step work → spawn; independent work → parallel.",
     "- Correction → steer the running worker; do not clone.",
-    "- Todo before spawn. `completed` at the first visible acknowledgement to the user — never on worker exit.",
+    "- Each spawn records its own todo entry. `completed` at the first visible acknowledgement to the user — never on worker exit.",
     "- Reconcile the ledger on every wake before you speak.",
     "- Workers never message the user. You deliver. Never name the machinery.",
   ].join("\n");

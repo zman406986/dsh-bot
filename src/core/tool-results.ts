@@ -59,7 +59,9 @@ export type SpawnWorkerToolResult =
         | "duplicate-stream-key"
         | "auto-review-refused"
         /** Ticket 151: a given `todo_id` named no ledger entry. No spawn ran. */
-        | "unknown-todo-id";
+        | "unknown-todo-id"
+        /** Ticket 151: the id already points at a worker. No spawn ran. */
+        | "todo-already-linked";
       readonly detail: string;
     };
 
