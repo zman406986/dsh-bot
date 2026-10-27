@@ -71,12 +71,12 @@ export const WORKER_SESSION_TABLE_NAME = "worker_sessions";
  * table set.
  *
  * Ticket 124: the `compaction_boundaries` table is added WITHOUT a version
- * bump. `dsh-storage-json`'s single layout rejects any stored unit version
- * that differs from the declared one (`lib/index.js:100-102`), so bumping to
- * 3 would refuse to open every existing marker store on upgrade — the opposite
- * of what a new optional table needs. A store written before this ticket opens
- * with the new table empty. Downgrades are not supported and are not a case
- * this repo claims.
+ * bump. A stored unit version that differs from the declared one refuses to
+ * open (see {@link DOMAIN_LEGACY_VERSIONS} for how older stores are still
+ * admitted), so bumping to 3 would refuse to open every existing marker store
+ * on upgrade — the opposite of what a new optional table needs. A store
+ * written before this ticket opens with the new table empty. Downgrades are
+ * not supported and are not a case this repo claims.
  *
  * Ticket 130: `dispatcher_sessions` is added the same way, same reason.
  *
@@ -84,6 +84,43 @@ export const WORKER_SESSION_TABLE_NAME = "worker_sessions";
  * existing store opens with the new table empty.
  */
 export const DOMAIN_VERSION = 2;
+
+/**
+ * Ticket 149: stored unit versions a read still accepts. The owner's live
+ * store was stamped version 1 (written before ticket 113 bumped the spec) and
+ * every `storageDomain.open` had thrown `version-mismatch` since, so no mark
+ * was read or written for about a month.
+ *
+ * Mechanism chosen from the installed library, not guessed
+ * (`@deepseek-ai/dsh-storage-json` 0.2.1-rc.2):
+ *
+ * - The `single` layout parses the one document and compares the stored
+ *   `unit.version` against the descriptor EXACTLY
+ *   (`lib/index.js:100-102`); `compatibleVersions` is never consulted there.
+ *   The backend contract says so outright: "`single`-layout reads stay
+ *   exact-version" (`dsh-storage/lib/types/backend.d.ts:65-66`). So declaring
+ *   `compatibleVersions: [1]` while staying `single` would change nothing.
+ * - The `per-record` layout builds `acceptedStamps` = current version plus
+ *   `compatibleVersions` (`lib/index.js:353-355`) and, when the unit tree
+ *   holds no document yet, BOOTSTRAPS it from a legacy whole-unit file
+ *   stamped with an accepted version (`bootstrapLegacyUnit`,
+ *   `lib/index.js:370-397`): each record is copied into a document stamped
+ *   with the CURRENT version, and the legacy file is never changed.
+ *
+ * That bootstrap is the library's own migration step. Declaring
+ * `layout: "per-record"` plus `compatibleVersions: [DOMAIN_LEGACY_VERSIONS]`
+ * therefore opens the v1 store once, rewrites its rows as version-2
+ * documents, and keeps the old file untouched on disk for inspection.
+ * Writes always stamp {@link DOMAIN_VERSION}.
+ *
+ * Recorded limit of that layout: a record key becomes a path segment and must
+ * match `[a-zA-Z0-9_-]+` (`lib/index.js:301-302`, `:581-584`). Host session
+ * ids and worker ids already match. Inbox `jobId`s come from an external
+ * queue file, where an exotic id (a dot, a space) would now reject at write
+ * instead of being stored; the inbox paths that write checkpoints already log
+ * and retry, so such a job is re-presented rather than lost.
+ */
+export const DOMAIN_LEGACY_VERSIONS: readonly number[] = [1];
 
 /**
  * Ticket 113: what we did to one inbox job, in OUR store (A5: the watched
@@ -347,6 +384,13 @@ export function markerDomainSpec(): unknown {
   return {
     name: MARKER_DOMAIN_NAME,
     version: DOMAIN_VERSION,
+    // Ticket 149: the library's own v1 migration route. `per-record` is what
+    // makes `compatibleVersions` mean anything (the `single` layout compares
+    // the stored stamp exactly); a legacy whole-unit file stamped with an
+    // accepted version is bootstrapped into current-version documents on the
+    // first open, unchanged on disk. See {@link DOMAIN_LEGACY_VERSIONS}.
+    layout: "per-record",
+    compatibleVersions: DOMAIN_LEGACY_VERSIONS,
     tables: {
       [MARKER_TABLE_NAME]: {
         valueSchema: markerValueSchema,
