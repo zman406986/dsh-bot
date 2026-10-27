@@ -71,6 +71,11 @@ async function setup(options?: {
 describe("dispatcher tools — spawn_worker", () => {
   it("maps 1:1 onto Multitask.spawnWorker and returns a do-not-wait ack", async () => {
     const { host, multitask, tools } = await setup();
+    multitask.createTodo({
+      sessionId: "session-1",
+      id: "t-1",
+      title: "Summarize RFCs",
+    });
     const spawn = byName(tools, SPAWN_WORKER_TOOL);
     const result = (await spawn.execute({
       stream_key: "todo-1",
@@ -107,6 +112,70 @@ describe("dispatcher tools — spawn_worker", () => {
     assert.equal(second.reason, "duplicate-stream-key");
     assert.ok(second.detail.includes("s-1"));
     assert.equal(host.spawnCalls.length, 1);
+  });
+
+  // Ticket 151: the dispatcher ledger was never written in live use, so the
+  // per-turn reminder stayed `(empty)`. Ruling 2026-10-28: the spawn itself
+  // creates the linked entry from the title it is already given.
+  it("without todo_id, creates exactly one linked ledger entry from the title", async () => {
+    const { host, multitask, tools } = await setup();
+    const result = (await byName(tools, SPAWN_WORKER_TOOL).execute({
+      stream_key: "rfc-work",
+      title: "Summarize RFCs",
+      prompt: "Summarize the three auth RFCs.",
+    })) as SpawnWorkerToolResult;
+
+    assert.ok(result.ok);
+    if (!result.ok) return;
+    assert.equal(host.spawnCalls.length, 1);
+    const todos = multitask.listTodos("session-1");
+    assert.equal(todos.length, 1);
+    const todo = todos[0];
+    assert.ok(todo);
+    assert.equal(todo.title, "Summarize RFCs");
+    assert.equal(todo.streamKey, "rfc-work");
+    assert.equal(todo.workerId, result.worker_id);
+    assert.equal(todo.status, "pending");
+  });
+
+  it("an unknown todo_id is refused before spawn and the ledger stays untouched", async () => {
+    const { host, multitask, tools } = await setup();
+    const result = (await byName(tools, SPAWN_WORKER_TOOL).execute({
+      stream_key: "rfc-work",
+      title: "Summarize RFCs",
+      prompt: "Summarize the three auth RFCs.",
+      todo_id: "typo-1",
+    })) as SpawnWorkerToolResult;
+
+    assert.ok(!result.ok);
+    if (result.ok) return;
+    assert.equal(result.reason, "unknown-todo-id");
+    assert.ok(result.detail.includes("typo-1"));
+    assert.equal(host.spawnCalls.length, 0);
+    assert.deepEqual(multitask.listTodos("session-1"), []);
+  });
+
+  it("a failed spawn leaves no ledger entry behind", async () => {
+    const host = new FakeDshHost();
+    host.spawnWorker = async () => {
+      throw new Error("host exploded");
+    };
+    const multitask = createMultitask(host);
+    const tools = createDispatcherTools({
+      multitask,
+      getSessionId: () => "session-1",
+    });
+    await assert.rejects(
+      () =>
+        byName(tools, SPAWN_WORKER_TOOL).execute({
+          stream_key: "rfc-work",
+          title: "Summarize RFCs",
+          prompt: "Summarize the three auth RFCs.",
+        }),
+      /host exploded/,
+    );
+    assert.deepEqual(multitask.listTodos("session-1"), []);
+    assert.equal(multitask.listWorkers("session-1").length, 0);
   });
 
   it("requires a bound dispatcher session", async () => {

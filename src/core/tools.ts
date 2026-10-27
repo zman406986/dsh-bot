@@ -68,6 +68,7 @@ import {
 import type {
   DispatcherSpawnOptions,
   DispatcherSpawnResult,
+  SpawnResult,
   WorkerSummary,
 } from "./types.js";
 
@@ -723,7 +724,8 @@ export function createDispatcherTools(
           type: "string",
           required: false,
           description:
-            "Links the worker to a ledger entry. Prefer always setting it.",
+            "Links an existing ledger entry; an unknown id is refused. " +
+            "When omitted, the spawn creates the entry from the title.",
         },
       },
     },
@@ -733,6 +735,18 @@ export function createDispatcherTools(
       const title = requireString(args, "title");
       const prompt = requireString(args, "prompt");
       const todoId = optionalString(args, "todo_id");
+
+      // Ticket 151 (ruling 2026-10-28): a GIVEN todo_id must name an
+      // existing entry. A typo is a refusal, never a silent new entry.
+      if (todoId !== undefined && multitask.todos.get(todoId) === undefined) {
+        return {
+          ok: false,
+          reason: "unknown-todo-id",
+          detail:
+            `todo entry "${todoId}" does not exist; omit todo_id to let ` +
+            `the spawn create the entry, or pass an existing id`,
+        };
+      }
 
       // Ticket 69 (chunk A, design §4): worker-dispatch posture gate.
       // Miss → spawn proceeds exactly as shipped, no approval-seam call.
@@ -780,15 +794,39 @@ export function createDispatcherTools(
         postureGated = true;
       }
 
+      // Ticket 151 (ruling 2026-10-28, PM under owner grant): no todo_id →
+      // the spawn itself creates the linked ledger entry. The entry is
+      // system-authored and lifecycle-bound (ADR-0007 / DD-164: no
+      // model-invoked create tool), built from the title the model already
+      // passes. Created BEFORE the spawn so §6.1's "todo entry before spawn"
+      // holds; `noteTurnStarted` later promotes it to in_progress.
+      let createdTodoId: string | null = null;
+      if (todoId === undefined) {
+        createdTodoId = multitask.createTodo({
+          sessionId: parentSessionId,
+          title,
+          streamKey,
+        }).id;
+      }
+      const linkedTodoId = todoId ?? createdTodoId ?? undefined;
       const request = {
         parentSessionId,
         streamKey,
         title,
         prompt,
-        ...(todoId !== undefined ? { todoId } : {}),
+        ...(linkedTodoId !== undefined ? { todoId: linkedTodoId } : {}),
       };
-      const result = await multitask.spawnWorker(request);
+      let result: SpawnResult;
+      try {
+        result = await multitask.spawnWorker(request);
+      } catch (error) {
+        // A failed spawn must leave the ledger untouched: drop only the
+        // entry this call created (a caller-given id is never touched).
+        if (createdTodoId !== null) multitask.todos.prune(createdTodoId);
+        throw error;
+      }
       if (!result.ok) {
+        if (createdTodoId !== null) multitask.todos.prune(createdTodoId);
         return {
           ok: false,
           reason: "duplicate-stream-key",

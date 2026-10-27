@@ -76,7 +76,7 @@ export const DISPATCHER_TOOL_NAMES = [
 /** Model-facing tool descriptions (new copy). */
 export const TOOL_DESCRIPTIONS = {
   [SPAWN_WORKER_TOOL]:
-    "Start a background worker for one stream of work. Give it a complete, standalone prompt: it does not see this conversation. Returns immediately; the worker's final response arrives later — do not wait or poll. One live worker per stream_key. Write a todo entry first when the work is user-visible.",
+    "Start a background worker for one stream of work. Give it a complete, standalone prompt: it does not see this conversation. Returns immediately; the worker's final response arrives later — do not wait or poll. One live worker per stream_key. Each spawn records its own ledger entry — give every spawn a clear title that says what the work is.",
   [CHECK_WORKERS_TOOL]:
     "List your running and recent workers, or inspect one by id. Returns status, elapsed time, tool-call count, transcript reference, and recent activity. Use this when the user asks what is in flight — not as a wait loop.",
   [STEER_WORKER_TOOL]:

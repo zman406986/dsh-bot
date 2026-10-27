@@ -55,7 +55,11 @@ export type SpawnWorkerToolResult =
     }
   | {
       readonly ok: false;
-      readonly reason: "duplicate-stream-key" | "auto-review-refused";
+      readonly reason:
+        | "duplicate-stream-key"
+        | "auto-review-refused"
+        /** Ticket 151: a given `todo_id` named no ledger entry. No spawn ran. */
+        | "unknown-todo-id";
       readonly detail: string;
     };
 
