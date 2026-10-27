@@ -1,6 +1,6 @@
-# RACOONS overlay for the racoons-integration worktree.
-# Run from that worktree: dsh --profile web --patch dev/cordis.racoons.patch.yml
-# The plugin path resolves relative to this patch, so it uses this worktree's build.
+# RACOONS overlay for the main checkout.
+# Run from the repo root: dsh --profile web --patch dev/cordis.racoons.patch.yml
+# The plugin path resolves relative to this patch, so it uses this checkout's build.
 #
 # Ticket 145: racoons mounts unconditionally while the plugin is enabled, so
 # there is no on/off switch here any more. This overlay only pins the test
