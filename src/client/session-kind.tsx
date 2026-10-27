@@ -7,21 +7,22 @@
  *
  * ## Where each kind can be marked (verified against dsh 0.2.1-rc.2)
  *
- * - **Only the sidebar leading cell is licensed.** ADR-0024's 2026-10-18
+ * - **Two seats are licensed, by two dated rulings.** ADR-0024's 2026-10-18
  *   rider permits "exactly one additional additive registration, and it is
- *   this one ... no other slot is licensed by this rider". That one seat is
- *   `sidebar.session.row.leading`.
+ *   this one ... no other slot is licensed by this rider" — the SIDEBAR cell
+ *   `sidebar.session.row.leading`. The 2026-10-28 ruling (ticket 140) extends
+ *   it with the child's OWN conversation header
+ *   (`conversation.session.header.actions`), because a spawned dispatcher is
+ *   a subagent child and has no sidebar row.
  * - **Workers are not sidebar rows.** Subagent sessions carry the durable
  *   header flag `origin: 'subagent'` (`dsh-subagent/lib/index.js:354`) and
  *   the stock sidebar drops them (`dsh-client-ui-workspace/lib/client.js:965`).
  *   `sidebar.session.row.leading` therefore never mounts for a worker, so the
  *   worker half of the owner's three-way request has no licensed seat.
- * - **The conversation header is NOT composed (declined, not forgotten).**
- *   `conversation.session.header.actions` is a real additive `list` seat and
- *   would be the worker's only visible location, but ADR-0024's rider does
- *   not license it. Ticket 123 records the header part as declined pending a
- *   fresh dated human ruling extending the rider. The generic glyph factory
- *   below still supports the `worker` kind so that ruling lands as a
+ * - **The worker marker in the header is still NOT composed.** Ticket 123
+ *   recorded the worker half as declined (2026-10-22). The ticket-140 ruling
+ *   covers the DISPATCHER mark only, at that seat. The generic glyph factory
+ *   below still supports the `worker` kind so a later ruling lands as a
  *   composition edit, not a rewrite.
  * - **`conversation.session.header.lineage` remains an unsafe seat** if that
  *   ruling ever comes: it is a `single` slot
@@ -231,6 +232,31 @@ export const SESSION_KIND_COPY_KEYS = {
   worker: "indicator.worker",
 } as const;
 
+/**
+ * The session's own conversation header actions band (dsh-owned LIST slot,
+ * scope `session`, owner `ConversationHeaderActionOwnerProps` =
+ * `{ children?: never }` — no owner values; `slots.d.ts:231-234`, `:440-443`).
+ *
+ * Ticket 140 + its 2026-10-28 ruling: this is the SECOND additive seat, and
+ * it exists because a spawned dispatcher is a subagent child — stock dsh
+ * hides every `origin: 'subagent'` session from the sidebar
+ * (`dsh-client-ui-workspace/lib/client.js:964-965`), so the licensed sidebar
+ * cell never mounts for it. Its own conversation is the only place the mark
+ * can reach. Stock occupants of the band: `agent-team` at -20, `agent-preset`
+ * at -10, `subagent-catalog` at 10 (`dsh-client-ui-subagent/lib/client.js:983-989`)
+ * and `job-list` at 20 (`dsh-client-ui-jobs/lib/client.js:627-635`), so an
+ * additive entry at a higher order never shadows any of them.
+ */
+export const SESSION_HEADER_ACTIONS_SLOT = "conversation.session.header.actions";
+
+/** Header chip order: above every stock occupant (`subagent-catalog` at 10,
+ * `job-list` at 20 — `dsh-client-ui-jobs/lib/client.js:627-635`), so it is
+ * additive and never shadows one. */
+export const DISPATCHER_HEADER_GLYPH_ORDER = 30;
+
+/** Entry id the dispatcher header chip carries. */
+export const DISPATCHER_HEADER_GLYPH_ENTRY_ID = "multitask-dispatcher-header-kind";
+
 /** The three kinds the owner ruling names. */
 export type SessionKind = "dispatcher" | "worker" | "normal";
 
@@ -281,6 +307,33 @@ export function resolveSessionKind(
 }
 
 /**
+ * Header-chip resolution (ticket 140 ruling, 2026-10-28): reads
+ * `projectionValues.sessionKind` DIRECTLY and ignores `origin`.
+ *
+ * This seat is the session's OWN conversation, not a list row: the projection
+ * is per-session (the fold reads that session's own log plus the adapter's
+ * dispatcher-mark mirror), so a worker's row can never say `"dispatcher"`.
+ * `origin`-first exists to stop a worker INHERITING a parent's mark in the
+ * sidebar; there is nothing to inherit here. The spawned dispatcher IS a
+ * subagent child, so routing this seat through {@link resolveSessionKind}
+ * would resolve it `"worker"` and render nothing — the exact bug this
+ * ticket fixes.
+ *
+ * Never throws; anything unexpected resolves `normal` (renders nothing).
+ */
+export function resolveHeaderDispatcherKind(
+  facts: SessionKindFactsLike | null | undefined,
+): SessionKind {
+  if (typeof facts !== "object" || facts === null) return "normal";
+  const kind =
+    typeof facts.projectionValues === "object" &&
+    facts.projectionValues !== null
+      ? facts.projectionValues.sessionKind
+      : undefined;
+  return kind === DISPATCHER_PROJECTION_VALUE ? "dispatcher" : "normal";
+}
+
+/**
  * One list-slot entry's registration options (the shape the stock schedule
  * and subagent packages use: `name` + unique `id` + `order` + `locale`).
  * `priority` is deliberately omitted: list entries are keyed by `id`, and the
@@ -299,14 +352,28 @@ export interface SessionKindGlyphRegistrationOptions {
  * marks an activated dispatcher session durably, so the glyph has a real
  * identity to key on.
  *
- * A worker/header registration is deliberately absent: that seat is not
- * licensed (ticket 123 §B, declined 2026-10-22).
+ * The header chip (below) is the second, separately ruled seat (2026-10-28,
+ * ticket 140), not a widening of this one.
  */
 export function dispatcherGlyphRegistration(): SessionKindGlyphRegistrationOptions {
   return {
     name: SIDEBAR_LEADING_SLOT,
     id: DISPATCHER_GLYPH_ENTRY_ID,
     order: DISPATCHER_GLYPH_ORDER,
+    locale: LOCALE_NAMESPACE,
+  };
+}
+
+/**
+ * The dispatcher header chip's registration (ticket 140 ruling, 2026-10-28):
+ * the session's own conversation header, additive beside the stock
+ * `subagent-catalog` entry at order 10.
+ */
+export function dispatcherHeaderGlyphRegistration(): SessionKindGlyphRegistrationOptions {
+  return {
+    name: SESSION_HEADER_ACTIONS_SLOT,
+    id: DISPATCHER_HEADER_GLYPH_ENTRY_ID,
+    order: DISPATCHER_HEADER_GLYPH_ORDER,
     locale: LOCALE_NAMESPACE,
   };
 }
@@ -327,21 +394,15 @@ export interface SessionKindGlyphProps {
 type MarkedKind = Exclude<SessionKind, "normal">;
 
 /**
- * The resolved glyph body. A separate component on purpose: it always calls
- * `useSessions`, so the outer factory never has a conditional hook.
- *
- * `normal` — and any session the snapshot cannot resolve — renders `null`.
+ * One rendered mark: the wrapper span (accessible name, `role="img"`, the
+ * `data-session-kind` test/styling hook) plus — for the dispatcher — the bot
+ * portrait and its stylesheet. Shared by the sidebar cell and the header chip
+ * (ticket 140) so both seats render the identical `◆`-era mark.
  */
-function KindGlyphBody(props: {
+function SessionKindMark(props: {
   readonly kind: MarkedKind;
   readonly label: string;
-  readonly sessionId: string;
-  readonly useSessions: UseSessionsLike;
-}): JSX.Element | null {
-  const resolved = props.useSessions((state) =>
-    resolveSessionKind(state?.byId?.[props.sessionId]),
-  );
-  if (resolved !== props.kind) return null;
+}): JSX.Element {
   const mark = (
     <span
       className="multitask-dispatcher-kind-glyph"
@@ -366,6 +427,26 @@ function KindGlyphBody(props: {
 }
 
 /**
+ * The resolved glyph body. A separate component on purpose: it always calls
+ * `useSessions`, so the outer factory never has a conditional hook.
+ *
+ * `normal` — and any session the snapshot cannot resolve — renders `null`.
+ */
+function KindGlyphBody(props: {
+  readonly kind: MarkedKind;
+  readonly label: string;
+  readonly sessionId: string;
+  readonly useSessions: UseSessionsLike;
+  readonly resolve: (facts: SessionKindFactsLike | undefined) => SessionKind;
+}): JSX.Element | null {
+  const resolved = props.useSessions((state) =>
+    props.resolve(state?.byId?.[props.sessionId]),
+  );
+  if (resolved !== props.kind) return null;
+  return <SessionKindMark kind={props.kind} label={props.label} />;
+}
+
+/**
  * Build the glyph component for one kind. The factory binds the translate
  * seat and the mark at registration time, so the renderer-controlled props
  * face stays fully defensive:
@@ -379,6 +460,36 @@ function KindGlyphBody(props: {
 export function createSessionKindGlyph(
   kind: MarkedKind,
   t: TranslateFn,
+): (props: SessionKindGlyphProps) => JSX.Element | null {
+  return createKindGlyph(kind, t, resolveSessionKind);
+}
+
+/**
+ * Build the header chip (ticket 140 ruling, 2026-10-28): the dispatcher mark
+ * for a session's OWN conversation header, resolved from
+ * `projectionValues.sessionKind` directly ({@link resolveHeaderDispatcherKind})
+ * rather than through the sidebar's `origin`-first rule.
+ *
+ * That difference is the whole point: a spawned dispatcher is
+ * `origin: 'subagent'`, so `origin`-first would resolve it `"worker"` and the
+ * chip would never render. `resolveSessionKind` keeps its `origin`-first
+ * order untouched (ADR-0027 §Settled 5); only this seat reads the projection
+ * alone, and the projection is per-session (see the resolver's own note).
+ *
+ * Same defensive face as the sidebar factory: missing id/hook or a
+ * non-dispatcher session renders `null` without calling a hook.
+ */
+export function createSessionHeaderKindGlyph(
+  t: TranslateFn,
+): (props: SessionKindGlyphProps) => JSX.Element | null {
+  return createKindGlyph("dispatcher", t, resolveHeaderDispatcherKind);
+}
+
+/** The shared factory body for both seats (the sidebar cell and the header chip). */
+function createKindGlyph(
+  kind: MarkedKind,
+  t: TranslateFn,
+  resolve: (facts: SessionKindFactsLike | undefined) => SessionKind,
 ): (props: SessionKindGlyphProps) => JSX.Element | null {
   const label = t(SESSION_KIND_COPY_KEYS[kind]);
   return function SessionKindGlyph(
@@ -398,6 +509,7 @@ export function createSessionKindGlyph(
         label={label}
         sessionId={sessionId}
         useSessions={useSessions}
+        resolve={resolve}
       />
     );
   };

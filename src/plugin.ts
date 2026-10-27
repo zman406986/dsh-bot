@@ -483,7 +483,15 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   // marking their sessions. Per-session by construction: the pair lands in
   // the invoking session's log only (ADR-0019). Registration is an effect
   // on the calling fiber, so unloading this plugin removes the key.
-  registerSessionKindProjection(ctx);
+  // Ticket 140: the unit ALSO consults the host's in-memory dispatcher-mark
+  // mirror, so a spawned dispatcher child — whose own log carries no
+  // `/dsh-bot` settlement — still projects `"dispatcher"`. The host does not
+  // exist at this line (it is constructed below), so the probe is a
+  // LATE-BOUND thunk: `init` calls it at `session/created`, long after the
+  // host binding is assigned. A null probe (host not built yet) reads as "not
+  // marked", which is the pre-140 behavior.
+  let dispatcherMarkProbe: ((sessionId: string) => boolean) | null = null;
+  registerSessionKindProjection(ctx, () => dispatcherMarkProbe ?? undefined);
 
   const markers: StorageDomainDurability = createStorageDomainDurability(
     ctx.storageDomain,
@@ -739,6 +747,10 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       multitaskRef?.reclaimWorker(workerId, parentSessionId);
     },
   });
+  // Ticket 140: the projection unit's late-bound probe now resolves. Bound
+  // AFTER construction so the unit never captured an uninitialized `host`;
+  // `init` only runs on `session/created`, which cannot happen during apply.
+  dispatcherMarkProbe = (sessionId) => host.isDurablyMarkedDispatcher(sessionId);
   const accessTimeoutMs = config.accessRequestTimeoutMs?.get();
   // Ticket 108: clamped defensively here too — the schema enforces min 0,
   // but apply() must never trust raw config for a window that arms timers.

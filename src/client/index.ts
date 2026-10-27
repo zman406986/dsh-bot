@@ -26,11 +26,12 @@
  *    for the row `<package name>#<settings namespace>`, whose form comes from
  *    the slot owner's props (0.2.1 replaced the removed `settings.plugin.item`
  *    slot and `ctx.settingsScope` service with this path);
- * 4. the session-kind indicator (ticket 123): ONE additive `list` entry in
- *    the stock sidebar row's leading cell — the dispatcher glyph. That is the
- *    only seat ADR-0024's rider licenses ("exactly one additional additive
- *    registration ... no other slot is licensed"); the worker marker in the
- *    conversation header is declined there and not composed.
+ * 4. the session-kind indicators (ticket 123; extended by ticket 140):
+ *    the dispatcher glyph in the stock sidebar row's leading cell (the seat
+ *    ADR-0024's rider licenses), plus the dispatcher header chip in a
+ *    session's own conversation header (the 2026-10-28 ruling — a spawned
+ *    dispatcher has no sidebar row). The WORKER marker is still declined and
+ *    not composed in either seat.
  *
  * The roster/config watch and its feeds are NOT composed: no client service
  * serves that document on 0.2.1. `mountShellPage` and the shell-mount
@@ -122,8 +123,10 @@ import {
 } from "./onboarding.js";
 import { createOnboardingPane } from "./onboarding-pane.js";
 import {
+  createSessionHeaderKindGlyph,
   createSessionKindGlyph,
   dispatcherGlyphRegistration,
+  dispatcherHeaderGlyphRegistration,
 } from "./session-kind.js";
 
 /**
@@ -286,24 +289,21 @@ export function applyClientModule(
     );
   });
 
-  // Session-kind indicator (ticket 123; ADR-0024 rider + addendum): exactly
-  // ONE additive list entry, the dispatcher glyph in the stock sidebar row's
-  // 16px leading cell (`sidebar.session.row.leading`).
+  // Session-kind indicator (ticket 123; ADR-0024 rider + addendum): the
+  // dispatcher glyph in the stock sidebar row's 16px leading cell
+  // (`sidebar.session.row.leading`).
   //
   // The ADR-0024 rider (2026-10-18) licenses "exactly one additional additive
   // registration, and it is this one ... no other slot is licensed by this
-  // rider". The worker marker in `conversation.session.header.actions`, which
-  // an earlier revision of this composition also registered, is therefore NOT
-  // composed: that seat is a different slot and needs a fresh dated human
-  // ruling extending the rider. The glyph factory and the worker kind stay
-  // exported from `session-kind.tsx` as retained, uncomposed machinery so the
-  // ruling can later be honoured at this one composition point.
+  // rider". The header seat below is a SEPARATE, later dated ruling (ticket
+  // 140, 2026-10-28) extending the rider — not a widening of this one.
   //
   // Identity: dispatchers are identified by the `sessionKind` projection the
   // adapter registers, which folds the `command/run` + `command/done` pair
-  // `/dsh-bot` already writes — so the identity is durable and needs no event
-  // of our own. `agentPreset` is unusable here (every durable header reads
-  // "standard").
+  // `/dsh-bot` already writes (plus, since ticket 140, the adapter's
+  // dispatcher-mark mirror at `init` for spawned children) — so the identity
+  // is durable and needs no event of our own. `agentPreset` is unusable here
+  // (every durable header reads "standard").
   ctx.slots.inject(
     dispatcherGlyphRegistration().name,
     () => {
@@ -311,6 +311,26 @@ export function applyClientModule(
       return ctx.slots.register(
         dispatcherGlyphRegistration(),
         createSessionKindGlyph("dispatcher", t),
+      );
+    },
+  );
+
+  // Session-kind header chip (ticket 140; ruling 2026-10-28): a spawned
+  // dispatcher is `origin: 'subagent'`, and stock dsh hides those sessions
+  // from the sidebar — so the licensed sidebar cell never mounts for it. Its
+  // own conversation header is the only reachable seat. Additive in the same
+  // list band, above every stock occupant (`subagent-catalog` at 10,
+  // `job-list` at 20); it reads `projectionValues.sessionKind` directly
+  // (per-session, no `origin` gate), because the child IS a subagent and the
+  // sidebar's origin-first rule would resolve it "worker".
+  // `resolveSessionKind` is untouched.
+  ctx.slots.inject(
+    dispatcherHeaderGlyphRegistration().name,
+    () => {
+      const t = ctx.locale.bind(LOCALE_NAMESPACE);
+      return ctx.slots.register(
+        dispatcherHeaderGlyphRegistration(),
+        createSessionHeaderKindGlyph(t),
       );
     },
   );

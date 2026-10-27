@@ -373,7 +373,9 @@ describe("session-kind projection — state durability", () => {
 describe("session-kind projection — registration", () => {
   it("declares the contract's key, wire view, and state version", () => {
     assert.equal(SESSION_KIND_PROJECTION_KEY, "sessionKind");
-    assert.equal(SESSION_KIND_PROJECTION_STATE_VERSION, 1);
+    // v2 (ticket 140): `init` also consults the dispatcher-mark mirror, which
+    // changes what a v1 row would have cached for a spawned child.
+    assert.equal(SESSION_KIND_PROJECTION_STATE_VERSION, 2);
     assert.equal(
       SESSION_KIND_PROJECTION_DEFINITION.key,
       SESSION_KIND_PROJECTION_KEY,

@@ -2070,6 +2070,13 @@ export function createCordisDshHost(
       // correlation available while the spawn is in flight.
       const reservedChildId = randomUUID();
       reservedDispatcherIds.add(reservedChildId);
+      // Ticket 140: seed the durable-mark MIRROR with the reserved id BEFORE
+      // `startActivation`. The `sessionKind` projection unit's `init` runs at
+      // `session/created`, inside that call, and reads this mirror; the
+      // durable row is only written after the spawn resolves (below), so an
+      // unseeded init would durably cache the child as NOT a dispatcher. The
+      // seed is provisional — `finally` removes it when no child existed.
+      dispatcherMarks.set(reservedChildId, opts.parentSessionId);
       // Ticket 141: the child is one generation past its spawner. A
       // user-started dispatcher is generation 1 (the option is absent for
       // every pre-141 caller), so a direct spawn is generation 2.
@@ -2142,6 +2149,14 @@ export function createCordisDshHost(
         // seed moved under that id above.)
         if (spawnedId === null) {
           dispatcherGenerations.delete(reservedChildId);
+        }
+        // Ticket 140: the mirror never self-deletes and the peer fence
+        // (`src/core/multitask.ts`) reads it, so a failed spawn must not leave
+        // a phantom dispatcher mark. The same applies when the host minted its
+        // own id: the reservation never became a session, and the durable
+        // write above keyed the REAL child id instead.
+        if (spawnedId !== reservedChildId) {
+          dispatcherMarks.delete(reservedChildId);
         }
       }
     },

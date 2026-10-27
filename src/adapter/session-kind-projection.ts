@@ -88,8 +88,14 @@ export const SESSION_KIND_PROJECTION_KEY = "sessionKind";
 /**
  * Persisted-cache invalidation version. Bump whenever the state fields or
  * fold semantics change (`ProjectionDefinition.stateVersion`).
+ *
+ * v2 (ticket 140, 2026-10-28): `init` consults the adapter's dispatcher-mark
+ * mirror, so a spawned dispatcher child projects `"dispatcher"` from the
+ * moment its session is created. A v1 row was folded without that source and
+ * would durably cache the wrong kind for such a child, so the contract's
+ * invalidation rule applies: discard v1 rows and refold the log.
  */
-export const SESSION_KIND_PROJECTION_STATE_VERSION = 1;
+export const SESSION_KIND_PROJECTION_STATE_VERSION = 2;
 
 /** The one wire value this unit publishes. */
 export const DISPATCHER_SESSION_KIND = "dispatcher";
@@ -191,6 +197,63 @@ export const INITIAL_SESSION_KIND_STATE: SessionKindProjectionState =
     pendingStarts: Object.freeze([]) as readonly string[],
     pendingStops: Object.freeze([]) as readonly string[],
   });
+
+/**
+ * Frozen active state — the state a session whose id the dispatcher-mark
+ * mirror already knows starts from (ticket 140). Shared, never mutated: the
+ * fold copies on every transition, exactly like the initial state.
+ */
+export const ACTIVE_SESSION_KIND_STATE: SessionKindProjectionState =
+  Object.freeze({
+    active: true,
+    pendingStarts: Object.freeze([]) as readonly string[],
+    pendingStops: Object.freeze([]) as readonly string[],
+  });
+
+/**
+ * Ticket 140: the session id carried by the header the registry hands
+ * `init`. `header.id` is the host `SessionId` (`dsh-session/lib/types/
+ * types.d.ts:66`) and equals the id the session row is listed under. Any
+ * other shape answers null so the projection fails closed.
+ */
+export function sessionIdOfHeader(header: unknown): string | null {
+  if (typeof header !== "object" || header === null) return null;
+  const id = (header as { id?: unknown }).id;
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
+
+/**
+ * Ticket 140: the unit's `init` for a session whose dispatcher identity may
+ * already be known from the adapter's in-memory dispatcher-mark mirror.
+ *
+ * A spawned dispatcher is a host subagent child: its own log carries no
+ * `command/run` pair (nobody typed `/dsh-bot` in it), so the command fold
+ * alone would report it as NOT a dispatcher — and the projection cache would
+ * checkpoint that wrong kind durably. `spawnDispatcher` seeds the mirror with
+ * the reserved child id BEFORE `startActivation`, so by the time the host
+ * announces `session/created` the id is already known. The probe is a
+ * late-bound accessor: the unit is registered before the host object exists
+ * (`src/plugin.ts`), so this function must never capture a host instance.
+ *
+ * Fail-closed: no probe, an unreadable header, or a throwing probe all fall
+ * back to the empty state — a cosmetic indicator must never break the create
+ * path.
+ */
+export function initSessionKindProjection(
+  header: unknown,
+  isMarkedDispatcher?: (sessionId: string) => boolean,
+): SessionKindProjectionState {
+  if (isMarkedDispatcher === undefined) return INITIAL_SESSION_KIND_STATE;
+  const sessionId = sessionIdOfHeader(header);
+  if (sessionId === null) return INITIAL_SESSION_KIND_STATE;
+  let marked = false;
+  try {
+    marked = isMarkedDispatcher(sessionId) === true;
+  } catch {
+    marked = false;
+  }
+  return marked ? ACTIVE_SESSION_KIND_STATE : INITIAL_SESSION_KIND_STATE;
+}
 
 /** Defensive event-data read: null for anything but a plain object. */
 function eventDataOf(
@@ -442,6 +505,31 @@ export const SESSION_KIND_PROJECTION_DEFINITION: SessionProjectionDefinitionLike
   };
 
 /**
+ * Ticket 140: the same unit with an `init` that also consults the
+ * dispatcher-mark mirror, so a spawned dispatcher child projects
+ * `"dispatcher"` from its session's creation. Everything else is shared with
+ * {@link SESSION_KIND_PROJECTION_DEFINITION} by reference.
+ *
+ * `isMarkedDispatcher` is read at CALL time through the passed function, not
+ * captured as a host object: the unit is registered before the host exists.
+ *
+ * @param isMarkedDispatcher the late-bound mirror probe; omitted means the
+ *   command fold is the only source (the pre-140 shape).
+ */
+export function sessionKindProjectionDefinition(
+  isMarkedDispatcher?: () => ((sessionId: string) => boolean) | undefined,
+): SessionProjectionDefinitionLike<SessionKindProjectionState> {
+  if (isMarkedDispatcher === undefined) {
+    return SESSION_KIND_PROJECTION_DEFINITION;
+  }
+  return {
+    ...SESSION_KIND_PROJECTION_DEFINITION,
+    init: (header) =>
+      initSessionKindProjection(header, isMarkedDispatcher()),
+  };
+}
+
+/**
  * Register the unit through the host registry.
  *
  * Optional by design: a host without `sessionProjections` (older trees,
@@ -450,21 +538,27 @@ export const SESSION_KIND_PROJECTION_DEFINITION: SessionProjectionDefinitionLike
  * host), the registration is made on the injected child so unloading this
  * plugin removes the key with it.
  *
+ * @param isMarkedDispatcher ticket 140: a late-bound probe for the adapter's
+ *   dispatcher-mark mirror. The plugin registers this unit BEFORE the host
+ *   object exists, so the probe must be a thunk read at `init` time, never a
+ *   captured host reference. Omitted: the command fold is the only source.
  * @returns the registry's own disposer, or null when no registry answered.
  *   Registration is already an effect on the calling/injected fiber; the
  *   disposer exists for explicit early removal (tests, HMR teardown).
  */
 export function registerSessionKindProjection(
   ctx: SessionProjectionHostLike,
+  isMarkedDispatcher?: () => ((sessionId: string) => boolean) | undefined,
 ): (() => void) | null {
   let dispose: (() => void) | null = null;
+  const definition = sessionKindProjectionDefinition(isMarkedDispatcher);
   const registerOn = (host: SessionProjectionChildLike): void => {
     const registry = host.sessionProjections;
     if (registry === undefined || typeof registry.register !== "function") {
       return;
     }
     try {
-      dispose = registry.register(SESSION_KIND_PROJECTION_DEFINITION);
+      dispose = registry.register(definition);
     } catch (error) {
       // A cosmetic indicator must never break dispatcher activation: a host
       // that rejects the unit (e.g. a key/version conflict) leaves the client
