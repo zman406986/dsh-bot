@@ -81,7 +81,7 @@ Every field is a volatile setting of the plugin's `Config`, editable in dsh's Pl
 | `inboxRescanIntervalMs` | `5000` | Fallback rescan interval; clamped to a 1000 ms floor. |
 | `microcompactEnabled` | `false` | Clears the content of old tool results on dispatcher sessions at a fixed usage ratio. Off pending live verification. |
 
-Racoons is always on while the multitask plugin is enabled, and it covers the dispatcher session and every worker session, not just one of them. Removed content is restorable by its recall id, and the originals are stored durably per session under `<DSH_HOME>/storages/racoons` (one ledger file plus its blobs directory per session).
+Racoons is always on while the multitask plugin is enabled, and it covers every session in the process — the dispatcher, its workers, and plain chats alike. Removed content is restorable by its recall id, and the originals are stored durably per session under `<DSH_HOME>/storages/racoons` (one ledger file plus its blobs directory per session).
 
 ## Architecture
 
