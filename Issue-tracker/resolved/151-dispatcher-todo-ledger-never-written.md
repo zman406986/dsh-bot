@@ -1,6 +1,6 @@
 # 151 — The dispatcher todo ledger is never written in live use, so the per-turn reminder is always empty
 
-**Status:** open (review pending)
+**Status:** resolved
 **Labels:** needs-ruling
 **Blocked by:** — the shape ruling was recorded 2026-10-28 (see `## Ruling`); research answered.
 **Origin:** PRD gap scan 2026-10-28 — verified against the tree in a read-only pass; nothing implemented.
@@ -65,3 +65,16 @@ Label note: `needs-ruling` is not one of the five role strings listed in `agent.
 2026-10-28 (implementation, ticket-151-auto-ledger): auto-create implemented in the `spawn_worker` handler; an unknown explicit `todo_id` now refuses with `unknown-todo-id` before any spawn; a failed spawn prunes only the entry that call created. `test/dispatcher-tools.test.ts` gained the three cases (auto-create/linked, unknown-id refusal with ledger untouched, failed-spawn no phantom); file plus typecheck green. The S6/§13 "shipped" wording still needs the recording amendment if review wants it — not touched here.
 
 2026-10-28 (review round): blocker + four should-fixes landed on the same branch. (1) Ledger id sequence: `create()` with an explicit `todo-N` id now advances the generated counter past it (`src/core/todo-reconciler.ts`), so a restored `todo-1` no longer makes the next auto-created spawn throw — restart test added (`restored todo-1 → new spawn creates todo-2`). (2) EN policy copy at `prompts.ts:181-182` and the standing-rules line 218 reworded to "each spawn records its own todo entry"; ZH untouched. (3) Prune-on-failure is now conditional (`pruneIfUnlinked`): a throw from the durability marker write happens AFTER the worker was registered and the entry linked, so that entry is kept; test pins it. (4) The explicit-id refusal now also requires the entry to belong to the calling session and to have no linked worker (`todo-already-linked`); tests for both. (5) The duplicate-stream-key test now asserts the ledger (one entry, still linked to the first worker). Accepted reviewer notes 6-9 (result omits created id, wake-drain cosmetic reminder, mislabeled stream-key-held error, edited-case scope) are untouched. Tests: `dispatcher-tools` + `policy-assembler` + `todo-reconciler` + `durable-roster` = 87/87; adjacent `inbox-core`/`policy-peer-roster`/`adapter-policy-inject`/`delivery-obligation` = 62/62; typecheck core+client clean. The ticket-141 sha256 pin in `test/policy-assembler.test.ts` was re-pinned to the new intentional text, with the reason recorded beside it.
+
+## Resolution — 2026-10-28
+
+Landed via merge `a29bf71` ("Merge branch 'ticket-151-auto-ledger'"), carrying branch commits
+`961aa3d` (auto-create) and `3a8a35e` (review fix batch: restart id-collision blocker plus the
+should-fixes, with regression tests for restart `todo-2`, cross-session refusal, already-linked
+refusal, and keep-entry-after-link-failure). 149 adjacent tests pass; typecheck clean.
+
+PRD S6 ("Dispatcher todo list shows multiple `in_progress` streams and is reconciled on every wake")
+is now reachable in live use without the file inbox.
+
+Bookkeeping: `**Status:**` → `resolved`; moved
+`Issue-tracker/open/151-dispatcher-todo-ledger-never-written.md` → `Issue-tracker/resolved/`.

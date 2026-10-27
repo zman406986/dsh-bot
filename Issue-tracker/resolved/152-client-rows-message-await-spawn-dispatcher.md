@@ -1,6 +1,6 @@
 # 152 — Client rows for `message_agent`, `await_agent`, `spawn_dispatcher` fall back to the generic tool row
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Origin:** PRD gap scan 2026-10-28 — verified against the tree; nothing implemented.
 **Related:** PRD §6.3 (dispatcher-visible tools), ticket 24 (the per-tool call views), ticket 116 (`message_agent`), ticket 117 (`await_agent`), ticket 118 (`spawn_dispatcher`), `docs/surfaces.md` (the "Six tool call views" row).
@@ -44,3 +44,12 @@ Effect for the user: the three most visible peer/mitosis actions — sending to 
 - `docs/surfaces.md`: the tool-view row is now "Nine tool call views" and no longer describes a gap; `src/client/index.ts` module comment updated to the nine-key count.
 - Tests: `test/client-toolviews.test.ts` — the claim pin now expects the exact dispatcher surface plus `send_peer`; three new describe blocks (one per tool) cover the key fields, refusal/degrade paths, wrong-typed fields, and body/prompt non-rendering. The locale-key pin in `test/client-face-scaffold.test.ts` gained the four new keys.
 - Verification (worktree only): `tsx --test test/client-toolviews.test.ts test/client-face-scaffold.test.ts test/coexistence.test.ts test/client-conversation-surface.test.ts` → 230 pass, 0 fail; `npm run typecheck` clean.
+
+## Resolution — 2026-10-28
+
+Landed via merge `e0cb917` ("Merge branch 'ticket-152-tool-rows'"), carrying branch commit
+`58f1a05`. Specific rows for `message_agent`, `await_agent`, and `spawn_dispatcher`; en+zh
+dictionary parity intact. The 230 focused tests pass.
+
+Bookkeeping: `**Status:**` → `resolved`; moved
+`Issue-tracker/open/152-client-rows-message-await-spawn-dispatcher.md` → `Issue-tracker/resolved/`.
