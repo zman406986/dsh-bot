@@ -357,7 +357,7 @@ export const localeDictionary: LocaleDictionary = {
     "toolview.field.attachments": "附件",
     // Ticket 70：send_peer 行标签（同伴流量的对话可见痕迹；消息正文不出现在行上）。
     "toolview.field.peer": "目标会话",
-    "toolview.field.priority": "优先",
+    "toolview.field.priority": "优先级",
     // Ticket 152：message_agent / await_agent / spawn_dispatcher 行标签。
     "toolview.field.agent": "代理",
     "toolview.field.status": "状态",
