@@ -212,11 +212,14 @@ export const localeDictionary: LocaleDictionary = {
       "When on, older tool output is emptied once a chat fills past a fixed share of the model window, keeping the newest few. This rewrites history, so the provider's prompt cache restarts from the oldest cleared entry.",
     // Ticket 145: racoons is always on while the multitask plugin is
     // enabled, so the card only tunes it — record-only, storage root and the
-    // half-window prune denominator.
+    // half-window prune denominator. Ticket 150: the label states what the
+    // mode now does — it still records everything, but a result's entry
+    // checkpoint answer can apply to the context; only the bulk prune and
+    // manual forget are held back.
     "settings.card.field.racoonsRecordOnly.label":
-      "Racoons record-only mode (no context edits)",
+      "Racoons record-only mode (entry checkpoint can still apply)",
     "settings.card.field.racoonsRecordOnly.hint":
-      "Off = racoons applies context cleanup to every chat in this process; removed content stays restorable by recall id, originals stored per session on disk.",
+      "Off = racoons applies context cleanup to every chat in this process; on = everything is still recorded, the automatic prune and manual forget are held back, but a result's entry checkpoint answer can still rewrite that result turn. Removed content stays restorable by recall id, originals stored per session on disk.",
     "settings.card.field.racoonsStorageRoot.label":
       "Racoons storage root (empty = default <DSH_HOME>/storages/racoons)",
     "settings.card.field.racoonsStorageRoot.hint":
@@ -389,11 +392,13 @@ export const localeDictionary: LocaleDictionary = {
     "settings.card.field.inboxEnabled.hint":
       "保存为调度器的设置：对新会话生效。开启后，调度器还会从下方目录接收任务。",
     // Ticket 145：只要调度器插件启用，RACOONS 就一直运行；此处只调节它——
-    // 仅记录模式、存储根目录、半窗口清理的窗口大小。
+    // 仅记录模式、存储根目录、半窗口清理的窗口大小。Ticket 150：标签说明
+    // 当前真实行为——一切照常记录，但结果回合的入口检查点答案仍可落到上下文；
+    // 只有自动清理和手动遗忘会被拦下。
     "settings.card.field.racoonsRecordOnly.label":
-      "RACOONS 仅记录模式（不改动上下文）",
+      "RACOONS 仅记录模式（入口检查点仍可生效）",
     "settings.card.field.racoonsRecordOnly.hint":
-      "关闭时，RACOONS 会对本进程内的所有会话执行上下文清理；被移除的内容仍可通过 recall id 按原样取回，原始内容按会话保存在磁盘上。",
+      "关闭时，RACOONS 会对本进程内的所有会话执行上下文清理；开启时一切照常记录，自动清理和手动遗忘不再执行，但结果回合的入口检查点答案仍可改写该结果。被移除的内容仍可通过 recall id 按原样取回，原始内容按会话保存在磁盘上。",
     "settings.card.field.racoonsStorageRoot.label":
       "RACOONS 存储根目录（留空使用默认 <DSH_HOME>/storages/racoons）",
     "settings.card.field.racoonsStorageRoot.hint":

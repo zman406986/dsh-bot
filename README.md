@@ -74,7 +74,7 @@ Every field is a volatile setting of the plugin's `Config`, editable in dsh's Pl
 | `accessRequestTimeoutMs` | `120000` | How long an unanswered access ask waits before it is denied. |
 | `wakeCoalesceWindowMs` | `0` | Batch idle background wakes into one dispatcher turn per window. `0` wakes immediately. |
 | `inboxEnabled` | `false` | Opt-in file inbox. Off starts nothing at all. |
-| `racoonsRecordOnly` | `false` | Racoons record-only mode. Off means racoons applies context cleanup; on means it only records. |
+| `racoonsRecordOnly` | `false` | Racoons record-only mode. Off means racoons applies context cleanup; on means everything is still recorded but the automatic prune and manual forget are held back (a result's entry checkpoint answer can still apply). |
 | `racoonsStorageRoot` | `""` | Racoons storage root. Empty uses `<DSH_HOME>/storages/racoons`. |
 | `racoonsContextWindowTokens` | `0` | Racoons context window in tokens; `0` leaves the half-window auto prune off. |
 | `inboxDir` | `""` | Inbox root. Empty disables intake even when enabled. |

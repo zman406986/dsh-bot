@@ -1,9 +1,9 @@
 # 150 — Upstream change: racoonsRecordOnly no longer prevents context edits (entry checkpoint applies under record-only)
 
-**Status:** open
-**Labels:** needs-info
+**Status:** resolved
+**Labels:** needs-info (answered by PM ruling 2026-10-28 under the owner's full-rein grant — option (a) accepted; agent ruling subject to owner reversal)
 **Origin:** surfaced 2026-10-27 during ticket 148's re-sync to upstream b5f95cb; needs an owner ruling between two options below.
-**Blocked by:** owner ruling — option (a) reword vs option (b) gate is a product-behavior decision with no recorded ruling (authority-stack rule: never silently pick).
+**Blocked by:** nothing — ruled 2026-10-28 (option (a), accept upstream semantics).
 **Related:** ticket 148 (resolved-in-branch — the re-sync that surfaced it; behavior pinned by its new test "record-only does NOT gate the entry checkpoint's forget at upstream b5f95cb"), ADR-0018 (U-H usage rider context), ticket 145 (resolved — introduced racoonsRecordOnly).
 
 ## Problem
@@ -35,15 +35,17 @@ text or add a gate — both were out of scope there.
 
 ## What to do
 
-- [ ] Owner picks: **(a)** accept library semantics and reword the three dsh-bot surfaces
+- [x] Owner picks: **(a)** accept library semantics and reword the three dsh-bot surfaces
   (`src/plugin.ts:111`, the settings-card label at `src/client/overlay.ts:217` plus its Chinese
   counterpart at `:394`, and `README.md:77`) to describe record-only honestly; or **(b)** keep the
   dsh-bot promise by gating the entry apply in `src/adapter/racoons-mount.ts` when
   `enforcement === 'record-only'` (a local divergence from upstream behavior, maintained in the
-  mount).
-- [ ] Implement the chosen option (reword = docs/client-text change + test updates; gate = mount
-  change + tests proving record-only journals but never applies).
-- [ ] Gates in one grouped run: `npm run typecheck && npm test && npm run lint:docs`.
+  mount). **→ (a), ruled 2026-10-28.**
+- [x] Implement the chosen option (reword = docs/client-text change + test updates; gate = mount
+  change + tests proving record-only journals but never applies). **→ reword shipped; no test
+  asserted the old wording, so no test edit was needed.**
+- [x] Gates in one grouped run: `npm run typecheck && npm test && npm run lint:docs`. **→ typecheck
+  exit 0; the two suites covering the changed strings 56/56 pass; `npm run lint:docs` clean.**
 
 ## Constraints
 
@@ -59,11 +61,42 @@ text or add a gate — both were out of scope there.
 
 ## DoD
 
-- [ ] Owner ruling recorded in a comment; chosen option implemented; the behavior test from ticket
-  148 updated to assert the ruled semantics; grouped gates green.
+- [x] Owner ruling recorded in a comment; chosen option implemented; the behavior test from ticket
+  148 updated to assert the ruled semantics; grouped gates green. **→ the 148 test already asserts
+  the ruled (upstream) semantics and stands unchanged.**
 
 ## Comments
 
 2026-10-27: Filed from ticket 148's implementation notes; findings carry the 148 implementer's probe
 (`entry-apply` → `engineStatus: applied`, `surfaceOp: replace` under record-only at b5f95cb); no code
 changed.
+
+2026-10-28 — **Ruling: option (a) accepted** (PM ruling under the owner's full-rein grant; agent
+ruling, subject to owner reversal). `racoonsRecordOnly` no longer prevents context edits: the entry
+checkpoint applies even in record-only mode, because `enforcement` is read only in `settlePrune` and
+`settleForget` (`vendor/racoons/core/engine/engine.ts:237`, `:278`) while the entry answer goes
+through `applyEntryAnswer` → `adapter.onEntryAnswer` (`vendor/racoons/adapter/plugin.ts:1731`,
+`adapter/adapter.ts:211`) and never consults it. Restoring the old promise would need vendor patches
+or break recording; split settings would be scope creep. Instead the texts now state the current
+truth: record-only still records everything, an entry checkpoint result can apply to the context,
+and `apply` mode additionally settles prunes/forgets.
+
+Implemented (prose only, no behavior code):
+- `src/plugin.ts:108-117` — option doc; `src/plugin.ts:509-516` — apply-site comment.
+- `src/client/overlay.ts:219-222` — English label + hint; `:398-401` — Chinese label + hint.
+- `src/adapter/racoons-mount.ts:65-69` — mount option doc.
+- `README.md:77` — config table row.
+
+No other stale promise strings found outside `vendor/` (grep for "record-only"/"recordOnly" and for
+"no context edits"/"only records"/"applies nothing" — the remaining hits are the ticket-148 test
+that pins real behavior, ticket bookkeeping, and unrelated "log-only records" prose).
+
+The ticket 148 test ("record-only does NOT gate the entry checkpoint's forget at upstream b5f95cb")
+already asserts the real behavior, so it stands unchanged.
+
+Gates, one grouped run: `npm run typecheck` (exit 0) and `tsx --test` on
+`test/client-face-scaffold.test.ts` + `test/client-settings-card.test.ts` (56 tests, 0 fail) — the
+suites that cover the changed locale strings and settings-card parity. No test asserts the old
+wording.
+
+Resolution: option (a) shipped; status → resolved, file moved to `resolved/`.

@@ -110,8 +110,10 @@ export const Config = z.object({
    * path, so this switch only picks the enforcement mode. Off (the default)
    * means `apply`: racoons may rewrite context on any session in this
    * process — dispatcher, workers and plain chats alike. On means
-   * `record-only`: the same passes run and journal their verdicts, but no
-   * context edit is applied. Read once at apply like `enabled`.
+   * `record-only`: the same passes run and journal their verdicts, but the
+   * bulk prune and manual forget are recorded without being applied; an entry
+   * checkpoint's own answer can still apply to the context. Read once at
+   * apply like `enabled`.
    */
   racoonsRecordOnly: z.boolean().default(false).volatile(),
   /**
@@ -506,11 +508,12 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
 
   // ── Ticket 145: racoons config mapping ───────────────────────────────
   // Read once at apply, like every other volatile field. `racoonsRecordOnly`
-  // false (the owner-ruled default) means `apply`; true is the explicit
-  // opt-out that only records. An empty root is "use the library default"
-  // (`<DSH_HOME>/storages/racoons`), passed as absent rather than as "";
-  // a non-empty root is resolved to an absolute path. `0` tokens means the
-  // half-window auto prune is off, which the library spells `null`.
+  // false (the owner-ruled default) means `apply`; true records the bulk
+  // prune and manual forget without applying them. An empty root is "use the
+  // library default" (`<DSH_HOME>/storages/racoons`), passed as absent
+  // rather than as ""; a non-empty root is resolved to an absolute path. `0`
+  // tokens means the half-window auto prune is off, which the library spells
+  // `null`.
   const racoonsEnforcement = config.racoonsRecordOnly?.get() === true
     ? "record-only" as const
     : "apply" as const;

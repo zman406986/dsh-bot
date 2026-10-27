@@ -62,7 +62,11 @@ export interface RacoonsHostContext {
 
 /** The mount options the plugin maps its volatile config onto. */
 export interface RacoonsMountOptions {
-  /** `record-only` records answers and applies nothing; `apply` is the default. */
+  /**
+   * `record-only` records answers and holds back the bulk prune and manual
+   * forget; an entry checkpoint's own answer still applies (`apply` is the
+   * default).
+   */
   readonly enforcement: RacoonsEnforcement;
   /** Durable root; absent means the library default (`<DSH_HOME>/storages/racoons`). */
   readonly racoonsStorageRoot?: string;
