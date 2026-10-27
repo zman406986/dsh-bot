@@ -1,6 +1,6 @@
 # 127 — Add the RACOONS desktop launcher
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-human
 **Related:** 114; owner request, 2026-10-20
 
@@ -31,7 +31,7 @@ Its branch is `main`.
 - [x] Confirm the documented command and source/build config path by inspection.
 - [x] Prepare the existing source and client builds offline if needed.
 - [x] Check paths and batch syntax without starting dsh.
-- [ ] Human launch check; live startup is intentionally unverified in this session.
+- [x] Human launch check; live startup verified 2026-10-28 (LAUNCH-PASS).
 
 ## Comments
 
@@ -63,3 +63,16 @@ exist in the main checkout. Syntax checked with a neutered copy
 (`.scratch/testing/2026-10-28-t127-launcher/`); no dsh start, no live test.
 The bat is outside git; only this ticket file is committed. Human launch check
 still open, so status stays open.
+
+2026-10-28: **Resolved — launcher fixed and LAUNCH-PASS.** The launcher now
+targets the main checkout at `C:\Users\TZhen\Desktop\dsh-bot` (commits
+`16d9495` launcher re-point, `bcd7d86` patch header re-point). Live check ran
+the Desktop `dsh-bot-RACOONS.bat` against `a8cc5d0`: it executed
+`dsh --profile web --patch dev\cordis.racoons.patch.yml`; server came up on
+port 3080 with the expected 401 token fence; the plugin imported with zero
+module errors; log showed `racoons: mounted` with `enforcement:"apply"` and the
+pinned storage root `.scratch\racoons-storage`; no crash, no orphan processes;
+kill timer armed and cancelled before firing; no model contact.
+Evidence: `.scratch/testing/2026-10-28-127-launch-check/summary.md`.
+Optional follow-up (owner's call, nicety only): the launcher could pass
+`--no-open` — it currently opens a browser tab on every launch.
