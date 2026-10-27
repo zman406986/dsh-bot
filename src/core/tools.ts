@@ -748,7 +748,7 @@ export function createDispatcherTools(
           type: "string",
           required: false,
           description:
-            "Links an existing ledger entry; an unknown id is refused. " +
+            "Links an existing todo entry; an unknown id is refused. " +
             "When omitted, the spawn creates the entry from the title.",
         },
       },

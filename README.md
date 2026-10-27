@@ -57,7 +57,7 @@ dsh --profile web --patch dev/cordis.web.patch.yml
 1. Open a top-level chat in dsh.
 2. Type `/dsh-bot`. That chat becomes the dispatcher for the session. Activation is refused in a child chat.
 3. Ask for work. The dispatcher decides what to delegate, spawns workers, and reports results back in the chat.
-4. To leave the mode, dispose the chat or unload the plugin. There is no stop command.
+4. To leave the dispatcher, dispose the chat or unload the plugin. There is no stop command.
 
 Related commands:
 
