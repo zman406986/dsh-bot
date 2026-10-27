@@ -1,6 +1,6 @@
 # 149 — Marker store version mismatch: every storageDomain.open throws since DOMAIN_VERSION 2
 
-**Status:** claimed
+**Status:** resolved
 **Labels:** ready-for-agent
 **Origin:** owner 2026-10-27: "dispatcher status fails to persist after dsh shutdown. when restarted dispatcher seem to lose dispatcher status and says: 'Tools updated 10 removed Removed: await_agent, check_workers, deliver_result, message_agent, recall, request_access, spawn_dispatcher, spawn_worker, steer_worker, stop_worker'".
 **Blocked by:** nothing — owner instruction 2026-10-27 names this work directly.
@@ -109,3 +109,20 @@ tests pass, doc-lint 0 findings.
 branch `ticket-147-dispatcher-status-persistence` (commit 30a16a2), agent stopped by owner order
 before merge. Next team: merge with 147, run grouped gates on merged main, then move both tickets
 to resolved/.
+
+## Resolution — 2026-10-28
+
+Landed via the same merge `a83f5e1` (branch commits `30a16a2`, `e7a8e0e`). Verified against the host
+backend `@deepseek-ai/dsh-storage-json` 0.2.1-rc.2 APIs the fix relies on: per-record dispatch,
+`acceptedStamps`, `bootstrapLegacyUnit`. No vendor interaction with ticket 148's racoons re-sync.
+
+Two recorded caveats:
+
+- Exotic `jobId`s outside `[a-zA-Z0-9_-]+` now reject at write (record keys are path segments).
+  Inbox paths already log and retry, so such a job is re-presented, not lost.
+- `bootstrapLegacyUnit` runs only when no readable per-record document exists
+  (`lib/index.js:349`, function at `:370`). If even one record document is already there, migration
+  from the legacy whole-unit file is skipped entirely and the remaining legacy rows are never copied.
+
+Bookkeeping: `**Status:**` → `resolved`; moved
+`Issue-tracker/open/149-marker-store-version-mismatch.md` → `Issue-tracker/resolved/`.

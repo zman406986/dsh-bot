@@ -1,6 +1,6 @@
 # 147 — Dispatcher status persists across dsh restart (user-started dispatchers re-activate on session resume)
 
-**Status:** claimed
+**Status:** resolved
 **Labels:** ready-for-agent
 **Origin:** owner 2026-10-27: "dispatcher status fails to persist after dsh shutdown. when restarted dispatcher seem to lose dispatcher status and says: 'Tools updated 10 removed Removed: await_agent, check_workers, deliver_result, message_agent, recall, request_access, spawn_dispatcher, spawn_worker, steer_worker, stop_worker'".
 **Blocked by:** nothing — owner instruction 2026-10-27 names this work directly. Ticket 149 is an independent defect on the same behaviour, not a blocker for the primary route.
@@ -172,3 +172,13 @@ advanced to 39bed3b with tickets 146+148, file overlap is low but no combined ga
 (2) run the grouped gates `npm run typecheck && npm test && npm run lint:docs` on merged main;
 (3) move this ticket and 149 to resolved/. The worktree `.scratch/worktrees/t147` holds the branch
 and is left in place for the handoff.
+
+## Resolution — 2026-10-28
+
+Landed via merge `a83f5e1` ("Merge branch 'ticket-147-dispatcher-status-persistence'"), carrying
+branch commits `30a16a2`, `e7a8e0e`. Gates on the merged tree: `npm run typecheck && npm test &&
+npm run lint:docs` — 1579/1579 tests pass, typecheck clean, doc-lint clean, client build fresh.
+Live boot evidence is tracked separately under ticket 145's pass, not here.
+
+Bookkeeping: `**Status:**` → `resolved`; moved
+`Issue-tracker/open/147-dispatcher-status-persists-across-restart.md` → `Issue-tracker/resolved/`.
