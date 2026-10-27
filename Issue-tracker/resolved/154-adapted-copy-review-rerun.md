@@ -1,6 +1,6 @@
 # 154 — Re-run the adapted-copy review: the recorded pass predates tickets 116-149
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Origin:** PRD gap scan 2026-10-28 — verified against the tree; nothing implemented.
 **Related:** PRD §12 Legal QA row (`:382`, amended 2026-09-18 by ADR-0018 — adapted-copy review replaces the identifier grep), §13 M4 (exit condition), `docs/research/no-verbatim-copy-review-2026-09-19.md` (the recorded pass), ADR-0018 B9, ticket 33 (the review it closed).
@@ -69,3 +69,23 @@ Re-ran the 2026-09-19 method (`docs/research/no-verbatim-copy-review-2026-09-19.
 **Not done in this chunk** (still open on this ticket): the durable `docs/research/no-verbatim-copy-review-2026-10-28.md` record, the PRD §13 M4 citation, and folding the deferred `prompts.ts` lines in once 153b releases the file.
 
 Gates: `client-face-scaffold`, `client-toolviews`, `dispatcher-tools`, `policy-zh-assets`, `policy-assembler`, `client-onboarding`, `client-approval-pane` → 300 pass / 0 fail; `doc-lint` adds no new finding (the pre-existing `AGENTS.md`/`lib/` path rot is unchanged).
+
+### 2026-10-28 — resolution: deferred fixes, rulings folded in, pass record written
+
+Closes the four items chunk B left open. Nothing here changes behavior: copy only, plus the record and the tracker move.
+
+**Deferred `prompts.ts` lines, applied (ticket 153 released the file):**
+1. `spawn_worker` description, EN and ZH: "ledger entry"/"账本条目" → "todo entry"/"待办条目" — the same alignment `tools.ts` took in `ed5c40c`.
+2. `await_agent` description, EN and ZH: the `released` clause now names the user-message cause. `formatAwaitNote` in `tool-results.ts` already prints "the user said something — answer them now", so the model now hears the same three causes from the tool description.
+3. Access-policy line, EN and ZH: "Answer each ask in your reply with allow or deny" is gone. It named a reply-text channel no seam reads; the two real paths are the access prompt (host `ctx.userQuestions.ask` → `Multitask.resolveAccess`) and `/dispatcher-resolve <worker id> <allow|always-allow|deny>`. The line now names both and says the answer never comes from reply text. Timeout-deny default unchanged. Ticket 132 option 2 is now actually carried out.
+
+**Rulings applied (agent rulings 2026-10-28 — subject to owner reversal, recorded as such in the pass record):**
+1. `RESUME_WAKE_CUE` (EN + ZH) drops "from your peer inbox". Ticket 142 also sends this cue as the dormant-worker payload, and a worker has no peer inbox; the sentence is now true for both readers ("it arrives as the next turn"). Reverting to a split worker-face cue is a two-string edit if the owner prefers it.
+2. README racoons coverage now states the actual mount scope: every session in the process — dispatcher, workers, and plain chats. `racoons-mount.ts` and the `plugin.ts` mount comment agree: no session filter.
+
+**Record:** `docs/research/no-verbatim-copy-review-2026-10-28.md` — same structure as the 2026-09-19 pass (method, findings, verdict, residual risk), scope 80 rows / ~103 EN strings over 8 copy files plus README (tickets 116–152), result PASS, 8 fixes listed. PRD §13 M4 now cites it alongside the 2026-09-19 file; that file is untouched.
+
+**Fix count, whole ticket: 8** — 3 landed in `ed5c40c` (`overlay.ts` priority label, `tools.ts` todo_id wording, README "the mode" line), 5 landed here (two `prompts.ts` description fixes, the access-policy line, the resume cue, the README coverage line).
+
+Gates (worktree, offline): `policy-zh-assets`, `policy-assembler`, `access-prompt`, `adapter-policy-inject`, `dispatcher-tools`, `spawn-dispatcher-tool`, `adapter-dispatcher-tools`, `adapter-racoons-mount`, `todo-reconciler`, `worker-reply`, `policy-peer-roster`, `client-toolviews` → all pass, 0 fail. Typecheck clean. No sha256 pin moved: the ticket-141 pin covers the user-started policy spine, which none of these lines touch.
+

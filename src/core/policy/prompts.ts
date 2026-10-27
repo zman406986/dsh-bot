@@ -83,7 +83,7 @@ export const DISPATCHER_TOOL_NAMES = [
 /** Model-facing tool descriptions (new copy). */
 export const TOOL_DESCRIPTIONS = {
   [SPAWN_WORKER_TOOL]:
-    "Start a background worker for one stream of work. Give it a complete, standalone prompt: it does not see this conversation. Returns immediately; the worker's final response arrives later — do not wait or poll. One live worker per stream_key. Each spawn records its own ledger entry — give every spawn a clear title that says what the work is.",
+    "Start a background worker for one stream of work. Give it a complete, standalone prompt: it does not see this conversation. Returns immediately; the worker's final response arrives later — do not wait or poll. One live worker per stream_key. Each spawn records its own todo entry — give every spawn a clear title that says what the work is.",
   [CHECK_WORKERS_TOOL]:
     "List your running and recent workers, or inspect one by id. Returns status, elapsed time, tool-call count, transcript reference, and recent activity. Use this when the user asks what is in flight — not as a wait loop.",
   [STEER_WORKER_TOOL]:
@@ -95,7 +95,7 @@ export const TOOL_DESCRIPTIONS = {
   [MESSAGE_AGENT_TOOL]:
     "Send a message to one of your workers or to another dispatcher session, by id. Routing is by target: a worker id parks the text as that worker's next correction — it folds in at the worker's next step boundary, context preserved, and only the latest undelivered message applies. A dispatcher session id delivers the text to that peer's inbox, and the peer's next turn sees it. priority asks for attention now — it may interrupt only the peer's background work, never a turn their user is driving. Fire-and-forget: the tool returns an acceptance ack only — a reply, if any, arrives later as its own message on a fresh turn; never wait, poll, or keep a turn open for it. Ids come from a spawn ack, the sender line of a message you received, list_agents, or the user. A refused send is reported with a reason and dropped — no queue, no retry.",
   [AWAIT_AGENT_TOOL]:
-    "Wait, once and bounded, for one of your workers to finish, then return its terminal status and result. Use it only when your next step is blocked on that worker's result — one await per target, never a loop. timeout_ms is 0 to 120000 ms (default 30000); 0 checks the current state without waiting. A timeout is a normal outcome: status still-running means the worker is alive and has not finished, and its result still arrives later. Workers only — a dispatcher is not awaitable; message it instead. Released means the wait was cut short (the turn was stopped or the session went inactive); the worker keeps running.",
+    "Wait, once and bounded, for one of your workers to finish, then return its terminal status and result. Use it only when your next step is blocked on that worker's result — one await per target, never a loop. timeout_ms is 0 to 120000 ms (default 30000); 0 checks the current state without waiting. A timeout is a normal outcome: status still-running means the worker is alive and has not finished, and its result still arrives later. Workers only — a dispatcher is not awaitable; message it instead. Released means the wait was cut short (the user said something, the turn was stopped, or the session went inactive); the worker keeps running.",
   [SPAWN_DISPATCHER_TOOL]:
     "Summon another dispatcher: a peer session that works from your prompt with the same dispatcher tools and policy, its own workers, its own ledger, and its own inbox — not a worker, and no stream key. Give it the problem and the outcome you want; it does not see this conversation, and it cannot talk to the user, so its work reaches the user only through you. Returns immediately with the new dispatcher's session id. Message it with message_agent; do not wait on it — a dispatcher is not awaitable, and its answers arrive later on their own. The bounds are the host's own depth ceiling and live-child pool; a refusal says so and nothing was started.",
 } as const;
@@ -110,7 +110,7 @@ export const TOOL_DESCRIPTIONS_ZH: Record<
   string
 > = {
   [SPAWN_WORKER_TOOL]:
-    "为一条工作流启动一个后台工作者。给它一段完整、独立的提示：它看不到这个对话。工具立即返回；工作者的最终答复稍后送到——不要等待，也不要轮询。每条 `stream_key` 只允许一个在运行的工作者。每次启动都会记下自己的账本条目——给每次启动起一个清楚说明工作内容的标题。",
+    "为一条工作流启动一个后台工作者。给它一段完整、独立的提示：它看不到这个对话。工具立即返回；工作者的最终答复稍后送到——不要等待，也不要轮询。每条 `stream_key` 只允许一个在运行的工作者。每次启动都会记下自己的待办条目——给每次启动起一个清楚说明工作内容的标题。",
   [CHECK_WORKERS_TOOL]:
     "列出在运行和最近的工作者，或按 id 查看其中一个。返回状态、已用时间、工具调用次数、记录引用和最近活动。用户问起在跑什么时用它——不要拿它当等待循环。",
   [STEER_WORKER_TOOL]:
@@ -122,7 +122,7 @@ export const TOOL_DESCRIPTIONS_ZH: Record<
   [MESSAGE_AGENT_TOOL]:
     "按 id 向你的某个工作者或另一个调度器会话发一条消息。路由看目标：工作者 id 会把文本停放为该工作者的下一条修正——它会在工作者下一个步骤边界折入，上下文保留，且只有最新一条尚未送达的消息生效。调度器会话 id 会把文本送进那个同伴的收件箱，同伴的下一个回合能看到它。`priority` 表示要求现在关注——它只能打断同伴的后台工作，绝不打断对方用户正在驱动的回合。发完即走：工具只返回一个受理回执——答复（如果有）之后会作为一条新回合上的独立消息到达；绝不等待、轮询或为它保持回合打开。id 来自启动回执、你收到的消息里的发送者行、`list_agents`，或用户。被拒绝的发送会带着原因报告并丢弃——没有队列，不会重试。",
   [AWAIT_AGENT_TOOL]:
-    "对某个工作者做一次有上限的等待，等它结束，然后返回它的最终状态和结果。只在你下一步卡在那个工作者的结果上时使用——每个目标只等一次，绝不循环。`timeout_ms` 是 0 到 120000 毫秒（默认 30000）；0 表示只查当前状态、不等待。超时是正常结果：状态仍是 `still-running` 表示工作者还活着、尚未结束，它的结果之后仍会送到。只能等工作者——调度器不能被等待，请给它发消息。`released` 表示等待被提前中断（回合被停止或会话转为不活跃）；工作者继续运行。",
+    "对某个工作者做一次有上限的等待，等它结束，然后返回它的最终状态和结果。只在你下一步卡在那个工作者的结果上时使用——每个目标只等一次，绝不循环。`timeout_ms` 是 0 到 120000 毫秒（默认 30000）；0 表示只查当前状态、不等待。超时是正常结果：状态仍是 `still-running` 表示工作者还活着、尚未结束，它的结果之后仍会送到。只能等工作者——调度器不能被等待，请给它发消息。`released` 表示等待被提前中断（用户说了话、回合被停止，或会话转为不活跃）；工作者继续运行。",
   [SPAWN_DISPATCHER_TOOL]:
     "召唤另一个调度器：一个同伴会话，它根据你的提示、用同样的调度器工具和策略工作，有自己的工作者、自己的账本和自己的收件箱——不是工作者，也没有流键。把问题和你要的结果交给它；它看不到这个对话，也不能和用户说话，所以它的工作只能经由你到达用户。工具立即返回新调度器的会话 id。用 `message_agent` 给它发消息；不要等它——调度器不能被等待，它的答复之后会自己回来。边界由宿主的深度上限和存活子会话池决定；被拒绝时会说明，且没有启动任何东西。",
 };
@@ -477,7 +477,7 @@ function buildAccessPolicyBlockEn(): string {
     "For each pending ask:",
     "- Ask the user in plain language when the action is not pre-approved (name the action and why the worker needs it).",
     "- Apply a stored policy answer when one exists; do not re-ask.",
-    "- Answer each ask in your reply with allow or deny. Never leave an ask unanswered — timeout denies by default.",
+    "- The answer comes from the user — in the access prompt, or with `/dispatcher-resolve <worker id> allow|always-allow|deny` — never from your reply text. Do not let an ask sit: timeout denies by default.",
     "",
     "For each denial (user, policy, or timeout):",
     "- Tell the user which action was denied, in plain language.",
@@ -494,7 +494,7 @@ function buildAccessPolicyBlockZh(): string {
     "对每一个待处理的请求：",
     "- 如果这个动作没有预先批准，就用日常的话问用户（说清是什么动作、工作者为什么需要它）。",
     "- 如果已有存下的策略答复，就直接套用；不要重复询问。",
-    "- 在你的回复里对每个请求给出允许或拒绝。绝不要让请求悬空——超时默认拒绝。",
+    "- 答复来自用户——在访问提示里，或用 `/dispatcher-resolve <worker id> allow|always-allow|deny`——绝不来自你的回复文本。不要让请求一直悬着：超时默认拒绝。",
     "",
     "对每一个拒绝（用户、策略或超时）：",
     "- 用日常的话告诉用户哪个动作被拒绝了。",

@@ -44,7 +44,10 @@ export function peerWakeCueFor(language: PolicyLanguage): string {
 
 /**
  * Ticket 138 (owner ruling 2026-10-22): the payload of the cold-resume call
- * that wakes a marked dispatcher nobody had re-announced yet.
+ * that wakes a marked dispatcher nobody had re-announced yet. Ticket 142
+ * sends the same cue as the dormant-worker payload, so it names no lane:
+ * a dispatcher's message arrives from its peer inbox, a worker's as a steer,
+ * and both land as the next turn (ticket 154 ruling, 2026-10-28).
  *
  * It carries NO peer text on purpose. The host's `sendMessage` both resumes
  * the absent child and opens its turn, so this cue is what that turn sees;
@@ -53,11 +56,11 @@ export function peerWakeCueFor(language: PolicyLanguage): string {
  * Sending the text here as well would deliver it twice.
  */
 export const RESUME_WAKE_CUE =
-  "Your session was resumed because another agent sent you a message. That message is not part of this cue; it arrives as the next turn, from your peer inbox.";
+  "Your session was resumed because another agent sent you a message. That message is not part of this cue; it arrives as the next turn.";
 
 /** ZH face of {@link RESUME_WAKE_CUE} (ticket 153, authored copy). */
 export const RESUME_WAKE_CUE_ZH =
-  "你的会话被恢复，是因为另一个代理给你发了消息。那条消息不在这个提示里；它会在下一个回合从你的同伴收件箱到达。";
+  "你的会话被恢复，是因为另一个代理给你发了消息。那条消息不在这个提示里；它会在下一个回合到达。";
 
 /** Select the resume cue face (ticket 153). Fail-closed to EN. */
 export function resumeWakeCueFor(language: PolicyLanguage): string {
