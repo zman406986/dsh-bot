@@ -80,6 +80,7 @@ export const PATH_ALLOWLIST = [
   { path: 'resolved/', because: 'tracker status-folder shorthand for Issue-tracker/resolved/ (agent.md §Domain docs layout list)' },
   { path: 'cancelled/', because: 'tracker status-folder shorthand for Issue-tracker/cancelled/ (agent.md §Domain docs layout list)' },
   { path: '.out-of-scope/', because: 'convention name from the research-notes skills convention (research/research.md §Naming), not a repo path' },
+  { path: 'conversation.session.header.actions', because: 'dsh client UI slot name (the seat ADR-0024’s rider licenses and ADR-0031 extends; cited in docs/adr/README.md), not a repo path — ticket 156' },
 ];
 
 const ALLOWLISTED = new Set(PATH_ALLOWLIST.map((a) => a.path));

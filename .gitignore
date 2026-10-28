@@ -21,6 +21,10 @@ opencode.json
 .scratch/_overnight-*/
 .scratch/adr-drafts/
 .scratch/repo-analysis/
+# Runtime racoons ledger store (dev/cordis.racoons.patch.yml pins this root, and
+# src/adapter/racoons-mount.ts defaults to it). Holds live session ledgers and
+# blobs — private dsh session content; NEVER commit (ticket 156).
+.scratch/racoons-storage/
 # Team-leader dispatch ledger (the skill says delete it when the job ends).
 .team-leader-ledger.md
 
