@@ -145,7 +145,6 @@ export {
   type ActivationOutcome,
   type BindDispatcherLifecycleOptions,
   type BindDispatcherLifecycleResult,
-  type SpawnedActivationOutcome,
 } from "./parent-agent.js";
 export {
   applySessionKindProjection,

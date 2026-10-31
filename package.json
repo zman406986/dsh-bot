@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "keywords": ["cordis", "dsh", "deepseek", "dispatcher", "multitask", "agent"],
   "author": "TZ",
+  "private": true,
   "type": "module",
   "workspaces": ["vendor/racoons/core", "vendor/racoons/adapter"],
   "main": "lib/index.js",

@@ -1,6 +1,6 @@
 # A spawned dispatcher's mark rides the existing `sessionKind` projection, and one header seat renders it
 
-**Status:** draft (non-human-approved) — **agent ruling 2026-10-28**, made under the owner's full-rein grant dated 2026-10-28 and **explicitly subject to human reversal**. Pending human sign-off; it becomes accepted only on the owner's signature. Nothing in this draft retires an existing decision.
+**Status:** draft (non-human-approved) — **agent ruling 2026-10-28**, made under the owner's full-rein grant dated 2026-10-28 and **explicitly subject to human reversal**. Pending human sign-off; it becomes accepted only on the owner's signature. Nothing in this draft retires an existing decision. **2026-10-28 note (0032): withdrawn — the premise is dead, so the seat it licenses is void.** This draft exists only because a spawned dispatcher was a hidden subagent child with no row ("Why it had no seat"). ADR-0032 makes a summoned dispatcher a top-level session with its own sidebar row, so decisions 2–4 (the mirror seed, the child's own conversation header, the second seat) have no subject left; the `conversation.session.header.actions` chip they licensed was removed from the client on 2026-10-28 and the seat count returns to one (dated note on ADR-0024). Decision 1's finding — `sessionKind` is the identity source — already ships as the sidebar glyph, so nothing remains to sign. The file is kept and its body is not edited; it was never signed, and this is a withdrawal, not an acceptance.
 
 **Approval:** non-human — agent-drafted, pending human sign-off.
 

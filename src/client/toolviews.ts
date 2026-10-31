@@ -480,6 +480,161 @@ function describeSpawnDispatcher(payload: ToolCallPayload): ToolviewModel {
   return detailOrDegraded(fields, []);
 }
 
+//#region stock props → parser payload (the boundary adapter)
+
+/**
+ * The structural face this adapter reads off the shipped `PartialArguments`
+ * reader (`dsh-util-values/lib/types/partial-json.d.ts:24-123`): keys seen so
+ * far, a streaming string prefix, and a completed non-string value. All three
+ * readers are total — absent or differently typed fields answer `undefined`,
+ * never throw (`:20-22`).
+ */
+interface PartialArgumentsReader {
+  keys(): readonly string[];
+  text(key: string): string | undefined;
+  value(key: string): unknown;
+}
+
+function isPartialArguments(value: unknown): value is PartialArgumentsReader {
+  const record = asRecord(value);
+  return (
+    record !== null &&
+    typeof record.keys === "function" &&
+    typeof record.text === "function" &&
+    typeof record.value === "function"
+  );
+}
+
+/**
+ * Materialize the lazy argument reader into the plain record the parsers
+ * already consume. Reads whatever has arrived: a completed non-string answers
+ * `value()`, a string answers its `text()` prefix (complete or still
+ * streaming), so a half-streamed argument object renders the fields it has
+ * instead of degrading. A reader over a still-open object simply yields the
+ * fields whose delimiters have landed.
+ */
+function readArguments(args: unknown): Record<string, unknown> | null {
+  if (isPartialArguments(args)) {
+    const out: Record<string, unknown> = {};
+    for (const key of args.keys()) {
+      if (typeof key !== "string" || key.length === 0) continue;
+      const value = args.value(key);
+      if (value !== undefined) {
+        out[key] = value;
+        continue;
+      }
+      const text = args.text(key);
+      if (typeof text === "string") out[key] = text;
+    }
+    // An empty reading falls back to the raw text the caller may still hold
+    // (a result whose `tool/call` left the loaded window has an empty view,
+    // `records.d.ts:279-281`).
+    return Object.keys(out).length === 0 ? null : out;
+  }
+  return asRecord(args);
+}
+
+/** Parse one raw argument JSON text; junk and non-objects narrow to null. */
+function parseArgumentsText(raw: unknown): Record<string, unknown> | null {
+  if (typeof raw !== "string" || raw.length === 0) return null;
+  try {
+    return asRecord(JSON.parse(raw) as unknown);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The structured result record for the parsers, read off a settled
+ * `ToolResultNode` (`records.d.ts:157-185`): the tool's own `meta` when it
+ * attached one, else the first text block's JSON (where the harness
+ * serializes a tool's structured payload), mirroring the store's reader.
+ * A failed call with no readable payload still reports the failure
+ * (`isError` + `error.code`/`error.reason`, `:177-182`), never a false "ok".
+ */
+function readResult(block: Record<string, unknown>): Record<string, unknown> | null {
+  const meta = asRecord(block.meta);
+  if (meta !== null) return meta;
+
+  const recorded = recordedPayload(block.content);
+  if (recorded !== null) return recorded;
+
+  if (block.isError === true) {
+    const error = asRecord(block.error);
+    const reason = asString(error?.reason) ?? asString(error?.code);
+    return reason === null ? { ok: false } : { ok: false, reason };
+  }
+  return null;
+}
+
+/**
+ * First JSON text block of a result's content as a record. A `tool-result`
+ * block carries its payload one nesting level deeper; a bare text block sits
+ * at the message level. The first text block decides — JSON is the structured
+ * record, any other text is prose and yields null.
+ */
+function recordedPayload(content: unknown): Record<string, unknown> | null {
+  if (!Array.isArray(content)) return null;
+  const firstTextRecord = (blocks: readonly unknown[]) => {
+    for (const block of blocks) {
+      const record = asRecord(block);
+      if (record === null || record.type !== "text") continue;
+      return parseArgumentsText(record.text);
+    }
+    return null;
+  };
+  for (const part of content) {
+    const record = asRecord(part);
+    if (record === null) continue;
+    if (record.type === "tool-result" && Array.isArray(record.content)) {
+      const nested = firstTextRecord(record.content);
+      if (nested !== null) return nested;
+      continue;
+    }
+    if (record.type === "text") return firstTextRecord([record]);
+  }
+  return null;
+}
+
+/**
+ * Adapt the props the shipped renderer actually passes into the record the
+ * parsers below were written against.
+ *
+ * Stock dsh hands the keyed `tool.call.toolview` slot
+ * `ToolCallCommonProps & ToolCallPhaseProps` — only `phase` plus `block`
+ * (`dsh-client-ui-tool/lib/types/client/contract/slots.d.ts:54-84`, composed
+ * at `dsh-client-ui-tool/lib/client.js:1936-1947`) — while the argument view
+ * is lazy (`records.d.ts:270,282`). The parsers want `{args, result}`, so the
+ * real data is lifted here, at the boundary; the parser shape is unchanged.
+ *
+ * A props record without `phase` keeps the plain `{args, result}` reading
+ * (the store's own rows and the pinned parser tests use that shape).
+ */
+export function adaptToolviewProps(props: unknown): ToolCallPayload {
+  const record = asRecord(props);
+  if (record === null) return { args: null, result: null };
+  if (typeof record.phase !== "string") {
+    return { args: record.args, result: record.result };
+  }
+
+  const block = asRecord(record.block);
+  if (block === null) return { args: null, result: null };
+
+  // Arguments: `block.args` (all three stages, `records.d.ts:270`) with the
+  // raw-text fallbacks — `argsRaw` once dispatched (`:288-291`), `call.argsRaw`
+  // on a settled result whose call is still in-window (`:170-173`).
+  const call = asRecord(block.call);
+  const args =
+    readArguments(block.args) ??
+    parseArgumentsText(block.argsRaw) ??
+    parseArgumentsText(call?.argsRaw);
+
+  const result = record.phase === "result" ? readResult(block) : null;
+  return { args, result };
+}
+
+//#endregion
+
 /**
  * Parse one tool call payload into a view model for the given wire tool
  * name. Never throws: every deviation (foreign tool name, non-object props,
@@ -492,10 +647,7 @@ export function describeToolview(
   try {
     const record = asRecord(props);
     if (record === null) return DEGRADED;
-    const payload: ToolCallPayload = {
-      args: record.args,
-      result: record.result,
-    };
+    const payload: ToolCallPayload = adaptToolviewProps(record);
     switch (toolName) {
       case SPAWN_WORKER_TOOL:
         return describeSpawn(payload);

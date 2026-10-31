@@ -18,14 +18,18 @@ import {
 } from "../worker/report.js";
 import {
   WORKER_MAX_DEPTH,
-  dispatcherSpawnMaxDepth,
   workerSpawnMaxDepth,
   type WorkerAgentDef,
 } from "../worker/agent-def.js";
 import { applyWorkerComposition } from "../worker/preset.js";
 import { blocksToText, textBlocks, type ContentBlock } from "./content-blocks.js";
 import type { StorageDomainLike } from "./durable-marker.js";
-import { resumeWakeCueFor, wakeCueFor, wakeUserMessage } from "./wake-copy.js";
+import {
+  WAKE_SOURCE_KIND,
+  resumeWakeCueFor,
+  wakeCueFor,
+  wakeUserMessage,
+} from "./wake-copy.js";
 import type { PolicyLanguage } from "../core/policy/prompts.js";
 
 export type { WorkerAgentDef };
@@ -40,8 +44,24 @@ export interface AgentLike {
     readonly header?: {
       readonly parentSession?: unknown;
       readonly delegationDepth?: number;
+      /**
+       * ADR-0032: the summoning dispatcher's working directory. A summoned
+       * dispatcher session is created in the SAME cwd, because the host's
+       * cross-session route (`sessionController.resolveAgent`) refuses a
+       * session whose header carries no `cwd`
+       * (`dsh-api-session-controller/lib/index.js:393`) — i.e. no `cwd`
+       * means no cold resume, ever.
+       */
+      readonly cwd?: unknown;
     };
   };
+  /**
+   * ADR-0032: the provider/model route this agent's requests use
+   * (`dsh-agent/lib/types/runtime-types.d.ts:139`). Read, never written — the
+   * summoned session is created on the summoner's own route instead of
+   * inheriting it through a subagent descriptor that no longer exists.
+   */
+  readonly options?: AgentOptionsLike;
   followup(message: unknown): void;
   /** Queue context without opening a turn (optional; policy inject). */
   inject?(message: unknown): void;
@@ -79,6 +99,57 @@ export interface ActivationLike {
   dispose(): Promise<void>;
 }
 
+/**
+ * Structural view of `AgentOptions` (`dsh-agent/lib/types/runtime-types.d.ts:21`).
+ * Only the route pair this adapter copies; the rest is opaque and never sent.
+ */
+export interface AgentOptionsLike {
+  readonly provider?: string;
+  readonly model?: string;
+  readonly [key: string]: unknown;
+}
+
+/**
+ * Structural session metadata for a plugin-created TOP-LEVEL session
+ * (ADR-0032). Deliberately narrow: `cwd` and nothing else. The host also
+ * accepts `parentSession`, `origin` and `delegationDepth` here, and setting
+ * ANY of them re-classifies the session as subagent-owned by the host's OR
+ * guard (`dsh-api-session-controller/lib/index.js:128-134`), after which every
+ * ordinary route refuses it with `session/agent-busy`. Typing them out is what
+ * keeps that mistake unrepresentable.
+ */
+export interface TopLevelSessionMetaLike {
+  readonly cwd?: string;
+}
+
+/** Structural view of `CreateAgentOptions` (`dsh-agent/lib/types/index.d.ts:53`). */
+export interface CreateAgentOptionsLike {
+  readonly sessionId: string;
+  readonly meta?: TopLevelSessionMetaLike;
+  readonly agentOptions?: AgentOptionsLike;
+  /**
+   * Per-agent scoped-world composition. AWAITED BEFORE publication, so
+   * everything registered here exists before `session/created`,
+   * `agent/created` and the first prompt assembly
+   * (`dsh-agent/lib/types/index.d.ts:99-101`). Setup COMPOSES; it must never
+   * drive the agent.
+   */
+  readonly setup?: (
+    agentCtx: unknown,
+    agent: AgentLike,
+  ) => void | Promise<void>;
+  /**
+   * Abort before publication only — same rule as `ActivationSpecLike.signal`.
+   */
+  readonly signal?: AbortSignal;
+}
+
+/** Structural view of `AgentHandle` (`dsh-agent/lib/types/index.d.ts:143-146`). */
+export interface AgentHandleLike {
+  readonly agent: AgentLike;
+  dispose(): Promise<void>;
+}
+
 export interface ActivationSpecLike {
   readonly provider: string;
   readonly label: string;
@@ -96,11 +167,14 @@ export interface ActivationSpecLike {
     readonly prompt: ContentBlock[];
     readonly parent: AgentLike;
     /**
-     * Ticket 83: the CHILD'S ABSOLUTE delegation-depth ceiling. The host's
-     * `resolveChildDepth` refuses the spawn when `parentDepth + 1 > maxDepth`
-     * — it is NOT the worker's own budget. Derive with
-     * `workerSpawnMaxDepth` for a worker hop, `dispatcherSpawnMaxDepth` for a
-     * dispatcher hop; never send `WORKER_MAX_DEPTH` (0) here raw.
+     * Ticket 83: the CHILD'S ABSOLUTE delegation-depth ceiling for a SUBAGENT
+     * spawn. The host's `resolveChildDepth` refuses the spawn when
+     * `parentDepth + 1 > maxDepth` — it is NOT the worker's own budget. Derive
+     * with `workerSpawnMaxDepth`; never send `WORKER_MAX_DEPTH` (0) here raw.
+     *
+     * ADR-0032: the DISPATCHER path (`spawnDispatcher`) sends no `maxDepth` at
+     * all. A summoned dispatcher is a top-level session, so this ceiling and
+     * the 8-slot root pool are subagent-runtime bounds and never reach it.
      */
     readonly maxDepth?: number;
   };
@@ -221,7 +295,58 @@ export interface AdapterContext {
   };
   agents: {
     get(id: unknown): AgentLike | undefined;
+    /**
+     * ADR-0032: create a genuinely NEW TOP-LEVEL session — the same call the
+     * host's own "new conversation" makes
+     * (`dsh-api-session-controller/lib/index.js:517-525`).
+     *
+     * The summoned dispatcher is created with `meta: { cwd }` and NO
+     * `parentAgent`, NO `origin`, NO `parentSession`, NO `delegationDepth`.
+     * All three header fields must be omitted TOGETHER: the host's ownership
+     * guard is an OR (`origin === 'subagent'` OR `parentSession` set and its
+     * live parent owns the agent — `dsh-api-session-controller/lib/index.js`
+     * `:128-134`), so passing a parent "for convenience" silently
+     * re-classifies the child and every ordinary route then refuses it with
+     * `session/agent-busy`.
+     *
+     * Optional so stub contexts stay minimal: a host without this seam cannot
+     * summon a parallel dispatcher at all and `spawnDispatcher` refuses by
+     * name rather than falling back to the subagent shape.
+     */
+    create?(options: CreateAgentOptionsLike): Promise<AgentHandleLike>;
   };
+  /**
+   * ADR-0032: the host's cross-session delivery facade (`ctx.sessionController`,
+   * `@deepseek-ai/dsh-api-session-controller`). `resolveAgent(sessionId)` is
+   * get-or-cold-resume and deduped (`lib/index.js:221-246`), so it addresses a
+   * session BY ID — no parent edge, which is exactly the shape a summoned
+   * top-level dispatcher has. This is the route `dsh-schedule` uses to deliver
+   * to a session it does not own (`:1576-1596`).
+   *
+   * Optional so stub contexts stay minimal, and because only the web-app
+   * profile mounts it: when absent, the dormant-dispatcher resume falls back to
+   * the pre-ADR-0032 parent→child `subagents.sendMessage` route (which cannot
+   * wake a parentless peer — there is no sender to resolve).
+   */
+  sessionController?: {
+    resolveAgent(
+      sessionId: string,
+    ): Promise<{ readonly agent: AgentLike } | { readonly error: unknown }>;
+  };
+  /**
+   * Ticket 157 (ADR-0032): guarded read of the cros-session delivery facade
+   * (`ctx.get`, `cordis/lib/index.js:763`), mirroring the plugin's other
+   * host-plane reads (ticket 124 `tokenMeter`, ticket 147 `sessionProjections`).
+   *
+   * The facade is mounted by the web-app profile only
+   * (`dsh-web-app/cordis.patch.yml:122`), so it is deliberately NOT in the
+   * inject list: a headless/ACP deployment must still load this plugin, and
+   * `resumeDormantDispatcher` already degrades honestly when it is absent.
+   *
+   * Optional so stub contexts stay minimal; an absent getter means "no facade",
+   * which is exactly the pre-existing behaviour.
+   */
+  get?: (name: string) => unknown;
   jobs: {
     /** Omitted caller lists unowned jobs only; pass the reading session. */
     list(callerSessionId?: unknown): readonly JobSnapshotLike[];
@@ -367,8 +492,10 @@ export interface CordisDshHost extends DshHost {
    *   no dispatcher-sized cap of ours exists), and
    * - passes no `agentPreset` (none exists in `ActivationSpecLike`).
    *
-   * The only bounds are the host's: `maxDepth` (derived with
-   * `dispatcherSpawnMaxDepth`, parent depth + 2) and the 8-active root pool.
+   * ADR-0032: a summoned dispatcher is a TOP-LEVEL session, so there is no
+   * `maxDepth` bound (parent depth + 2) and no 8-slot root pool to respect —
+   * both are subagent-runtime bounds. We impose no cap of our own; observe
+   * the host's real behaviour first rather than inventing one here.
    * Host errors surface unchanged — no refusal class is invented here.
    */
   spawnDispatcher(opts: DispatcherSpawnOptions): Promise<DispatcherSpawnResult>;
@@ -819,6 +946,48 @@ export class WorkerActivityRing {
   }
 }
 
+/** The facade shape, named once so both the seam and the read below agree. */
+type SessionControllerLike = {
+  resolveAgent(
+    sessionId: string,
+  ): Promise<{ readonly agent: AgentLike } | { readonly error: unknown }>;
+};
+
+/**
+ * Ticket 157 (ADR-0032): read the cross-session delivery facade from a live
+ * context, guarded.
+ *
+ * Tried in order:
+ * 1. `ctx.get("sessionController")` — the host-plane read (cordis
+ *    `lib/index.js:763`), the same route this repo already uses for
+ *    `tokenMeter` (ticket 124) and `sessionProjections` (ticket 147). This is
+ *    the one that works on a LIVE context, where an un-injected property read
+ *    throws.
+ * 2. the declared seam — a stub or a host that supplies it directly.
+ *
+ * Returns `undefined` when neither exists, which is the pre-existing behaviour:
+ * the caller falls back to the parent→child route and says so once.
+ */
+function readSessionController(
+  ctx: AdapterContext,
+): SessionControllerLike | undefined {
+  if (typeof ctx.get === "function") {
+    try {
+      const service = ctx.get("sessionController");
+      if (
+        typeof service === "object" &&
+        service !== null &&
+        typeof (service as SessionControllerLike).resolveAgent === "function"
+      ) {
+        return service as SessionControllerLike;
+      }
+    } catch {
+      // Absent (or not yet active): fall through to the declared seam.
+    }
+  }
+  return ctx.sessionController;
+}
+
 export function createCordisDshHost(
   ctx: AdapterContext,
   options?: CordisDshHostOptions,
@@ -910,8 +1079,9 @@ export function createCordisDshHost(
    * the same answer — every child this host ever activated as a dispatcher —
    * so an announcement that arrives AFTER the spawn resolved still cannot be
    * composed as a worker. Its cardinality matches the `workers` map (which
-   * also lives for the process), and dispatcher spawns are bounded by the
-   * host's own live-child pool, so it is not a leak this adapter invents.
+   * also lives for the process). ADR-0032: a summoned dispatcher is a top-level
+   * session, so neither set is bounded by a subagent live-child pool — both grow
+   * with the sessions that were really created, which is not a cap of ours.
    */
   const reservedDispatcherIds = new Set<string>();
   const dispatcherActivated = new Set<string>();
@@ -1032,6 +1202,10 @@ export function createCordisDshHost(
    */
   const peerToolCalls = new Map<string, PeerToolActivity>();
   let wakeMissingLogged = false;
+  /** Say the no-facade resume gap once, not once per send. */
+  let resumeDegradedLogged = false;
+  /** Same once-only rule for the worker half (`requestDormantWorkerWake`). */
+  let workerResumeDegradedLogged = false;
 
   /**
    * Shared wake-turn mechanics (ticket 116). `origin` is the optional
@@ -1079,49 +1253,79 @@ export function createCordisDshHost(
    * dispatchers and children"; this is the DISPATCHERS half): cold-resume a
    * marked dispatcher the host has not re-announced since the restart.
    *
-   * Mechanism: `ctx.subagents.sendMessage(sender, targetId, …)` is the host's
-   * documented resume path — for an absent child it cold-resumes a new
-   * Activation and then delivers. The sender must be the exact live parent
-   * Agent the host recorded as this child's parent, so the mark carries the
-   * spawner's session id and the parent binding supplies the object.
+   * ADR-0032: a summoned dispatcher is its own TOP-LEVEL session, so there is
+   * no parent→child edge to ride. The address is the session id itself and the
+   * route is the host's cross-session delivery facade:
+   * `ctx.sessionController.resolveAgent(id)` is get-or-cold-resume and deduped
+   * (`dsh-api-session-controller/lib/index.js:221-246`) — the same route
+   * `dsh-schedule` uses to deliver to a session it does not own (`:1576-1596`).
    *
-   * The payload is `RESUME_WAKE_CUE`, NOT the peer text: this call only
-   * wakes the child. The peer message itself is drained from our wake bus
-   * once the child activates (`pendingWakeTurns` → `openWakeTurn` →
-   * `composeWakeText` → `assemblePeerWakeTurn`), so it is never delivered
-   * twice and always carries its `agent-message` origin.
+   * Two rules are load-bearing here:
+   * - Never append a `user/message` into the target's log: it renders but never
+   *   enters that inbox and never wakes anything.
+   * - Resume alone runs nothing. A restored inbox stays parked (publication
+   *   sets no `wakeRequested`, `dsh-agent-loop/lib/index.js:1942-1956`), so the
+   *   resume MUST be paired with an explicit `followup`, which is what opens
+   *   the turn (`:806-808`). Never "resume and hope".
+   *
+   * The payload is the resume cue, NOT the peer text: the peer message itself
+   * is drained from our wake bus once the target is announced
+   * (`pendingWakeTurns` → `openWakeTurn` → `composeWakeText`), so it is never
+   * delivered twice and always carries its `agent-message` origin.
+   *
+   * Graceful degradation: a host without the facade (only the web-app profile
+   * mounts it) keeps the pre-ADR-0032 parent→child `subagents.sendMessage`
+   * route. That route needs the spawner live in this process, so it cannot
+   * wake a parentless dispatcher — it says so once instead of claiming success.
    *
    * Failure is honest and quiet: the send was already ACCEPTED by the core
    * (the mark is the whole permission), so a resume that cannot be issued —
-   * no row parent, no bound parent Agent, a host refusal — leaves the message
-   * in the peer inbox for the next activation to deliver. Nothing is thrown
-   * into the wake bus, and no refusal class is invented.
+   * no facade, no bound parent Agent, a host refusal — leaves the message in
+   * the peer inbox for the next activation to deliver. Nothing is thrown into
+   * the wake bus, and no refusal class is invented.
    */
   function resumeDormantDispatcher(sessionId: string): void {
     if (resumeRequested.has(sessionId)) return;
-    const parentSessionId = dispatcherMarks.get(sessionId);
-    if (parentSessionId === undefined) {
-      // A pre-138 row: the mark is enough to accept a send, but not enough
-      // to resume (the host needs the sender Agent, not just an id).
-      return;
-    }
-    const sender = parents.get(parentSessionId);
-    if (sender === undefined) {
-      // The spawner is not bound in this process (it never activated this
-      // boot): the message waits in the inbox for when it does.
-      return;
-    }
     resumeRequested.add(sessionId);
-    const controller = new AbortController();
     void Promise.resolve()
-      .then(() =>
-        ctx.subagents.sendMessage(
+      .then(async () => {
+        const facade = readSessionController(ctx);
+        if (facade !== undefined) {
+          const found = await facade.resolveAgent(sessionId);
+          if ("error" in found) throw found.error;
+          // Resume alone runs nothing: this followup is what opens the turn.
+          found.agent.followup(wakeUserMessage(resumeWakeCue));
+          return;
+        }
+        const parentSessionId = dispatcherMarks.get(sessionId);
+        const sender =
+          parentSessionId === undefined || parentSessionId === ""
+            ? undefined
+            : parents.get(parentSessionId);
+        if (sender === undefined) {
+          // Degraded host: nothing was issued, so the next send may try again.
+          resumeRequested.delete(sessionId);
+          if (!resumeDegradedLogged) {
+            resumeDegradedLogged = true;
+            try {
+              console.warn(
+                `[multitask-dispatcher] dispatcher ${sessionId} cannot be cold-resumed: ` +
+                  `no ctx.sessionController and no live spawner bound; the peer ` +
+                  `message waits in its inbox until it activates.`,
+              );
+            } catch {
+              // A broken console must not break the wake path either.
+            }
+          }
+          return;
+        }
+        await ctx.subagents.sendMessage(
           sender,
           sessionId,
           textBlocks(resumeWakeCue),
-          { signal: controller.signal },
-        ),
-      )
+          { signal: new AbortController().signal },
+        );
+      })
       .catch((error) => {
         // Retry on the NEXT send: the resume never reached the host.
         resumeRequested.delete(sessionId);
@@ -1146,40 +1350,67 @@ export function createCordisDshHost(
    * carries our own durable `worker_sessions` row but has no live Agent.
    *
    * The mechanics mirror `resumeDormantDispatcher` exactly: park the text
-   * (last-wins — one slot, like the core's steer queue), then ask the host to
-   * cold-resume through `ctx.subagents.sendMessage` from the SPAWNER recorded
-   * on the row, using `RESUME_WAKE_CUE` rather than the correction. The
-   * correction itself is delivered by `deliverParkedWorkerWake` once the
+   * (last-wins — one slot, like the core's steer queue), then cold-resume the
+   * worker session by id, using `RESUME_WAKE_CUE` rather than the correction.
+   * The correction itself is delivered by `deliverParkedWorkerWake` once the
    * resumed child is announced, so it is never sent twice.
    *
+   * Resume route: the `sessionController` facade first — `resolveAgent` gives
+   * an Agent for a session whose spawner is not live in this process, which
+   * the parent→child route cannot do. ADR-0003 still stands (workers are
+   * leaves spawned through the subagent runtime), so the recorded spawner
+   * stays as the fallback on a host with no facade.
+   *
    * Failure is honest and quiet, same rule as the dispatcher half: the send
-   * was already ACCEPTED by the core (the mark is the whole permission), so a
-   * wake that cannot be issued — no bound spawner, a host refusal — logs, and
-   * the text stays parked for the next activation. Nothing is thrown into the
-   * caller and no refusal class is invented.
+   * was already ACCEPTED by the core, so a wake that cannot be issued — no
+   * facade and no bound spawner, a host refusal — logs, and the text stays
+   * parked for the next activation. Nothing is thrown into the caller and no
+   * refusal class is invented.
    */
   function requestDormantWorkerWake(workerId: string, message: string): void {
     parkedWorkerWakes.set(workerId, message);
     if (resumeRequested.has(workerId)) return;
-    const parentSessionId = workerSessions.get(workerId);
-    if (parentSessionId === undefined) return;
-    const sender = parents.get(parentSessionId);
-    if (sender === undefined) {
-      // The spawner is not bound in this process (it never activated this
-      // boot): the text waits here for when it does.
-      return;
-    }
     resumeRequested.add(workerId);
     const controller = new AbortController();
     void Promise.resolve()
-      .then(() =>
-        ctx.subagents.sendMessage(
+      .then(async () => {
+        const facade = readSessionController(ctx);
+        if (facade !== undefined) {
+          const found = await facade.resolveAgent(workerId);
+          if ("error" in found) throw found.error;
+          // Resume alone runs nothing: this followup is what opens the turn.
+          found.agent.followup(wakeUserMessage(resumeWakeCue));
+          return;
+        }
+        const parentSessionId = workerSessions.get(workerId);
+        const sender =
+          parentSessionId === undefined
+            ? undefined
+            : parents.get(parentSessionId);
+        if (sender === undefined) {
+          // Degraded host: nothing was issued, so the next send may try again.
+          resumeRequested.delete(workerId);
+          if (!workerResumeDegradedLogged) {
+            workerResumeDegradedLogged = true;
+            try {
+              console.warn(
+                `[multitask-dispatcher] worker ${workerId} cannot be cold-resumed: ` +
+                  `no ctx.sessionController and no live spawner bound; the parked ` +
+                  `wake waits until it activates.`,
+              );
+            } catch {
+              // A broken console must not break the wake path either.
+            }
+          }
+          return;
+        }
+        await ctx.subagents.sendMessage(
           sender,
           workerId,
           textBlocks(resumeWakeCue),
           { signal: controller.signal },
-        ),
-      )
+        );
+      })
       .catch((error) => {
         // Retry on the NEXT send: the resume never reached the host. The
         // parked text stays, so nothing was lost.
@@ -1344,14 +1575,21 @@ export function createCordisDshHost(
    *
    * `generation` (ticket 141) is resolved by the caller from the map/mark and
    * forwarded to the hook; it is the number the policy text names.
+   *
+   * `flushWake` (ADR-0032): when the activation runs from the create `setup`
+   * hook, the parked-wake discharge is suppressed here and performed by the
+   * caller after creation resolves. `setup` COMPOSES, never drives
+   * (`dsh-agent/lib/types/index.d.ts:99-101`), and `flushPendingWakeTurn`
+   * drives — it opens a `followup` turn.
    */
   function activateSpawnedDispatcher(
     childAgent: AgentLike,
     sessionId: string,
     generation: number = dispatcherGenerations.get(sessionId) ?? 2,
+    flushWake = true,
   ): void {
     if (onDispatcherSpawned === undefined) {
-      flushPendingWakeTurn(sessionId, childAgent);
+      if (flushWake) flushPendingWakeTurn(sessionId, childAgent);
       return;
     }
     if (dispatcherActivated.has(sessionId)) {
@@ -1359,7 +1597,7 @@ export function createCordisDshHost(
       // send parked for this id is still discharged — for a child that is
       // live again it lands normally, and there is no second activation to
       // wait for.
-      flushPendingWakeTurn(sessionId, childAgent);
+      if (flushWake) flushPendingWakeTurn(sessionId, childAgent);
       return;
     }
     dispatcherActivated.add(sessionId);
@@ -1380,7 +1618,7 @@ export function createCordisDshHost(
     // (the plugin's `onDispatcherSpawned` runs synchronously above) — so the
     // resumed dispatcher's first turn already has its own tools and policy.
     // If no send parked a turn for this id, this is a no-op.
-    flushPendingWakeTurn(sessionId, childAgent);
+    if (flushWake) flushPendingWakeTurn(sessionId, childAgent);
   }
 
   /**
@@ -1649,24 +1887,34 @@ export function createCordisDshHost(
   ): void {
     if (onUserDispatcherResumed === undefined) return;
     if (sessionKindOfSession === undefined) return;
-    if (resumedUserDispatchers.has(sessionId)) return;
     if (sessionKindOfSession(session) !== "dispatcher") return;
-    resumedUserDispatchers.add(sessionId);
-    try {
-      onUserDispatcherResumed(agent, sessionId);
-    } catch (error) {
-      // The agent is already live; a failed activation must not turn the
-      // host's resume into an error. The id stays recorded so a second
-      // announcement does not retry a path that just threw.
+    if (!resumedUserDispatchers.has(sessionId)) {
+      resumedUserDispatchers.add(sessionId);
       try {
-        console.warn(
-          `[multitask-dispatcher] resumed dispatcher ${sessionId} could not be re-activated:`,
-          error,
-        );
-      } catch {
-        // A broken console must not break the create path either.
+        onUserDispatcherResumed(agent, sessionId);
+      } catch (error) {
+        // The agent is already live; a failed activation must not turn the
+        // host's resume into an error. The id stays recorded so a second
+        // announcement does not retry a path that just threw.
+        try {
+          console.warn(
+            `[multitask-dispatcher] resumed dispatcher ${sessionId} could not be re-activated:`,
+            error,
+          );
+        } catch {
+          // A broken console must not break the create path either.
+        }
       }
     }
+    // ADR-0032: a summoned dispatcher is a TOP-LEVEL session, so its cold
+    // resume lands in the parentless branch and never reaches
+    // `activateSpawnedDispatcher`. Without this the wake a send parked
+    // (`openWakeTurn` → `pendingWakeTurns`) would be dropped forever. Same
+    // order as the parented sites (ticket 138): the flush is LAST, after the
+    // hook above mounted the tool surface and applied the policy, so the
+    // drained turn's first request already has both. A repeat announcement
+    // still discharges a wake parked since the last one.
+    flushPendingWakeTurn(sessionId, agent);
   }
 
   /**
@@ -2144,47 +2392,43 @@ export function createCordisDshHost(
     },
 
     /**
-     * Ticket 118 (ADR-0025 mitosis): spawn another DISPATCHER from a bound
-     * dispatcher session, then hand the child to the activation path. Across
-     * the two chunks this is the whole "mitosis" seam: chunk 1 built the
-     * spawn, chunk 3 (this one) adds the reservation that identifies the
-     * child and the single `onDispatcherSpawned` call that turns it into a
-     * real dispatcher (bind, scoped tools, policy, lifecycle, rebuild).
+     * ADR-0032 (owner ruling 2026-10-28; ticket 157): summon another
+     * DISPATCHER as a NEW TOP-LEVEL SESSION PARALLEL to the summoner — not a
+     * subagent child of it — then hand it to the ordinary activation path.
      *
-     * Three deliberate differences from `spawnWorker`:
-     * - the child id is RESERVED here and passed as `spec.childId`, not left
-     *   to the host. That is what closes chunk 1's recorded race:
-     *   `pendingSpawns` is keyed per parent and cannot tell two children of
-     *   one parent apart, so while a worker spawn from the same parent was in
-     *   flight the `agent/created` listener could compose the dispatcher
-     *   child as a worker. With a reserved id the listener matches by
-     *   IDENTITY — a dispatcher child returns before the counter is read, and
-     *   a worker child can never match a reserved id. The host refuses a
-     *   reserved id that is already live or persisted (`DUPLICATE_CHILD`),
-     *   exactly as for its own minted id.
-     * - NO `pendingSpawns` bump and NO `workers` registry entry: the child is
-     *   a peer, not a work stream, so the firehose/settle subscriptions
-     *   ignore it.
-     * - NO `agentPreset` in the spec: the child joins the parent's
-     *   composition, which is exactly what "full tool set" means here.
+     * ADR-0025 decision 6 said the host gives a summoned dispatcher no chat
+     * surface and hides it from the sidebar; that is the clause the ruling
+     * reverses. The mechanism is now `ctx.agents.create` +
+     * `agent.followup` (the same call the host's own "new conversation"
+     * makes), and ADR-0019's per-dispatcher scoping is what makes a parallel
+     * session cheap.
      *
-     * Depth: `dispatcherSpawnMaxDepth` gives the child an ABSOLUTE ceiling of
-     * parent depth + 2 — one hop for the child dispatcher, one for the
-     * workers it will spawn. Sending +1 would admit the child and then refuse
-     * every one of its workers.
+     * Three things are kept from the ticket-118 shape, all still load-bearing:
+     * - the child id is RESERVED here and passed as the session id, so the
+     *   `agent/created` listener recognises THIS spawn by identity instead of
+     *   the per-parent `pendingSpawns` counter, which cannot tell two
+     *   children of one parent apart.
+     * - NO `pendingSpawns` bump and NO `workers` registry entry: the session
+     *   is a peer, not a work stream, so the firehose/settle subscriptions
+     *   ignore it. A top-level session is nobody's child, so it can never
+     *   enter a child registry.
+     * - the durable mark and `dispatcherGenerations` rows are written exactly
+     *   as before; the generation is still spawner + 1 (ticket 141).
      *
-     * Activation hook: `onDispatcherSpawned` runs from the `agent/created`
-     * listener — the last moment the child's own scope can take
-     * registrations before its first turn. When the host announces nothing
-     * (a stub), the post-resolve fallback below makes the same single call
-     * from `ctx.agents.get(childId)`; a child absent from that registry is
-     * left live but inactive, which is the honest degraded shape because no
-     * Agent object exists to bind.
+     * What is deliberately GONE: `request.parent`, `delivery: "parent"`,
+     * `provider: SPAWN_PROVIDER` and `maxDepth`. All four are
+     * subagent-runtime fields. There is no spawn cap of ours (owner decision,
+     * 2026-10-28) and `maxDepth`/the 8-slot root pool do not bound a
+     * top-level session.
      *
-     * Host errors propagate unchanged: `ACTIVATION_LIMIT_REACHED` arrives as
-     * a rejection of `startActivation` (the 8-active root pool) and
-     * `SubagentDepthError` as the host's own throw. No wrapper, no invented
-     * refusal class, no cap of ours (ADR-0025 §Starting bounds).
+     * Activation hook: `onDispatcherSpawned` now runs from the create `setup`
+     * callback — awaited BEFORE publication, so the session's scoped tools and
+     * policy exist before its `agent/created`, its `session/created` and its
+     * first prompt assembly. The `agent/created` listener and the post-resolve
+     * fallback remain for a host that resumes or re-announces the session, and
+     * both deduplicate through the same helper.
+     *
+     * Host errors propagate unchanged; no wrapper, no invented refusal class.
      */
     async spawnDispatcher(
       opts: DispatcherSpawnOptions,
@@ -2199,16 +2443,32 @@ export function createCordisDshHost(
       }
       const controller = new AbortController();
       const signal = opts.signal ?? controller.signal;
-      // A child dispatcher of a depth-N parent lands at N+1. Its own workers
-      // land at N+2, so the ceiling admitted here must reach N+2. The `?? 0`
-      // fallback mirrors `spawnWorker`: a bound parent is assumed top-level
-      // only when its header carries no depth.
-      const parentDelegationDepth = parent.session.header?.delegationDepth ?? 0;
-      const maxDepth = dispatcherSpawnMaxDepth(parentDelegationDepth);
-      // Ticket 118 chunk 3: reserve the child id BEFORE the spawn. The
-      // `agent/created` listener fires inside `startActivation` — awaited
-      // before it resolves on the installed host — so identity is the only
-      // correlation available while the spawn is in flight.
+      // ADR-0032: the summoned dispatcher is a TOP-LEVEL session parallel to
+      // this one, so it inherits no delegation depth — `maxDepth`,
+      // `dispatcherSpawnMaxDepth` and the host's 8-slot root pool are
+      // subagent-runtime bounds and do not apply to it (no cap of ours, per
+      // the 2026-10-28 owner decision). The summoner still supplies:
+      // - `cwd`, because the host's cross-session route refuses a session
+      //   whose header has none (`dsh-api-session-controller/lib/index.js:393`),
+      //   which would leave the peer unreachable after a restart;
+      // - the provider/model route, because `AgentOptions` is empty otherwise
+      //   and the first turn would throw "no provider/model"
+      //   (`dsh-agent-loop/lib/index.js:1197`). The subagent path inherited
+      //   both through `resolveChildAgentOptions`; that edge is gone.
+      const summonerCwd = parent.session.header?.cwd;
+      const route = parent.options;
+      const agentOptions: AgentOptionsLike | undefined =
+        typeof route?.provider === "string" &&
+        typeof route.model === "string" &&
+        route.provider !== "" &&
+        route.model !== ""
+          ? { provider: route.provider, model: route.model }
+          : undefined;
+      // Ticket 118 chunk 3: the child id is still RESERVED here — identity is
+      // what lets `agent/created` recognise the summoning session as ours
+      // instead of falling through to the worker composition. It is passed as
+      // `sessionId` below, so the host either creates the session under this
+      // id or refuses; no other id can come back.
       const reservedChildId = randomUUID();
       /** The id the host actually gave the child, or null if it refused. */
       let spawnedId: string | null = null;
@@ -2219,53 +2479,87 @@ export function createCordisDshHost(
         // reservation / mark the `finally` never revisits.
         reservedDispatcherIds.add(reservedChildId);
         // Ticket 140 (review fix): seed the durable-mark MIRROR with the
-        // reserved id BEFORE `startActivation`. The `sessionKind` projection
-        // unit's `init` runs at `session/created`, inside that call, and reads
-        // this source; the durable row is only written after the spawn
-        // resolves (below), so an unseeded init would have nothing to read.
+        // reserved id BEFORE the create. The `sessionKind` projection unit's
+        // `init` runs at `session/created`, inside that call, and reads this
+        // source; the durable row is only written after the spawn resolves
+        // (below), so an unseeded init would have nothing to read.
         dispatcherMarks.set(reservedChildId, opts.parentSessionId);
         // Ticket 141: the child is one generation past its spawner. A
         // user-started dispatcher is generation 1 (the option is absent for
         // every pre-141 caller), so a direct spawn is generation 2. Seeded
-        // BEFORE `startActivation`: `agent/created` fires inside that call,
-        // and the mark row — the other source of this number — is only
-        // written after it resolves.
+        // BEFORE the create: `agent/created` fires inside that call, and the
+        // mark row — the other source of this number — is only written after
+        // it resolves.
         const spawnerGeneration =
           dispatcherGenerationOf?.(opts.parentSessionId) ?? 1;
         const childGeneration = spawnerGeneration + 1;
         dispatcherGenerations.set(reservedChildId, childGeneration);
-        const activation = await ctx.subagents.startActivation({
-          provider: SPAWN_PROVIDER,
-          label: opts.title,
-          childId: reservedChildId,
-          // No `agentPreset` field exists on the spec — omitting it is
-          // automatic and is the mitosis requirement.
-          request: {
-            prompt: textBlocks(opts.prompt),
-            parent,
-            // Child's absolute ceiling: parent depth + 1 hop + its own worker hop.
-            maxDepth,
-          },
-          signal,
-          delivery: "parent",
-        });
-        // The child session id IS the dispatcher identity the activation path
-        // binds. Brand erased at the boundary; normally it equals the
-        // reservation, and a host that minted its own id is still handled.
-        const dispatcherId = String(activation.childId);
-        // Ticket 141: mirror the number under the id the host actually gave
-        // the child, so a host that minted its own id still activates with
-        // the right generation.
-        dispatcherGenerations.set(dispatcherId, childGeneration);
-        spawnedId = dispatcherId;
-        // Fallback for a host that announced no `agent/created` (or announced
-        // it under a different id). Deduplicated inside the helper, so a host
-        // that DID announce the child is not activated twice. It runs BEFORE
-        // the mark write so a slow store never delays a child's activation.
-        const childAgent = ctx.agents.get(dispatcherId);
-        if (childAgent !== undefined) {
-          activateSpawnedDispatcher(childAgent, dispatcherId, childGeneration);
+        // ADR-0032 — the whole fix. Create a real top-level session, the same
+        // call the host's own "new conversation" makes
+        // (`dsh-api-session-controller/lib/index.js:517-525`).
+        //
+        // THE TRAP: `parentAgent`, `meta.origin`, `meta.parentSession` and
+        // `meta.delegationDepth` must ALL stay omitted, together. The host's
+        // ownership guard is an OR (`origin === 'subagent'` OR `parentSession`
+        // set AND its live parent owns the agent —
+        // `dsh-api-session-controller/lib/index.js:128-134`), so passing a
+        // parent "for convenience" silently re-classifies this session and
+        // every ordinary route then refuses it with `session/agent-busy`.
+        // `TopLevelSessionMetaLike` types the meta down to `cwd` so the
+        // mistake cannot be written here at all.
+        const create = ctx.agents.create;
+        if (create === undefined) {
+          throw new Error(
+            "CordisDshHost: this host exposes no ctx.agents.create; cannot summon a parallel dispatcher session",
+          );
         }
+        const handle = await create.call(ctx.agents, {
+          sessionId: reservedChildId,
+          meta: summonerCwd === undefined ? {} : { cwd: String(summonerCwd) },
+          ...(agentOptions === undefined ? {} : { agentOptions }),
+          setup: (agentCtx, agent) => {
+            // ADR-0019: the child's own scope takes its scoped tools and
+            // policy HERE rather than from `agent/created` — `setup` is
+            // awaited BEFORE publication, so nothing sees a half-configured
+            // dispatcher. This is the same seam the host's own session
+            // creation uses; it replaces the subagent composition the old
+            // path inherited.
+            void agentCtx;
+            // Ticket 118/140: the activation itself still runs through the
+            // single deduplicated helper. `setup` COMPOSES, never drives, so
+            // the parked-wake discharge is deferred to the caller below and
+            // the first turn is opened after creation resolves.
+            activateSpawnedDispatcher(
+              agent,
+              reservedChildId,
+              childGeneration,
+              false,
+            );
+          },
+          ...(signal === undefined ? {} : { signal }),
+        });
+        // The session id IS the dispatcher identity the activation path binds.
+        // `create` was handed the reservation, so this is normally the same
+        // string; erased at the boundary for the same reason as before.
+        const dispatcherId = String(handle.agent.session.id ?? reservedChildId);
+        spawnedId = dispatcherId;
+        // The handoff prompt is the summoned dispatcher's FIRST user turn.
+        // `followup` is the only call that both queues a whole turn and wakes
+        // the driver (`dsh-agent-loop/lib/index.js:806-808`) — creating the
+        // session alone leaves it blank, and a blank session is hidden from
+        // the sidebar until its first turn lands. The message carries a
+        // producer-owned source kind because session format v4 rejects an
+        // empty/`plugin` wrapper (`dsh-session-format-v3-to-v4/lib/index.js:126`).
+        handle.agent.followup({
+          id: `multitask-spawn-${randomUUID()}`,
+          role: "user",
+          content: textBlocks(opts.prompt),
+          source: { kind: WAKE_SOURCE_KIND },
+        });
+        // Ticket 138: a wake a send parked before this session existed is
+        // discharged NOW — after activation (`setup`) and after the first turn
+        // is queued, so the resumed turn sees tools and policy.
+        flushPendingWakeTurn(dispatcherId, handle.agent);
         // Ticket 130: the child is durable from here on. Written AFTER the
         // spawn resolved — there is no session id to key on before that — and
         // never deleted: deactivation also runs on plugin unload, so a delete
@@ -2319,8 +2613,20 @@ export function createCordisDshHost(
     },
 
     async sendMessage(workerId: string, message: string): Promise<void> {
-      // ADR-0019: delivery authority resolves from the worker's recorded
-      // parent — the answer reaches the worker through ITS dispatcher.
+      // ADR-0032: the sessionController facade first — `resolveAgent` reaches
+      // the worker by its own id, so delivery no longer needs the spawner to
+      // be live in this process. Resume alone runs nothing, so the wake is an
+      // explicit `followup` carrying the caller's text.
+      const facade = readSessionController(ctx);
+      if (facade !== undefined) {
+        const found = await facade.resolveAgent(workerId);
+        if ("error" in found) throw found.error;
+        found.agent.followup(wakeUserMessage(message));
+        return;
+      }
+      // ADR-0019 fallback: with no facade, delivery authority still resolves
+      // from the worker's recorded parent — the answer reaches the worker
+      // through ITS dispatcher.
       const entry = workers.get(workerId);
       const parent =
         entry !== undefined ? parents.get(entry.parentSessionId) : undefined;

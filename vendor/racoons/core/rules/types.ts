@@ -88,19 +88,6 @@ export type Note =
     }
   | {
       readonly id: NoteId;
-      readonly kind: "evict-marker";
-      readonly removalId: RemovalId;
-      readonly episodeId: EpisodeId;
-    }
-  | {
-      readonly id: NoteId;
-      readonly kind: "span-marker";
-      readonly removalId: RemovalId;
-      readonly path: string;
-      readonly keepLines: readonly LineRange[];
-    }
-  | {
-      readonly id: NoteId;
       readonly kind: "receipt";
       readonly removalId: RemovalId;
       readonly unitId: UnitId;
@@ -178,20 +165,6 @@ export interface SealOp {
   readonly noteId: NoteId;
 }
 
-export interface EvictOp {
-  readonly kind: "evict";
-  readonly episodeId: EpisodeId;
-  readonly removalId: RemovalId;
-  readonly noteId: NoteId;
-}
-
-export interface SpanOp {
-  readonly kind: "span";
-  readonly removalId: RemovalId;
-  readonly keepLines: readonly LineRange[];
-  readonly noteId: NoteId;
-}
-
 /**
  * One forgotten unit: archive exactly the unit's span and append its receipt.
  * The cut is the unit's own node index ("revert to just before the read"), so
@@ -219,7 +192,7 @@ export interface ProofOp {
   readonly noteId: NoteId;
 }
 
-export type Operation = CapOp | SealOp | EvictOp | SpanOp | VerdictOp | ProofOp | ShapeOp;
+export type Operation = CapOp | SealOp | VerdictOp | ProofOp | ShapeOp;
 
 export interface RulePlan {
   readonly ruleId: RuleId;

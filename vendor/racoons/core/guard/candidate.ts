@@ -164,7 +164,10 @@ function renderProofReceipt(note: Note, recall: RecallRecord): RenderedRecord {
  * node lies in one contiguous rebuilt suffix and one revert covers the batch.
  * The cost is the §2 arithmetic for that cut; the chooser's freed-byte floor and
  * positive-net filters belong to the full-revisit cut, where the cut is chosen
- * rather than dictated by a verdict.
+ * rather than dictated by a verdict. `netFreedBytes` prices ONE request — freed
+ * minus the kept suffix re-sent minus the receipt — while the standing delta is
+ * freed − receipt, so a verdict's dictated cut may price negative for one request
+ * and still shrink every later one (ISSUE-083).
  *
  * Each receipt anchors to the survivor before it, and the first one anchors to
  * the prefix tail `nodes[cutIndex - 1]` so no receipt lands before the salvage;

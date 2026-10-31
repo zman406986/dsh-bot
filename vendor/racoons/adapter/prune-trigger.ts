@@ -5,7 +5,13 @@
  *
  * The threshold is relative to the window, so nothing here waits on a measured
  * token count: the host (or a test) states the window once, and the trigger
- * compares the session's estimated content tokens against half of it.
+ * compares the session's usage reading against half of it.
+ *
+ * WHICH reading is the mount's decision (ISSUE-092): dsh feeds the host's own
+ * billed prompt for the last accounted request, one step stale, and falls back
+ * to the local whole-request estimate only before the first usage row. The
+ * local estimate counted message text only, so on live runs it read ~0.56 of
+ * the host meter and a 200 000 bar never armed.
  *
  * The re-arm policy (CRITIC-022 P1-1, provisional 2026-10-24, PM-ruled):
  *

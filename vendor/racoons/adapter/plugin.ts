@@ -413,14 +413,24 @@ export interface RacoonsSessionEntry {
   readonly pruneTrigger: PruneWindowTrigger;
   /**
    * The local estimate of the request the last pre-step was about to send, and
-   * the port revision that estimate describes (G8, ISSUE-045 D1). It is the same
-   * `estimateContent` arithmetic the half-window trigger uses — one number, two
-   * readers — held here because a host usage row arrives in the synchronous
-   * `session/event` callback, where no snapshot can be awaited. Null before the
-   * first pre-step; a row arriving before it is journaled missing, never
-   * reconciled against an invented estimate.
+   * the port revision that estimate describes (G8, ISSUE-045 D1). Held here
+   * because a host usage row arrives in the synchronous `session/event` callback,
+   * where no snapshot can be awaited. It is the estimate a row is reconciled
+   * against (`estimateErrorTokens`), NOT the half-window bar's reading — since
+   * ISSUE-092 the trigger reads `billedPromptTokens` and this is its pre-first-
+   * usage fallback. Null before the first pre-step; a row arriving before it is
+   * journaled missing, never reconciled against an invented estimate.
    */
   requestEstimate: { readonly revision: string; readonly inputTokens: number } | null;
+  /**
+   * The host's own billed prompt for the last request it accounted, in tokens
+   * (ISSUE-092): `input + cacheRead + cacheWrite` from the same usage row
+   * `usage-reconciled` journals. The half-window trigger reads THIS — not the
+   * local estimate — because the estimate counts message text only, omits
+   * tool-call arguments and runs at ~0.56 of the host meter on live runs. Null
+   * until the first usage row arrives.
+   */
+  billedPromptTokens: number | null;
   /**
    * Usage request ids already journaled for this session. One host event is one
    * request, so a row seen twice must not read as two calls; the engine's own
@@ -528,6 +538,13 @@ const UNCHANGED_ENGINE_RESULT: EngineResult = Object.freeze({
   status: 'unchanged', validation: null, intentId: null, receipt: null, invalidation: null,
 });
 
+/**
+ * The bound on an `entry-ask-refused` row's `raw`: a refusal journals the
+ * answer text only as a prefix, so a pathological reply cannot bloat the
+ * evidence file. Sliced by character, never by byte.
+ */
+const ENTRY_ASK_REFUSED_RAW_CHARS = 4000;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -627,7 +644,6 @@ export function engineConfig(config: ResolvedRacoonsConfig, floorBytes?: number)
     capHeadBytes: DEFAULT_CONFIG.thresholds.capHeadBytes,
     episodeNoNewPathSteps: config.episodeNoNewPathSteps,
     sealMaxLatencyTurns: config.sealMaxLatencyTurns,
-    evictAfterClosedTurns: null,
   };
   const freshZone: FreshZoneConfig = { maxNodes: null, maxBytes: null };
   const protocol: ProtocolConfig = {
@@ -640,7 +656,7 @@ export function engineConfig(config: ResolvedRacoonsConfig, floorBytes?: number)
     minCutFreedBytes: config.minCutFreedBytes,
     enforcement: config.enforcement,
   };
-  return { thresholds, freshZone, sealMode: 'append', enableSpans: false,
+  return { thresholds, freshZone, sealMode: 'append',
     validationFailureLimit: 2, protocol,
     floorBytes: floorBytes ?? config.floorBytes ?? DEFAULT_FLOOR_BYTES };
 }
@@ -1310,6 +1326,7 @@ export function createRacoonsMount(options: {
       publications, host: host ?? null, pruneRounds: persistedRound,
       pruneTrigger: new PruneWindowTrigger(config.contextWindowTokens),
       requestEstimate: null, usageSeen: new Set<string>(), pendingForgets, floorBytes,
+      billedPromptTokens: null,
       entryJudged: new Set<string>(), entryKept: new Set<string>(),
       takePublication: () => { const value = latestRequest; latestRequest = null; return value; } };
     sessions.set(sessionId, entry);
@@ -1364,11 +1381,11 @@ export function createRacoonsMount(options: {
 
   /**
    * Record the estimate of the request the next boundary will send, and return
-   * it (G8, ISSUE-045 D1; ISSUE-022 chunk 6). One function, so the half-window
-   * trigger and the usage reconciliation read the same number by construction:
-   * two callers computing the same arithmetic twice is how an estimate error
-   * count starts measuring the drift between two estimators instead of the
-   * provider's count against ours.
+   * it (G8, ISSUE-045 D1; ISSUE-022 chunk 6). It is the number a usage row is
+   * reconciled against, and the half-window trigger's reading only before the
+   * first row has arrived (ISSUE-092: from then on the bar reads the host's
+   * own billed prompt, because this estimate sees message text only and read
+   * ~0.56 of the host meter on the 078 run).
    *
    * The estimate is the WHOLE request — main's captured system+tools prefix plus
    * the live transcript (ADR-0009 §Amendment 2026-10-24) — and the revision is
@@ -1423,7 +1440,10 @@ export function createRacoonsMount(options: {
     if (measured === null) {
       // No pre-step has run, so no request this mount measured exists to answer:
       // the reading would be authoritative about a request we never estimated,
-      // and the meter's error count would compare two unrelated things.
+      // and the meter's error count would compare two unrelated things. The
+      // bar still takes the host's own depth reading (ISSUE-092): it is a valid
+      // row, it just has no estimate to be reconciled against.
+      entry.billedPromptTokens = read.usage.inputTokens;
       journal('usage-missing', { sessionId: session.id, seq: event.seq, requestId,
         reason: 'no-request-estimate' });
       return;
@@ -1433,12 +1453,16 @@ export function createRacoonsMount(options: {
         estimatedInputTokens: measured.inputTokens, usage: read.usage });
     } catch (error) {
       // The meter refuses an inconsistent row (a cached count above input). The
-      // engine throws before emitting anything, so nothing was recorded.
+      // engine throws before emitting anything, so nothing was recorded — and
+      // the bar does not take a row the meter rejected (ISSUE-092).
       journal('usage-missing', { sessionId: session.id, seq: event.seq, requestId,
         revision: measured.revision, reason: 'inconsistent-usage',
         message: error instanceof Error ? error.message : String(error) });
       return;
     }
+    // ISSUE-092: the accepted row is the bar's reading — the host's billed
+    // prompt, whole, cached share included.
+    entry.billedPromptTokens = read.usage.inputTokens;
     journal('usage-reconciled', { sessionId: session.id, seq: event.seq, requestId,
       revision: measured.revision,
       estimatedInputTokens: measured.inputTokens,
@@ -1873,6 +1897,9 @@ export function createRacoonsMount(options: {
         journal('entry-ask-refused', { sessionId: entry.sessionId, eventId: capture.eventId,
           callId: capture.item.callId, unitId, code: outcome.code,
           ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+          ...(outcome.raw === undefined
+            ? {}
+            : { raw: outcome.raw.slice(0, ENTRY_ASK_REFUSED_RAW_CHARS) }),
           retried: outcome.retried,
           turns: outcome.turns.length,
           ...(outcome.usage === undefined ? {} : { usage: outcome.usage }) });
@@ -1974,12 +2001,14 @@ export function createRacoonsMount(options: {
     const snapshot = await entry.port.snapshot();
     // The pass's own pre-pass reading is the latch's new baseline (CRITIC-022
     // P1-1): a completed pass re-arms, so the next fire needs a below-half
-    // excursion or half a window of growth past what this pass saw. It carries
-    // the same fixed prefix the step observation does (ADR-0009 §Amendment
-    // 2026-10-24), or the baseline would sit a whole prefix below every later
-    // reading and the next step would re-fire on unchanged content.
-    const prePassUsage = estimatedContentTokens(estimateMeter, snapshot, null,
+    // excursion or half a window of growth past what this pass saw. It must be
+    // the SAME scale the latch observes (ISSUE-092): the host's billed prompt
+    // when one exists, the local whole-request estimate only before the first
+    // usage row — otherwise every later observation would sit a whole
+    // estimate-vs-host gap away from the baseline and re-fire at once.
+    const localPrePass = estimatedContentTokens(estimateMeter, snapshot, null,
       mainWire.last(entry.sessionId)?.wire ?? null);
+    const prePassUsage = entry.billedPromptTokens ?? localPrePass;
     entry.pruneRounds += 1;
     try {
       const outcome = await runRecordOnlyPrune({
@@ -2172,18 +2201,17 @@ export function createRacoonsMount(options: {
     // consumes it: `runPrune`'s finally re-arms the latch from its own reading,
     // so one step never runs two passes.
     //
-    // The denominator is the WHOLE request: the fixed system+tools prefix of
-    // main's captured request plus the live transcript (ADR-0009 §Amendment
-    // 2026-10-24). The prefix is read from the capture's own `system` and
-    // `tools` fields — the object the host dispatched — never re-rendered from
-    // config. A session whose first main request is not captured yet has no
-    // prefix to count, and the journal line says `content` for that reading.
+    // The local reading is still measured here every boundary: it is the
+    // estimate the NEXT request's usage row is reconciled against (G8,
+    // ISSUE-045 D1), because this boundary ends with the state the host is about
+    // to send and `assistant/message` for that request arrives after it. It is
+    // NOT what the latch reads once a usage row exists (ISSUE-092, below).
     //
-    // The same reading is the estimate the NEXT request's usage row is
-    // reconciled against (G8, ISSUE-045 D1): this boundary ends with the state
-    // the host is about to send, and `assistant/message` for that request
-    // arrives after it. One number, two readers, so the drift the meter reports
-    // is never an artefact of two estimators disagreeing.
+    // It is the WHOLE request: the fixed system+tools prefix of main's captured
+    // request plus the live transcript (ADR-0009 §Amendment 2026-10-24). The
+    // prefix is read from the capture's own `system` and `tools` fields — the
+    // object the host dispatched — never re-rendered from config. A session
+    // whose first main request is not captured yet has no prefix to count.
     //
     // What the number does NOT include is the receipt the caller appends after
     // this function returns (`publishAppend`), and — until the recompute below —
@@ -2195,19 +2223,33 @@ export function createRacoonsMount(options: {
     const prefix = mainWire.last(entry.sessionId)?.wire ?? null;
     const snapshotNow = await entry.port.snapshot();
     let estimate = measureRequest(entry, snapshotNow, prefix);
-    const estimatedTokens = entry.pruneTrigger.enabled ? estimate.totalTokens : null;
-    const crossed = estimatedTokens !== null && entry.pruneTrigger.observe(estimatedTokens);
-    if (crossed) {
-      // The half-window auto trigger (ISSUE-022 chunk 6; ADR-0009 §Amendment):
-      // the SAME seam as the command, one boundary later. The latch fires on a
-      // crossing and re-arms when a pass ends or a compaction lands (CRITIC-022
-      // P1-1), so a grown session re-prunes only after half a window of new
-      // content — never on every step. No window configured means the latch is
-      // disabled and nothing is scheduled (record-only, ADR-0008).
-      journal('prune-threshold', { sessionId: entry.sessionId, estimatedTokens,
+    // ISSUE-092: the latch reads the host's billed prompt for the last
+    // accounted request, with one step of staleness — the row for the request
+    // in flight arrives after this boundary. The local estimate is only the
+    // pre-first-usage fallback; it omits tool-call arguments and ran at ~0.56
+    // of the host meter on the 078 run, so it cannot be the steady-state bar.
+    const reading = entry.pruneTrigger.enabled
+      ? entry.billedPromptTokens ?? estimate.totalTokens : null;
+    const crossed = reading !== null && entry.pruneTrigger.observe(reading);
+    // The half-window auto trigger (ISSUE-022 chunk 6; ADR-0009 §Amendment):
+    // the SAME seam as the command, one boundary later. The latch fires on a
+    // crossing and re-arms when a pass ends or a compaction lands (CRITIC-022
+    // P1-1), so a grown session re-prunes only after half a window of new
+    // content — never on every step. No window configured means the latch is
+    // disabled and nothing is scheduled (record-only, ADR-0008).
+    //
+    // The line is written on EVERY boundary that evaluates the bar, not only on
+    // a fire: a live run that never crosses must still prove which depth source
+    // the bar read throughout, and `crossed` separates an evaluation (false)
+    // from a fire (true). One line per boundary because the bar reads once per
+    // boundary; with no window there is no reading and no line at all.
+    if (reading !== null) {
+      journal('prune-threshold', { sessionId: entry.sessionId, estimatedTokens: reading,
+        billedPromptTokens: entry.billedPromptTokens,
         contentTokens: estimate.contentTokens, prefixTokens: estimate.prefixTokens,
         estimate: prefix === null ? 'content' : 'content+prefix',
-        threshold: entry.pruneTrigger.threshold });
+        barReading: entry.billedPromptTokens === null ? 'local-estimate' : 'host-billed-prompt',
+        threshold: entry.pruneTrigger.threshold, crossed });
     }
     // A `/prune` message seen during this step runs here, after the at-rest
     // pass: that pass leaves the entry's state settled, and a prune reads that
@@ -2369,10 +2411,9 @@ export function resolveToolHost(ctx: DshMountContext,
 
 /**
  * Register the handler-backed tools once, at mount, and return one disposer.
- * `DSH_TOOL_SPECS` declares `forget`, `expand` and `recall`; `forget` and
- * `recall` have execution paths, so both are registered and `expand` stays out
- * — no model is ever offered a tool that would fail (design-protocol §4;
- * ISSUE-045 chunk D2 added the forget handler).
+ * `DSH_TOOL_SPECS` declares `forget` and `recall`, and both have execution
+ * paths, so both are registered — no model is ever offered a tool that would
+ * fail (design-protocol §4; ISSUE-045 chunk D2 added the forget handler).
  *
  * The host's `register` takes a `ToolDefinition` (schema plus a mandatory
  * `output` declaration), while the adapter's seam is `{ spec, execute }`. The
@@ -2526,11 +2567,13 @@ export function createRacoonsPlugin(options: RacoonsPluginOptions = {}): {
         // line is readable from this one (CRITIC-022 P2 #8, P2 #11).
         prune: config.contextWindowTokens === null ? 'command' : 'command+threshold',
         window: config.contextWindowTokens,
-        // What the threshold counts (ADR-0009 §Amendment 2026-10-24): the whole
-        // request — main's captured system+tools prefix plus the live transcript.
-        // Before main's first request is captured there is no prefix to count;
-        // each `prune-threshold` line says which reading it took.
-        estimate: 'content+prefix',
+        // What the threshold counts (ISSUE-092): the host's own billed prompt
+        // from the last `usage` row (`input + cacheRead + cacheWrite`), one step
+        // stale, because the local estimate omitted tool-call arguments and ran
+        // at ~0.56 of the host meter on the 078 run. Before the first usage row
+        // the local whole-request estimate is the fallback, and each
+        // `prune-threshold` line says which reading it took.
+        estimate: 'host-billed-prompt',
         nativeCompactionBackstop: config.nativeCompactionBackstop,
       });
       options.journal?.(mountedLine);

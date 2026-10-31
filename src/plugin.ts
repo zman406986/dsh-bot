@@ -679,6 +679,26 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
    * worker composition both run long after apply returned.
    */
   let racoonsMount: RacoonsMountHandle | null = null;
+  /**
+   * Ticket 155/ADR-0032: spawn titles waiting for the host's activation hook.
+   *
+   * The hook carries only `(agent, sessionId, generation)` — no title — and it
+   * fires from the child's create `setup`, i.e. INSIDE `host.spawnDispatcher`.
+   * So the title exists on exactly one seam this plugin can read: the
+   * `spawnDispatcher` wrapper below. That wrapper pushes the title before
+   * calling the host and the hook shifts it back off, which is how a summoned
+   * dispatcher reaches `lifecycle.activate` with its human label — the same
+   * `options.title` that `parent-agent.ts` keeps as the peer roster label. No
+   * second label source is invented.
+   *
+   * Entries are shorter-lived than a spawn: claimed by the hook inside the
+   * call, or dropped in the wrapper's `finally` when the spawn is refused.
+   * Claim is FIFO, so the single-spawn case (the normal one) is exact; two
+   * dispatchers summoning at the same instant could swap labels — accepted,
+   * and visible in the roster rather than silent, since the child id and the
+   * title both stay correct.
+   */
+  const spawnTitlesInFlight: Array<{ readonly title: string }> = [];
   const host: CordisDshHost = createCordisDshHost(ctx, {
     markers,
     // Ticket 153: the worker contract ships in the same language as the
@@ -731,14 +751,23 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     },
     // Ticket 118 chunk 3 / ADR-0025: the spawned-dispatcher activation path.
     // The host fires this once per successful `spawnDispatcher` — from the
-    // child's `agent/created` (before its first turn), or from `ctx.agents`
+    // child's create `setup` (before its first turn), or from `ctx.agents`
     // after the spawn resolves when the host announced nothing. It routes
-    // into the SAME lifecycle map as a command activation, minus the
-    // top-level gate: the child is a subagent by construction. `lifecycle` is
-    // assigned below; this closure only runs once a spawn happens, never
-    // during apply (same rule as `pumpFor`).
+    // into the SAME lifecycle map as any other activation: ADR-0032 made a
+    // summoned dispatcher a top-level session, so the ordinary gate admits it
+    // and one policy text serves it. `lifecycle` is assigned
+    // below; this closure only runs once a spawn happens, never during apply
+    // (same rule as `pumpFor`).
+    //
+    // Ticket 155: `title` is the spawn's human label. The hook carries only
+    // (agent, sessionId, generation) and fires INSIDE `host.spawnDispatcher`,
+    // so the one place this plugin can read the label is the seam below.
     onDispatcherSpawned: (agent, sessionId, generation) => {
-      lifecycle.activateSpawnedDispatcher(agent, sessionId, generation);
+      const pending = spawnTitlesInFlight.shift();
+      lifecycle.activate(agent, {
+        generation,
+        ...(pending === undefined ? {} : { title: pending.title }),
+      });
     },
     // Ticket 141: a spawn from a CHILD must read that child's generation, not
     // assume the spawner is a user-started generation 1. `lifecycle` is
@@ -1062,9 +1091,23 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       // what `spawn_dispatcher` calls. Without it the registered tool THROWS
       // at execute (a missing seam is a wiring bug, never a host refusal).
       // The parent is the closure's session id; the host resolves its bound
-      // Agent and applies the depth ceiling (parent depth + 2).
-      spawnDispatcher: (opts: DispatcherSpawnOptions) =>
-        host.spawnDispatcher(opts),
+      // Agent only for the summoner's cwd and provider/model route — the
+      // child is created as a top-level session, so no depth ceiling applies.
+      //
+      // Ticket 155: the title is pushed for the activation hook — it fires
+      // inside this call (the child's create `setup`) and has no other way to
+      // learn the label. Removed again when the spawn refuses, so a failed
+      // summon cannot leak its title onto a later one.
+      spawnDispatcher: async (opts: DispatcherSpawnOptions) => {
+        const pendingTitle = { title: opts.title };
+        spawnTitlesInFlight.push(pendingTitle);
+        try {
+          return await host.spawnDispatcher(opts);
+        } finally {
+          const index = spawnTitlesInFlight.indexOf(pendingTitle);
+          if (index >= 0) spawnTitlesInFlight.splice(index, 1);
+        }
+      },
       // Ticket 153: the tool descriptions follow the same language.
       language,
     };

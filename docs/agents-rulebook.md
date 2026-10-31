@@ -124,6 +124,6 @@ Register maintained by ticket 97 (2026-09-20). Verification hint for auditors: d
 These bind every task in this repo.
 
 1. Summon subagents in background mode by default.
-2. Owner works from 2 devices: one has `C:\Users\TZhen\`, the other has `C:\Users\TZ\`.
+2. Owner works from 2 devices, and the two home directories differ (`TZhen…` and `TZ…`). Never hardcode a home path.
 3. Never invent jargon, codenames, or project shorthand. Talk to the human in plain, very concise language, as if he has ADHD: short sentences, concrete words, no metaphors, no private vocabulary. A term that needs explaining to a newcomer is not allowed in a sentence to the owner.
 4. Run the smallest test set that can fail. Do not run end-to-end tests when unit tests cover the change. Group tests into one run instead of starting one run per change.

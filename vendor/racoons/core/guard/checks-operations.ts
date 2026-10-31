@@ -1,8 +1,6 @@
 import { ENTRY_SHAPE_RULE_ID, PROOF_RULE_IDS } from "../rules/types.js";
-import type { Note, Operation, Removal, RulePlan } from "../rules/types.js";
-import type { ByteRange } from "../types/identity.js";
-import { complement, lineRanges, sameRanges } from "./bytes.js";
-import type { CheckContext, Report } from "./context.js";
+import type { Note, Operation, RulePlan } from "../rules/types.js";
+import type { CheckContext } from "./context.js";
 import { reporter } from "./context.js";
 import { checkEpisode } from "./checks-episodes.js";
 import { checkShape } from "./checks-entry-shape.js";
@@ -70,42 +68,10 @@ function shapeUnderItsRule(plan: RulePlan, op: Operation): boolean {
 // The entry-time cap has no validation branch: ADR-0014 (2026-10-23) scrapped it.
 // A `cap` operation is declaration-only in the type vocabulary; no rule the
 // product registers emits one, and the candidate builder refuses it.
-function checkSpan(c: CheckContext, op: Extract<Operation, { kind: "span" }>, removal: Removal | undefined, report: Report): void {
-  const source = removal?.sources[0], node = source === undefined ? undefined : c.nodes.get(source.source.nodeId);
-  if (removal?.sources.length !== 1 || node === undefined || node.kind !== "tool-result") {
-    report("invalid-line-range", "Span requires exactly one line-addressable tool result"); return;
-  }
-  const lines = lineRanges(node.bytes);
-  let last = 0;
-  const keep: ByteRange[] = [];
-  for (const range of op.keepLines) {
-    if (!Number.isSafeInteger(range.startLine) || !Number.isSafeInteger(range.endLineInclusive)
-      || range.startLine <= last || range.endLineInclusive < range.startLine
-      || range.endLineInclusive > lines.length) {
-      report("invalid-line-range", "Retained line ranges must be ordered, bounded and nonoverlapping", node.id); return;
-    }
-    const start = lines[range.startLine - 1], end = lines[range.endLineInclusive - 1];
-    if (start !== undefined && end !== undefined) keep.push({ startByte: start.startByte, endByteExclusive: end.endByteExclusive });
-    last = range.endLineInclusive;
-  }
-  const certified = c.value.snapshot.retentionEvidence.some(e => e.source.nodeId === node.id
-    && e.source.sha256 === node.sha256 && e.source.byteLength === node.bytes.length
-    && e.witnessNodeIds.length > 0 && e.witnessNodeIds.every(id => c.nodes.has(id))
-    && e.keepLines.length === op.keepLines.length && e.keepLines.every((r, i) =>
-      r.startLine === op.keepLines[i]?.startLine && r.endLineInclusive === op.keepLines[i]?.endLineInclusive));
-  if (!certified) report("invalid-line-range", "Retained lines lack authoritative retention evidence", node.id);
-  if (source !== undefined && !sameRanges(source.ranges, complement(keep, node.bytes.length))) {
-    report("unaccounted-removal", "Span removals differ from the complement of certified lines", node.id);
-  }
-}
 function noteMatches(note: Note, op: Operation): boolean {
   switch (op.kind) {
     case "cap": return note.kind === "cap-marker" && note.removalId === op.removalId;
     case "seal": return note.kind === "negative-fact" && note.episodeId === op.episodeId;
-    case "evict": return note.kind === "evict-marker" && note.removalId === op.removalId && note.episodeId === op.episodeId;
-    case "span": return note.kind === "span-marker" && note.removalId === op.removalId
-      && note.keepLines.length === op.keepLines.length && note.keepLines.every((r, i) =>
-        r.startLine === op.keepLines[i]?.startLine && r.endLineInclusive === op.keepLines[i]?.endLineInclusive);
     // A verdict removal is paired with the receipt that replaces its unit.
     case "verdict": return note.kind === "receipt" && note.removalId === op.removalId
       && note.unitId === op.unitId;
@@ -145,13 +111,12 @@ export function checkOperations(c: CheckContext, plans: readonly RulePlan[]): vo
         if (usedRemovals.has(op.removalId)) report("conflicting-operations", "Removal is consumed by multiple operations");
         usedRemovals.add(op.removalId);
       }
-      if (op.kind === "span") checkSpan(c, op, removal, report);
       // The entry-shape lane (ISSUE-056 chunk C5, reworked to the landed-node
       // contract by ISSUE-058 chunk P3b): every claim a shape makes — the
       // whole-line kept spans of the landed body, the complement removal and the
       // unit binding — is re-derived from that body's own bytes there.
       if (op.kind === "shape") checkShape(c, op, removal, report);
-      if (op.kind === "seal" || op.kind === "evict") {
+      if (op.kind === "seal") {
         if (episodeIds.has(op.episodeId)) report("conflicting-operations", "Episode has multiple operations in one application");
         episodeIds.add(op.episodeId);
         checkEpisode(c, op, removal, report);
@@ -163,11 +128,10 @@ export function checkOperations(c: CheckContext, plans: readonly RulePlan[]): vo
           report("unsupported-capability", "Append seal requires configured append mode and an at-rest append-record seam");
         }
       }
-      if (op.kind === "span" || op.kind === "evict" || (op.kind === "seal" && op.mode === "replace")) {
-        // ADR-0018 §4: `span`, `evict` and replace-mode seal stay refused and the
-        // refusal names the seam, so a supervisor knows what to declare first.
-        report("unsupported-capability", namesSeam(
-          op.kind === "seal" ? "A replace-mode seal" : `A ${op.kind} removal`));
+      if (op.kind === "seal" && op.mode === "replace") {
+        // ADR-0018 §4: replace-mode seal stays refused and the refusal names the
+        // seam, so a supervisor knows what to declare first.
+        report("unsupported-capability", namesSeam("A replace-mode seal"));
       }
       if (op.kind === "verdict" && !declaresRevert(c)) {
         report("unsupported-capability", namesSeam("A verdict removal"));

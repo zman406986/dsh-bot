@@ -45,7 +45,7 @@ export { FakeTokenMeter } from './meter/fake-token-meter.js';
 export type { Episode, EpisodeCloseReason, EpisodeTrackerOptions, EpisodeDetectionInput } from './episodes/types.js';
 export { EpisodeTracker } from './episodes/tracker.js';
 export type {
-  RemovedSource, Removal, Note, CapOp, SealOp, EvictOp, SpanOp, VerdictOp,
+  RemovedSource, Removal, Note, CapOp, SealOp, VerdictOp,
   Operation, RulePlan, RuleContext, Rule,
 } from './rules/types.js';
 // C12 integration surface (ISSUE-045): the proof vocabulary chunk V0 added and
@@ -75,16 +75,20 @@ export {
   ANCHOR_QUOTE_MAX_WORDS, ANCHOR_QUOTE_MIN_CODE_POINTS, anchorsAt, anchorsFor,
   blankBandNotice, entryPositions, quoteLineTail, tailCodePoints,
 } from './rules/anchors.js';
+// `withTotal: false` is the entry seam's rendering (the ask states `N` once);
+// the prune lane keeps the total on every row, so it leaves the option unset.
+export type { AnchorRenderOptions } from './rules/anchors.js';
 export {
   RECALL_TOOL_DESCRIPTION, MODEL_FACING_STRINGS, receiptLine,
   PRUNE_ASK_SYSTEM_PROMPT,
   // The entry checkpoint's copy (ISSUE-056 C2, exported by C6a; the ask became
   // body-free in ISSUE-058 P2): the contract, the end anchor the rig's matcher
-  // keys on, the two legacy fence literals, and the two renderers.
+  // keys on, the two legacy fence literals, the two renderers, and the
+  // per-result block the one correction turn restates.
   ENTRY_ASK_CLOSING_LINE, ENTRY_ASK_END_ANCHOR, ENTRY_ASK_FRAME, ENTRY_ASK_RESULT_CLOSE,
   ENTRY_ASK_RESULT_OPEN, ENTRY_ASK_SYSTEM_PROMPT,
   SHAPE_MARKER_EMPTY_TEMPLATE, SHAPE_MARKER_TEMPLATE,
-  entryAskMessage, shapeMarker,
+  entryAskFactsBlock, entryAskMessage, shapeMarker,
 } from './rules/assets.js';
 export type {
   ValidationCode, ValidationIssue, BreakerState, RetainedCopy, Replacement,
@@ -175,7 +179,9 @@ export { parseWireVerdict, WireVerdictError } from './verdicts/wire.js';
 export type {
   EntryAnswer, EntryAnswerAction, EntryAnswerErrorCode,
 } from './verdicts/entry-wire.js';
-export { ENTRY_ANSWER_ACTIONS, EntryAnswerError, parseEntryAnswer } from './verdicts/entry-wire.js';
+export {
+  ENTRY_ANSWER_ACTIONS, EntryAnswerError, parseEntryAnswer, isKeepEverythingAnswer,
+} from './verdicts/entry-wire.js';
 
 // The conversation renderer the ask lanes share (ADR-0028 removed the judge's
 // per-unit assembly with the judge pass; `renderHistory` stays because a fork's
@@ -223,13 +229,15 @@ export type {
 export { LEVEL1_RULES, planLevel1Prune } from './prune/level1.js';
 
 // big-prune row anchors (ISSUE-022 chunk 2, ADR-0009, re-based on ADR-0022 §7):
-// the whole call, the occurrence ordinal among identical calls, and the SAME
-// line anchors the entry ask carries — `line L of N ends with "..."` — placed at
+// the whole call, the occurrence ordinal among identical calls, and the same
+// line anchors the entry ask carries — `line L of N ends with "..."`, placed at
 // the lines holding the unit's 30th and 70th byte shares instead of the entry
-// seam's even spacing. The quoting routine and every fallback are
-// `rules/anchors.js`'s; `prune/anchor-positions.ts` owns only the placement and
-// its two shares. The bytes are read only after the L1 proof passes; a failed
-// proof yields a refused anchor, never a quote of the wrong bytes.
+// seam's even spacing. The entry ask states its `N` once and drops the ` of N`
+// (`line 67 ends with "..."`); the prune keeps it on every row, one unit per
+// row. The quoting routine and every fallback are `rules/anchors.js`'s;
+// `prune/anchor-positions.ts` owns only the placement and its two shares. The
+// bytes are read only after the L1 proof passes; a failed proof yields a
+// refused anchor, never a quote of the wrong bytes.
 export type {
   PruneAnchor, PruneAnchorOptions, PruneAnchorRefusal, PruneAnchorResult,
   PruneCallFacts, RefusedPruneAnchor,

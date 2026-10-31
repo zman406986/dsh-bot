@@ -120,6 +120,13 @@ export type TelemetryEvent = TelemetryBase & (
       readonly keptBytes: number;
       readonly receiptBytes: number;
       readonly netFreedBytes: number;
+      /**
+       * Salvage share for one revisit (PRD §6.9, §13): the kept bytes over every
+       * suffix byte the cut measured, `keptBytes / (keptBytes + freedBytes)`.
+       * `null` when no suffix bytes were measured, the convention
+       * `MeterReading.cachedInputShare` uses for an undefined ratio.
+       */
+      readonly salvageShare: number | null;
       readonly survivorCount: number;
     }
   | ({

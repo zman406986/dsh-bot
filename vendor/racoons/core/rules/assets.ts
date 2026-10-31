@@ -11,12 +11,14 @@ import type { LineRange, RecallId } from "../types/identity.js";
 import type { PathEvidence } from "../types/transcript.js";
 import {
   ENTRY_ASK_CLOSING_LINE, ENTRY_ASK_FORGETLINES_SYSTEM_PROMPT, ENTRY_ASK_SYSTEM_PROMPT,
+  ENTRY_ASK_TWOFORM_SYSTEM_PROMPT,
   NONE_MATCHED, SHAPE_MARKER_EMPTY_TEMPLATE, SHAPE_MARKER_TEMPLATE,
 } from "./assets-templates.js";
 
 export {
   ENTRY_ASK_CLOSING_LINE, ENTRY_ASK_END_ANCHOR, ENTRY_ASK_FORGETLINES_SYSTEM_PROMPT,
   ENTRY_ASK_FRAME, ENTRY_ASK_RESULT_CLOSE, ENTRY_ASK_RESULT_OPEN, ENTRY_ASK_SYSTEM_PROMPT,
+  ENTRY_ASK_TWOFORM_SYSTEM_PROMPT,
   MODEL_FACING_STRINGS, PRUNE_ASK_SYSTEM_PROMPT, RECALL_TOOL_DESCRIPTION,
   SHAPE_MARKER_EMPTY_TEMPLATE, SHAPE_MARKER_TEMPLATE,
 } from "./assets-templates.js";
@@ -66,60 +68,126 @@ export function shapeMarker({
     .replace("<id>", recallId);
 }
 
-/** The facts one entry ask states: the total line count and the ready anchor lines. */
+/**
+ * The facts one entry ask states: the total line count and the quote lines.
+ */
 export interface EntryAskInput {
   /** The landed result's total line count `N`. */
   readonly lineCount: number;
   /**
-   * The anchor lines, already rendered by the anchor subsystem (`line L of N
-   * ends with "xxx"`), in ascending line order. Empty when `N` produced no
-   * anchor. This function does not derive them and holds no result bytes.
+   * The quote lines, already rendered by the anchor subsystem (`line L ends with
+   * "xxx"` for the entry seam since 2026-10-28: the total is stated once in the
+   * range sentence, not on every quote), in ascending line order. Empty when `N`
+   * produced no anchor. This function does not derive them and holds no result
+   * bytes.
    */
   readonly anchorLines: readonly string[];
   /**
    * Which contract the ask states (ISSUE-061 T-8; ADR-0027 §4). Absent or
    * `'default'` is the shipped `keeplines` contract, byte for byte;
-   * `'forgetlines'` is lane F's one-partial-class variant. The two prompts
-   * differ only in their class lines; the facts block and the closing line are
-   * shared, so the ask's shape and size are the same on both arms.
+   * `'forgetlines'` is lane F's one-partial-class variant; `'twoform'` is the
+   * experiment's two-key contract (no `keepall`, `keeplines` covering every
+   * line). The prompts differ only in their contract block and class lines; the
+   * facts block and the closing line are shared, so the ask's shape and size are
+   * the same on every arm. Any other value throws: a typo is never a silent
+   * fallback to the shipped prompt.
    */
-  readonly variant?: 'default' | 'forgetlines';
+  readonly variant?: 'default' | 'forgetlines' | 'twoform';
+}
+
+/** The three contract variants `entryAskMessage` renders; anything else throws. */
+const ENTRY_ASK_VARIANTS = ['default', 'forgetlines', 'twoform'] as const;
+
+/**
+ * One arm's contract: the static prompt, and the partial-class key its range
+ * sentence names (the class the answer's ranges belong to on that arm).
+ */
+interface EntryAskContract {
+  readonly prompt: string;
+  readonly partialClass: string;
+}
+
+/** The three contracts, keyed by variant name. */
+const ENTRY_ASK_CONTRACTS: ReadonlyMap<string, EntryAskContract> = new Map<
+  string,
+  EntryAskContract
+>([
+  ['default', { prompt: ENTRY_ASK_SYSTEM_PROMPT, partialClass: 'keeplines' }],
+  ['forgetlines', { prompt: ENTRY_ASK_FORGETLINES_SYSTEM_PROMPT, partialClass: 'forgetlines' }],
+  ['twoform', { prompt: ENTRY_ASK_TWOFORM_SYSTEM_PROMPT, partialClass: 'keeplines' }],
+]);
+
+/**
+ * The one resolver both renderers use. An unknown variant is a caller bug — a
+ * JS caller, a rig config or a bench can name one — so it throws, naming the
+ * value and the two arms this module has (critic blocker B1: never a silent
+ * fallback to the shipped prompt).
+ */
+function contractFor(variant: string): EntryAskContract {
+  const contract = ENTRY_ASK_CONTRACTS.get(variant);
+  if (contract === undefined) {
+    throw new Error(
+      `entryAskMessage: unknown variant "${variant}"; use one of ${ENTRY_ASK_VARIANTS.join(', ')}`,
+    );
+  }
+  return contract;
+}
+
+/**
+ * The per-result lines of one ask: the range sentence naming `N` and the class
+ * the ranges belong to, then one shortened quote per line. The sentence is the
+ * ONE place `N` is stated, which is why the quotes carry no ` of N` (the anchor
+ * subsystem renders the entry seam without it).
+ *
+ * Exported because the one correction turn restates this exact block: the retry
+ * copies the first ask's facts through this function instead of re-deriving the
+ * sentence, so the two cannot drift.
+ */
+export function entryAskFactsBlock(
+  { lineCount, anchorLines, variant = 'default' }: EntryAskInput,
+): string {
+  const { partialClass } = contractFor(variant);
+  return [
+    `This result has ${String(lineCount)} lines, so ${partialClass} ranges sit in `
+      + `[1,${String(lineCount)}]. Quotes to help you locate them:`,
+    ...anchorLines,
+  ].join("\n");
 }
 
 /**
  * The one user message an entry ask appends after the result has landed
- * (ISSUE-056 C2, adapted by ISSUE-058 chunk P2; design §1 "The ask"; ADR-0022
- * §3). The static contract, the landed result's line count `N`, the anchor
- * lines, and the closing line. Nothing else.
+ * (ISSUE-056 C2; body-free per ISSUE-058 chunk P2; copy rewritten 2026-10-28;
+ * ADR-0022 §3). The static contract, then the per-result lines, then the
+ * closing line. Nothing else.
+ *
+ * The per-result lines are `entryAskFactsBlock`: the range sentence naming `N`,
+ * then one shortened quote per anchor. The quotes carry no ` of N` because the
+ * sentence just stated it.
  *
  * It NEVER carries the result's body: the result already landed in the
  * conversation immediately above the ask, so copying its bytes into the
  * question would double the body on the wire and make the ask's size the
  * result's size (ADR-0022 §Context). The caller passes only facts about the
- * body — its line count and the anchors — so there is no parameter through
- * which the body could enter.
+ * body — its line count and the quotes — so there is no parameter through which
+ * the body could enter.
  *
- * The ask is near-constant in size: one base instruction plus one short anchor
- * per ~100 lines (ADR-0022 §5). The count line and the anchors are one block,
- * then exactly one blank line, then the closing line; empty anchors ship no
- * line of their own, never a blank slot.
+ * The ask is near-constant in size: one base instruction plus one short quote
+ * per ~100 lines (ADR-0022 §5). The range sentence and the quotes are one
+ * block, then exactly one blank line, then the closing line; empty quotes ship
+ * no line of their own, never a blank slot.
  *
  * `variant` picks the contract and nothing else (ISSUE-061 T-8; ADR-0027 §4):
- * unset is the shipped prompt, so every existing caller sends the same bytes
- * it sent before, and lane F's bench is the only caller that names the other
- * arm.
+ * unset is the shipped prompt, so every existing caller sends the same bytes it
+ * sent before, and lane F's bench is the only caller that names the other arm.
+ * An unknown variant throws, naming the value and the two it accepts: a typo is
+ * never a silent fallback to the shipped prompt (critic blocker B1).
  *
  * Every refusal is the caller's (`C6a`): a failure to build or send the ask
  * leaves the landed result untouched (ADR-0022 §14).
  */
-export function entryAskMessage(
-  { lineCount, anchorLines, variant = 'default' }: EntryAskInput,
-): string {
-  const facts = [`This result has ${String(lineCount)} lines.`, ...anchorLines].join("\n");
-  const contract = variant === "forgetlines"
-    ? ENTRY_ASK_FORGETLINES_SYSTEM_PROMPT
-    : ENTRY_ASK_SYSTEM_PROMPT;
-  return `${contract}\n\n${facts}\n\n${ENTRY_ASK_CLOSING_LINE}`;
+export function entryAskMessage(input: EntryAskInput): string {
+  const { prompt } = contractFor(input.variant ?? 'default');
+  return `${prompt}\n\n${entryAskFactsBlock(input)}\n\n${ENTRY_ASK_CLOSING_LINE}`;
 }
 
 interface NegativeFactInput {

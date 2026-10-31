@@ -147,7 +147,7 @@ export function formatSpawnDispatcherNote(input: {
   return [
     `Summoned "${input.title}" as a peer dispatcher (session ${input.dispatcherId}).`,
     "It runs with the same dispatcher tools and policy as you, its own workers, its own ledger, and its own inbox, and it works from the prompt it was given — it does not see this conversation.",
-    `Message it with message_agent addressed to ${input.dispatcherId}; its answer arrives later as its own message on a fresh turn. It cannot talk to the user, so its work reaches the user only through you.`,
+    `Message it with message_agent addressed to ${input.dispatcherId}; its answer arrives later as its own message on a fresh turn. It is a dispatcher in its own chat with its own user and answers that user directly; what it sends you answers what you asked.`,
     "Do not wait on it: a dispatcher is not awaitable (await_agent is workers-only). Tell the user what is underway if they need to know, then end the turn or move to other work.",
   ].join(" ");
 }

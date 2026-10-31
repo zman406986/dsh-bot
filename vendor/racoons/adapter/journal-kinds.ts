@@ -39,7 +39,8 @@ export const RACOONS_JOURNAL_KINDS = [
   'forget', 'forget-error',
   // the entry checkpoint's ask (G7, ISSUE-056 C6a; ADR-0022): `entry-ask`
   // carries the answer, its action fields and the observed ask cost;
-  // `entry-ask-refused` carries the refusal code; `entry-ask-off` says the seam
+  // `entry-ask-refused` carries the refusal code and, when the seam returned a
+  // text, that text in `raw` (a bounded prefix); `entry-ask-off` says the seam
   // was not armed. Without these three a dead seam reads as a green zero-shaping
   // run, so the mount journals one of them per over-floor result (C6b).
   'entry-ask', 'entry-ask-refused', 'entry-ask-off',

@@ -17,15 +17,12 @@ const RECALL_TOOL_DESCRIPTION_DSH = RECALL_TOOL_DESCRIPTION
   + ' `parts`, and `text` is null.';
 
 /**
- * The three additive tools the contract names (`ToolSpec`). Nothing here
- * replaces a native read (ADR-0007): `forget`/`expand`/`recall` sit beside the
- * host's own tools.
+ * The two additive tools the contract names (`ToolSpec`). Nothing here
+ * replaces a native read (ADR-0007): `forget`/`recall` sit beside the host's
+ * own tools.
  *
- * `forget` and `recall` have execution paths (ISSUE-045 chunk D2 added the
- * manual forget handler behind the spec PRD §6.2 requires). `expand` belongs to
- * the Pull/skeleton protocol, which design-protocol §1 explicitly leaves to its
- * own plan; it ships as a declared spec and is never registered until a handler
- * exists, so the model is never offered a tool that would fail.
+ * Both have execution paths (ISSUE-045 chunk D2 added the manual forget handler
+ * behind the spec PRD §6.2 requires).
  *
  * The `forget` argument surface is the one the spec declares and no more: the
  * path the content came from and, optionally, the 1-based line ranges within
@@ -48,17 +45,6 @@ export const DSH_TOOL_SPECS: readonly ToolSpec[] = Object.freeze([
         } },
       },
       required: ['path'], additionalProperties: false,
-    } },
-  { name: 'expand',
-    description: 'shows more of a result that was capped; give the recall id and a line range.',
-    parameters: {
-      type: 'object',
-      properties: {
-        recallId: { type: 'string' },
-        startLine: { type: 'integer' },
-        endLine: { type: 'integer' },
-      },
-      required: ['recallId'], additionalProperties: false,
     } },
   { name: 'recall',
     description: RECALL_TOOL_DESCRIPTION_DSH,

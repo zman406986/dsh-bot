@@ -4,10 +4,15 @@
  * mechanics are the binding design at `docs/plans/2026-10-26-anchor/design.md`;
  * this module implements that file and decides nothing new.
  *
- * One anchor names a line's 1-based number out of the result's total `N` and
- * closes with the tail of that line's content:
+ * One anchor names a line's 1-based number, optionally out of the result's total
+ * `N`, and closes with the tail of that line's content:
  *
  *     line 67 of 201 ends with "148 rows to /var/log/app/ingest.jsonl"
+ *     line 67 ends with "148 rows to /var/log/app/ingest.jsonl"
+ *
+ * The prune lane uses the first form, one unit per row, so each row states its
+ * own total. The entry ask uses the second: it states `N` once, in the sentence
+ * that introduces the quotes.
  *
  * A blank band of two or more lines is stated plainly instead of quoting a
  * far-away line:
@@ -175,9 +180,31 @@ export function blankBandNotice(firstLine: number, lastLine: number): string {
   return `lines ${String(firstLine)}–${String(lastLine)} are blank`;
 }
 
-/** One anchor line: `line L of N ends with "<quote>"`, ASCII, no trailing punctuation. */
-function renderAnchor(lineNumber: number, lineCount: number, quote: string): string {
-  return `line ${String(lineNumber)} of ${String(lineCount)} ends with "${quote}"`;
+/**
+ * Whether a content anchor states the total (`line 67 of 201 ends with …`).
+ * The prune lane reads one unit per row, so it keeps the total on every anchor.
+ * The entry ask states the total once in its range sentence and drops it here,
+ * so the same line never says it twice.
+ */
+export interface AnchorRenderOptions {
+  /** Append ` of N` to each content anchor. Default `true`. */
+  readonly withTotal?: boolean;
+}
+
+/**
+ * One anchor line: `line L of N ends with "<quote>"`, or `line L ends with
+ * "<quote>"` when the seam states the total itself. ASCII, no trailing
+ * punctuation.
+ */
+function renderAnchor(
+  lineNumber: number,
+  lineCount: number,
+  quote: string,
+  withTotal: boolean,
+): string {
+  return withTotal
+    ? `line ${String(lineNumber)} of ${String(lineCount)} ends with "${quote}"`
+    : `line ${String(lineNumber)} ends with "${quote}"`;
 }
 
 /** One quote per line index, computed at most once per `anchorsAt` call. */
@@ -236,10 +263,19 @@ function blankRunAround(blank: readonly boolean[], index: number): { first: numb
  *   that band are omitted. Quotes are never de-duplicated — two positions that
  *   resolve to the same line both print.
  *
+ * `options.withTotal = false` drops the ` of N` clause from content anchors (the
+ * entry ask states `N` once in its range sentence); band notices carry no total
+ * either way. Default `true`.
+ *
  * A position that is not a safe integer inside `1…N` is ignored, so a seam's
  * clamping bug cannot invent a line. Never throws on transcript data.
  */
-export function anchorsAt(lines: readonly string[], positions: readonly number[]): string[] {
+export function anchorsAt(
+  lines: readonly string[],
+  positions: readonly number[],
+  options: AnchorRenderOptions = {},
+): string[] {
+  const withTotal = options.withTotal ?? true;
   const total = lines.length;
   const anchors: string[] = [];
   const noticedBands = new Set<string>();
@@ -250,7 +286,7 @@ export function anchorsAt(lines: readonly string[], positions: readonly number[]
   const fallback = (position: number): string | null => {
     const index = earlierQuotable(position - 1);
     if (index < 0) return null;
-    return renderAnchor(index + 1, total, quoteAt(index));
+    return renderAnchor(index + 1, total, quoteAt(index), withTotal);
   };
 
   for (const position of positions) {
@@ -271,7 +307,7 @@ export function anchorsAt(lines: readonly string[], positions: readonly number[]
     }
     const quote = quoteAt(index);
     if (quote.length > 0) {
-      anchors.push(renderAnchor(position, total, quote));
+      anchors.push(renderAnchor(position, total, quote, withTotal));
       continue;
     }
     const anchor = fallback(position);
@@ -282,8 +318,10 @@ export function anchorsAt(lines: readonly string[], positions: readonly number[]
 
 /**
  * The entry ask's anchors: `anchorsAt(lines, entryPositions(lines.length))`.
- * `N < 100` has no anchor, and `N` alone is then the whole numbering aid.
+ * `N < 100` has no anchor, and `N` alone is then the whole numbering aid. The
+ * entry ask states `N` once in its range sentence, so its content anchors drop
+ * the ` of N` clause and read `line 67 ends with "..."`.
  */
 export function anchorsFor(lines: readonly string[]): string[] {
-  return anchorsAt(lines, entryPositions(lines.length));
+  return anchorsAt(lines, entryPositions(lines.length), { withTotal: false });
 }

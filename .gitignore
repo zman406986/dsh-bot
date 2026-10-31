@@ -21,6 +21,9 @@ opencode.json
 .scratch/_overnight-*/
 .scratch/adr-drafts/
 .scratch/repo-analysis/
+# Release-prep report and its activation run logs — raw run output carries local
+# home paths and dsh session ids; NEVER commit.
+.scratch/release-prep/
 # Runtime racoons ledger store (dev/cordis.racoons.patch.yml pins this root, and
 # src/adapter/racoons-mount.ts defaults to it). Holds live session ledgers and
 # blobs — private dsh session content; NEVER commit (ticket 156).

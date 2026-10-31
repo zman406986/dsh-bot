@@ -23,13 +23,20 @@ import {
 import type {
   ActivationSpecLike,
   AdapterContext,
+  AgentHandleLike,
   AgentLike,
   CommandDefinitionLike,
+  CreateAgentOptionsLike,
 } from "../src/adapter/cordis-dsh-host.js";
 
 function createAgent(id: string): AgentLike {
   return {
-    session: { id, header: { parentSession: null, delegationDepth: 0 } },
+    session: {
+      id,
+      // ADR-0032: a summoned dispatcher inherits the summoner's cwd; the
+      // cross-session route refuses a session whose header carries none.
+      header: { parentSession: null, delegationDepth: 0, cwd: "C:\\work" },
+    },
     followup() {},
     inject() {},
   };
@@ -72,6 +79,16 @@ function createStubCtx(options?: {
   registeredTools: Array<{ name: string }>;
   /** Ticket 118: every activation spec the fake host's `subagents` received. */
   activationCalls: ActivationSpecLike[];
+  /**
+   * ADR-0032 / ticket 157: every top-level create the host asked for. This is
+   * the far side of the dispatcher spawn seam now — a summon used to arrive at
+   * `subagents.startActivation` and no longer does.
+   */
+  createCalls: CreateAgentOptionsLike[];
+  /** The first turn handed to each created session (`agent.followup`). */
+  createFollowups: unknown[];
+  /** Names composed on each created session's OWN tool scope (ADR-0019). */
+  createdToolNames: string[];
   /** Variadic: some buses pass extra args (session/event is two-arg). */
   fire(name: string, ...payloads: unknown[]): void;
   runCommand(inv: { commandId: string; agent: AgentLike }): void;
@@ -81,6 +98,9 @@ function createStubCtx(options?: {
   const tables = new Map<string, Map<string, unknown>>();
   const registeredCommands: CommandDefinitionLike[] = [];
   const activationCalls: ActivationSpecLike[] = [];
+  const createCalls: CreateAgentOptionsLike[] = [];
+  const createFollowups: unknown[] = [];
+  const createdToolNames: string[] = [];
   const registeredTools: Array<{ name: string } & {
     execute: (args: unknown, exec?: unknown) => Promise<unknown>;
   }> = [];
@@ -97,6 +117,9 @@ function createStubCtx(options?: {
     registeredCommands,
     registeredTools,
     activationCalls,
+    createCalls,
+    createFollowups,
+    createdToolNames,
     // Cordis effect contract (ticket 44): `execute` runs at apply; a returned
     // function — or each value a generator yields — is the unload disposer.
     // (The old inverted fake collected the passed function itself, which hid
@@ -192,6 +215,54 @@ function createStubCtx(options?: {
     agents: {
       get(id: unknown) {
         return options?.agentsById?.get(String(id));
+      },
+      /**
+       * ADR-0032 / ticket 157: the summon path. The real host creates a
+       * TOP-LEVEL session here (no `parentAgent`), runs `setup` before
+       * publication and then publishes; this stub does the same order —
+       * `setup` first, so the child's own tool surface exists before the
+       * first turn — and records what reached it. `sessionId` is the
+       * reservation the host minted, so the returned agent's id must be
+       * exactly that (the real factory refuses a mismatch).
+       */
+      async create(createOptions: CreateAgentOptionsLike) {
+        createCalls.push(createOptions);
+        const created: AgentLike = {
+          session: {
+            id: createOptions.sessionId,
+            // A top-level session: no parent, depth 0, meta carries cwd only.
+            header: {
+              parentSession: undefined,
+              delegationDepth: 0,
+              ...(createOptions.meta?.cwd === undefined
+                ? {}
+                : { cwd: createOptions.meta.cwd }),
+            },
+          },
+          followup(message: unknown) {
+            createFollowups.push(message);
+          },
+          inject() {},
+          ctx: {
+            tools: {
+              schemas() {
+                return [];
+              },
+              register(definition: unknown) {
+                createdToolNames.push(
+                  String((definition as { name?: unknown }).name),
+                );
+                return () => {};
+              },
+            },
+          },
+        };
+        await createOptions.setup?.(created.ctx, created);
+        const handle: AgentHandleLike = {
+          agent: created,
+          async dispose() {},
+        };
+        return handle;
       },
     },
     jobs: {
@@ -390,27 +461,50 @@ describe("plugin scaffold", () => {
     );
     assert.ok(spawnDispatcher);
 
-    // The activate path bound this agent, so the host resolves the parent and
-    // the tool's closure session id (not any exec argument) is the authority.
+    // The activate path bound this agent, so the host resolves the parent from
+    // the tool's closure session id — the exec argument below names ANOTHER
+    // session and must change nothing (no parent is bound for it).
     const result = (await spawnDispatcher.execute(
       { title: "Child dispatcher", prompt: "Own the other half." },
-      { agent: { session: { id: "session-1" } } },
+      { agent: { session: { id: "session-2" } } },
     )) as { ok: boolean; dispatcher_id?: string };
 
     assert.equal(result.ok, true);
-    assert.equal(result.dispatcher_id, "child-stub");
 
-    // The fake host's subagents service is the seam's far side: exactly one
-    // dispatcher activation arrived, with the mitosis request shape.
-    assert.equal(ctx.activationCalls.length, 1);
-    const spec = ctx.activationCalls[0];
-    assert.ok(spec);
-    assert.equal(spec.provider, "spawn");
-    assert.equal(spec.label, "Child dispatcher");
-    assert.equal(spec.delivery, "parent");
-    assert.equal(spec.request.parent.session.id, "session-1");
-    assert.equal(spec.request.maxDepth, 2);
-    assert.equal("agentPreset" in spec, false);
+    // ADR-0032 (ticket 157): the seam's far side is `ctx.agents.create` — a
+    // new TOP-LEVEL session parallel to the summoner. The old expectation here
+    // (`subagents.startActivation` once, with provider "spawn", delivery
+    // "parent" and `maxDepth: 2`) pinned the retired subagent shape; there is
+    // no activation call left to count.
+    assert.equal(ctx.activationCalls.length, 0);
+    assert.equal(ctx.createCalls.length, 1);
+    const createCall = ctx.createCalls[0];
+    assert.ok(createCall);
+
+    // The reserved id the host minted is what the host asked for and what the
+    // tool reports back — no other id can come back from a real create.
+    assert.equal(result.dispatcher_id, createCall.sessionId);
+    assert.ok(createCall.sessionId.length > 0);
+
+    // `meta` is `cwd` and nothing else: `origin`, `parentSession` and
+    // `delegationDepth` would re-classify the session as a subagent child.
+    assert.deepEqual(createCall.meta, { cwd: "C:\\work" });
+    assert.equal("parentAgent" in createCall, false);
+
+    // `setup` composed the child's OWN tool surface before publication
+    // (ADR-0019): the spawned session is a dispatcher, not a blank chat.
+    assert.ok(ctx.createdToolNames.includes("spawn_worker"));
+    assert.ok(ctx.createdToolNames.includes("spawn_dispatcher"));
+
+    // The first turn is part of the summon — a created-but-unprompted session
+    // stays blank and the sidebar hides it.
+    assert.equal(ctx.createFollowups.length, 1);
+    const firstTurn = ctx.createFollowups[0] as {
+      role?: unknown;
+      content?: ReadonlyArray<{ text?: unknown }>;
+    };
+    assert.equal(firstTurn.role, "user");
+    assert.equal(firstTurn.content?.[0]?.text, "Own the other half.");
   });
 
   it("dispose-all (HMR) unregisters the command, tools, and listeners", async () => {

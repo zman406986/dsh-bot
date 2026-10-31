@@ -1,19 +1,20 @@
 /**
  * Ticket 140 — a SPAWNED dispatcher resolves to kind `"dispatcher"`.
  *
- * The 2026-10-28 ruling: a spawned dispatcher gets the dispatcher mark via
- * (1) the host-side `sessionKind` projection unit consulting the adapter's
- * dispatcher-mark mirror at `init`, and (2) the client header chip reading
- * `projectionValues.sessionKind` (pinned in `client-session-kind.test.ts`).
- *
- * This file pins the host half end to end against the REAL pieces — real
- * `CordisDshHost`, real projection unit, real probe — over a structural ctx
- * whose `startActivation` announces the child the way the installed host
- * does (`agent/created` fires INSIDE the call, i.e. before the durable mark
- * row is written). Three binding facts:
+ * The durable `sessionKind` projection unit consults the adapter's
+ * dispatcher-mark mirror at `init`. Ticket 140 originally hung a client
+ * header chip on the same value; ticket 157 / ADR-0032 removed that chip —
+ * a summoned dispatcher is a top-level session with its own sidebar row, so
+ * the sidebar glyph is the one mark. The host half is unchanged and is what
+ * this file pins, end to end, against the REAL pieces — real `CordisDshHost`,
+ * real projection unit, real probe — over a structural ctx whose
+ * `agents.create` creates the session the way the installed host does
+ * (`setup` composes, then `session/created` — the moment the projection's
+ * `init` runs — then `agent/created`; the durable mark row is written only
+ * after the create resolves). Three binding facts:
  *
  * 1. The mirror is SEEDED at the reserve site, so the projection's `init` —
- *    which runs at session creation, inside `startActivation` — sees the
+ *    which runs at session creation, inside `ctx.agents.create` — sees the
  *    child as a dispatcher even though the durable row does not exist yet.
  *    The projection cache would otherwise checkpoint the wrong kind.
  * 2. A FAILED spawn removes the seed: the mirror never self-deletes and the
@@ -22,17 +23,22 @@
  *    host exists, so `init` must read a thunk set afterwards, never a
  *    captured host instance.
  *
+ * Ticket 157 / ADR-0032: the summon no longer rides `ctx.subagents`. The
+ * stub's `startActivation` is kept only as a tripwire — any dispatcher spawn
+ * that reaches it fails the test by name.
+ *
  * Offline only (S8): a stub ctx, no live dsh, no LLM.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   createCordisDshHost,
-  SPAWN_PROVIDER,
   type ActivationLike,
   type ActivationSpecLike,
   type AdapterContext,
+  type AgentHandleLike,
   type AgentLike,
+  type CreateAgentOptionsLike,
 } from "../src/adapter/cordis-dsh-host.js";
 import {
   applySessionKindProjection,
@@ -64,7 +70,12 @@ function createAgent(id: string, delegationDepth = 0): AgentLike {
       id,
       header:
         delegationDepth === 0
-          ? { parentSession: undefined, delegationDepth: 0 }
+          ? {
+              parentSession: undefined,
+              delegationDepth: 0,
+              // ADR-0032: `meta.cwd` is the only field a summon carries.
+              cwd: "C:\\work",
+            }
           : { parentSession: "disp-1", delegationDepth },
     },
     followup() {},
@@ -119,19 +130,26 @@ function createFakeRegistry() {
 }
 
 /**
- * Structural ctx stub. `startActivation` announces the child exactly like the
- * installed host: the child session id is `spec.childId` (so the reservation
- * matches), and `agent/created` fires INSIDE the call — the moment the real
- * registry's `session/created` listener runs `init`.
+ * Structural ctx stub. `agents.create` creates the child exactly like the
+ * installed host: `setup` composes while the agent is still unpublished, then
+ * publication announces `session/created` (the moment the real registry's
+ * `init` runs) and `agent/created`. The durable mark row is written only after
+ * the create resolves, so the seed is the only source `init` can see.
+ *
+ * ADR-0032 (ticket 157): a dispatcher summon no longer rides
+ * `ctx.subagents.startActivation`. That stub stays because the adapter
+ * contract requires it, and it throws by name so a regression to the subagent
+ * shape fails loudly instead of passing on a stale assumption.
  */
 function createStubCtx(options?: {
-  /** Runs at the host's `session/created` moment (inside startActivation). */
+  /** Runs at the host's `session/created` moment (inside `agents.create`). */
   onSessionCreated?: (header: StubSessionHeader) => void;
 }) {
   const listeners = new Map<string, Array<(payload: never) => void>>();
   const startActivationCalls: ActivationSpecLike[] = [];
-  const state: { failNextWith: unknown; mintOwnId: boolean } = {
-    failNextWith: undefined,
+  const createCalls: CreateAgentOptionsLike[] = [];
+  const state: { failNextCreateWith: unknown; mintOwnId: boolean } = {
+    failNextCreateWith: undefined,
     mintOwnId: false,
   };
   let nextChild = 1;
@@ -139,14 +157,16 @@ function createStubCtx(options?: {
   const ctx: AdapterContext & {
     fire(name: string, payload: unknown): void;
     startActivationCalls: ActivationSpecLike[];
-    failNextActivationWith(error: unknown): void;
-    mintOwnChildId(): void;
+    createCalls: CreateAgentOptionsLike[];
+    failNextCreateWith(error: unknown): void;
+    mintOwnSessionId(): void;
   } = {
     startActivationCalls,
-    failNextActivationWith(error: unknown) {
-      state.failNextWith = error;
+    createCalls,
+    failNextCreateWith(error: unknown) {
+      state.failNextCreateWith = error;
     },
-    mintOwnChildId() {
+    mintOwnSessionId() {
       state.mintOwnId = true;
     },
     fire(name: string, payload: unknown) {
@@ -168,49 +188,40 @@ function createStubCtx(options?: {
     subagents: {
       async startActivation(spec: ActivationSpecLike): Promise<ActivationLike> {
         startActivationCalls.push(spec);
-        if (state.failNextWith !== undefined) {
-          const failure = state.failNextWith;
-          state.failNextWith = undefined;
-          throw failure;
-        }
-        const announcedId = String(spec.childId);
-        const parentDepth =
-          spec.request.parent.session.header?.delegationDepth ?? 0;
-        // The registry's `session/created` listener runs first (the host
-        // creates the Session, then builds the Agent).
-        options?.onSessionCreated?.({
-          id: announcedId,
-          parentSession: String(spec.request.parent.session.id),
-          delegationDepth: parentDepth + 1,
-        });
-        ctx.fire("agent/created", {
-          agent: {
-            session: {
-              id: announcedId,
-              header: {
-                parentSession: String(spec.request.parent.session.id),
-                delegationDepth: parentDepth + 1,
-              },
-            },
-          },
-          source: "startup",
-        });
-        const returnedId = state.mintOwnId
-          ? `host-child-${nextChild++}`
-          : announcedId;
-        state.mintOwnId = false;
-        return {
-          childId: returnedId,
-          messageId: `msg-${returnedId}`,
-          dispose: async () => {},
-        };
+        // ADR-0032: a dispatcher summon creates a top-level session; reaching
+        // the subagent service is the retired shape and must fail the test.
+        throw new Error(
+          "startActivation is the worker route, not the dispatcher summon (ADR-0032)",
+        );
       },
       interrupt() {},
       async sendMessage() {
         return "msg-stub";
       },
     },
-    agents: { get: () => undefined },
+    agents: {
+      get: () => undefined,
+      async create(
+        spec: CreateAgentOptionsLike,
+      ): Promise<AgentHandleLike> {
+        createCalls.push(spec);
+        if (state.failNextCreateWith !== undefined) {
+          const failure = state.failNextCreateWith;
+          state.failNextCreateWith = undefined;
+          throw failure;
+        }
+        const reservedId = String(spec.sessionId);
+        const createdId = state.mintOwnId ? `host-session-${nextChild++}` : reservedId;
+        state.mintOwnId = false;
+        const agent = createAgent(createdId);
+        // The real factory runs `setup` while unpublished, then publishes:
+        // `session/created` first, `agent/created` second.
+        await spec.setup?.({}, agent);
+        options?.onSessionCreated?.({ id: createdId });
+        ctx.fire("agent/created", { agent, source: "startup" });
+        return { agent, dispose: async () => {} };
+      },
+    },
     jobs: { list: () => [] },
     storageDomain: {
       async open() {
@@ -233,15 +244,16 @@ function createStubCtx(options?: {
 }
 
 describe("ticket 140: spawned dispatcher resolves to kind dispatcher", () => {
-  it("the reserved id is in the mirror BEFORE startActivation runs (the seed)", async () => {
+  it("the reserved id is in the mirror BEFORE the session is created (the seed)", async () => {
     const registry = createFakeRegistry();
-    let seededAtStart = false;
+    let seededAtCreate = false;
     let host: ReturnType<typeof createCordisDshHost> | null = null;
     const ctx = createStubCtx({
       onSessionCreated(header) {
         // The mirror must already answer for the reserved id: `init` below
-        // runs before the durable mark row is written.
-        seededAtStart = host?.isDurablyMarkedDispatcher(header.id) === true;
+        // runs at `session/created`, inside `ctx.agents.create`, while the
+        // durable mark row is written only after the create resolves.
+        seededAtCreate = host?.isDurablyMarkedDispatcher(header.id) === true;
         registry.sessionCreated(header);
       },
     });
@@ -257,11 +269,21 @@ describe("ticket 140: spawned dispatcher resolves to kind dispatcher", () => {
       prompt: "Handle it.",
     });
 
-    assert.equal(seededAtStart, true, "seed is visible inside startActivation");
-    assert.equal(
-      (ctx.startActivationCalls[0] as ActivationSpecLike).provider,
-      SPAWN_PROVIDER,
-    );
+    // Ticket 157 / ADR-0032: the seed is written BEFORE `ctx.agents.create`,
+    // which is where the projection's `init` now runs. The retired assertion
+    // counted `spawnDispatcher`'s far side at `subagents.startActivation` with
+    // `provider: "spawn"` — that call no longer exists; this is the same
+    // protection (the mirror answers before the child is visible) reached
+    // through the create route.
+    assert.equal(seededAtCreate, true, "seed is visible at session creation");
+    assert.equal(ctx.startActivationCalls.length, 0);
+    assert.equal(ctx.createCalls.length, 1);
+    const createCall = ctx.createCalls[0];
+    assert.ok(createCall);
+    assert.equal(createCall.sessionId, result.dispatcherId);
+    // A top-level session: `cwd` and nothing else in `meta`, no parentAgent.
+    assert.deepEqual(createCall.meta, { cwd: "C:\\work" });
+    assert.equal("parentAgent" in createCall, false);
     // (a) the child session projects kind "dispatcher", from a log that
     // carries no `/dsh-bot` settlement at all.
     assert.equal(registry.kindOf(result.dispatcherId), DISPATCHER_SESSION_KIND);
@@ -287,8 +309,12 @@ describe("ticket 140: spawned dispatcher resolves to kind dispatcher", () => {
     const ctx = createStubCtx();
     const host = createCordisDshHost(ctx);
     host.bindParent(createAgent("disp-1"), "disp-1");
-    const refusal = new Error("ACTIVATION_LIMIT_REACHED");
-    ctx.failNextActivationWith(refusal);
+    const refusal = new Error("host refused the create");
+    // Ticket 157 / ADR-0032: the failure is the CREATE now. The old stub made
+    // `subagents.startActivation` throw `ACTIVATION_LIMIT_REACHED`, a subagent
+    // pool refusal a top-level session never sees; the protection is the same
+    // one — the seed must not survive a spawn that produced no session.
+    ctx.failNextCreateWith(refusal);
 
     await assert.rejects(
       host.spawnDispatcher({
@@ -299,8 +325,10 @@ describe("ticket 140: spawned dispatcher resolves to kind dispatcher", () => {
       (error: unknown) => error === refusal,
     );
 
+    // The id the host reserved and handed to `create` — the only id the
+    // mirror could have been seeded with, and the one `finally` must remove.
     const reservedId = String(
-      (ctx.startActivationCalls[0] as ActivationSpecLike).childId,
+      (ctx.createCalls[0] as CreateAgentOptionsLike).sessionId,
     );
     assert.ok(reservedId.length > 0);
     // The mirror never self-deletes, and the peer fence reads it — a refused
@@ -316,11 +344,11 @@ describe("ticket 140: spawned dispatcher resolves to kind dispatcher", () => {
     assert.notEqual(ok.dispatcherId, reservedId);
   });
 
-  it("a host that minted its own id keeps only the REAL child marked", async () => {
+  it("a create that answers under another session id keeps only the REAL one marked", async () => {
     const ctx = createStubCtx();
     const host = createCordisDshHost(ctx);
     host.bindParent(createAgent("disp-1"), "disp-1");
-    ctx.mintOwnChildId();
+    ctx.mintOwnSessionId();
 
     const result = await host.spawnDispatcher({
       parentSessionId: "disp-1",
@@ -328,8 +356,14 @@ describe("ticket 140: spawned dispatcher resolves to kind dispatcher", () => {
       prompt: "Handle it.",
     });
 
+    // Ticket 157 / ADR-0032: `ctx.agents.create` is HANDED the reservation, so
+    // the installed host creates under it or refuses — it cannot mint its own
+    // id the way the subagent service could. This now drives the adapter's
+    // defensive branch (`src/adapter/cordis-dsh-host.ts:2544`, `:2595-2597`):
+    // whatever id the created session reports, the reservation that never
+    // became a session must not stay marked.
     const reservedId = String(
-      (ctx.startActivationCalls[0] as ActivationSpecLike).childId,
+      (ctx.createCalls[0] as CreateAgentOptionsLike).sessionId,
     );
     assert.notEqual(result.dispatcherId, reservedId);
     assert.equal(host.isDurablyMarkedDispatcher(result.dispatcherId), true);

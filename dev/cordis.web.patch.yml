@@ -2,7 +2,7 @@
 
 #   dsh --profile web --patch dev/cordis.web.patch.yml
 #
-# Passed by C:\Users\TZhen\Desktop\dsh-bot.bat in the SAME command that spawns
+# Passed by the desktop launcher script in the SAME command that spawns
 # dsh, so the overlay a live pass ran is reviewable in the tree rather than
 # regenerated in %TEMP%.
 #

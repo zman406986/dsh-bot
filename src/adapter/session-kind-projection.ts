@@ -307,13 +307,13 @@ function settleFromAnswer(
  * already be known from the adapter's dispatcher-mark source (the in-memory
  * mirror plus its durable table).
  *
- * A spawned dispatcher is a host subagent child: its own log carries no
- * `command/run` pair (nobody typed `/dsh-bot` in it), so the command fold
- * alone would report it as NOT a dispatcher — and the projection cache would
- * checkpoint that wrong kind durably. `spawnDispatcher` seeds the mirror with
- * the reserved child id BEFORE `startActivation`, so by the time the host
- * announces `session/created` the id is already known. The probe is a
- * late-bound accessor: the unit is registered before the host object exists
+ * A programmatically created session never runs `/dsh-bot`, so its log
+ * carries no `command/run` + `command/done` pair at any depth: the command
+ * fold alone would report it as NOT a dispatcher — and the projection cache
+ * would checkpoint that wrong kind durably. `spawnDispatcher` seeds the
+ * mirror with the reserved child id BEFORE `startActivation`, so by the time
+ * the host announces `session/created` the id is already known. The probe is
+ * a late-bound accessor: the unit is registered before the host object exists
  * (`src/plugin.ts`), so this function must never capture a host instance.
  *
  * Review fix: an `"unknown"` answer is NOT cached as "not a dispatcher". The

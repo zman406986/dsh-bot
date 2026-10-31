@@ -35,10 +35,12 @@ import {
 } from "../src/client/toolviews.js";
 import {
   AWAIT_AGENT_TOOL,
+  CHECK_WORKERS_TOOL,
   DISPATCHER_TOOL_NAMES,
   MESSAGE_AGENT_TOOL,
   SEND_PEER_TOOL,
   SPAWN_DISPATCHER_TOOL,
+  SPAWN_WORKER_TOOL,
 } from "../src/core/policy/prompts.js";
 import { ROSTER_STATUS_KEYS } from "../src/core/roster-snapshot.js";
 import type { WorkerStatus } from "../src/core/types.js";
@@ -699,13 +701,13 @@ describe("toolview — apply() registers one keyed entry per tool via the fake s
     const ctx = createClientCtx();
     apply(ctx);
 
-    // Four injects: tool.call.toolview (toolviews) + plugins.row.config
+    // Three injects: tool.call.toolview (toolviews) + plugins.row.config
     // (ticket 47's settings page) + the dispatcher session-kind glyph in the
-    // sidebar leading cell (ticket 123) + the dispatcher header chip
-    // (ticket 140, 2026-10-28 ruling). The `main` page and `root` election
-    // are not composed (stock dsh stays primary). The shell.overlay injects
+    // sidebar leading cell (ticket 123). The ticket-140 header chip was
+    // removed 2026-10-28. The `main` page and `root` election are not
+    // composed (stock dsh stays primary). The shell.overlay injects
     // (capsule, launcher) retired at the ticket-78 cutover.
-    assert.equal(ctx.injects.length, 4);
+    assert.equal(ctx.injects.length, 3);
     const overlay = ctx.findInject(SHELL_OVERLAY_SLOT);
     const toolviews = ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT);
     assert.equal(overlay, undefined, "no overlay inject post-cutover");
@@ -757,7 +759,7 @@ describe("toolview — HMR reversal over the fake seam", () => {
     // left any entry in its cell (the fake now models that rule), so the
     // HMR-reversal assertion is a real contract check, not just a count.
     assert.doesNotThrow(() => apply(ctx));
-    assert.equal(ctx.injects.length, 4);
+    assert.equal(ctx.injects.length, 3);
     assert.equal(
       ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT)?.entries.length,
       TOOLVIEW_TOOL_NAMES.length,
@@ -1029,5 +1031,183 @@ describe("toolview — spawn_dispatcher payload parsing (ticket 152)", () => {
       }).kind,
       "degraded",
     );
+  });
+});
+
+/**
+ * The shipped reader face (`dsh-util-values/.../partial-json.d.ts:24-123`),
+ * faked over a plain field map. `keys()` lists what has arrived so far and the
+ * readers answer `undefined` for absent fields, exactly like the real view.
+ */
+function fakeArgs(fields: Record<string, unknown>): {
+  keys(): readonly string[];
+  complete(key: string): boolean;
+  text(key: string): string | undefined;
+  value(key: string): unknown;
+} {
+  return {
+    keys: () => Object.keys(fields),
+    complete: (key) => key in fields,
+    text: (key) => {
+      const value = fields[key];
+      return typeof value === "string" ? value : undefined;
+    },
+    value: (key) => {
+      const value = fields[key];
+      return typeof value === "string" ? undefined : value;
+    },
+  };
+}
+
+describe("toolview — shipped slot props (phase/block) adapt to the parsers", () => {
+  it("reads the lazy args view and the result content off a settled call", () => {
+    // Exactly what the shipped composition spreads: `phase` + `block` only
+    // (`dsh-client-ui-tool/lib/client.js:1936-1947`); no `args`, no `result`.
+    const view = assertDetail(
+      describeToolview(SPAWN_WORKER_TOOL, {
+        phase: "result",
+        block: {
+          kind: "tool-result",
+          callId: "c-1",
+          name: "spawn_worker",
+          args: fakeArgs({ stream_key: "t-2", title: "Rewrite auth docs", todo_id: "t-2" }),
+          call: {
+            name: "spawn_worker",
+            argsRaw: JSON.stringify({ stream_key: "t-2", title: "Rewrite auth docs" }),
+          },
+          content: [{ type: "text", text: JSON.stringify(spawnOkResult()) }],
+          isError: false,
+        },
+      }),
+    );
+    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.worker), "w-7f3a");
+    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.title), "Rewrite auth docs");
+    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.todo), "t-2");
+    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "ok");
+  });
+
+  it("renders a start-phase call from the lazy args view (no result yet)", () => {
+    const view = assertDetail(
+      describeToolview(SPAWN_WORKER_TOOL, {
+        phase: "start",
+        block: {
+          phase: "start",
+          callId: "c-2",
+          name: "spawn_worker",
+          args: fakeArgs({ stream_key: "t-9", title: "Grid sweep" }),
+          argsRaw: JSON.stringify({ stream_key: "t-9", title: "Grid sweep" }),
+        },
+      }),
+    );
+    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.title), "Grid sweep");
+    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), undefined);
+  });
+
+  it("renders a half-streamed argument object instead of degrading", () => {
+    // The reader answers what has landed: `title` still streaming, `message`
+    // complete, `todo_id` not yet begun.
+    const view = assertDetail(
+      describeToolview(SPAWN_WORKER_TOOL, {
+        phase: "start",
+        block: {
+          phase: "start",
+          callId: "c-3",
+          name: "spawn_worker",
+          args: fakeArgs({ title: "Rewrite au", stream_key: "t-2" }),
+          argsRaw: '{"title":"Rewrite au","stream_key":"t-2"',
+        },
+      }),
+    );
+    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.title), "Rewrite au");
+    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.stream), "t-2");
+  });
+
+  it("reads a preparing call's partial args when argsRaw is absent", () => {
+    const view = assertDetail(
+      describeToolview(CHECK_WORKERS_TOOL, {
+        phase: "preparing",
+        block: {
+          phase: "preparing",
+          callId: "c-4",
+          name: "check_workers",
+          args: fakeArgs({ worker_id: "w-1" }),
+        },
+      }),
+    );
+    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.worker), "w-1");
+  });
+
+  it("takes the structured result from meta, and reports an error without one", () => {
+    const withMeta = assertDetail(
+      describeToolview(SPAWN_WORKER_TOOL, {
+        phase: "result",
+        block: {
+          kind: "tool-result",
+          callId: "c-5",
+          name: "spawn_worker",
+          args: fakeArgs({ stream_key: "t-2", title: "Rewrite auth docs" }),
+          call: null,
+          content: [{ type: "text", text: 'Started "Rewrite auth docs".' }],
+          isError: false,
+          meta: spawnOkResult(),
+        },
+      }),
+    );
+    assert.equal(fieldOf(withMeta, TOOLVIEW_FIELD_KEYS.worker), "w-7f3a");
+    assert.equal(fieldOf(withMeta, TOOLVIEW_FIELD_KEYS.outcome), "ok");
+
+    const failed = assertDetail(
+      describeToolview(SPAWN_WORKER_TOOL, {
+        phase: "result",
+        block: {
+          kind: "tool-result",
+          callId: "c-6",
+          name: "spawn_worker",
+          args: fakeArgs({ title: "Rewrite auth docs" }),
+          call: null,
+          content: [{ type: "text", text: "Error: denied" }],
+          isError: true,
+          error: { name: "ToolError", code: "denied" },
+        },
+      }),
+    );
+    assert.equal(fieldOf(failed, TOOLVIEW_FIELD_KEYS.outcome), "denied");
+    assert.equal(fieldOf(failed, TOOLVIEW_FIELD_KEYS.title), "Rewrite auth docs");
+  });
+
+  it("falls back to argsRaw when the lazy view is empty", () => {
+    const view = assertDetail(
+      describeToolview(SPAWN_WORKER_TOOL, {
+        phase: "start",
+        block: {
+          phase: "start",
+          callId: "c-7",
+          name: "spawn_worker",
+          args: fakeArgs({}),
+          argsRaw: JSON.stringify({ title: "From raw text", stream_key: "t-4" }),
+        },
+      }),
+    );
+    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.title), "From raw text");
+    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.stream), "t-4");
+  });
+
+  it("degrades a result phase that carries nothing readable, without throwing", () => {
+    let view: ToolviewModel | undefined;
+    assert.doesNotThrow(() => {
+      view = describeToolview(SPAWN_WORKER_TOOL, {
+        phase: "result",
+        block: {
+          kind: "tool-result",
+          callId: "c-8",
+          name: "spawn_worker",
+          args: fakeArgs({}),
+          call: null,
+          content: [{ type: "image" }],
+          isError: false,
+        },
+      });
+    });
+    assert.equal(view?.kind, "degraded");
   });
 });

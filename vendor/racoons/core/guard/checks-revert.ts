@@ -172,7 +172,9 @@ function checkAppends(
  * re-applied: they select a cut for the full revisit, while a per-unit verdict
  * reverts to just before the read and may legitimately free a small span
  * (ledger `application-integrity.ts` states the same rule). Only the identity
- * `net = freed − kept − receipt` is enforced.
+ * `net = freed − kept − receipt` is enforced — `net` prices the one request that
+ * pays the kept suffix again, so a negative value is not a refusal reason when a
+ * verdict dictated the cut and the standing delta is freed − receipt (ISSUE-083).
  */
 function checkCost(
   plan: RevertPlan, forgotten: ReadonlyMap<number, ForgottenUnit>,

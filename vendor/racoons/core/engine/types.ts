@@ -122,7 +122,7 @@ export interface Disposable {
  * native read is ever replaced (ADR-0007).
  */
 export interface ToolSpec {
-  readonly name: 'forget' | 'expand' | 'recall';
+  readonly name: 'forget' | 'recall';
   readonly description: string;
   readonly parameters: Readonly<Record<string, unknown>>;
 }

@@ -133,7 +133,7 @@ Injected as system / always-on skill. **Amended 2026-09-18 (ADR-0018, supersedes
 | Steer | Injected as a steering prompt; interrupt current step; **preserve** conversation/tool context; do not restart. |
 | Resume (optional) | Follow-up after finish may re-enter same agent id if dsh supports it; still re-include needed context. |
 | Report | Final text is the stream’s report to the dispatcher (structured enough to deliver / act on). |
-| Spawning | Workers are **leaves**: only a dispatcher spawns agents, and a worker never spawns anything. A dispatcher may spawn a worker or (since 2026-10-18) a dispatcher peer; the bounds on that peer are the host's own depth ceiling and live-child pool, with no cap of ours. (ADR-0003 as amended by ADR-0025.) |
+| Spawning | Workers are **leaves**: only a dispatcher spawns agents, and a worker never spawns anything. A dispatcher may spawn a worker or (since 2026-10-18) a dispatcher peer; the peer runs as its own top-level session, so it is not bounded by the host's depth ceiling or live-child pool — those bounds are scoped to the subagent runtime — and we set no cap of ours. (ADR-0003 as amended by ADR-0025 and ADR-0032, 2026-10-28.) |
 | Todos | The todo list belongs to the dispatcher alone — never passed into a worker's context (a worker has no user-messaging tool, so it cannot legitimately complete an item); a worker's own list stays empty (ADR-0007). |
 
 ### 6.3 Tools / commands (dispatcher-visible)
@@ -147,7 +147,7 @@ Surface names are **dsh-native**; do not ship Sand tool names.
 | Steer | `steer_worker` / dsh followup-interrupt | Inject into running worker |
 | Message any agent | `message_agent` | Worker → the steer path above; dispatcher → its inbox and wake. Tagged as from another assistant, never the user. *(2026-10-18, ADR-0025)* |
 | Await a worker | `await_agent` | Block this turn on one named worker, ≤120 s; returns its terminal status and result, or "still running". *(2026-10-18, ADR-0025)* |
-| Spawn a dispatcher | `spawn_dispatcher` | One dispatcher peer with the full tool set and dispatcher policy; bounded by the host's depth ceiling and live-child pool. *(2026-10-18, ADR-0025)* |
+| Spawn a dispatcher | `spawn_dispatcher` | One dispatcher peer with the full tool set and dispatcher policy; it runs as a top-level session, so the host's depth ceiling and live-child pool do not bound it. *(2026-10-18, ADR-0025; amended 2026-10-28, ADR-0032)* |
 | Stop | `stop_worker` | Abort; a result that arrives after the abort is not brought back — late results are dropped, per reference behavior (docs/research/reference-behavior-notes.md) |
 | Todos | existing todo tools | Allow **multiple** `in_progress`; reconcile on wake |
 | Deliver | existing user message tool | Dispatcher → user only |
@@ -431,7 +431,7 @@ Deliver as separate files in the product repo (e.g. `prompts/dispatcher.md`). Re
 | Wake | Event that starts a new dispatcher turn (user, job, peer) |
 | Delivery | User-visible completion of a todo stream |
 | Stream key | One logical work item shared by todo ↔ worker |
-| Spawned dispatcher | A dispatcher created by another dispatcher. Same tools and policy, its own ledger and inbox, bounded by the host's depth ceiling and live-child pool. |
+| Spawned dispatcher | A dispatcher created by another dispatcher. Same tools and policy, its own ledger and inbox; it runs as its own top-level session, so the host's depth ceiling and live-child pool do not bound it (amended 2026-10-28, ADR-0032). |
 | Await | A bounded wait on one named worker for its terminal result. Not polling. |
 
 These are **product concepts**. Implementation names must be chosen independently.

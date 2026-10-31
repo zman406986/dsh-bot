@@ -29,11 +29,12 @@ export interface DshHost {
    * dispatcher session; resolves with the child's session id.
    *
    * Distinct from `spawnWorker` on purpose: the child is a PEER — it gets no
-   * worker composition, enters no worker roster, carries no stream key, and
-   * is bounded only by the host's `maxDepth` ceiling (`parentDepth + 2`, see
-   * `dispatcherSpawnMaxDepth`) and the 8-active root pool. Host refusals
-   * (e.g. `ACTIVATION_LIMIT_REACHED`) surface as-is; the host adds no cap of
-   * its own (ADR-0025 §Starting bounds).
+   * worker composition, enters no worker roster, carries no stream key.
+   * ADR-0032: it is a TOP-LEVEL session (the adapter creates it through
+   * `ctx.agents.create` with no `parentAgent`), so the subagent runtime's
+   * `maxDepth` ceiling and its live-child pool do not bound it;
+   * `dispatcherSpawnMaxDepth` no longer feeds this path and we set no cap of
+   * our own. Host errors surface as-is, unchanged.
    */
   spawnDispatcher(opts: DispatcherSpawnOptions): Promise<DispatcherSpawnResult>;
   /** Interrupt a running worker. Fire-and-return once the host accepted the stop. */

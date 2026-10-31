@@ -5,7 +5,7 @@
   "status": "pass",
   "visualReview": "pending",
   "artifact": {
-    "path": "C:\\Users\\TZ\\Desktop\\dsh-bot\\docs\\diagrams\\reference-agent-runtime.html",
+    "path": "docs/diagrams/reference-agent-runtime.html",
     "sha256": "93c334dcf68e69fd9668b1b06bea2b050e987fc98cb8360507255334683a686d",
     "bytes": 730412
   },

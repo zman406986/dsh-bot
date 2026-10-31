@@ -114,50 +114,33 @@ const PRUNE_ASK_PROMPT_LINES: readonly string[] = [
 export const PRUNE_ASK_SYSTEM_PROMPT = PRUNE_ASK_PROMPT_LINES.join("\n");
 
 /**
- * The entry ask's contract (ISSUE-056 chunk C2, adapted by ISSUE-058 chunk P2;
- * ADR-0022 §3 and §9). Static, so it is byte-identical across every ask of a run
- * and cacheable, and it rides inside the one appended user message: the fork's
- * system slot stays main's (ADR-0010).
+ * The entry ask's contract (ISSUE-056 chunk C2; rewritten 2026-10-28 to the
+ * owner-approved copy). Static, so it is byte-identical across every ask of a
+ * run and cacheable, and it rides inside the one appended user message: the
+ * fork's system slot stays main's (ADR-0010).
  *
  * The result has already landed above the ask, so this contract never repeats
- * its body. It states exactly three answer forms — the three the entry parser
- * accepts (`verdicts/entry-wire.ts`) — the `[start,end]` notation, how the
- * line count and the anchors that follow are read, and the fail-open rule. No
- * keep-first-N form: a first-N prefix is not an answer class (ADR-0022 §9).
- * Plain words only: the words the deleted size rule used (cap, capped) do not
- * appear, and a `keeplines`/`forgetall` note is called a note, because the
- * inventory test keeps the word "summary" out of shipped copy.
+ * its body. It states exactly three answer keys — the three the entry parser
+ * accepts (`verdicts/entry-wire.ts`) — the `[start,end]` notation, what each
+ * key keeps or purges, and how hard to prune. The fail-open rule stays in code
+ * and is not restated here. No keep-first-N form: a first-N prefix is not an
+ * answer class (ADR-0022 §9). The words the deleted size rule used (cap,
+ * capped) do not appear; "summary" is the parser's own field name and is
+ * allowed by owner ruling.
+ *
+ * The per-result lines follow this block at send time (`entryAskMessage`): the
+ * range sentence naming `N`, then the shortened quotes.
  */
 const ENTRY_ASK_PROMPT_LINES: readonly string[] = [
-  "You decide what the coding agent keeps of one tool result. The result has already landed in the",
-  "conversation, immediately above this message, and it is not repeated here. Answer about that",
-  "result only.",
-  "",
-  "Answer with exactly one JSON object and no other text. Its only top-level key is one of three",
-  "actions:",
+  "Memory management: decide what part of the tool result above this message stays in your memory. Answer about that result only, with exactly one JSON object and no other text. One of three keys:",
   "",
   '{"keepall":true}',
-  '{"keeplines":[[2,3],"stale run notes: the superseded TODO and the old deploy host"]}',
-  '{"forgetall":"a stale build log from the old host"}',
+  '{"keeplines":[[X,Y],[A,B],"<summary of what you dropped>"]}',
+  '{"forgetall":"one-line summary of the whole result"}',
   "",
-  "keepall keeps every line of the result, and its value is the boolean true.",
-  "keeplines keeps only the lines the ranges name and drops the rest. The array holds the ranges",
-  "and, last, one short note of at most 25 words saying what is dropped.",
-  "forgetall keeps no line. Its value is one short note of at most 25 words saying what the whole",
-  "result held.",
+  'keeplines keeps the named ranges (1-based, inclusive); the rest is purged from your memory and replaced by that summary, 25 words max. forgetall purges everything but the summary. keepall keeps every line. Every keeplines answer must carry that summary: last in the array, or as a sibling "summary" key; both are read.',
   "",
-  "A range is written [start,end]: 1-based, inclusive, and counted on the result's own lines.",
-  "Name several ranges when the useful lines sit apart; they need not be sorted or merged.",
-  "",
-  "The lines that follow state how many lines the result has and quote the end of a few of them.",
-  'An anchor reads `line 67 of 201 ends with "..."`: those are the result\'s own line numbers,',
-  "counted from its first line, so name your ranges by them.",
-  "",
-  "What you keep stays in the conversation. Everything else is dropped from it, stored, and",
-  "restored byte for byte by a recall id, so a wrong choice costs one restore, not the content.",
-  "",
-  "If your answer is missing or cannot be read, the whole result stays as it landed. That is the",
-  "fallback, and it is safe: silence keeps everything.",
+  "Prune aggressively: drop anything the immediate task does not need. If you drop too much, the recall tool restores the exact bytes.",
 ];
 
 /** Joined for the same purity-gate reason as the judge prompt above. */
@@ -168,41 +151,47 @@ export const ENTRY_ASK_SYSTEM_PROMPT = ENTRY_ASK_PROMPT_LINES.join("\n");
  * place of `keeplines`, so the arm admits exactly one partial class while
  * `keepall` and `forgetall` stay in both. Inert: nothing reads it, and it is
  * absent from `assets.ts`'s surface, so the shipped ask is still the default.
+ *
+ * The polarity is the whole difference: `forgetlines` purges the named ranges
+ * and keeps the rest, so the summary describes what left.
  */
 const ENTRY_ASK_FORGETLINES_PROMPT_LINES: readonly string[] = [
-  "You decide what the coding agent keeps of one tool result. The result has already landed in the",
-  "conversation, immediately above this message, and it is not repeated here. Answer about that",
-  "result only.",
-  "",
-  "Answer with exactly one JSON object and no other text. Its only top-level key is one of three",
-  "actions:",
+  "Memory management: decide what part of the tool result above this message stays in your memory. Answer about that result only, with exactly one JSON object and no other text. One of three keys:",
   "",
   '{"keepall":true}',
-  '{"forgetlines":[[2,3],"stale run notes: the superseded TODO and the old deploy host"]}',
-  '{"forgetall":"a stale build log from the old host"}',
+  '{"forgetlines":[[X,Y],[A,B],"<summary of what you dropped>"]}',
+  '{"forgetall":"one-line summary of the whole result"}',
   "",
-  "keepall keeps every line of the result, and its value is the boolean true.",
-  "forgetlines drops only the lines the ranges name and keeps the rest. The array holds the ranges",
-  "and, last, one short note of at most 25 words saying what is dropped.",
-  "forgetall keeps no line. Its value is one short note of at most 25 words saying what the whole",
-  "result held.",
+  'forgetlines purges the named ranges (1-based, inclusive) from your memory, replaced by that summary, 25 words max; the rest stays. forgetall purges everything but the summary. keepall keeps every line. Every forgetlines answer must carry that summary: last in the array, or as a sibling "summary" key; both are read.',
   "",
-  "A range is written [start,end]: 1-based, inclusive, and counted on the result's own lines.",
-  "Name several ranges when the useful lines sit apart; they need not be sorted or merged.",
-  "",
-  "The lines that follow state how many lines the result has and quote the end of a few of them.",
-  'An anchor reads `line 67 of 201 ends with "..."`: those are the result\'s own line numbers,',
-  "counted from its first line, so name your ranges by them.",
-  "",
-  "What you keep stays in the conversation. Everything else is dropped from it, stored, and",
-  "restored byte for byte by a recall id, so a wrong choice costs one restore, not the content.",
-  "",
-  "If your answer is missing or cannot be read, the whole result stays as it landed. That is the",
-  "fallback, and it is safe: silence keeps everything.",
+  "Prune aggressively: drop anything the immediate task does not need. If you drop too much, the recall tool restores the exact bytes.",
 ];
 
 /** Joined like the two prompts above; T-8 adds it to the surface when a caller selects it. */
 export const ENTRY_ASK_FORGETLINES_SYSTEM_PROMPT = ENTRY_ASK_FORGETLINES_PROMPT_LINES.join("\n");
+
+/**
+ * The experiment's two-form contract: the default with `keepall` removed, its
+ * example replaced by a `keeplines` whose ranges cover every line and whose
+ * note is `"None"`, and one gloss line saying that this keeps the whole result.
+ * Two keys remain — `keeplines` and `forgetall` — so a model that would have
+ * kept everything states it through a full-range `keeplines` instead. Selected
+ * only by `variant: 'twoform'`.
+ */
+const ENTRY_ASK_TWOFORM_PROMPT_LINES: readonly string[] = [
+  "Memory management: decide what part of the tool result above this message stays in your memory. Answer about that result only, with exactly one JSON object and no other text. One of two keys:",
+  "",
+  '{"keeplines":[[1,201],"None"]}',
+  '{"forgetall":"one-line summary of the whole result"}',
+  "`None` says nothing was dropped: the ranges cover every line, so the whole result stays.",
+  "",
+  'keeplines keeps the named ranges (1-based, inclusive); the rest is purged from your memory and replaced by that summary, 25 words max. forgetall purges everything but the summary. Every keeplines answer must carry that summary: last in the array, or as a sibling "summary" key; both are read.',
+  "",
+  "Prune aggressively: drop anything the immediate task does not need. If you drop too much, the recall tool restores the exact bytes.",
+];
+
+/** Joined like the three prompts above; `assets.ts` maps it to variant `twoform`. */
+export const ENTRY_ASK_TWOFORM_SYSTEM_PROMPT = ENTRY_ASK_TWOFORM_PROMPT_LINES.join("\n");
 
 /**
  * The framing line that introduced the result's block. Retained for the export

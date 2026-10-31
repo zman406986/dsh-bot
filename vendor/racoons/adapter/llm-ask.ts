@@ -133,7 +133,7 @@ function usageOfChunk(chunk: Record<string, unknown>): ApiUsage | undefined {
   return read !== null && read.kind === 'usage' ? read.usage : undefined;
 }
 
-/** One iterator step, abandoned when the deadline's controller aborts. */
+/** One iterator step, abandoned when the composed deadline signal aborts. */
 function nextWithin(iterator: AsyncIterator<DshLlmChunk>,
   signal: AbortSignal): Promise<IteratorResult<DshLlmChunk>> {
   if (signal.aborted) return Promise.reject(new Error('aborted'));
@@ -231,16 +231,19 @@ async function askRequest(llm: DshLlmService, fields: {
     return refuse('not-configured', 'no provider/model route for the ask');
   }
   const timeoutMs = options.timeoutMs ?? DEFAULT_ASK_TIMEOUT_MS;
-  const controller = new AbortController();
-  let timedOut = false;
-  const timer = Number.isFinite(timeoutMs) && timeoutMs > 0
-    ? setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs) : null;
+  // The stdlib owns the deadline and the race: `AbortSignal.timeout` fires once and
+  // does not hold the event loop; `AbortSignal.any` keeps the FIRST source's reason
+  // by identity, so a fired deadline and a caller's abort stay distinguishable —
+  // even when the caller's own reason is itself named `TimeoutError`.
+  const deadline = Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? AbortSignal.timeout(Math.floor(timeoutMs)) : null;
   const outer = options.signal;
-  const forward = (): void => { controller.abort(); };
-  if (outer !== undefined) {
-    if (outer.aborted) controller.abort();
-    else outer.addEventListener('abort', forward, { once: true });
-  }
+  const signal = AbortSignal.any([
+    ...(deadline === null ? [] : [deadline]),
+    ...(outer === undefined ? [] : [outer]),
+  ]);
+  const timedOut = (): boolean =>
+    deadline !== null && signal.aborted && signal.reason === deadline.reason;
   let text = '';
   let finish: string | null = null;
   // The host's own accounting for this call, when it reports one. The chunk is
@@ -254,12 +257,12 @@ async function askRequest(llm: DshLlmService, fields: {
       ...fields.tools === undefined ? {} : { tools: fields.tools },
       messages: fields.messages,
       ...(options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens }),
-      signal: controller.signal,
+      signal,
     };
     (request as unknown as Record<symbol, unknown>)[RACOONS_ASK_MARK] = true;
     const iterator = llm.stream(request)[Symbol.asyncIterator]();
     for (;;) {
-      const step = await nextWithin(iterator, controller.signal);
+      const step = await nextWithin(iterator, signal);
       if (step.done === true) break;
       const chunk = step.value;
       if (isRecord(chunk) && chunk['type'] === 'text-delta'
@@ -280,14 +283,11 @@ async function askRequest(llm: DshLlmService, fields: {
       }
     }
   } catch (error) {
-    if (timedOut) {
+    if (timedOut()) {
       return refuse('timeout', `the ask stream produced no answer within ${String(timeoutMs)} ms`);
     }
-    if (controller.signal.aborted) return refuse('aborted', 'the ask stream was aborted');
+    if (signal.aborted) return refuse('aborted', 'the ask stream was aborted');
     return refuse('stream-error', messageOf(error));
-  } finally {
-    if (timer !== null) clearTimeout(timer);
-    outer?.removeEventListener('abort', forward);
   }
   if (finish === 'error' || finish === 'aborted') {
     return refuse('stream-error', `the ask stream finished with ${finish}`);

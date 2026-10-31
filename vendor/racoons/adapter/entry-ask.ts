@@ -31,8 +31,9 @@
  * that cannot be applied arithmetically — an `invalid-span` parse refusal, a
  * `keeplines` range past `N`, or a `keeplines` that covers every line — earns
  * exactly one retry: the first answer is appended as an assistant turn and a
- * correction turn restates the SAME facts (`N` and the anchor lines, copied
- * from the same `EntryAskFacts`, never recomputed). The retry does not reopen
+ * correction turn restates the SAME facts (the range sentence naming `N` and
+ * the quotes, rendered from the same `EntryAskFacts` through the core's one
+ * `entryAskFactsBlock`, never recomputed). The retry does not reopen
  * keep-or-forget. A second invalid answer lands the result whole. Every parse
  * refusal that is not arithmetic (malformed JSON, unknown action, a long note)
  * fails open at once, with no retry.
@@ -45,7 +46,7 @@
  */
 import {
   ENTRY_ASK_CLOSING_LINE, EntryAnswerError, ForkError, appendAsk, appendMessage, anchorsFor,
-  entryAskMessage, fromBytes, lineCount, parseEntryAnswer, seedFork,
+  entryAskFactsBlock, entryAskMessage, fromBytes, lineCount, parseEntryAnswer, seedFork,
 } from '@racoons/core';
 import type {
   ApiUsage, Bytes, EntryAnswer, EntryAnswerErrorCode, WireFork, WireRequest,
@@ -333,29 +334,35 @@ export function entryAskFacts(resultBytes: Bytes): EntryAskFacts {
   return { lineCount: total, anchorLines: lines.length === total ? anchorsFor(lines) : [] };
 }
 
-/** The facts block `entryAskMessage` renders, restated verbatim by the retry. */
+/**
+ * The facts block the first ask carried, rebuilt through the core's own
+ * renderer so the two cannot drift: the range sentence naming `N`, then the
+ * shortened quotes.
+ */
 function factsText(facts: EntryAskFacts): string {
-  return [`This result has ${String(facts.lineCount)} lines.`, ...facts.anchorLines].join('\n');
+  return entryAskFactsBlock(facts);
 }
 
 /**
  * The ONE bounded correction turn (ADR-0022 §6; anchor design §7).
  *
  * It states the refusal code, says plainly that it does not put the keep-or-
- * forget question again, and restates the same `N` and the same anchor lines
- * the first ask carried (`factsText` over the caller's own `EntryAskFacts`, so
- * the two cannot drift). It ends with the shipped closing line, so the rig's
- * end-anchor matcher still names this as an entry ask and serves it from the
- * entry lane. It never carries the body and never changes the grammar, the
+ * forget question again, and restates the same facts block the first ask
+ * carried (`factsText` over the caller's own `EntryAskFacts`, rendered by the
+ * core, so the two cannot drift). It ends with the shipped closing line, so the
+ * rig's end-anchor matcher still names this as an entry ask and serves it from
+ * the entry lane. It never carries the body and never changes the grammar, the
  * option count or the floor.
  */
 export function entryRetryAskMessage(facts: EntryAskFacts, code: EntryAskRetryCode): string {
   const correction = `Your previous answer could not be applied: ${code}. This turn corrects `
     + 'an answer that could not be applied; it does not put the keep-or-forget question again.';
   const answer = 'Answer again, once, with exactly one JSON object: {"keepall":true}, '
-    + '{"forgetall":"a short note of at most 25 words"}, or '
-    + '{"keeplines":[[start,end],…,"a short note of at most 25 words"]}. '
-    + `A range is [start,end], 1-based and inclusive, inside 1 to ${String(facts.lineCount)}.`;
+    + '{"forgetall":"one-line summary of the whole result"}, or '
+    + '{"keeplines":[[X,Y],[A,B],"<summary of what you dropped>"]}. '
+    + 'A keeplines answer always carries its summary: last in the array, or as a sibling '
+    + '"summary" key. '
+    + `Ranges are 1-based and inclusive, inside [1,${String(facts.lineCount)}].`;
   return `${correction}\n${factsText(facts)}\n${answer}\n${ENTRY_ASK_CLOSING_LINE}`;
 }
 

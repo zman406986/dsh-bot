@@ -6,6 +6,19 @@ import { materializeEntries, metadata, receiptMatches } from './journal.js';
 
 export type TranscriptReading = MeterReading | ForcedLossObservation;
 
+/**
+ * Salvage share for one revisit (PRD §6.9, §13): the kept suffix over every
+ * suffix byte the cut measured, `keptBytes / (keptBytes + freedBytes)`.
+ *
+ * `null` when the cut measured no suffix bytes at all, the same convention
+ * `MeterReading.cachedInputShare` uses for an undefined ratio: a measured zero
+ * keeps is `0`, an empty measurement is `null`, and neither is `NaN`.
+ */
+export function salvageShare(keptBytes: number, freedBytes: number): number | null {
+  const suffixBytes = keptBytes + freedBytes;
+  return suffixBytes === 0 ? null : keptBytes / suffixBytes;
+}
+
 export function summarize(
   snapshot: SessionSnapshot, entries: readonly LedgerEntry[], readings: readonly TranscriptReading[],
 ) {

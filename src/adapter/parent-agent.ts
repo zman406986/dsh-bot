@@ -88,6 +88,13 @@ function tryWake(agent: AgentLike, text: string): void {
  * chat's activation succeeds (no `already-active-elsewhere` refusal exists
  * anymore); only re-activating an ALREADY active chat and child chats
  * refuse.
+ *
+ * ONE outcome type for every dispatcher session. The spawned path used to
+ * carry its own union (a `SpawnedActivationOutcome` alias, with no
+ * `not-top-level` arm) because a summoned child could never pass the
+ * top-level gate; since the summon is a top-level session parallel to its
+ * summoner, it passes the same gate and earns the same answers as any other
+ * chat — the alias is gone, not just deprecated.
  */
 export type ActivationOutcome =
   | { readonly ok: true }
@@ -97,21 +104,34 @@ export type ActivationOutcome =
     };
 
 /**
- * Result of {@link BindDispatcherLifecycleResult.activateSpawnedDispatcher}
- * (ticket 118, ADR-0025 mitosis). Deliberately NOT {@link ActivationOutcome}:
- * there is no `not-top-level` arm, because a spawned dispatcher is a subagent
- * by construction and the top-level gate is exactly what must not apply to it.
- *
- * `session-mismatch` is a wiring guard, not a cap: the passed session id must
- * be the child agent's own session id, or every per-session map (parent
- * binding, tool disposers, wake state) would key the wrong session.
+ * What the CALLER knows and the top-level gate cannot see. Omitted entirely
+ * for a user chat, which is why that path stays byte-identical.
  */
-export type SpawnedActivationOutcome =
-  | { readonly ok: true }
-  | {
-      readonly ok: false;
-      readonly reason: "already-active-here" | "unbound" | "session-mismatch";
-    };
+export interface DispatcherActivationOptions {
+  /**
+   * Ticket 141: whose dispatcher this session is. `user` (the default) is the
+   * `/dsh-bot` chat. ADR-0032: one policy text serves every dispatcher, so
+   * this reaches the policy wording only and selects nothing — never the gate,
+   * never the per-session state.
+   */
+  readonly origin?: DispatcherOrigin;
+  /**
+   * Ticket 141: the spawn generation — 1 for a user-started dispatcher (the
+   * default), the spawner's + 1 for a summoned one, which the caller passes
+   * explicitly. Stored so
+   * {@link BindDispatcherLifecycleResult.dispatcherGeneration} can answer it.
+   */
+  readonly generation?: number;
+  /**
+   * Ticket 155: the human label the spawn carried (`DispatcherSpawnOptions.title`),
+   * kept as this peer's roster label for the life of the activation. A
+   * summoned session is top-level, so it has no `subagent` descriptor and no
+   * `subagent.label` to read; without this it would render its raw session id
+   * in every peer roster. Absent for a user chat, whose row keeps rendering
+   * its session id exactly as ticket 155 decided.
+   */
+  readonly title?: string;
+}
 
 export interface BindDispatcherLifecycleResult {
   /**
@@ -119,31 +139,20 @@ export interface BindDispatcherLifecycleResult {
    * inject policy once. Idempotent-refusing per session — never re-binds a
    * chat that is already the dispatcher. ADR-0019: activating a DIFFERENT
    * chat succeeds; each dispatcher session owns its own surface and state.
+   *
+   * ONE entry point for every dispatcher session, user-started and summoned
+   * alike. A summoned dispatcher is now a top-level session parallel to its
+   * summoner, so the top-level gate admits it for the same reason it admits a
+   * user chat — hence no second, gate-free path exists (the pre-2026-10-28
+   * `activateSpawnedDispatcher` existed only to dodge that gate). What the
+   * caller must still tell it is what the gate cannot see: `options.origin`,
+   * `options.generation` and `options.title`. Omit `options` entirely for a
+   * user chat and the behaviour is byte-identical to before.
    */
-  activate(agent: AgentLike): ActivationOutcome;
-  /**
-   * Ticket 118 / ADR-0025 mitosis: activate a SPAWNED child as a dispatcher.
-   *
-   * The top-level gate is the only REFUSAL that differs from {@link activate}:
-   * a spawned dispatcher is a subagent (`origin: 'subagent'`, depth ≥ 1) by
-   * construction, so `not-top-level` would refuse every mitosis child. The
-   * origin also selects the spawned policy wording (ticket 141) — the child is
-   * told what it is instead of being told it is the user's assistant. Every
-   * other step is the same sequence — parent bind, policy inject, lifecycle
-   * registration, `onActivated` (which registers that session's scoped tool
-   * surface and starts the durability rebuild).
-   *
-   * `activate()` itself stays unchanged for user chats (ADR-0009: a child
-   * chat can never be turned into a dispatcher by a command).
-   *
-   * Idempotent-refusing per session, like `activate`. `session-mismatch`
-   * guards the keying: `sessionId` must equal `String(agent.session.id)`.
-   */
-  activateSpawnedDispatcher(
+  activate(
     agent: AgentLike,
-    sessionId: string,
-    generation?: number,
-  ): SpawnedActivationOutcome;
+    options?: DispatcherActivationOptions,
+  ): ActivationOutcome;
   /**
    * Best-effort one-shot **waking** delivery into ONE activated dispatcher
    * chat (ticket 57, register D-4): opens a recovery turn rather than
@@ -310,6 +319,16 @@ export function bindDispatcherLifecycle(
    * can report the live value; the durable source of truth is the mark row.
    */
   const spawnGenerations = new Map<string, number>();
+  /**
+   * Peer labels this lifecycle OWNS rather than reads (ticket 155, extended):
+   * the `title` a dispatcher spawn carried. A summoned session is top-level,
+   * so it has no `subagent` descriptor and `peerLabelOf` answers null for it —
+   * without this entry its roster row would render the raw session id, which
+   * is the regression ticket 155 fixed. The read seam above stays the first
+   * source (it is what a user-started dispatcher's row has always used); this
+   * map is consulted before falling back to the id.
+   */
+  const spawnTitles = new Map<string, string>();
   let activationSeq = 0;
   let unbound = false;
   const disposers: Array<() => void> = [];
@@ -317,6 +336,7 @@ export function bindDispatcherLifecycle(
   function deactivateSession(sessionId: string): void {
     if (!sessions.has(sessionId)) return;
     sessions.delete(sessionId);
+    spawnTitles.delete(sessionId);
     host.unbindParent(sessionId);
     onDeactivated?.(sessionId);
   }
@@ -346,7 +366,7 @@ export function bindDispatcherLifecycle(
         const tool = host.peerToolActivity(sessionId);
         return {
           sessionId,
-          label: readPeerLabel(peerAgent.session),
+          label: readPeerLabel(peerAgent.session) ?? spawnTitles.get(sessionId) ?? null,
           busy: multitask.wakeBus.isBusy(sessionId),
           pendingApproval: multitask.listPendingAccess(sessionId).length > 0,
           queuedWake: multitask.wakeBus.peek(sessionId) !== undefined,
@@ -440,30 +460,36 @@ export function bindDispatcherLifecycle(
   );
 
   /**
-   * The one activation sequence both entry points share — TICKET 118:
+   * The one activation sequence every entry point shares — TICKET 118:
    * extracted verbatim from `activate` so the spawned path cannot drift from
-   * the command path. The ONLY thing the caller decides is the gate.
+   * the command path.
    *
-   * Ticket 141: `origin` is the second thing the caller decides, and it only
-   * reaches the policy text. `user` is the command path (`activate`);
-   * `spawned` is this dispatcher's child (`activateSpawnedDispatcher`), which
-   * has no user in its chat and no user-facing delivery, so its policy must
-   * not claim either. Nothing else branches on it.
+   * Ticket 141: `origin` only reaches the policy text, which ADR-0032 made a
+   * single text for every dispatcher, so nothing branches on it any more.
    *
-   * `generation` is the third: the spawn generation the caller resolved (1 for
-   * a user chat, the mark's value + 1 for a spawn). It is stored so
+   * `generation` is stored so
    * {@link BindDispatcherLifecycleResult.dispatcherGeneration} can answer it,
-   * and it reaches the spawned policy text only.
+   * and it reaches the policy text only.
+   *
+   * `title` (ticket 155) is the spawn's `DispatcherSpawnOptions.title`, kept
+   * here as this peer's roster label. Nothing reads it at activation time; it
+   * is the label every OTHER dispatcher's roster renders for this session.
    */
   function bindActivation(
     agent: AgentLike,
     sessionId: string,
     origin: DispatcherOrigin,
     generation: number,
+    title?: string,
   ): void {
     // ADR-0019: another chat being a dispatcher is not a refusal — each
     // session activates independently.
     sessions.set(sessionId, agent);
+    // Ticket 155: a summoned session has no `subagent.label`, so its spawn
+    // title is the label its peers read. Omitted for a user chat.
+    if (title !== undefined && title.length > 0) {
+      spawnTitles.set(sessionId, title);
+    }
     // Ticket 90 (F2): stamp THIS activation before anything observes it
     // (`onActivated` starts the rebuild chain that captures the value).
     activationSeq += 1;
@@ -481,52 +507,51 @@ export function bindDispatcherLifecycle(
     onActivated?.(sessionId);
   }
 
-  return {
-    activate(agent: AgentLike): ActivationOutcome {
-      // HMR/unload safety: a torn-down lifecycle never re-binds.
-      if (unbound) {
-        return { ok: false, reason: "unbound" };
-      }
-      // Fail-open preserved: an inaccessible session header still counts as
-      // top-level (documented isTopLevel behavior).
-      if (!isTopLevel(agent)) {
-        return { ok: false, reason: "not-top-level" };
-      }
-      const sessionId = String(agent.session.id);
-      if (sessions.has(sessionId)) {
-        return { ok: false, reason: "already-active-here" };
-      }
-      bindActivation(agent, sessionId, "user", 1);
-      return { ok: true };
-    },
+  /**
+   * The ONE activation path: gate, per-session idempotency, then bind. Every
+   * entry point below is a thin caller of this — a summoned dispatcher is
+   * admitted here exactly as a user chat is, which is the whole collapse.
+   */
+  function activateSession(
+    agent: AgentLike,
+    options?: DispatcherActivationOptions,
+  ): ActivationOutcome {
+    // HMR/unload safety: a torn-down lifecycle never re-binds.
+    if (unbound) {
+      return { ok: false, reason: "unbound" };
+    }
+    // Fail-open preserved: an inaccessible session header still counts as
+    // top-level (documented isTopLevel behavior). A summoned dispatcher is a
+    // top-level session now, so this same gate admits it — there is no
+    // gate-free branch left to take.
+    if (!isTopLevel(agent)) {
+      return { ok: false, reason: "not-top-level" };
+    }
+    const sessionId = String(agent.session.id);
+    if (sessions.has(sessionId)) {
+      return { ok: false, reason: "already-active-here" };
+    }
+    // Defaults keep the user path byte-identical: generation 1, `user`
+    // wording, no spawn title. A summoned dispatcher's generation comes from
+    // its caller (the spawn carries it explicitly); origin no longer implies
+    // one, since ADR-0032 left a single policy text.
+    const origin = options?.origin ?? "user";
+    bindActivation(
+      agent,
+      sessionId,
+      origin,
+      options?.generation ?? 1,
+      options?.title,
+    );
+    return { ok: true };
+  }
 
-    /**
-     * Ticket 118 / ADR-0025: the spawned-dispatcher path. Identical to
-     * {@link activate} minus the top-level gate — the child is a subagent by
-     * construction. `session-mismatch` is a keying guard, not a refusal
-     * category a caller can earn by using the feature correctly.
-     *
-     * Ticket 141: `generation` is the child's spawn generation, resolved by
-     * the caller from the mark row (or from the in-process spawn map). The
-     * default 2 is the direct child of a user-started dispatcher — the shape
-     * every pre-141 spawn produced.
-     */
-    activateSpawnedDispatcher(
+  return {
+    activate(
       agent: AgentLike,
-      sessionId: string,
-      generation = 2,
-    ): SpawnedActivationOutcome {
-      if (unbound) {
-        return { ok: false, reason: "unbound" };
-      }
-      if (String(agent.session.id) !== sessionId) {
-        return { ok: false, reason: "session-mismatch" };
-      }
-      if (sessions.has(sessionId)) {
-        return { ok: false, reason: "already-active-here" };
-      }
-      bindActivation(agent, sessionId, "spawned", generation);
-      return { ok: true };
+      options?: DispatcherActivationOptions,
+    ): ActivationOutcome {
+      return activateSession(agent, options);
     },
 
     wakeNotice(sessionId: string, text: string): void {

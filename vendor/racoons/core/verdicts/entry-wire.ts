@@ -11,6 +11,10 @@
  * {"forgetlines":[[start,end],...,"summary of the dropped lines, <= 25 words"]}
  * ```
  *
+ * A partial answer may spell its summary in the action's array or in a sibling
+ * `summary` key beside it (ADR-0033); both spellings decode to one answer, and
+ * an answer carrying both is refused rather than merged.
+ *
  * `forgetlines` names the lines that LEAVE and keeps every other line of the
  * unit; it is `keeplines` with the opposite polarity in the same shape
  * (ADR-0026). Keeping that shape single-variable is what makes the K-versus-F
@@ -110,7 +114,7 @@ const MESSAGES: Readonly<Record<EntryAnswerErrorCode, string>> = {
   "empty-text": "The answer carries no text.",
   "malformed-json": "The answer is not readable JSON.",
   "not-an-object": "An answer is one JSON object.",
-  "mixed-keys": "An answer carries exactly one top-level key: the action.",
+  "mixed-keys": "An answer carries exactly one action key: a partial answer may add one summary.",
   "unknown-action": `The entry action is not one of ${ENTRY_ANSWER_ACTIONS.join(", ")}.`,
   "invalid-keepall": "keepall carries the boolean true and nothing else.",
   "invalid-keeplines": "keeplines carries an array of [start,end] pairs and a trailing summary string.",
@@ -130,11 +134,11 @@ function refuse(code: EntryAnswerErrorCode): never {
  * One entry answer, off the ask's answer text.
  *
  * Refused whole (an `EntryAnswerError`, never a partial reading): absent or
- * blank text, unreadable JSON, a non-object, zero or several top-level keys, an
- * action outside the four, `keepall` whose value is not `true`, a `keeplines` or
- * `forgetlines` payload that is not a list of pairs plus a trailing summary, an
- * empty span list, a reversed or fractional span, and a summary past the
- * 25-word cap.
+ * blank text, unreadable JSON, a non-object, an answer that is not one action
+ * key beside at most one `summary` on a partial answer, an action outside the
+ * four, `keepall` whose value is not `true`, a `keeplines` or `forgetlines`
+ * payload that is not a list of pairs, no summary or two summaries, an empty
+ * span list, a reversed or fractional span, and a summary past the 25-word cap.
  *
  * Span order and overlap are normalised, not refused: `normalizeKeptSpans` is
  * the planner's own function, so an unsorted or touching pair means exactly
@@ -148,22 +152,19 @@ export function parseEntryAnswer(text: string): EntryAnswer {
     refuse("not-an-object");
   }
   const record = parsed as Record<string, unknown>;
-  const keys = Object.keys(record);
-  if (keys.length !== 1) refuse("mixed-keys");
-  const action = keys[0];
-  if (action === undefined) refuse("mixed-keys");
-  if (!(ENTRY_ANSWER_ACTIONS as readonly string[]).includes(action)) refuse("unknown-action");
+  const action = readActionKey(record);
   const payload = record[action];
+  const flat = readFlatSummary(record);
   switch (action) {
     case "keepall":
       if (payload !== true) refuse("invalid-keepall");
       return { action: "keepall" };
     case "keeplines": {
-      const { ranges, summary } = readKeptLines(payload);
+      const { ranges, summary } = readKeptLines(payload, flat);
       return { action: "keeplines", ranges, summary };
     }
     case "forgetlines": {
-      const { ranges, summary } = readForgottenLines(payload);
+      const { ranges, summary } = readForgottenLines(payload, flat);
       return { action: "forgetlines", ranges, summary };
     }
     case "forgetall":
@@ -176,6 +177,25 @@ export function parseEntryAnswer(text: string): EntryAnswer {
   }
 }
 
+/**
+ * Whether this answer says "nothing was dropped", in either of the two legal
+ * forms a two-form ask offers: `keepall` itself, or a `keeplines` whose spans
+ * merge to `1..lineCount` with the note `None`. Both must plan keep-all, so no
+ * lane reads the second form as a refusal.
+ *
+ * The `None` note is required: the ranges alone are ambiguous with a genuine
+ * partial answer that happens to name every line, and only the note says the
+ * model meant "nothing was dropped".
+ */
+export function isKeepEverythingAnswer(answer: EntryAnswer, lineCount: number): boolean {
+  if (answer.action === "keepall") return true;
+  if (answer.action !== "keeplines" || answer.summary !== "None") return false;
+  const merged = normalizeKeptSpans(answer.ranges);
+  const span = merged?.[0];
+  return merged?.length === 1 && span !== undefined
+    && span.from === 1 && span.to === lineCount;
+}
+
 /** The answer text as one JSON value; a syntax error is a typed refusal. */
 function parseJsonText(text: string): unknown {
   try {
@@ -185,18 +205,63 @@ function parseJsonText(text: string): unknown {
   }
 }
 
+function isEntryAction(key: string): key is EntryAnswerAction {
+  return (ENTRY_ANSWER_ACTIONS as readonly string[]).includes(key);
+}
+
+function isPartialAction(action: string): action is "keeplines" | "forgetlines" {
+  return action === "keeplines" || action === "forgetlines";
+}
+
 /**
- * The kept spans a `keeplines` payload names, normalised, plus its trailer
- * summary. The payload is one array: zero or more `[start,end]` pairs and,
- * last, the summary string. Same rule as the gate lane's reader.
+ * The action the record's top-level keys name. One action key is the rule; a
+ * partial action may sit beside the literal key `summary` (ADR-0033). Any other
+ * key set — no action, two actions, or a stranger beside one — is mixed.
+ */
+function readActionKey(record: Record<string, unknown>): EntryAnswerAction {
+  const keys = Object.keys(record);
+  if (keys.length === 1) {
+    const only = keys[0];
+    if (only === undefined) refuse("mixed-keys");
+    if (!isEntryAction(only)) refuse("unknown-action");
+    return only;
+  }
+  if (keys.length !== 2) refuse("mixed-keys");
+  const action = keys.find(isEntryAction);
+  if (action === undefined || !isPartialAction(action)) refuse("mixed-keys");
+  if (!keys.includes("summary")) refuse("mixed-keys");
+  return action;
+}
+
+/** The record's sibling `summary` slot: whether it exists, and what it holds. */
+interface FlatSummary {
+  readonly present: boolean;
+  readonly value: unknown;
+}
+
+/** The sibling `summary` key's value; absent is not the same as a wrong type. */
+function readFlatSummary(record: Record<string, unknown>): FlatSummary {
+  const present = Object.hasOwn(record, "summary");
+  return { present, value: present ? record.summary : undefined };
+}
+
+/**
+ * The kept spans a `keeplines` payload names, normalised, plus its summary.
+ * The payload is one array: zero or more `[start,end]` pairs and, last, the
+ * summary string. Same rule as the gate lane's reader. A summary in the
+ * record's sibling key replaces the trailer (ADR-0033); the array then holds
+ * pairs only, and a trailer beside it is refused rather than chosen between.
  */
 function readKeptLines(
   payload: unknown,
+  flat: FlatSummary,
 ): { readonly ranges: readonly KeptLineSpan[]; readonly summary: string } {
   if (!Array.isArray(payload) || payload.length === 0) refuse("invalid-keeplines");
   const last = payload[payload.length - 1];
-  if (typeof last !== "string") refuse("summary-missing");
-  const pairs = payload.slice(0, -1);
+  const trailer = typeof last === "string";
+  if (trailer && flat.present) refuse("mixed-keys");
+  if (!trailer && !flat.present) refuse("summary-missing");
+  const pairs = trailer ? payload.slice(0, -1) : payload;
   if (pairs.length === 0) refuse("empty-ranges");
   const spans: KeptLineSpan[] = [];
   for (const pair of pairs) {
@@ -209,24 +274,27 @@ function readKeptLines(
   }
   const normalized = normalizeKeptSpans(spans);
   if (normalized === null || normalized.length === 0) refuse("invalid-span");
-  const summary = readSummary(last, "summary-missing");
+  const summary = readSummary(trailer ? last : flat.value, "summary-missing");
   return { ranges: normalized, summary };
 }
 
 /**
  * The spans a `forgetlines` payload names — the lines that LEAVE the unit —
- * normalised, plus its trailer summary. The payload is the same array shape
+ * normalised, plus its summary. The payload is the same array shape
  * `keeplines` takes: one or more `[start,end]` pairs and, last, the summary
  * string. Only the polarity differs (ADR-0026 §2–§3), so the rules are the same
  * rules with the action's own `invalid-forgetlines` name.
  */
 function readForgottenLines(
   payload: unknown,
+  flat: FlatSummary,
 ): { readonly ranges: readonly KeptLineSpan[]; readonly summary: string } {
   if (!Array.isArray(payload) || payload.length === 0) refuse("invalid-forgetlines");
   const last = payload[payload.length - 1];
-  if (typeof last !== "string") refuse("summary-missing");
-  const pairs = payload.slice(0, -1);
+  const trailer = typeof last === "string";
+  if (trailer && flat.present) refuse("mixed-keys");
+  if (!trailer && !flat.present) refuse("summary-missing");
+  const pairs = trailer ? payload.slice(0, -1) : payload;
   if (pairs.length === 0) refuse("empty-ranges");
   const spans: KeptLineSpan[] = [];
   for (const pair of pairs) {
@@ -239,7 +307,7 @@ function readForgottenLines(
   }
   const normalized = normalizeKeptSpans(spans);
   if (normalized === null || normalized.length === 0) refuse("invalid-span");
-  const summary = readSummary(last, "summary-missing");
+  const summary = readSummary(trailer ? last : flat.value, "summary-missing");
   return { ranges: normalized, summary };
 }
 

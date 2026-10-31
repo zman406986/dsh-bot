@@ -3,12 +3,9 @@ import {
   canonicalBytesWithByteArrays, concatBytes, equalBytes,
 } from "../util/bytes.js";
 import { sha256Sync } from "../util/hash.js";
-import { splitLineOffsets } from "../util/lines.js";
 
 /** Single SHA-256 implementation, owned by util/hash.ts. */
 export const digest = sha256Sync;
-/** Single line-splitting implementation, owned by util/lines.ts. */
-export const lineRanges = splitLineOffsets;
 /** Single byte-equality implementation, owned by util/bytes.ts. */
 export const equal = equalBytes;
 export const length = (r: ByteRange): number => r.endByteExclusive - r.startByte;

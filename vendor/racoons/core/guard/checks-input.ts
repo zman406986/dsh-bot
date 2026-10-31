@@ -46,7 +46,7 @@ export function checkInput(value: ValidationInput, report: Report): void {
   // checkpoint plans a shape under `entry-shape`. The guard must know those ids
   // are plans, not typos; whether such a plan is applicable is
   // `checkOperations`' judgement.
-  for (const plan of value.plans) if (!["cap", "seal", "evict", "span", "verdict",
+  for (const plan of value.plans) if (!["cap", "seal", "verdict",
     "forget", ENTRY_SHAPE_RULE_ID, ...PROOF_RULE_IDS].includes(plan.ruleId)) {
     report("wrong-rule", `Unknown rule ID ${plan.ruleId}`);
   }

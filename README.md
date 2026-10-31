@@ -1,114 +1,128 @@
 # dsh-multitask-dispatcher
 
-An always-on multitask dispatcher plugin for DeepSeek Harness (`dsh`).
+A plugin for DeepSeek Harness (`dsh`). It turns one dsh chat into a dispatcher.
 
-## What it is
+## What this is
 
-In dsh, one agent turn does the work, so a long task blocks the chat. This plugin adds a mode where the chat becomes a dispatcher: it stays responsive and hands non-trivial work to background workers. A worker starts blank — it sees only the prompt the dispatcher writes for it, never the dispatcher's conversation — and reports back when it finishes.
+In dsh, one agent turn does the work, so a long job blocks the chat. This plugin adds a dispatcher: a chat agent that stays free to talk to you and hands long jobs to background workers. A worker starts blank. It sees only the prompt the dispatcher writes for it, never your chat. When a worker finishes, it wakes the dispatcher, and the dispatcher tells you the result in the chat.
 
-The dispatcher drives workers through eight tools: `spawn_worker`, `check_workers`, `steer_worker`, `stop_worker`, `deliver_result`, `message_agent`, `await_agent`, and `spawn_dispatcher`. Workers are leaves: they never address the user. They return a final answer, can send the dispatcher a mid-task note with `reply_to_dispatcher`, and can ask for a gated action or a named credential with `request_access`. That ask reaches the user as a prompt with Allow, Always allow (this session), or Deny; an unanswered ask is denied after a timeout.
+The dispatcher has eight tools: `spawn_worker`, `check_workers`, `steer_worker`, `stop_worker`, `deliver_result`, `message_agent`, `await_agent`, and `spawn_dispatcher`.
 
-Workers wake the dispatcher when they settle or ask for access; a peer dispatcher can message it; the optional file inbox can deliver a job. The dispatcher then answers the user in an ordinary chat turn. Results arrive as normal messages, not notifications.
+Workers are leaves. They never talk to you. A worker returns a final answer, can send the dispatcher a note with `reply_to_dispatcher`, and can ask for a permission or a named credential with `request_access`. That ask arrives as a prompt with Allow, Always allow (this session), or Deny. An unanswered ask is denied after a timeout.
 
-## Status
+Status: version 0.1.0. It is not published to npm. Install it from a checkout.
 
-Working plugin, version 0.1.0. Offline-tested: `npm test` runs the suite with no network and no LLM. A mock-LLM end-to-end harness (`npm run e2e`) drives a real local dsh process against a scripted model. Not published to npm yet; install it from a checkout. Open work is tracked in `Issue-tracker/open/`.
+## What you need
 
-## Requirements
+- Node.js 22.13 or newer. This is the `engines` floor in `package.json`.
+- A local dsh install that can load plugins. The plugin targets the dsh 0.2.x plugin API and was last run against dsh 0.2.1-rc.3.
+- npm. This repo uses npm workspaces, not pnpm.
+- The cordis framework is a peer dependency. `npm install` fetches it.
 
-- Node.js 22 or newer (`engines` in `package.json`).
-- A local dsh installation whose profile can load plugins. The plugin targets the 0.2.x plugin API; the code was verified against dsh 0.2.1-rc.3 (ticket 144, 2026-10-24; rc.2 was the previous baseline, ticket 114).
-- npm. The repo uses npm workspaces, not pnpm.
-
-## Build and test
+## Install
 
 ```bash
-npm install          # installs dependencies; `prepare` runs the build
-npm run typecheck    # vendor build, then tsc --noEmit for plugin and client
-npm test             # offline suite: no network, no LLM
-npm run build        # compile the plugin to lib/
-npm run build:client # bundle the browser module to client/index.js
-npm run e2e          # mock-LLM end-to-end harness (needs a local dsh install)
+git clone https://github.com/zman406986/dsh-bot.git
+cd dsh-bot
+npm install
+npm run build:client
 ```
 
-`lib/` and `client/index.js` are build output and are git-ignored.
-
-## Install into a dsh profile
-
-Build first, including the browser bundle (the host serves `client/index.js`), then add the local package to the profile:
+`npm install` runs `prepare`, which runs the main build. Then add the local package to a dsh profile:
 
 ```bash
-npm run build && npm run build:client
 dsh plugin --profile <profile> add file:<path-to-this-checkout>
 ```
 
-The package ships a bundle patch (`cordis.patch.yml`, selected through the "dsh.bundle.patch" key in `package.json`). Select the bundle in the profile's "dsh.profile.bundles" list and do not also add an insert row by hand: two rows with the same id make the plugin's settings form disappear. `docs/research/plugin-install-workflow.md` records the install workflow in more detail.
+Select the bundle `dsh-multitask-dispatcher` in that profile's bundle list. Do not also add an insert row by hand: two rows with the same id make the plugin's settings form disappear.
 
-For development, the committed overlay boots the built tree into the stock web profile without touching that profile:
+## Build
+
+- `npm run build` compiles the vendored libraries and then the plugin, into `lib/`. It runs `build:vendor` first.
+- `npm run build:vendor` compiles only `vendor/racoons/core` and `vendor/racoons/adapter`.
+- `npm run build:client` bundles the browser module into the `client/` folder with esbuild. dsh serves that bundle to its web UI.
+- `npm run typecheck` builds the vendored libraries, then type-checks the plugin and the browser module. It writes no output.
+
+`lib/` and `client/` are build output. They are git-ignored.
+
+## Test
 
 ```bash
-dsh --profile web --patch dev/cordis.web.patch.yml
+npm test
 ```
 
-`dev/cordis.src.patch.yml` is the same row pointed at `src/index.ts`; the e2e harness uses it.
+This runs the offline suite. It needs no network and no model. `pretest` compiles the vendored libraries first.
 
-## Usage
+The offline suite is the default lane. A second harness, `npm run e2e`, drives a real local dsh process against a scripted model. It needs a dsh install, so it is optional.
 
-1. Open a top-level chat in dsh.
-2. Type `/dsh-bot`. That chat becomes the dispatcher for the session. Activation is refused in a child chat.
-3. Ask for work. The dispatcher decides what to delegate, spawns workers, and reports results back in the chat.
-4. To leave the dispatcher, dispose the chat or unload the plugin. There is no stop command.
+## Use it
 
-Related commands:
+1. Open a normal dsh chat.
+2. Type `/dsh-bot`. That chat becomes the dispatcher.
+3. Ask for work. The dispatcher keeps answering and gives long jobs to workers.
 
-- `/dispatcher-steer <worker id> <instruction>` sends a mid-run correction.
-- `/dispatcher-resolve <worker id> <allow|always-allow|deny>` answers a pending access ask.
+Two more commands:
+
+- `/dispatcher-steer <worker id> <instruction>` corrects a worker that is still running.
+- `/dispatcher-resolve <worker id> <allow|always-allow|deny>` answers a pending ask.
+
+To stop, close the chat or unload the plugin. There is no stop command.
+
+### Summoning a second dispatcher
+
+The dispatcher can call `spawn_dispatcher` to summon another dispatcher.
+
+- The new one is a new top-level session. It runs beside the first one, not under it.
+- It has its own sidebar row, its own chat, and its own state.
+- It does not see the first chat. The prompt it was given is its first message.
+- The two talk with `message_agent`. Neither can wait on the other.
+- The sidebar glyph is the only mark on a dispatcher session. There is no header chip.
+- The plugin sets no spawn limit of its own. Because the new dispatcher is a top-level session, dsh's subagent depth limit and its live-child pool do not apply to it either. A tree of dispatchers is uncapped today. That is observed behaviour, not a promise.
 
 ## Configuration
 
-Every field is a volatile setting of the plugin's `Config`, editable in dsh's Plugins page card for **Multitask Dispatcher**. A saved change applies to new chats; the chat you are in keeps the values it started with.
+Every field is a setting on the plugin's card on dsh's Plugins page. A saved change is not applied live. It takes effect in the next chat.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `enabled` | `true` | Feature flag for the plugin. When off, the plugin registers nothing. Read once at plugin apply. |
-| `accessRequestTimeoutMs` | `120000` | How long an unanswered access ask waits before it is denied. |
-| `wakeCoalesceWindowMs` | `0` | Batch idle background wakes into one dispatcher turn per window. `0` wakes immediately. |
-| `inboxEnabled` | `false` | Opt-in file inbox. Off starts nothing at all. |
-| `racoonsRecordOnly` | `false` | Racoons record-only mode. Off means racoons applies context cleanup; on means everything is still recorded but the automatic prune and manual forget are held back (a result's entry checkpoint answer can still apply). |
-| `racoonsStorageRoot` | `""` | Racoons storage root. Empty uses `<DSH_HOME>/storages/racoons`. |
-| `racoonsContextWindowTokens` | `0` | Racoons context window in tokens; `0` leaves the half-window auto prune off. |
-| `inboxDir` | `""` | Inbox root. Empty disables intake even when enabled. |
-| `inboxRescanIntervalMs` | `5000` | Fallback rescan interval; clamped to a 1000 ms floor. |
-| `microcompactEnabled` | `false` | Clears the content of old tool results on dispatcher sessions at a fixed usage ratio. Off pending live verification. |
+| `enabled` | `true` | Turns the plugin on. Off registers nothing. |
+| `accessRequestTimeoutMs` | `120000` | How long an unanswered ask waits before it is denied. |
+| `wakeCoalesceWindowMs` | `0` | Batches background wakes into one dispatcher turn per window. `0` wakes at once. |
+| `inboxEnabled` | `false` | Optional file inbox. Off starts nothing. |
+| `inboxDir` | `""` | Inbox folder. Empty disables intake even when enabled. |
+| `inboxRescanIntervalMs` | `5000` | Fallback rescan interval. Clamped to a 1000 ms floor. |
+| `racoonsRecordOnly` | `false` | Records context cleanup without applying the bulk prune. |
+| `racoonsStorageRoot` | `""` | Where the cleanup ledger is stored. Empty uses `<DSH_HOME>/storages/racoons`. |
+| `racoonsContextWindowTokens` | `0` | Context window for the automatic prune. `0` leaves it off. |
+| `microcompactEnabled` | `false` | Clears old tool results on dispatcher sessions. Off, and not yet checked live. |
 
-Racoons is always on while the multitask plugin is enabled, and it covers every session in the process — the dispatcher, its workers, and plain chats alike. Removed content is restorable by its recall id, and the originals are stored durably per session under `<DSH_HOME>/storages/racoons` (one ledger file plus its blobs directory per session).
+The context-cleanup library is always on while the plugin is on, and it covers every session in the dsh process. Removed content can be restored by its recall id. Originals are stored per session under the storage root.
 
-## Architecture
+## Project layout
 
-| Path | Role |
+| Path | What is in it |
 |---|---|
-| `src/index.ts` | Public barrel: plugin entry plus the exported core surface. |
-| `src/plugin.ts` | Cordis entry (`name` / `inject` / `Config` / `apply`); wires adapter to core. |
-| `src/core/` | Host-agnostic dispatcher behind the `DshHost` boundary: worker state machine, wake bus, access relay, steer queue, todo ledger, roster snapshot, prompt assembly. |
-| `src/adapter/` | dsh/Cordis side: host implementation, slash commands, dispatcher tools, access prompts, settings identity, inbox watcher, restart notice. |
-| `src/worker/` | Worker side: contract prompt, tool barrier, agent definition. |
-| `src/client/` | Browser module: locale dictionaries, per-tool call views, settings card, sidebar session-kind glyph. Shell components are retained but not mounted (ADR-0024). |
-| `test/` | Offline tests. Hand-written fakes (`FakeDshHost`), no mocking framework. |
-| `dev/` | Mock LLM and the end-to-end harness. |
-| `docs/adr/` | Every recorded decision, with an index in `docs/adr/README.md`. |
-| `Issue-tracker/` | Tickets: `open/`, `resolved/`, `deferred/`, `cancelled/`. |
-
-The plugin registers into stock dsh only: three slash commands, eight per-session tools, tool-call views, one settings card, and one additive sidebar glyph that marks dispatcher sessions. There is no separate window, launcher, or capsule.
+| `src/` | Plugin source: the policy core, the dsh adapter, worker prompts, and the browser module. |
+| `test/` | Offline tests. |
+| `vendor/racoons/` | A vendored context-cleanup library. Apache License 2.0; see `vendor/racoons/LICENSE` and `vendor/racoons/PROVENANCE.md`. |
+| `dev/` | The scripted model and the end-to-end harness. |
+| `docs/` | Decisions, research notes, and notes on what the UI shows. |
+| `Issue-tracker/` | Tickets, sorted by status. |
+| `scripts/` | The browser bundle build. |
+| `tools/` | Documentation checks and index generators. |
 
 ## Docs
 
-- `docs/adr/README.md` — decision index; read the ones touching your area first.
-- `docs/agents-rulebook.md` — process rules, authority stack, environment notes.
-- `CONTEXT.md` — shared vocabulary.
-- `PRD-dsh-multitask-dispatcher.md` — product behavior, scope, success criteria.
-- `docs/surfaces.md` — what UI ships and what is deliberately absent.
-- `Issue-tracker/issue-tracker.md` — ticket conventions.
+- `docs/adr/README.md` — the decision index.
+- `docs/surfaces.md` — what the plugin adds to dsh's screen, and what it does not.
+- `docs/agents-rulebook.md` — working rules for this repo.
 
-## License
+## Licence
 
-MIT. See [LICENSE](LICENSE). Copyright (c) 2026 TZ.
+MIT. See [LICENSE](LICENSE).
+
+The vendored library under `vendor/racoons/` is under the Apache License 2.0. See `vendor/racoons/LICENSE`.
+
+## Problems
+
+There is no CONTRIBUTING file and no SECURITY file yet. To report a problem, open an issue at https://github.com/zman406986/dsh-bot/issues.

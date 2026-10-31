@@ -113,7 +113,11 @@ describe("session policy assembler", () => {
       "todo",
       "reconcile",
       "self-contained",
-      "cannot talk to the user",
+      // The user-channel bullet is the worker-leaf one. A summoned dispatcher
+      // answers its own user directly (owner ruling 2026-10-29, ADR-0032 Q1),
+      // so this needle names the workers explicitly and cannot pass on the
+      // peer line.
+      "workers cannot talk to the user",
       "never hears the machinery",
       "poll",
     ]) {
@@ -243,10 +247,11 @@ describe("wake-turn assembler", () => {
   });
 });
 
-describe("spawned dispatcher policy variant (ticket 141)", () => {
-  // The two activation paths share one policy block. Only the statements that
-  // are FALSE for a summoned dispatcher may differ; everything else is
-  // byte-identical, so the user-started text is pinned against the default.
+describe("one dispatcher policy for every dispatcher (owner ruling 2026-10-28)", () => {
+  // A summoned dispatcher runs as a normal top-level session, and its
+  // summoner's message arrives as its first user message. So there is no
+  // spawned variant left: every dispatcher gets the same bytes, whoever
+  // created it.
 
   it("user-started text is byte-identical to the pre-141 default", () => {
     const byDefault = buildDispatcherPolicySection();
@@ -267,8 +272,13 @@ describe("spawned dispatcher policy variant (ticket 141)", () => {
     // behavior — the spawn creates the entry. That is an intentional,
     // ticket-scoped copy change; the pin moves with it so any OTHER drift
     // still fails here.
+    // Re-pinned by ticket 166 (2026-10-29): the owner ruled that a summoned
+    // dispatcher addresses the user directly, like any other dispatcher
+    // (ADR-0032 open question 1), so the peer bullet in this text changed.
+    // Another intentional, ticket-scoped copy change; the pin moves with it so
+    // any OTHER drift still fails here.
     const SHIPPED_SHA256 =
-      "2be8e8c792e170d2c56605ee5094ce078c882e85a4aaf557b7133bd1099c7371";
+      "ff1aae79d4bf23267a47e524f878f1a5940e6d69018f2133d88e6ac7b4908cc8";
     const text = buildDispatcherPolicySection("user");
     assert.equal(
       createHash("sha256").update(text, "utf8").digest("hex"),
@@ -281,69 +291,25 @@ describe("spawned dispatcher policy variant (ticket 141)", () => {
     assert.ok(!text.includes("team leader"), "the user is not a team leader");
   });
 
-  it("the spawned opener carries the ruled generation line (ticket 141)", () => {
-    // A generation-3 dispatcher's child is generation 4: the child sees its
-    // spawner's number and its own, and nothing else changes.
-    const spawned = buildDispatcherPolicySection("spawned", 3);
-    assert.ok(
-      spawned.includes(
-        "A generation-2 dispatcher spawned you. You are the generation-3 team leader.",
-      ),
-      "X spawns X+1: a generation-2 spawner makes a generation-3 leader",
-    );
-    assert.equal(assembleSessionPolicy(true, "spawned", 3), spawned);
+  it("origin changes nothing: every dispatcher gets the same bytes", () => {
+    // Owner ruling 2026-10-28. The origin argument is still accepted so the
+    // spawn call site in `src/adapter/parent-agent.ts` keeps compiling, but it
+    // must not reach the text. The generation number cannot either.
+    const text = buildDispatcherPolicySection("user");
+    assert.equal(buildDispatcherPolicySection("spawned"), text);
+    assert.equal(buildDispatcherPolicySection("spawned", 3), text);
+    assert.equal(buildDispatcherPolicySection("spawned", 9), text);
+    assert.equal(assembleSessionPolicy(true, "spawned"), text);
+    assert.equal(assembleSessionPolicy(true, "spawned", 7), text);
 
-    // Default spawned is a direct child of a user-started dispatcher (1 → 2).
-    const byDefault = buildDispatcherPolicySection("spawned");
-    assert.ok(
-      byDefault.includes(
-        "A generation-1 dispatcher spawned you. You are the generation-2 team leader.",
-      ),
-    );
-    assert.equal(assembleSessionPolicy(true, "spawned"), byDefault);
-  });
-
-  it("spawned text says what the session is: summoned by a dispatcher, results go back to it", () => {
-    const spawned = buildDispatcherPolicySection("spawned");
-    assert.ok(
-      spawned.includes("Another dispatcher summoned you."),
-      "the opener names the summoner",
-    );
-    assert.ok(
-      spawned.includes(
-        "your results go back to that dispatcher, not to a user",
-      ),
-      "the opener states where results go",
-    );
-    assert.ok(
-      spawned.includes(
-        "Mark an entry `completed` at your first report of its outcome to the dispatcher that summoned you.",
-      ),
-      "the todo trigger is the report to the summoner, not a user acknowledgement",
-    );
-    assert.ok(
-      spawned.includes(
-        "Their results come back to you; yours go back to the dispatcher that summoned you.",
-      ),
-      "the delivery line names the only channel a child has",
-    );
-    assert.equal(assembleSessionPolicy(true, "spawned"), spawned);
-  });
-
-  it("spawned text drops the two statements a child cannot honour", () => {
-    const spawned = buildDispatcherPolicySection("spawned");
-    assert.ok(
-      !spawned.includes("You are the user's main assistant in this chat"),
-      "a spawned dispatcher is not the user's assistant in a chat",
-    );
-    assert.ok(
-      !spawned.includes("Only you deliver"),
-      "a spawned dispatcher has no user-facing delivery",
-    );
-    assert.ok(
-      !spawned.includes("first visible acknowledgement to the user"),
-      "a child has no user-visible acknowledgement to wait for",
-    );
+    // The retired variant's text is gone: nothing claims a summoner, and the
+    // one true delivery statement is present for every dispatcher.
+    assert.ok(!text.includes("Another dispatcher summoned you."));
+    assert.ok(!text.includes("dispatcher that summoned you"));
+    assert.ok(!text.includes("dispatcher spawned you"));
+    assert.ok(text.includes("You are the user's main assistant in this chat."));
+    assert.ok(text.includes("Only you deliver."));
+    assert.ok(text.includes("first visible acknowledgement to the user"));
   });
 
   it("both variants keep the stable headings, order, and the shared doctrine", () => {
@@ -370,13 +336,10 @@ describe("spawned dispatcher policy variant (ticket 141)", () => {
       }
       assertNewCopy(policy);
     }
-    // Everything except the three rewritten lines is shared: the two texts
-    // differ in exactly those three places.
+    // Origin is no longer a discriminator: the two texts are identical.
     const userLines = buildDispatcherPolicySection("user").split("\n");
     const spawnedLines = buildDispatcherPolicySection("spawned").split("\n");
-    assert.equal(spawnedLines.length, userLines.length);
-    const differing = userLines.filter((line, index) => line !== spawnedLines[index]);
-    assert.equal(differing.length, 3, "exactly three lines differ");
+    assert.deepEqual(spawnedLines, userLines);
   });
 
   it("flag OFF stays empty for either origin", () => {
@@ -542,7 +505,7 @@ describe("dispatcher policy — messaging, bounded await, mitosis (ticket 119)",
     );
   });
 
-  it("How you work states mitosis, its user-channel gap, and that it is not awaitable", () => {
+  it("How you work states mitosis, that the peer has its own user, and that it is not awaitable", () => {
     const policy = buildDispatcherPolicySection();
     assert.ok(
       policy.includes("You may summon another dispatcher"),
@@ -557,8 +520,14 @@ describe("dispatcher policy — messaging, bounded await, mitosis (ticket 119)",
       "the summoned dispatcher is a peer, not a helper",
     );
     assert.ok(
-      policy.includes("It cannot talk to the user, so its work reaches the user only through you."),
-      "the summoned dispatcher has no channel to the user",
+      policy.includes(
+        "It is a dispatcher like you, in its own chat with its own user, and it answers that user directly",
+      ),
+      "the summoned dispatcher is a dispatcher with its own user, not a muted one",
+    );
+    assert.ok(
+      !policy.includes("It cannot talk to the user"),
+      "the retired claim is gone: a summoned dispatcher is not mute",
     );
     assert.ok(
       policy.includes("It is not awaitable"),
@@ -722,6 +691,7 @@ describe("dispatcher policy — ZH face (ticket 153)", () => {
       ["Waiting is not polling", "等待不是轮询"],
       ["summon another dispatcher", "召唤另一个调度器"],
       ["same tools, same policy", "同样的工具、同样的策略"],
+      ["it answers that user directly", "会直接答复那个用户"],
       ["stop or change course in plain language", "让你停下或改变方向"],
       ["Never claim a stopped worker produced a result", "绝不要声称已停止的工作者产出了结果"],
       ["never reference a task board or milestone view", "绝不要提到任务看板或里程碑视图"],
@@ -793,28 +763,31 @@ describe("dispatcher policy — ZH face (ticket 153)", () => {
     }
   });
 
-  it("the spawned ZH variant differs from the user ZH variant in exactly three lines", () => {
-    // Same shape as the EN pin: the origin only rewrites the opener, the todo
-    // trigger, and the delivery line.
+  it("ZH has no spawned variant either: origin and generation change nothing", () => {
+    // Owner ruling 2026-10-28, ZH face. The retired sentencings are gone and
+    // the one shipment statement stands for every dispatcher.
     const userLines = buildDispatcherPolicySection("user", 2, "zh").split("\n");
-    const spawnedLines = buildDispatcherPolicySection("spawned", 2, "zh").split("\n");
-    assert.equal(spawnedLines.length, userLines.length);
-    const differing = userLines.filter((line, index) => line !== spawnedLines[index]);
-    assert.equal(differing.length, 3, "exactly three ZH lines differ by origin");
-  });
-
-  it("the spawned ZH opener carries the generation line", () => {
-    const zh = buildDispatcherPolicySection("spawned", 3, "zh");
-    assert.ok(
-      zh.includes("召唤你的是第 2 代调度器。你是第 3 代团队负责人。"),
-      "X spawns X+1 survives translation",
+    const spawnedLines = buildDispatcherPolicySection("spawned", 2, "zh").split(
+      "\n",
     );
-    // The user face never mentions generations, in either language.
-    const userZh = buildDispatcherPolicySection("user", 9, "zh");
-    assert.equal(userZh, buildDispatcherPolicySection("user", 2, "zh"));
+    assert.deepEqual(spawnedLines, userLines);
+    assert.equal(buildDispatcherPolicySection("spawned", 3, "zh"), buildDispatcherPolicySection("user", 2, "zh"));
+    assert.equal(assembleSessionPolicy(true, "spawned", 5, "zh"), buildDispatcherPolicySection("user", 2, "zh"));
+
+    const zh = buildDispatcherPolicySection("spawned", 3, "zh");
+    assert.ok(!zh.includes("另一个调度器召唤了你。"));
+    assert.ok(!zh.includes("召唤你的是第"));
+    assert.ok(!zh.includes("回到召唤你的那个调度器"));
+    assert.ok(zh.includes("你是用户在这个聊天里的主要助手。"));
+    assert.ok(zh.includes("只有你负责送达。"));
+    // The generation number never reaches either face, in either language.
     assert.ok(
-      !/第 *\d+ *代/.test(userZh),
-      "the user face never states a generation number",
+      !/第 *\d+ *代/.test(zh),
+      "the face never states a generation number",
+    );
+    assert.equal(
+      buildDispatcherPolicySection("user", 9, "zh"),
+      buildDispatcherPolicySection("user", 2, "zh"),
     );
   });
 

@@ -11,6 +11,7 @@ import type { ProcessingUnit } from '../units/types.js';
 import { sha256Sync } from '../util/hash.js';
 import { splitLineOffsets } from '../util/lines.js';
 import type { EntryAnswer } from '../verdicts/entry-wire.js';
+import { isKeepEverythingAnswer } from '../verdicts/entry-wire.js';
 import { planVerdictApplication, complementLineSpans, normalizeKeptSpans } from '../verdicts/plan.js';
 import type { VerdictBatch } from '../verdicts/types.js';
 import { estimatedContentTokens, judgeWindow, unitsFromWindow } from './protocol.js';
@@ -192,6 +193,12 @@ export function planEntryShape(
       return { action: "refuse", code: "spans-outside-result",
         detail: `lines ${String(lines.startLine)}–${String(lines.endLineInclusive)} exceed the ${String(totalLines)} line(s) the landed result holds` };
     }
+  }
+  // The two-form ask lets a model say "nothing was dropped" as `keepall` or as a
+  // full-range `keeplines` noted `None`. The second form is keep-all, not a
+  // refusal: no op, no marker, no removal.
+  if (answer.action === "keeplines" && isKeepEverythingAnswer(answer, totalLines)) {
+    return { action: "keepall" };
   }
   // The kept selection, in this lane's one derivation: `forgetall` keeps
   // nothing, `keeplines` keeps the named spans, `forgetlines` keeps their

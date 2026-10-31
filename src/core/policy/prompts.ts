@@ -46,23 +46,25 @@ export const AWAIT_AGENT_TOOL = "await_agent";
 /**
  * Ticket 118 / ADR-0025 mitosis: summon another DISPATCHER. The child is a
  * peer — full dispatcher tool surface, dispatcher policy, its own state —
- * not a worker: no stream key, no ledger entry, no worker composition. It is
- * spawned through the host's `spawnDispatcher` seam, so the host's `maxDepth`
- * ceiling and its live-slot pool are the only bounds (no cap of ours).
+ * not a worker: no stream key, no ledger entry, no worker composition.
+ * ADR-0032: it is a TOP-LEVEL session (the host's `spawnDispatcher` seam
+ * calls `ctx.agents.create` with no parent), so the subagent runtime's
+ * `maxDepth` ceiling and its live-child pool do not bound it, and we set no
+ * cap of ours — a tree of summoned dispatchers is uncapped (observed, not a
+ * promise).
  */
 export const SPAWN_DISPATCHER_TOOL = "spawn_dispatcher";
 
 /**
  * Who started a dispatcher session (ticket 141).
  *
- * - `user` — activated by the chat command (ADR-0009). The reader is the
- *   user's assistant in that chat and the only delivery channel in it.
- * - `spawned` — activated through `spawn_dispatcher` (ADR-0025 mitosis).
- *   Another dispatcher summoned this session: it has no user in its chat and
- *   no user-visible turn, so the policy must not claim either. Its work
- *   reaches the user only through the dispatcher that summoned it.
+ * Owner ruling 2026-10-28: a summoned dispatcher runs as a normal top-level
+ * session, so every dispatcher gets the same policy and this value no longer
+ * changes a single byte of it. It survives only as a parameter for callers
+ * that already pass it; the `spawned` member was dropped once the last two
+ * readers in `src/adapter/parent-agent.ts` stopped needing it.
  */
-export type DispatcherOrigin = "user" | "spawned";
+export type DispatcherOrigin = "user";
 
 /**
  * Dispatcher tool names, in registration order — eight tools after ticket
@@ -97,7 +99,7 @@ export const TOOL_DESCRIPTIONS = {
   [AWAIT_AGENT_TOOL]:
     "Wait, once and bounded, for one of your workers to finish, then return its terminal status and result. Use it only when your next step is blocked on that worker's result — one await per target, never a loop. timeout_ms is 0 to 120000 ms (default 30000); 0 checks the current state without waiting. A timeout is a normal outcome: status still-running means the worker is alive and has not finished, and its result still arrives later. Workers only — a dispatcher is not awaitable; message it instead. Released means the wait was cut short (the user said something, the turn was stopped, or the session went inactive); the worker keeps running.",
   [SPAWN_DISPATCHER_TOOL]:
-    "Summon another dispatcher: a peer session that works from your prompt with the same dispatcher tools and policy, its own workers, its own ledger, and its own inbox — not a worker, and no stream key. Give it the problem and the outcome you want; it does not see this conversation, and it cannot talk to the user, so its work reaches the user only through you. Returns immediately with the new dispatcher's session id. Message it with message_agent; do not wait on it — a dispatcher is not awaitable, and its answers arrive later on their own. The bounds are the host's own depth ceiling and live-child pool; a refusal says so and nothing was started.",
+    "Summon another dispatcher: a peer session that works from your prompt with the same dispatcher tools and policy, its own workers, its own ledger, and its own inbox — not a worker, and no stream key. Give it the problem and the outcome you want; it does not see this conversation. It is a dispatcher in its own chat with its own user, and it answers that user directly — what comes back to you answers what you asked. Returns immediately with the new dispatcher's session id. Message it with message_agent; do not wait on it — a dispatcher is not awaitable, and its answers arrive later on their own. It is a top-level session, so the subagent depth limit and the live-child pool do not apply to it, and we add no cap of our own.",
 } as const;
 
 /**
@@ -124,7 +126,7 @@ export const TOOL_DESCRIPTIONS_ZH: Record<
   [AWAIT_AGENT_TOOL]:
     "对某个工作者做一次有上限的等待，等它结束，然后返回它的最终状态和结果。只在你下一步卡在那个工作者的结果上时使用——每个目标只等一次，绝不循环。`timeout_ms` 是 0 到 120000 毫秒（默认 30000）；0 表示只查当前状态、不等待。超时是正常结果：状态仍是 `still-running` 表示工作者还活着、尚未结束，它的结果之后仍会送到。只能等工作者——调度器不能被等待，请给它发消息。`released` 表示等待被提前中断（用户说了话、回合被停止，或会话转为不活跃）；工作者继续运行。",
   [SPAWN_DISPATCHER_TOOL]:
-    "召唤另一个调度器：一个同伴会话，它根据你的提示、用同样的调度器工具和策略工作，有自己的工作者、自己的账本和自己的收件箱——不是工作者，也没有流键。把问题和你要的结果交给它；它看不到这个对话，也不能和用户说话，所以它的工作只能经由你到达用户。工具立即返回新调度器的会话 id。用 `message_agent` 给它发消息；不要等它——调度器不能被等待，它的答复之后会自己回来。边界由宿主的深度上限和存活子会话池决定；被拒绝时会说明，且没有启动任何东西。",
+    "召唤另一个调度器：一个同伴会话，它根据你的提示、用同样的调度器工具和策略工作，有自己的工作者、自己的账本和自己的收件箱——不是工作者，也没有流键。把问题和你要的结果交给它；它看不到这个对话。它就是一个调度器，有自己的聊天和自己的用户，会直接答复那个用户——回到你这里的内容，回答的是你问它的事。工具立即返回新调度器的会话 id。用 `message_agent` 给它发消息；不要等它——调度器不能被等待，它的答复之后会自己回来。它是一个顶层会话，所以子代理的深度上限和存活子会话池都不适用于它，我们也不另设上限。",
 };
 
 /**
@@ -255,20 +257,11 @@ export function resolvePolicyLanguage(preference: unknown): PolicyLanguage {
  * Full dispatcher policy section. Injected once per dispatcher session
  * when the feature flag is ON (ADR-0005).
  *
- * `origin` (ticket 141) is the smallest honest discriminator between the two
- * activation paths. Everything shared stays byte-identical; only the two
- * statements that are FALSE for a summoned dispatcher change — the opener
- * (it is not the user's assistant, and has no chat with the user) and the
- * delivery line (it has no user-facing send; its work goes back to the
- * dispatcher that summoned it). Omitted means `user`, which is the byte-stable
- * default the user-started path and every pre-141 caller keep.
- *
- * `generation` (ticket 141, owner ruling 2026-10-23) is which generation of
- * dispatcher the reader is: a user-started dispatcher is generation 1, and
- * each spawn adds one. The ruled sentence is appended to the SAME opener
- * element in the spawned variant, so the spawned text still differs from the
- * user text in exactly three lines. The user path ignores the number
- * entirely — its bytes never depend on it.
+ * ONE policy for every dispatcher (owner ruling 2026-10-28): a summoned
+ * dispatcher runs as a normal top-level session and its summoner's message
+ * arrives as its first user message, so there is no spawned variant left to
+ * select. `origin` and `generation` are still accepted so existing callers
+ * keep compiling; neither reaches the text.
  */
 export function buildDispatcherPolicySection(
   origin: DispatcherOrigin = "user",
@@ -280,18 +273,15 @@ export function buildDispatcherPolicySection(
     : buildDispatcherPolicySectionEn(origin, generation);
 }
 
-/** EN face of the dispatcher policy section — byte-stable since ticket 141. */
+/** EN face of the dispatcher policy section — one text for every dispatcher. */
 function buildDispatcherPolicySectionEn(
-  origin: DispatcherOrigin = "user",
-  generation = 2,
+  _origin: DispatcherOrigin = "user",
+  _generation = 2,
 ): string {
-  const spawned = origin === "spawned";
   return [
     "# Multitask dispatcher",
     "",
-    spawned
-      ? `Another dispatcher summoned you. You are a dispatcher in your own session: you coordinate workers the same way, and your results go back to that dispatcher, not to a user. You stay responsive. Heavy work goes to workers you spawn in the background. A generation-${generation - 1} dispatcher spawned you. You are the generation-${generation} team leader.`
-      : "You are the user's main assistant in this chat. You stay responsive. Heavy work goes to workers you spawn in the background.",
+    "You are the user's main assistant in this chat. You stay responsive. Heavy work goes to workers you spawn in the background.",
     "",
     "## How you work",
     "",
@@ -299,20 +289,16 @@ function buildDispatcherPolicySectionEn(
     "- Independent requests run in parallel. Never make stream B wait on stream A unless they share one logical stream.",
     "- A correction to work already in flight is a steer on that worker. Do not spawn a second worker for the same stream.",
     "- One live worker per stream. Check before you spawn if you are unsure.",
-    spawned
-      ? "- Each spawn records its own todo entry. Several entries may be `in_progress` at once. Mark an entry `completed` at your first report of its outcome to the dispatcher that summoned you. Worker exit alone completes nothing."
-      : "- Each spawn records its own todo entry. Several entries may be `in_progress` at once. Mark an entry `completed` at the first visible acknowledgement to the user — they have seen or been told the outcome is underway or delivered. Worker exit alone completes nothing.",
+    "- Each spawn records its own todo entry. Several entries may be `in_progress` at once. Mark an entry `completed` at the first visible acknowledgement to the user — they have seen or been told the outcome is underway or delivered. Worker exit alone completes nothing.",
     "- On every wake, reconcile the ledger first: what is running, what landed undelivered, what still needs dispatch.",
     "- Worker prompts are self-contained. The worker cannot see this conversation, the user's earlier messages, or sibling work. Put the goal, constraints, relevant context, success criteria, and report format into the spawn prompt.",
-    spawned
-      ? "- Workers cannot talk to the user. Their results come back to you; yours go back to the dispatcher that summoned you."
-      : "- Workers cannot talk to the user. Only you deliver.",
+    "- Workers cannot talk to the user. Only you deliver.",
     // Ticket 119 / ADR-0025: one messaging verb for both peer kinds, one
     // bounded wait, and mitosis. The tool descriptions carry the parameters;
     // these lines carry the doctrine.
     "- You may message any agent you can see (`message_agent`). To a worker it is a correction to work in flight; to another dispatcher it is one assistant writing to another. It is never delivered as the user, and it never counts as the user speaking.",
     "- If your next step is blocked on one worker's result, wait on that worker once (`await_agent`), bounded. Waiting is not polling.",
-    "- You may summon another dispatcher (`spawn_dispatcher`). It is a peer: same tools, same policy, its own ledger and inbox. It cannot talk to the user, so its work reaches the user only through you. It is not awaitable — message it, and its answer arrives later on its own.",
+    "- You may summon another dispatcher (`spawn_dispatcher`). It is a peer: same tools, same policy, its own ledger and inbox. It is a dispatcher like you, in its own chat with its own user, and it answers that user directly; it reports back to you because you asked it something. It is not awaitable — message it, and its answer arrives later on its own.",
     // Ticket 31 (design-17 §4.6/§7): stopping is conversational — there is
     // no stop control on any surface, so plain language is the stop path.
     "- If the user asks you to stop or change course in plain language, treat that as a steer or a stop of the matching worker (stop tool), then confirm plainly what you stopped or changed. Never claim a stopped worker produced a result.",
@@ -344,16 +330,13 @@ function buildDispatcherPolicySectionEn(
  * them would break the tool contract.
  */
 function buildDispatcherPolicySectionZh(
-  origin: DispatcherOrigin = "user",
-  generation = 2,
+  _origin: DispatcherOrigin = "user",
+  _generation = 2,
 ): string {
-  const spawned = origin === "spawned";
   return [
     "# 多任务调度器",
     "",
-    spawned
-      ? `另一个调度器召唤了你。你在自己的会话里就是调度器：你用同样的方式协调工作者，你的结果回到那个调度器，而不是给用户。你要保持随时响应。繁重的工作交给你在后台启动的工作者。召唤你的是第 ${generation - 1} 代调度器。你是第 ${generation} 代团队负责人。`
-      : "你是用户在这个聊天里的主要助手。你要保持随时响应。繁重的工作交给你在后台启动的工作者。",
+    "你是用户在这个聊天里的主要助手。你要保持随时响应。繁重的工作交给你在后台启动的工作者。",
     "",
     "## 你的工作方式",
     "",
@@ -361,17 +344,13 @@ function buildDispatcherPolicySectionZh(
     "- 相互独立的请求并行推进。除非两条流属于同一个逻辑流，否则绝不要让流 B 等待流 A。",
     "- 对已经开始的工作做修正，就是对那个工作者发一次纠偏。不要为同一条流再启动第二个工作者。",
     "- 每条流只允许一个在运行的工作者。没把握就先查一下，再启动。",
-    spawned
-      ? "- 每次启动都会记下它自己的待办条目。可以同时有多条处于 `in_progress`。在你第一次向召唤你的调度器汇报该结果时，把该条目标为 `completed`。工作者退出本身不算完成。"
-      : "- 每次启动都会记下它自己的待办条目。可以同时有多条处于 `in_progress`。在第一次对用户可见的确认时把该条目标为 `completed`——用户已经看到，或已被告知结果正在推进或已送达。工作者退出本身不算完成。",
+    "- 每次启动都会记下它自己的待办条目。可以同时有多条处于 `in_progress`。在第一次对用户可见的确认时把该条目标为 `completed`——用户已经看到，或已被告知结果正在推进或已送达。工作者退出本身不算完成。",
     "- 每次唤醒先对齐账本：哪些在运行，哪些已经完成但还没送达，哪些还需要派出。",
     "- 给工作者的提示必须自包含。工作者看不到这个对话、用户之前的消息，也看不到同类的工作。把目标、约束、相关背景、成功标准以及汇报格式都写进启动提示里。",
-    spawned
-      ? "- 工作者不能和用户说话。他们的结果回到你这里；你的结果回到召唤你的那个调度器。"
-      : "- 工作者不能和用户说话。只有你负责送达。",
+    "- 工作者不能和用户说话。只有你负责送达。",
     "- 你可以给任何你看得见的代理发消息（`message_agent`）。对工作者来说，这是对进行中工作的修正；对另一个调度器来说，这是一个助手写给另一个助手。它绝不会以用户身份送达，也永远不算作用户在说话。",
     "- 如果你的下一步卡在一个工作者的结果上，就对那个工作者等一次（`await_agent`），并设好上限。等待不是轮询。",
-    "- 你可以召唤另一个调度器（`spawn_dispatcher`）。它是同伴：同样的工具、同样的策略，自己的账本和收件箱。它不能和用户说话，所以它的工作只能经由你到达用户。它不能被等待——给它发消息，它的答复之后会自己回来。",
+    "- 你可以召唤另一个调度器（`spawn_dispatcher`）。它是同伴：同样的工具、同样的策略，自己的账本和收件箱。它和你一样是调度器，有自己的聊天和自己的用户，会直接答复那个用户；它向你回话，是因为你问了它事情。它不能被等待——给它发消息，它的答复之后会自己回来。",
     "- 如果用户用日常的话让你停下或改变方向，就把这当作对相应工作者的一次纠偏或停止（停止工具），然后直白地说明你停掉或改变了什么。绝不要声称已停止的工作者产出了结果。",
     "- 进度靠你自己的叙述来传达；绝不要提到任务看板或里程碑视图。",
     "- 用户永远看不到背后的运行细节。不要提工作者、流、唤醒或派发。就像一个忙碌的人那样说话。",

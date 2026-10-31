@@ -26,17 +26,19 @@ export const CHUNK_PARITY_IDS = ['manual-forget', 'proof-removals',
 /** Contract coverage, not a claim that the unavailable worktree was executed or inspected. */
 export const DSH_PARITY_CHECKLIST: readonly DshParityRow[] = Object.freeze([
   { id: 'size-threshold-capping', microcompactBehaviour: 'Limit oversized result payloads.',
-    racoonsEquivalent: 'Entry events delegate size decisions to core CapRule.', status: 'covered' },
+    racoonsEquivalent: 'Entry-time size limiting is scrapped (ADR-0014); what replaces it is the '
+      + 'entry checkpoint ask, which fires only above the size floor.', status: 'covered' },
   { id: 'deterministic-pass-order', microcompactBehaviour: 'Run deterministic selection first.',
-    racoonsEquivalent: 'Engine runs configured rules in order; M1 defaults are Cap then Seal.',
+    racoonsEquivalent: 'Engine runs configured rules in order; the defaults are Seal, Verdict, '
+      + 'EntryShape, Stale and Superseded.',
     status: 'covered' },
   { id: 'boundary-resume-marker', microcompactBehaviour: 'Keep the boundary marker as resume success evidence.',
     racoonsEquivalent: 'Round trips and M1 append applications preserve existing host records.',
     status: 'deferred', reason: 'Exact reference marker recognition cannot be checked: the supplied '
       + 'worktree files are absent. M1 does not create the native resume success marker.' },
   { id: 'already-capped-result', microcompactBehaviour: 'Do not cap a result a second time.',
-    racoonsEquivalent: 'Preserve embedded records and evidence; core CapRule decides whether to skip.',
-    status: 'covered' },
+    racoonsEquivalent: 'Preserve embedded records and evidence; a node an earlier plan reserved is '
+      + 'never removed twice.', status: 'covered' },
   { id: 'tool-call-pairing', microcompactBehaviour: 'Keep tool-call and result envelopes paired.',
     racoonsEquivalent: 'Envelope mapping preserves call IDs, roles, array order, and extra fields.',
     status: 'covered' },
@@ -67,25 +69,21 @@ export const DSH_PARITY_CHECKLIST: readonly DshParityRow[] = Object.freeze([
       + 'mount applies them in its at-rest pass.', status: 'covered',
     proof: 'packages/adapters/dsh/test/prune.test.ts' },
   // PRD §6.6 "Coverage is metered in bytes per source path across all
-  // result-producing calls". The meter is core's; the mount does not yet build
-  // the snapshot rows, so this row is honest as deferred.
+  // result-producing calls". The meter is core's; the mount feeds it where the
+  // snapshot is built, so this row is honest as covered.
   { id: 'per-path-coverage', microcompactBehaviour: 'Report what each source path costs the context.',
     racoonsEquivalent: 'Core ships `CoverageMeter` (tool-name agnostic, hit/miss/unknown split, '
-      + 'proven by `packages/core/test/coverage.test.ts`), but no mount path yet builds '
-      + '`SessionSnapshot.pathCoverage` from it.', status: 'deferred',
-    reason: 'The meter is core-only today: nothing calls `CoverageMeter.record` outside tests, so no '
-      + 'host receives per-path byte rows. Wiring it into the mount\'s snapshot is a follow-up '
-      + '(ISSUE-053), not a behaviour this adapter can claim.' },
+      + 'proven by `packages/core/test/coverage.test.ts`), and the mount records every tool-result '
+      + 'node it holds, handing the rows out on `SessionSnapshot.pathCoverage`.', status: 'covered',
+    proof: 'packages/adapters/dsh/test/plugin.test.ts' },
   // PRD §6.7 "recall falls back to re-reading the unchanged source when the
   // ledger misses — the two-device safety rule."
   { id: 'recall-source-fallback', microcompactBehaviour: 'Restore archived bytes after a ledger miss.',
     racoonsEquivalent: 'Core answers a miss from the unchanged source under the manifest\'s own hash '
       + '(proven by `packages/core/test/recall-fallback.test.ts` and '
       + '`packages/core/test/recall-integrity.test.ts`); a changed file is a refusal, never a '
-      + 'substitute.', status: 'deferred',
-    reason: 'The mount calls `engine.recall(id)` with no `RecallOptions`, so no live dsh recall ever '
-      + 'hands the ledger a reader. The lane is core\'s and proven there; exposing it through the '
-      + 'mount is ISSUE-053.' },
+      + 'substitute.', status: 'covered',
+    proof: 'packages/adapters/dsh/test/plugin.test.ts' },
   // PRD §6.9 "authoritative counts reconcile from API usage (including cached
   // tokens) after each call."
   { id: 'usage-reconciliation', microcompactBehaviour: 'Reconcile the local estimate against the '

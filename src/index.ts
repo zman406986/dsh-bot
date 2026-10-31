@@ -51,7 +51,6 @@ export type {
   RegisterDispatcherStartCommandOptions,
   RegisterDispatcherToolsOptions,
   RegisterableTool,
-  SpawnedActivationOutcome,
   StorageDomainDurability,
   StorageDomainLike,
   TextBlock,

@@ -180,9 +180,11 @@ describe("ticket 118: spawn_dispatcher — success shape", () => {
     // Do-not-wait, and it must be TRUE: await_agent is workers-only.
     assert.ok(note.includes("Do not wait on it"), note);
     assert.ok(note.includes("not awaitable"), note);
-    // A child dispatcher reaches the user only through its creator
-    // (ADR-0025 decision 6, first implementation).
-    assert.ok(note.includes("cannot talk to the user"), note);
+    // A summoned dispatcher is a dispatcher: it answers its own user in its own
+    // chat, and reports back to the summoner because it was asked (owner ruling
+    // 2026-10-29, ADR-0032 open question 1). Not a mute relay.
+    assert.ok(note.includes("answers that user directly"), note);
+    assert.ok(!note.includes("cannot talk to the user"), note);
   });
 
   it("passes the registration closure's session id as parentSessionId, not an argument", async () => {

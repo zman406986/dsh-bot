@@ -1,6 +1,6 @@
 # Per-dispatcher tool scoping: each dispatcher's tools register in its own agent scope; the process-global singleton retires
 
-**Status:** draft (non-human-approved) — agent-drafted 2026-09-19 (ticket 72), pending human sign-off
+**Status:** draft (non-human-approved) — agent-drafted 2026-09-19 (ticket 72), pending human sign-off. **2026-10-28 note (0032):** strengthened, not in conflict — a summoned dispatcher is a real top-level session (ADR-0032), so the per-dispatcher scoping recorded here now applies to a genuine top-level session with its own scope, rather than to a subagent child compensating for a missing one. Its `setup` seam is what composes those scoped tools.
 
 **Approval:** non-human — agent-drafted, pending human sign-off
 

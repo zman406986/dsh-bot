@@ -16,12 +16,13 @@
  *    glyph mirrors that; a missing `sessionId`/`useSessions` renders `null`
  *    without calling a hook. The worker factory stays exported as retained
  *    machinery even though no seat composes it (see claim 3).
- * 3. **The composition registers two separately ruled seats.** ADR-0024's
- *    2026-10-18 rider licenses the `sidebar.session.row.leading` dispatcher
- *    cell; the 2026-10-28 ticket-140 ruling extends it with the child's own
- *    `conversation.session.header.actions` chip. The WORKER marker is still
- *    declined (ticket 123 §B, 2026-10-22): no seat composes
- *    `createSessionKindGlyph("worker", …)`.
+ * 3. **The composition registers one seat.** ADR-0024's 2026-10-18 rider
+ *    licenses the `sidebar.session.row.leading` dispatcher cell, and it is
+ *    again the only seat composed: ticket 140's
+ *    `conversation.session.header.actions` chip was removed on 2026-10-28,
+ *    when a summoned dispatcher became a top-level session with its own
+ *    sidebar row. The WORKER marker is still declined (ticket 123 §B,
+ *    2026-10-22): no seat composes `createSessionKindGlyph("worker", …)`.
  * 4. **The dispatcher mark is an inline SVG bot portrait with CSS motion**
  *    (ticket 146, owner ruling 2026-10-27): the wrapper's text body is gone,
  *    an `svg` is inside the mark, and the stylesheet carries `@keyframes`
@@ -69,18 +70,12 @@ import {
   DISPATCHER_PROJECTION_VALUE,
   DISPATCHER_GLYPH_ENTRY_ID,
   DISPATCHER_GLYPH_ORDER,
-  DISPATCHER_HEADER_GLYPH_ENTRY_ID,
-  DISPATCHER_HEADER_GLYPH_ORDER,
-  SESSION_HEADER_ACTIONS_SLOT,
   SESSION_KIND_COPY_KEYS,
   SESSION_KIND_GLYPH_CSS,
   SIDEBAR_LEADING_SLOT,
   WORKER_GLYPH,
-  createSessionHeaderKindGlyph,
   createSessionKindGlyph,
   dispatcherGlyphRegistration,
-  dispatcherHeaderGlyphRegistration,
-  resolveHeaderDispatcherKind,
   resolveSessionKind,
   type SessionsSnapshotLike,
   type UseSessionsLike,
@@ -520,154 +515,6 @@ describe("session-kind — dispatcher glyph rendering (jsdom)", () => {
   });
 });
 
-describe("session-kind — the header chip (ticket 140 ruling, 2026-10-28)", () => {
-  it("resolves the header seat only for a SUBAGENT that projects dispatcher", () => {
-    // The spawned child: origin 'subagent' + projection 'dispatcher'.
-    assert.equal(
-      resolveHeaderDispatcherKind({
-        origin: "subagent",
-        projectionValues: { sessionKind: DISPATCHER_PROJECTION_VALUE },
-      }),
-      "dispatcher",
-    );
-    // Review fix: a USER-started dispatcher also projects "dispatcher", but it
-    // has a sidebar row and its glyph — no second mark in its header.
-    assert.equal(
-      resolveHeaderDispatcherKind({
-        projectionValues: { sessionKind: DISPATCHER_PROJECTION_VALUE },
-      }),
-      "normal",
-      "a top-level dispatcher must not grow a header chip",
-    );
-    assert.equal(
-      resolveHeaderDispatcherKind({
-        origin: "top-level",
-        projectionValues: { sessionKind: DISPATCHER_PROJECTION_VALUE },
-      }),
-      "normal",
-    );
-    // A plain worker child (no dispatcher projection) stays unmarked.
-    assert.equal(
-      resolveHeaderDispatcherKind({
-        origin: "subagent",
-        projectionValues: { sessionKind: null },
-      }),
-      "normal",
-    );
-    assert.equal(
-      resolveSessionKind({
-        origin: "subagent",
-        projectionValues: { sessionKind: DISPATCHER_PROJECTION_VALUE },
-      }),
-      "worker",
-      "the sidebar rule keeps origin first (ADR-0027 §Settled 5)",
-    );
-    // Fail closed.
-    assert.equal(resolveHeaderDispatcherKind(undefined), "normal");
-    assert.equal(resolveHeaderDispatcherKind(null), "normal");
-    assert.equal(resolveHeaderDispatcherKind({ origin: "subagent" }), "normal");
-    assert.equal(
-      resolveHeaderDispatcherKind({ projectionValues: { sessionKind: null } }),
-      "normal",
-    );
-    assert.equal(
-      resolveHeaderDispatcherKind({ projectionValues: { sessionKind: 42 } }),
-      "normal",
-    );
-  });
-
-  it("renders the dispatcher mark for a spawned dispatcher (subagent origin)", async () => {
-    const store = fakeUseSessions(
-      snapshot({
-        "s-spawned": {
-          origin: "subagent",
-          projectionValues: { sessionKind: DISPATCHER_PROJECTION_VALUE },
-        },
-      }),
-    );
-    const HeaderChip = createSessionHeaderKindGlyph(t);
-    const mounted = await mount(
-      createElement(HeaderChip, {
-        sessionId: "s-spawned",
-        useSessions: store.useSessions,
-      }),
-    );
-    const mark = mounted.container.querySelector(
-      '[data-session-kind="dispatcher"]',
-    );
-    assert.ok(mark, "the spawned dispatcher's own header carries the mark");
-    assert.ok(mark.querySelector("svg"), "same bot portrait as the sidebar");
-    assert.equal(
-      mark.getAttribute("aria-label"),
-      localeDictionary.en["indicator.dispatcher"],
-    );
-    await mounted.unmount();
-  });
-
-  it("renders nothing for a worker, a normal session, or a missing hook", async () => {
-    const store = fakeUseSessions(
-      snapshot({
-        "s-worker": { origin: "subagent" },
-        "s-plain": { projectionValues: { sessionKind: null } },
-      }),
-    );
-    const HeaderChip = createSessionHeaderKindGlyph(t);
-    for (const sessionId of ["s-worker", "s-plain", "s-unknown"]) {
-      const mounted = await mount(
-        createElement(HeaderChip, {
-          sessionId,
-          useSessions: store.useSessions,
-        }),
-      );
-      assert.equal(
-        mounted.container.querySelector("[data-session-kind]"),
-        null,
-        `session ${sessionId}`,
-      );
-      await mounted.unmount();
-    }
-    const bare = await mount(createElement(HeaderChip, {}));
-    assert.equal(bare.container.querySelector("[data-session-kind]"), null);
-    await bare.unmount();
-  });
-
-  it("renders NO mark for a user-started dispatcher (it has the sidebar glyph)", async () => {
-    const store = fakeUseSessions(
-      snapshot({
-        "s-user-disp": {
-          projectionValues: { sessionKind: DISPATCHER_PROJECTION_VALUE },
-        },
-      }),
-    );
-    const HeaderChip = createSessionHeaderKindGlyph(t);
-    const mounted = await mount(
-      createElement(HeaderChip, {
-        sessionId: "s-user-disp",
-        useSessions: store.useSessions,
-      }),
-    );
-    assert.equal(
-      mounted.container.querySelector("[data-session-kind]"),
-      null,
-      "a top-level dispatcher's header must stay bare",
-    );
-    await mounted.unmount();
-  });
-
-  it("declares an additive entry above the stock subagent catalog", () => {
-    const registration = dispatcherHeaderGlyphRegistration();
-    assert.deepEqual(registration, {
-      name: "conversation.session.header.actions",
-      id: DISPATCHER_HEADER_GLYPH_ENTRY_ID,
-      order: DISPATCHER_HEADER_GLYPH_ORDER,
-      locale: LOCALE_NAMESPACE,
-    });
-    // Stock occupants: `subagent-catalog` at 10 and `job-list` at 20. A
-    // higher order keeps both in front, so the entry is additive.
-    assert.equal(registration.order, 30);
-    assert.ok(registration.order > 20);
-  });
-});
 // ── The composition (the fake mirrors test/client-toolviews.test.ts's seam)
 
 interface FakeEntry {
@@ -724,7 +571,7 @@ function createCompositionCtx() {
 }
 
 describe("session-kind — the default composition", () => {
-  it("registers the sidebar cell and the header chip, one entry each", () => {
+  it("registers the sidebar cell, one entry, and no header chip", () => {
     const ctx = createCompositionCtx();
     apply(ctx);
 
@@ -736,18 +583,16 @@ describe("session-kind — the default composition", () => {
     assert.deepEqual(sidebar.entries[0]?.options, dispatcherGlyphRegistration());
     assert.equal(typeof sidebar.entries[0]?.component, "function");
 
-    // Ticket 140 ruling (2026-10-28): a spawned dispatcher has no sidebar
-    // row, so its own conversation header carries the same mark.
-    const header = ctx.injects.find(
-      (record) => record.parent === SESSION_HEADER_ACTIONS_SLOT,
+    // The ticket-140 header chip was removed (2026-10-28): a summoned
+    // dispatcher is a top-level session, so the sidebar cell marks it and a
+    // header seat would double the mark.
+    assert.equal(
+      ctx.injects.find(
+        (record) => record.parent === "conversation.session.header.actions",
+      ),
+      undefined,
+      "no dispatcher chip in the conversation header",
     );
-    assert.ok(header, "the dispatcher chip injects into the header actions");
-    assert.equal(header.entries.length, 1);
-    assert.deepEqual(
-      header.entries[0]?.options,
-      dispatcherHeaderGlyphRegistration(),
-    );
-    assert.equal(typeof header.entries[0]?.component, "function");
   });
 
   it("the composed component is bound to the dispatcher kind and the locale seat", async () => {

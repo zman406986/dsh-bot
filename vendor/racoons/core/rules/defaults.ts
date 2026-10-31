@@ -1,6 +1,5 @@
 import type { RacoonsConfig } from "../config.js";
 import { SealRule } from "./seal.js";
-import { SpanRule } from "./span.js";
 import { StaleReadRule } from "./stale.js";
 import { SupersededReadRule } from "./superseded.js";
 import { ENTRY_SHAPE_RULE_ID } from "./types.js";
@@ -47,7 +46,7 @@ export class EntryShapeRule implements Rule {
  * checkpoint's declaration, and the two proof rules (stale-read,
  * superseded-read). The entry-time cap is not registered — ADR-0014
  * (2026-10-23) scrapped it; the checkpoint that replaced it is an ask, not a
- * size rule (ADR-0022). Evict is deferred (ADR-0001).
+ * size rule (ADR-0022).
  *
  * Order is deliberate. The proof rules come after `verdict` (the protocol they
  * extend, ADR-0018), and stale-read precedes superseded-read because
@@ -57,9 +56,7 @@ export class EntryShapeRule implements Rule {
  * The entry declaration sits beside `verdict` because both are vocabulary, not
  * planners.
  */
-export function createDefaultRules(config: RacoonsConfig): readonly Rule[] {
-  const rules: Rule[] = [new SealRule(), new VerdictRule(), new EntryShapeRule(),
+export function createDefaultRules(_config: RacoonsConfig): readonly Rule[] {
+  return [new SealRule(), new VerdictRule(), new EntryShapeRule(),
     new StaleReadRule(), new SupersededReadRule()];
-  if (config.enableSpans) rules.push(new SpanRule());
-  return rules;
 }

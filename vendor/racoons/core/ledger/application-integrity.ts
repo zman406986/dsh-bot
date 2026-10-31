@@ -72,7 +72,9 @@ export function snapshotApplicationHash(application: PreparableApplication): App
  *
  * Receipt-first ordering is a host fact, enforced by the adapter, not here.
  * `netFreedBytes` is an identity, not a sign test: per-unit application skips
- * the cut chooser, so a legitimately applied unit cut may carry `net <= 0`.
+ * the cut chooser, so a legitimately applied unit cut may carry `net <= 0`. It
+ * prices one request (freed − kept − receipt), not the standing delta
+ * (freed − receipt), which is what shrinks every later request (ISSUE-083).
  */
 function checkRevertPayload(value: unknown): void {
   const payload = record(value, "revert payload");

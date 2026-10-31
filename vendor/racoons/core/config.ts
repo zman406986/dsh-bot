@@ -10,7 +10,6 @@ export interface Thresholds {
   readonly capHeadBytes: number | null;
   readonly episodeNoNewPathSteps: number | null;
   readonly sealMaxLatencyTurns: 0 | 1;
-  readonly evictAfterClosedTurns: number | null;
 }
 
 export interface FreshZoneConfig {
@@ -56,7 +55,6 @@ export interface RacoonsConfig {
   readonly thresholds: Thresholds;
   readonly freshZone: FreshZoneConfig;
   readonly sealMode: "append" | "replace";
-  readonly enableSpans: boolean;
   readonly validationFailureLimit: 2;
   readonly protocol: ProtocolConfig;
   /**
@@ -105,14 +103,12 @@ export const DEFAULT_CONFIG: RacoonsConfig = {
     capHeadBytes: null,
     episodeNoNewPathSteps: null,
     sealMaxLatencyTurns: 1,
-    evictAfterClosedTurns: null,
   },
   freshZone: {
     maxNodes: null,
     maxBytes: null,
   },
   sealMode: "append",
-  enableSpans: false,
   validationFailureLimit: 2,
   // ADR-0020 Decision 3: the measured default, not a provisional guess
   // (`docs/research/floor-calibration-2026-10-26.md` §6).
@@ -139,7 +135,6 @@ export function validateConfig(config: unknown): string[] {
     // `capHeadBytes` are accepted-and-ignored, not validated: an old config file
     // naming them must never crash a mount, and no value of theirs has meaning.
     checkCount(problems, "thresholds.episodeNoNewPathSteps", thresholds["episodeNoNewPathSteps"], true);
-    checkCount(problems, "thresholds.evictAfterClosedTurns", thresholds["evictAfterClosedTurns"], true);
     if (thresholds["sealMaxLatencyTurns"] !== 0 && thresholds["sealMaxLatencyTurns"] !== 1) {
       problems.push("thresholds.sealMaxLatencyTurns must be 0 or 1.");
     }
@@ -154,9 +149,6 @@ export function validateConfig(config: unknown): string[] {
   }
   if (config["sealMode"] !== "append" && config["sealMode"] !== "replace") {
     problems.push('sealMode must be "append" or "replace".');
-  }
-  if (typeof config["enableSpans"] !== "boolean") {
-    problems.push("enableSpans must be a boolean.");
   }
   if (config["validationFailureLimit"] !== 2) {
     problems.push("validationFailureLimit must be 2.");

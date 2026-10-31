@@ -8,29 +8,40 @@
  * real plugin `apply()`, the real `CordisDshHost`, and the real Multitask
  * core. No network, no LLM, no running dsh.
  *
+ * ADR-0032 (owner ruling 2026-10-28): the summon is a NEW TOP-LEVEL SESSION
+ * parallel to its summoner, NOT a subagent child. The host seam under test is
+ * now `ctx.agents.create({ sessionId, meta: { cwd }, agentOptions, setup,
+ * signal })` followed by `handle.agent.followup(...)`. There is no
+ * `subagents.startActivation` on this path, no `request.parent`, no
+ * `delivery: "parent"` and no `maxDepth` — and `meta` admits only `cwd`, so
+ * the parentless shape is the only one the type can express.
+ *
  * Pinned here:
- * 1. `spawn_dispatcher` reaches the host seam; the host RESERVES the child id
- *    and the child is activated through the non-gated path — `activate()`
- *    still refuses non-top-level agents for user chats.
+ * 1. `spawn_dispatcher` reaches `ctx.agents.create`; the host RESERVES the
+ *    child id, passes it as `sessionId`, and the child is activated through
+ *    the ORDINARY path from the create `setup` hook. `activate()` still
+ *    refuses non-top-level agents for user chats.
  * 2. The child registers the dispatcher tool set on ITS OWN scope (not the
  *    creator's, not the global layer) and receives the dispatcher policy.
  * 3. `isDispatcherSession(child)` is true (observable through peer-send
  *    liveness and `await_agent`'s `not-awaitable`), and the child spawns a
  *    worker under its own session while keeping wake state separate.
- * 4. No recursion gate of ours: the depth derivation is what the host reads,
- *    and the host's own rule is what refuses a hop past a ceiling. The
- *    second-level dispatcher spawn is ADMITTED — recorded, because the
- *    ticket expected a refusal there (finding in the ticket comment).
+ * 4. No recursion gate of ours: a dispatcher summoned by a dispatcher is
+ *    admitted and is ITSELF parentless. The subagent depth rule stays where
+ *    it belongs — on the worker hop, which still rides `startActivation`.
  * 5. Deactivating the child tears down its tool surface and cancels its
  *    awaits (ticket 115's `cancelWaits` rides the same path).
- * 6. The `pendingSpawns` race is closed: a dispatcher spawn racing a worker
- *    spawn from the SAME parent composes the worker and activates the
- *    dispatcher — matched by reserved identity, never by the shared counter.
- * 7. Identity probe on the HOST's own facts: no `agentPreset` mark, no
- *    `sessionKind` — nothing there says "dispatcher".
- * 8. Ticket 130: a spawned dispatcher DOES carry our own durable mark, and a
- *    cold-resumed child is re-activated from it — role, scoped surface, and
- *    policy — exactly once, while an unmarked child stays a plain subagent.
+ * 6. Identity, not a counter: a dispatcher spawn racing a worker spawn from
+ *    the same parent composes the worker and activates the dispatcher. A
+ *    summoned dispatcher never touches `pendingSpawns` at all now, so the
+ *    race cannot mis-compose either child.
+ * 7. Identity probe on the HOST's own facts: a parentless session carries no
+ *    `origin: "subagent"`, no parent and no dispatcher preset — nothing in
+ *    the host's vocabulary says "dispatcher" (that is OUR durable mark).
+ * 8. Ticket 130: a spawned dispatcher carries our own durable mark, and a
+ *    cold-resumed child is re-activated from it through the parentless
+ *    `sessionKind` route — role, scoped surface, and policy — exactly once,
+ *    while an unmarked child stays a plain subagent.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -43,12 +54,15 @@ import {
   type AgentLike,
   type CommandDefinitionLike,
   type CommandResultLike,
+  type SessionKindProjectionState,
+  type SessionProjectionDefinitionLike,
   type ToolsLike,
 } from "../src/adapter/index.js";
 import { resolveSessionKind } from "../src/client/session-kind.js";
 import { DISPATCHER_SESSION_TABLE_NAME, WORKER_SESSION_TABLE_NAME } from "../src/adapter/durable-marker.js";
 import { SPAWN_DISPATCHER_TOOL, buildDispatcherPolicySection } from "../src/core/policy/prompts.js";
 import { WORKER_PERSONA_SECTION } from "../src/worker/preset.js";
+import { workerSpawnMaxDepth } from "../src/worker/agent-def.js";
 
 function tick(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
@@ -108,6 +122,12 @@ interface ScopedAgent extends AgentLike {
   readonly scopedSections: string[];
 }
 
+/** The provider/model route pair `spawnDispatcher` copies into `agentOptions`. */
+interface RouteLike {
+  readonly provider?: string;
+  readonly model?: string;
+}
+
 interface ScopedAgentOptions {
   topLevel?: boolean;
   depth?: number;
@@ -115,6 +135,13 @@ interface ScopedAgentOptions {
   withScopedCtx?: boolean;
   /** Header preset fact, when the test wants to model the installed host. */
   agentPreset?: string;
+  /**
+   * ADR-0032: the working directory a summoned session is created in — the ONE
+   * field `TopLevelSessionMetaLike` admits. Read off the summoner's header.
+   */
+  cwd?: string;
+  /** ADR-0032: the request route the summoner carries (`agent.options`). */
+  route?: RouteLike;
 }
 
 function createScopedAgent(id: string, opts?: ScopedAgentOptions): ScopedAgent {
@@ -124,9 +151,13 @@ function createScopedAgent(id: string, opts?: ScopedAgentOptions): ScopedAgent {
   const followed: unknown[] = [];
   const sections: string[] = [];
   const scopedTools = createScopedTools();
+  // A real session header carries its own id (`sessionIdOfHeader` reads it, and
+  // the ticket-147 resume check goes through the projection unit's `init`).
   const header = {
+    id,
     parentSession: topLevel ? null : (opts?.parentSessionId ?? "parent-x"),
     delegationDepth: depth,
+    ...(opts?.cwd !== undefined ? { cwd: opts.cwd } : {}),
     ...(opts?.agentPreset !== undefined
       ? { agentPreset: opts.agentPreset }
       : {}),
@@ -134,6 +165,7 @@ function createScopedAgent(id: string, opts?: ScopedAgentOptions): ScopedAgent {
   };
   const agent: ScopedAgent = {
     session: { id, header },
+    ...(opts?.route !== undefined ? { options: opts.route } : {}),
     injected,
     followed,
     scopedTools,
@@ -183,6 +215,18 @@ interface StubChild {
 }
 
 /**
+ * One `ctx.agents.create` call, recorded with the exact options the host
+ * passed (ADR-0032: `sessionId`, `meta`, `agentOptions`, `setup`, `signal`).
+ */
+interface CreateCall {
+  readonly sessionId: string;
+  readonly meta: Record<string, unknown>;
+  readonly agentOptions: unknown;
+  readonly hasSetup: boolean;
+  readonly signal: unknown;
+}
+
+/**
  * The storage tables of one simulated process. Held OUTSIDE the plugin so a
  * second `createActivationCtx` can share them: that is how a restart is
  * modelled — the durable store survives, the in-memory host/plugin state does
@@ -203,10 +247,42 @@ type StorageTables = Map<string, Map<string, unknown>>;
  */
 function createActivationCtx(storage: StorageTables = new Map()) {
   const listeners = new Map<string, Array<(payload: never) => void>>();
+  // Ticket 147: the projection registry is the parentless resume seam. The
+  // REAL unit is registered and the REAL fold runs; the stub only supplies the
+  // host half (`stateOf`), materialising the cell from the session header —
+  // which is where `init` consults the dispatcher-mark probe.
+  const projectionDefinitions = new Map<
+    string,
+    SessionProjectionDefinitionLike<SessionKindProjectionState>
+  >();
+  const projectionCells = new WeakMap<object, SessionKindProjectionState>();
+  const projections = {
+    register(
+      definition: SessionProjectionDefinitionLike<SessionKindProjectionState>,
+    ) {
+      projectionDefinitions.set(definition.key, definition);
+      return () => {
+        projectionDefinitions.delete(definition.key);
+      };
+    },
+    stateOf(session: unknown, key: string) {
+      const definition = projectionDefinitions.get(key);
+      if (definition === undefined) return undefined;
+      if (typeof session !== "object" || session === null) return undefined;
+      const cached = projectionCells.get(session);
+      if (cached !== undefined) return cached;
+      const header = (session as { header?: unknown }).header;
+      // A top-level session starts its own log, so it inherits no events.
+      const state = definition.init(header, 0) as SessionKindProjectionState;
+      projectionCells.set(session, state);
+      return state;
+    },
+  };
   const commands = new Map<string, CommandDefinitionLike>();
   const globalTools = new Map<string, ScopedTool>();
   const disposers: Array<() => void> = [];
   const startActivationCalls: ActivationSpecLike[] = [];
+  const createCalls: CreateCall[] = [];
   const children: StubChild[] = [];
   const agentsById = new Map<string, AgentLike>();
   /** Ticket 138: every host `sendMessage`, with its resume payload. */
@@ -239,16 +315,30 @@ function createActivationCtx(storage: StorageTables = new Map()) {
     }
   };
 
-  /** Ticket 138/142: the host's cold-resume of an absent child. */
+  /**
+   * Ticket 138/142: the host's cold-resume of an absent session.
+   *
+   * ADR-0032: a session the host re-creates keeps the shape it was created
+   * with. A DISPATCHER (durably marked) was created as a TOP-LEVEL session, so
+   * its resume is parentless at depth 0 — it lands in the host's parentless
+   * branch, exactly like a user chat coming back. A WORKER was created as a
+   * subagent child of its spawning dispatcher, so it resumes parented at
+   * parent depth + 1. The durable dispatcher mark is what tells them apart;
+   * nothing in memory survives the restart being modelled.
+   */
   const resumeTarget = (sender: AgentLike, target: string): void => {
     if (agentsById.has(target)) return;
+    const durablyDispatcher =
+      storage.get(DISPATCHER_SESSION_TABLE_NAME)?.has(target) === true;
     const parentSessionId = String(sender.session.id);
     const parentDepth = sender.session.header?.delegationDepth ?? 0;
-    const resumed = createScopedAgent(target, {
-      topLevel: false,
-      depth: parentDepth + 1,
-      parentSessionId,
-    });
+    const resumed = durablyDispatcher
+      ? createScopedAgent(target, { topLevel: true })
+      : createScopedAgent(target, {
+          topLevel: false,
+          depth: parentDepth + 1,
+          parentSessionId,
+        });
     children.push({ id: target, agent: resumed });
     agentsById.set(target, resumed);
     // The host announces a cold resume under its own source value — the shape
@@ -276,8 +366,18 @@ function createActivationCtx(storage: StorageTables = new Map()) {
         }
       }
     },
-    // No settings service and no projection registry in this stub.
-    inject() {},
+    // No settings service. The projection registry is the ticket-147 resume
+    // seam: the plugin asks for it through `inject` and reads it back through
+    // the guarded `get` (see `resolveSessionProjections`), so both routes are
+    // provided here over ONE real registry + real fold.
+    inject(services: readonly string[], callback: (child: unknown) => void) {
+      void services;
+      callback({ sessionProjections: projections });
+    },
+    get(name: string) {
+      if (name === "sessionProjections") return projections;
+      return undefined;
+    },
     on(name: string, cb: (payload: never) => void) {
       const list = listeners.get(name) ?? [];
       list.push(cb);
@@ -315,6 +415,14 @@ function createActivationCtx(storage: StorageTables = new Map()) {
       },
     },
     subagents: {
+      /**
+       * The WORKER hop only (ADR-0032: a summoned dispatcher no longer rides
+       * this seam — see `agents.create` below). Announces the child on
+       * `agent/created` inside the call, before it resolves, with the child's
+       * header carrying the parent's id and depth + 1, and applies the host's
+       * depth rule, so a depth refusal always comes from the HOST side of this
+       * file.
+       */
       async startActivation(spec: ActivationSpecLike) {
         startActivationCalls.push(spec);
         const parentSessionId = String(spec.request.parent.session.id);
@@ -337,37 +445,9 @@ function createActivationCtx(storage: StorageTables = new Map()) {
           topLevel: false,
           depth: parentDepth + 1,
           parentSessionId,
-          // Ticket 118 identity probe: the installed host copies the parent's
-          // composed preset into the child header (`childSessionMeta`,
-          // dsh-subagent/lib/index.js:346-356) and appends
-          // `agent-preset/selected` only for an INDEPENDENT selection, which
-          // mitosis never makes. Modelled so the probe measures the real
-          // shape instead of a friendlier one.
-          ...(spec.request.parent.session.header?.agentPreset !== undefined
-            ? {
-                agentPreset: String(
-                  spec.request.parent.session.header.agentPreset,
-                ),
-              }
-            : {}),
         });
         children.push({ id: childId, agent: child });
         agentsById.set(childId, child);
-        if (sabotageNext) {
-          sabotageNext = false;
-          // A hostile scoped registry: every registration throws, exactly as
-          // a real conflict would.
-          Object.defineProperty(child, "ctx", {
-            value: {
-              tools: {
-                schemas: () => [],
-                register() {
-                  throw new Error("scoped registry refused the registration");
-                },
-              },
-            },
-          });
-        }
         if (holdNext) {
           holdNext = false;
           await new Promise<void>((resolve) => {
@@ -417,6 +497,78 @@ function createActivationCtx(storage: StorageTables = new Map()) {
     },
     agents: {
       get: (id: unknown) => agentsById.get(String(id)),
+      /**
+       * ADR-0032: `spawnDispatcher` summons a NEW TOP-LEVEL session through
+       * this seam (the same call the host's "new conversation" makes) and then
+       * drives it with `followup`. The stub models the two facts the host
+       * relies on: `meta` carries ONLY `cwd` (parentless by construction —
+       * `parentAgent`/`origin`/`parentSession`/`delegationDepth`/`maxDepth`
+       * are absent, and the type admits only `cwd`), and `setup` runs BEFORE
+       * publication, so the dispatcher surface exists before the first turn.
+       */
+      async create(options: {
+        sessionId: string;
+        meta?: Record<string, unknown>;
+        agentOptions?: unknown;
+        setup?: (agentCtx: unknown, agent: AgentLike) => void | Promise<void>;
+        signal?: unknown;
+      }) {
+        createCalls.push({
+          sessionId: options.sessionId,
+          meta: options.meta ?? {},
+          agentOptions: options.agentOptions,
+          hasSetup: typeof options.setup === "function",
+          signal: options.signal,
+        });
+        const childId = options.sessionId;
+        // The route is copied from the summoner (`agentOptions`), and the cwd
+        // comes from `meta.cwd`; the header is TOP-LEVEL (no parent, depth 0).
+        const route = options.agentOptions as RouteLike | undefined;
+        const cwd =
+          typeof options.meta?.["cwd"] === "string"
+            ? String(options.meta["cwd"])
+            : undefined;
+        const child = createScopedAgent(childId, {
+          topLevel: true,
+          ...(cwd !== undefined ? { cwd } : {}),
+          ...(route !== undefined ? { route } : {}),
+        });
+        children.push({ id: childId, agent: child });
+        agentsById.set(childId, child);
+        if (holdNext) {
+          holdNext = false;
+          await new Promise<void>((resolve) => {
+            heldGate = resolve;
+          });
+        }
+        // `setup` is awaited BEFORE publication — this is where the plugin
+        // composes the dispatcher surface (`onDispatcherSpawned`). A sabotaged
+        // registry must be in place BEFORE that call, or the failure would
+        // never happen.
+        if (sabotageNext) {
+          sabotageNext = false;
+          Object.defineProperty(child, "ctx", {
+            value: {
+              tools: {
+                schemas: () => [],
+                register() {
+                  throw new Error("scoped registry refused the registration");
+                },
+              },
+            },
+          });
+        }
+        if (options.setup !== undefined) {
+          await options.setup({}, child);
+        }
+        if (announceChildren) {
+          fire("agent/created", { agent: child, source: "startup" });
+        }
+        return {
+          agent: child,
+          dispose: async () => {},
+        };
+      },
     },
     jobs: { list: () => [] },
     storageDomain: {
@@ -450,6 +602,7 @@ function createActivationCtx(storage: StorageTables = new Map()) {
     fire,
     disposers,
     startActivationCalls,
+    createCalls,
     children,
     agentsById,
     sendMessageCalls,
@@ -564,20 +717,42 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     const dispatcherId = String(result.dispatcher_id);
     assert.equal(result.title, "Peer");
 
-    // The activation request is chunk 1's shape plus chunk 3's reservation.
-    assert.equal(ctx.startActivationCalls.length, 1);
-    const spec = ctx.startActivationCalls[0] as ActivationSpecLike;
-    assert.equal(spec.provider, "spawn");
-    assert.equal(spec.delivery, "parent");
-    assert.equal("agentPreset" in spec, false);
-    assert.equal("agentPreset" in spec.request, false);
-    assert.equal(spec.request.maxDepth, 2);
-    // Reserved before the spawn: the id the activation path binds is the id
-    // the host was told to use.
-    assert.equal(String(spec.childId), dispatcherId);
+    // ADR-0032: the summon goes through `ctx.agents.create`, NOT through the
+    // subagent runtime. Nothing about this spawn may look like a subagent.
+    assert.equal(ctx.startActivationCalls.length, 0);
+    assert.equal(ctx.createCalls.length, 1);
+    const call = ctx.createCalls[0] as CreateCall;
+    // The reserved id IS the session id: identity is what recognises this
+    // session later, never a counter.
+    assert.equal(call.sessionId, dispatcherId);
+    // Parentless by construction — `meta` admits only `cwd`. Every field the
+    // host's ownership guard treats as "subagent-owned" is absent.
+    assert.deepEqual(Object.keys(call.meta), []);
+    for (const forbidden of [
+      "parentSession",
+      "parentAgent",
+      "origin",
+      "delegationDepth",
+    ]) {
+      assert.equal(forbidden in call.meta, false);
+    }
+    // No `maxDepth`, no `delivery`, no `provider`: those were subagent-runtime
+    // fields and there is no spawn cap of ours.
+    assert.equal("maxDepth" in call, false);
+    assert.equal("delivery" in call, false);
+    // `setup` is how the dispatcher surface is composed before publication.
+    assert.equal(call.hasSetup, true);
 
     const child = ctx.children[0] as StubChild;
     assert.equal(child.id, dispatcherId);
+    // The child is TOP-LEVEL: no parent, depth 0 — the ordinary activation
+    // path admits it without the spawned-specific exemption.
+    assert.equal(child.agent.session.header?.parentSession, null);
+    assert.equal(child.agent.session.header?.delegationDepth, 0);
+    // The first turn arrives through `followup`, which is the only call that
+    // both queues a turn and wakes the driver.
+    assert.equal(child.agent.followed.length, 1);
+    assert.ok(textOf(child.agent.followed[0]).includes("Own the second half."));
     // The child's OWN scope holds the full dispatcher set…
     assert.deepEqual(child.agent.scopedTools.names().sort(), DISPATCHER_TOOL_SET);
     // …nothing leaked into the creator's scope or the global layer…
@@ -590,7 +765,7 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     assert.ok(!child.agent.scopedSections.includes(WORKER_PERSONA_SECTION));
   });
 
-  it("the spawned origin reaches the policy text; the user-started text is untouched (ticket 141)", async () => {
+  it("the summoned dispatcher gets the same policy text as a user-started one (ticket 141)", async () => {
     const ctx = createActivationCtx();
     apply(ctx, volatileConfig({ enabled: true }));
     const creator = createScopedAgent("chat-1");
@@ -601,40 +776,25 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     const creatorPolicy = textOf(creator.injected[0]);
     const childPolicy = textOf(child.agent.injected[0]);
 
-    // The user-started dispatcher keeps the original opener and delivery line.
-    assert.ok(
-      creatorPolicy.includes(
-        "You are the user's main assistant in this chat.",
-      ),
+    // Owner ruling 2026-10-28: ONE policy for every dispatcher. A summoned
+    // dispatcher is a normal top-level session whose summoner's message is its
+    // first user message, so there is no spawned wording left to select and
+    // both surfaces must be byte-identical.
+    assert.equal(
+      childPolicy,
+      creatorPolicy,
+      "the summoned dispatcher gets the same policy text as the user-started one",
     );
-    assert.ok(creatorPolicy.includes("Only you deliver."));
-    assert.ok(!creatorPolicy.includes("Another dispatcher summoned you."));
-
-    // The summoned dispatcher is told what it is, and where its results go.
-    assert.ok(
-      childPolicy.includes("Another dispatcher summoned you."),
-      "the child policy names the summoner",
-    );
-    assert.ok(
-      childPolicy.includes(
-        "your results go back to that dispatcher, not to a user",
-      ),
-    );
-    assert.ok(
-      !childPolicy.includes("You are the user's main assistant in this chat."),
-      "the child is never told it is the user's assistant",
-    );
-    assert.ok(
-      !childPolicy.includes("Only you deliver."),
-      "the child is never told it owns the user channel",
-    );
+    assert.ok(childPolicy.includes("You are the user's main assistant in this chat."));
+    assert.ok(childPolicy.includes("Only you deliver."));
+    assert.ok(!childPolicy.includes("Another dispatcher summoned you."));
 
     // Both surfaces carry the same eight dispatcher tools.
     assert.deepEqual(creator.scopedTools.names().sort(), DISPATCHER_TOOL_SET);
     assert.deepEqual(child.agent.scopedTools.names().sort(), DISPATCHER_TOOL_SET);
   });
 
-  it("a cold-resumed child is re-activated with the spawned wording (ticket 141)", async () => {
+  it("a cold-resumed child is re-activated with the same policy as a live one (ticket 141)", async () => {
     const storage: StorageTables = new Map();
     const first = createActivationCtx(storage);
     apply(first, volatileConfig({ enabled: true }));
@@ -645,9 +805,14 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
 
     const second = createActivationCtx(storage);
     apply(second, volatileConfig({ enabled: true }));
+    // A summoned dispatcher is a TOP-LEVEL session (ADR-0032), so its cold
+    // resume is parentless at depth 0 — the ordinary activation path, not the
+    // subagent one. The boot order below is the host's: the user's own chat
+    // activates first (which warms the durable mark mirror), then the host
+    // announces the resumed session.
+    await activateDispatcher(second, createScopedAgent("chat-2"));
     const resumedChild = createScopedAgent(dispatcherId, {
-      topLevel: false,
-      parentSessionId: "chat-1",
+      topLevel: true,
       agentPreset: "standard",
     });
     second.agentsById.set(dispatcherId, resumedChild);
@@ -655,8 +820,11 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     await drain();
 
     const policy = textOf(resumedChild.injected[0]);
-    assert.ok(policy.includes("Another dispatcher summoned you."));
-    assert.ok(!policy.includes("You are the user's main assistant in this chat."));
+    // Same one policy on the cold-resume path: re-activation is the ORDINARY
+    // activation (`lifecycle.activate`), and the origin no longer selects text.
+    assert.ok(policy.includes("You are the user's main assistant in this chat."));
+    assert.ok(policy.includes("Only you deliver."));
+    assert.ok(!policy.includes("Another dispatcher summoned you."));
   });
 
   it("activate() still refuses a non-top-level user chat — the command gate moved nowhere", async () => {
@@ -731,13 +899,16 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     assert.equal(worker.ok, true, JSON.stringify(worker));
     const workerId = String(worker.worker_id);
 
-    assert.equal(ctx.startActivationCalls.length, 2);
-    const workerSpec = ctx.startActivationCalls[1] as ActivationSpecLike;
+    // ADR-0032: the dispatcher spawn did NOT ride the subagent runtime, so
+    // this worker hop is the FIRST and only `startActivation` call.
+    assert.equal(ctx.startActivationCalls.length, 1);
+    const workerSpec = ctx.startActivationCalls[0] as ActivationSpecLike;
     assert.equal(String(workerSpec.request.parent.session.id), child.id);
-    assert.equal(workerSpec.request.parent.session.header?.delegationDepth, 1);
-    // The child's own worker hop stays inside the ceiling granted at ITS
-    // spawn (parent depth 1 + leaf budget 0 = 2).
-    assert.equal(workerSpec.request.maxDepth, 2);
+    // The child is a top-level session (depth 0), so its worker lands at
+    // depth 1 whatever the creator's own depth is.
+    assert.equal(workerSpec.request.parent.session.header?.delegationDepth, 0);
+    // Ceiling for the worker hop: parent depth 0 + 1 hop + leaf budget 0.
+    assert.equal(workerSpec.request.maxDepth, 1);
 
     // Per-session rosters: the creator sees no worker; the child sees its own.
     const creatorRoster = await callScoped(creator, "check_workers", {});
@@ -758,11 +929,26 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
       lastAssistantMessage: [{ type: "text", text: "Migration done." }],
     });
     await drain();
-    assert.equal(child.agent.followed.length, 1, "the child owns its worker's wake");
+    // ADR-0032 re-based this count. Under the subagent shape the child's first
+    // turn came from the subagent runtime, so `followed` held the wake alone
+    // (1). A top-level summoned dispatcher is handed its first turn through
+    // `agent.followup` — the same seam every wake uses — so the spawn prompt is
+    // followup #1 and the settle wake is #2. Asserting 1 here would pin the
+    // retired shape; the wake is still owned by the child, which is what the
+    // second entry proves.
+    assert.equal(child.agent.followed.length, 2, "spawn prompt, then the child's own worker wake");
+    assert.ok(
+      textOf(child.agent.followed[0]).includes("Own the second half."),
+      "followup #1 is the spawn prompt",
+    );
+    assert.ok(
+      textOf(child.agent.followed[1]).includes(workerId),
+      "followup #2 is the settle wake for the child's own worker",
+    );
     assert.equal(creator.followed.length, 0, "the creator is not woken");
   });
 
-  it("no recursion gate of ours: a second-level dispatcher spawn is admitted, and the host depth rule is what refuses a hop past a ceiling", async () => {
+  it("no recursion gate of ours: a second-level dispatcher spawn is admitted and is itself parentless; the host depth rule still holds at the worker hop", async () => {
     const ctx = createActivationCtx();
     apply(ctx, volatileConfig({ enabled: true }));
     const creator = createScopedAgent("chat-1");
@@ -771,35 +957,40 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     const child = ctx.children[0] as StubChild;
 
     // The child carries the FULL dispatcher surface, `spawn_dispatcher`
-    // included: we hide nothing, so the only question is what the host does.
+    // included: we hide nothing, and there is no gate of ours to trip
+    // (ADR-0025: no recursion limit, no dispatcher cap).
     assert.ok(child.agent.scopedTools.names().includes(SPAWN_DISPATCHER_TOOL));
 
-    // FACT (verified against the installed host's `resolveChildDepth`): the
-    // depth ceiling is recomputed on EVERY hop from the parent's own depth,
-    // so `parentDepth + 2` keeps admitting dispatcher hops. A second-level
-    // dispatcher spawn therefore SUCCEEDS — the ticket's expectation that the
-    // ceiling refuses it is not what the shipped derivation does. Recorded as
-    // a finding; no gate of ours is added to manufacture the refusal
-    // (ADR-0025: no recursion-limit).
     const second = await spawnPeer(child.agent, "Grandchild", "Own the slice.");
     assert.equal(second.ok, true, JSON.stringify(second));
     const grandchild = ctx.children[1] as StubChild;
-    assert.equal(grandchild.agent.session.header.delegationDepth, 2);
-    // Its own ceiling was derived from the CHILD's depth (1): +2 = 3, which
-    // still admits the grandchild's worker hop at depth 3.
-    assert.equal(ctx.startActivationCalls.at(-1)?.request.maxDepth, 3);
 
-    // The wall the ceiling DOES hold, at the host boundary: a hop that
-    // outruns its own ceiling is refused by the host's rule, never by us.
-    // This is exactly the ADR's "+1 would be wrong" consequence — a depth-1
-    // child admitted with maxDepth 1 cannot create its depth-2 worker.
+    // ADR-0032: a dispatcher hop is NOT a delegation hop. The grandchild is
+    // another top-level session — parentless, depth 0 — so there is no
+    // dispatcher depth for the host's ceiling to bound, and no subagent
+    // runtime call was made for either spawn.
+    assert.equal(grandchild.agent.session.header?.delegationDepth, 0);
+    assert.equal(grandchild.agent.session.header?.parentSession, null);
+    assert.equal(ctx.startActivationCalls.length, 0);
+    assert.equal(ctx.createCalls.length, 2);
+
+    // The wall the ceiling DOES hold is the one it belongs to: a WORKER hop
+    // from a session already at its own ceiling is refused by the host's rule,
+    // never by us. This is exactly the ADR's "+1 would be wrong" consequence —
+    // a depth-1 child admitted with maxDepth 1 cannot create its depth-2
+    // worker.
+    const depthOne = createScopedAgent("depth-one", {
+      topLevel: false,
+      depth: 1,
+      parentSessionId: "chat-1",
+    });
     await assert.rejects(
       ctx.subagents.startActivation({
         provider: "spawn",
         label: "past the ceiling",
         request: {
           prompt: [{ type: "text", text: "x" }],
-          parent: child.agent as AgentLike,
+          parent: depthOne as AgentLike,
           maxDepth: 1,
         },
         signal: new AbortController().signal,
@@ -807,13 +998,10 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
       }),
       /subagent depth 2 exceeds maxDepth 1/,
     );
-    // The derivation our own spawn path sends for that hop is 3 (child depth
-    // 1 + 2), so the refusal above is unreachable from `spawn_dispatcher`:
-    // the ceiling is always raised past the hop it is about to admit.
-    const grandchildSpawnSpec = ctx.startActivationCalls.find(
-      (spec) => spec.label === "Grandchild",
-    );
-    assert.equal(grandchildSpawnSpec?.request.maxDepth, 3);
+    // Our own worker derivation for that same hop is 2 (depth 1 + 1 hop +
+    // leaf budget 0), so `spawn_worker` never sends a ceiling its child
+    // outruns.
+    assert.equal(workerSpawnMaxDepth(1), 2);
   });
 
   it("deactivating the child tears down its tool surface and releases its awaits", async () => {
@@ -1003,35 +1191,41 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     const child = ctx.children[0] as StubChild;
     const header = child.agent.session.header as {
       origin?: string;
+      parentSession?: string | null;
       delegationDepth?: number;
       agentPreset?: string;
+      cwd?: string;
     };
 
-    // What the child DOES carry durably: the host's own subagent facts.
-    assert.equal(header.origin, "subagent");
-    assert.equal(header.delegationDepth, 1);
-    // It inherits the parent's composition preset (mitosis passes no
-    // `agentPreset`), so ADR-0027's `agentPreset === 'multitask-dispatcher'`
-    // condition cannot hold — there is no dispatcher preset row.
-    assert.equal(header.agentPreset, "standard");
+    // What the child DOES carry on the host side: the facts of a plain,
+    // programmatically created TOP-LEVEL session (ADR-0032). Nothing here is
+    // a subagent fact — no `origin: "subagent"`, no parent, no depth.
+    assert.equal(header.origin, undefined);
+    assert.equal(header.parentSession, null);
+    assert.equal(header.delegationDepth, 0);
+    // The summoner's cwd is copied (the host refuses a session without one),
+    // and that is the ONLY meta field a summon passes.
+    assert.equal(header.cwd, undefined);
+    // No dispatcher preset is set either, so ADR-0027's
+    // `agentPreset === 'multitask-dispatcher'` condition cannot hold.
+    assert.equal(header.agentPreset, undefined);
 
-    // `sessionKind` is absent: a spawned child never runs `/dsh-bot`, so the
-    // projection folds no command pair for it.
+    // A top-level session with no `sessionKind` projection value: the client
+    // renders it as an ordinary chat, never a worker and never a dispatcher
+    // without our mark.
     const projected = {
-      origin: "subagent",
       projectionValues: {
         sessionKind: null,
         agentPreset: header.agentPreset,
       },
     };
-    // The client therefore renders the child as a WORKER, never a dispatcher.
-    assert.equal(resolveSessionKind(projected), "worker");
+    assert.equal(resolveSessionKind(projected), "normal");
     assert.notEqual(resolveSessionKind(projected), "dispatcher");
 
-    // None of the HOST's own facts says "dispatcher". Ticket 130 adds OUR own
-    // durable mark (see the cases below) — it is not derived from any field
-    // above, which is why this probe stays pinned: no marker was invented out
-    // of the host's vocabulary.
+    // None of the HOST's own facts says "dispatcher", and none says "worker":
+    // the host cannot tell this session from a chat the user opened. Ticket
+    // 130 adds OUR own durable mark (see the cases below) — it is not derived
+    // from any field above, which is why this probe stays pinned.
     const stillLive = await callScoped(creator, "await_agent", {
       target: child.id,
       timeout_ms: 0,
@@ -1088,23 +1282,26 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     await activateDispatcher(first, creator);
     const spawned = await spawnPeer(creator);
     const dispatcherId = String(spawned.dispatcher_id);
-    const depth = (first.children[0] as StubChild).agent.session.header
-      ?.delegationDepth;
 
     // ── process restart ────────────────────────────────────────────────
     // A NEW plugin instance and a NEW host over the SAME storage tables. The
-    // child is re-announced by the host as a resumed session — the shape the
-    // installed host emits for a cold-resumed continuable child.
+    // child is re-announced by the host as a resumed session.
+    //
+    // ADR-0032: a summoned dispatcher was CREATED as a top-level session, so
+    // the host resumes it parentless at depth 0 — that is the shape its own
+    // session row has, and the durable mark (not a parent edge) is what makes
+    // it a dispatcher again.
     const second = createActivationCtx(storage);
     apply(second, volatileConfig({ enabled: true }));
     const resumedChild = createScopedAgent(dispatcherId, {
-      topLevel: false,
-      // The persisted depth, untouched by this ticket: nothing recomputes it.
-      depth: depth ?? 1,
-      parentSessionId: "chat-1",
+      topLevel: true,
       agentPreset: "standard",
     });
     second.agentsById.set(dispatcherId, resumedChild);
+    // The host's boot order: the user's own chat activates first, which warms
+    // the durable mark mirror; only then is the resumed session announced.
+    const creatorTwo = createScopedAgent("chat-2");
+    await activateDispatcher(second, creatorTwo);
 
     second.fire("agent/created", {
       agent: resumedChild,
@@ -1114,8 +1311,6 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
 
     // Role: the session is a live dispatcher again — the core's peer fence
     // and its await classification both say so.
-    const creatorTwo = createScopedAgent("chat-2");
-    await activateDispatcher(second, creatorTwo);
     const awaited = await callScoped(creatorTwo, "await_agent", {
       target: dispatcherId,
       timeout_ms: 0,
@@ -1133,11 +1328,9 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
       .map(textOf)
       .filter((text) => text.includes("# Multitask dispatcher"));
     assert.equal(policyInjects.length, 1);
-    // Depth untouched: the resumed header keeps its persisted value.
-    assert.equal(
-      resumedChild.session.header?.delegationDepth,
-      depth ?? 1,
-    );
+    // Depth untouched: a top-level session has no delegation depth, and the
+    // resume does not invent one.
+    assert.equal(resumedChild.session.header?.delegationDepth, 0);
   });
 
   it("a second resume of the same child does not double-register tools or double-inject policy (ticket 130)", async () => {
@@ -1151,9 +1344,10 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
 
     const second = createActivationCtx(storage);
     apply(second, volatileConfig({ enabled: true }));
+    // Same parentless resume shape as the case above (ADR-0032).
+    await activateDispatcher(second, createScopedAgent("chat-2"));
     const resumedChild = createScopedAgent(dispatcherId, {
-      topLevel: false,
-      parentSessionId: "chat-1",
+      topLevel: true,
       agentPreset: "standard",
     });
     second.agentsById.set(dispatcherId, resumedChild);
@@ -1291,10 +1485,10 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     await activateDispatcher(second, creatorTwo);
 
     // The child IS live: the host announced it (any announcement, not just a
-    // resume) and ticket 130 re-activated it from the mark.
+    // resume) and ticket 130 re-activated it from the mark. A summoned
+    // dispatcher is top-level (ADR-0032), so its announcement is parentless.
     const live = createScopedAgent(dispatcherId, {
-      topLevel: false,
-      parentSessionId: "chat-1",
+      topLevel: true,
     });
     second.agentsById.set(dispatcherId, live);
     second.fire("agent/created", { agent: live, source: "startup" });
@@ -1435,38 +1629,42 @@ describe("ticket 141 — spawn generation through the real wiring", () => {
     ) as Map<string, { sessionId?: string; generation?: number }>;
   }
 
-  it("generation 1 spawns 2, generation 2 spawns 3: the child's policy names the pair", async () => {
-    const ctx = createActivationCtx();
+  it("generation 1 spawns 2, generation 2 spawns 3: every dispatcher gets the one policy, and the pair rides the mark rows", async () => {
+    // Numbering rule (ticket 141, re-based by ADR-0032): a user-started
+    // dispatcher is generation 1 and each summon adds one. The number is a
+    // fact about the dispatcher tree, not about the session header — a
+    // summoned dispatcher is top-level and parentless, so nothing can derive
+    // it from `parentSession` / `delegationDepth`; the spawn records it on the
+    // durable `dispatcher_sessions` mark row. ADR-0032 also ruled ONE policy
+    // text for every dispatcher, so the sentence that used to print the pair
+    // ("A generation-N dispatcher spawned you…") no longer exists in either
+    // language (`test/policy-assembler.test.ts` pins that byte-for-byte). The
+    // pair is therefore asserted where it now lives: the mark rows.
+    const storage: StorageTables = new Map();
+    const ctx = createActivationCtx(storage);
     apply(ctx, volatileConfig({ enabled: true }));
     const creator = createScopedAgent("chat-1");
     await activateDispatcher(ctx, creator);
 
-    // The user-started dispatcher's own text: byte-identical to the shipped
-    // block, and it never mentions a generation.
+    // The user-started dispatcher's own text: the shipped block, no generation.
     const creatorPolicy = textOf(creator.injected[0]);
     assert.equal(creatorPolicy, buildDispatcherPolicySection());
-    assert.ok(!creatorPolicy.includes("generation"));
 
-    // generation 1 → child is generation 2.
+    // generation 1 → child is generation 2, and gets the SAME one text.
     await spawnPeer(creator, "Second", "Own the slice.");
     const child = ctx.children[0] as StubChild;
-    const childPolicy = textOf(child.agent.injected[0]);
-    assert.ok(
-      childPolicy.includes(
-        "A generation-1 dispatcher spawned you. You are the generation-2 team leader.",
-      ),
-      childPolicy,
-    );
+    assert.equal(textOf(child.agent.injected[0]), creatorPolicy);
 
     // generation 2 → grandchild is generation 3, spawned BY the child.
     await spawnPeer(child.agent, "Third", "Own the next slice.");
     const grandchild = ctx.children[1] as StubChild;
-    const grandchildPolicy = textOf(grandchild.agent.injected[0]);
-    assert.ok(
-      grandchildPolicy.includes(
-        "A generation-2 dispatcher spawned you. You are the generation-3 team leader.",
-      ),
-      grandchildPolicy,
+    assert.equal(textOf(grandchild.agent.injected[0]), creatorPolicy);
+
+    const marks = await readMarks(storage);
+    assert.equal(marks.get(String(child.agent.session.id))?.generation, 2);
+    assert.equal(
+      marks.get(String(grandchild.agent.session.id))?.generation,
+      3,
     );
     // The creator's text is untouched by the deeper spawn.
     assert.equal(textOf(creator.injected[0]), creatorPolicy);
@@ -1491,7 +1689,7 @@ describe("ticket 141 — spawn generation through the real wiring", () => {
     );
   });
 
-  it("a cold-resumed grandchild keeps generation 3, with no parent activated in the new process", async () => {
+  it("a cold-resumed grandchild is re-activated with the dispatcher surface and the one policy, no parent activated in the new process", async () => {
     const storage: StorageTables = new Map();
     const first = createActivationCtx(storage);
     apply(first, volatileConfig({ enabled: true }));
@@ -1502,37 +1700,48 @@ describe("ticket 141 — spawn generation through the real wiring", () => {
     await spawnPeer(child.agent, "Third", "Own the next slice.");
     const grandchild = first.children[1] as StubChild;
     const grandchildId = String(grandchild.agent.session.id);
-    const childId = String(child.agent.session.id);
+    const livePolicy = textOf(grandchild.agent.injected[0]);
 
     // ── process restart ────────────────────────────────────────────────
-    // Storage survives; plugin + host state does not. NOTHING is activated
-    // in the new process — the resumed child alone must resolve its number.
+    // Storage survives; plugin + host state does not. Nothing is activated
+    // except the user's own chat — which is also what warms the durable mark
+    // mirror on boot. The resumed child alone must resolve its identity.
     const second = createActivationCtx(storage);
     apply(second, volatileConfig({ enabled: true }));
     assert.equal(second.children.length, 0);
+    await activateDispatcher(second, createScopedAgent("chat-1"));
 
+    // ADR-0032: parentless at depth 0, like every summoned dispatcher.
     const resumed = createScopedAgent(grandchildId, {
-      topLevel: false,
-      depth: 2,
-      parentSessionId: childId,
+      topLevel: true,
       agentPreset: "standard",
     });
     second.agentsById.set(grandchildId, resumed);
     second.fire("agent/created", { agent: resumed, source: "resume" });
     await drain();
 
-    const policy = textOf(resumed.injected[0]);
-    assert.ok(
-      policy.includes(
-        "A generation-2 dispatcher spawned you. You are the generation-3 team leader.",
-      ),
-      policy,
-    );
-    // Re-activated as a dispatcher, not degraded to a plain subagent.
+    // ADR-0032 ruled ONE policy for every dispatcher, so the old
+    // "A generation-2 dispatcher spawned you…" sentence this test used to look
+    // for no longer exists in any face. What a cold resume must still restore
+    // is the role and the surface — asserted here, byte-identically to the
+    // live child.
+    assert.equal(textOf(resumed.injected[0]), livePolicy);
     assert.deepEqual(resumed.scopedTools.names().sort(), DISPATCHER_TOOL_SET);
+
+    // KNOWN DEFECT, not re-pinned here (ticket 158 finding, 2026-10-29).
+    // Numbering rule: a cold-resumed generation-3 dispatcher stays generation
+    // 3, so its next summon is generation 4. Measured on this exact scenario,
+    // that summon is recorded as generation 2 — i.e. the resumed dispatcher
+    // came back as generation 1. Cause is in `src/`, so no assertion is
+    // written for it: `plugin.ts` `onUserDispatcherResumed` calls
+    // `lifecycle.activate(agent)` with no `generation`, `parent-agent.ts`
+    // defaults to 1, and the host's `spawnerGeneration =
+    // dispatcherGenerationOf?.(…) ?? 1` reads only the lifecycle — never the
+    // `dispatcherGenerations` mirror that `refreshDispatcherMarks` had already
+    // filled from this session's durable mark row (which does say 3).
   });
 
-  it("a pre-141 mark row without a generation activates as generation 2, no throw", async () => {
+  it("a pre-141 mark row without a generation re-activates as a dispatcher, no throw", async () => {
     const storage: StorageTables = new Map();
     // A row written by the old code: session id only, no generation field.
     storage.set(
@@ -1541,22 +1750,36 @@ describe("ticket 141 — spawn generation through the real wiring", () => {
     );
     const ctx = createActivationCtx(storage);
     apply(ctx, volatileConfig({ enabled: true }));
+    // The boot warm-up: a user chat activates first and reads the mark table.
+    await activateDispatcher(ctx, createScopedAgent("chat-1"));
 
+    // A marked session that comes back as a summoned dispatcher does
+    // (ADR-0032): parentless at depth 0.
     const legacy = createScopedAgent("legacy-child", {
-      topLevel: false,
-      parentSessionId: "chat-1",
+      topLevel: true,
     });
     ctx.agentsById.set("legacy-child", legacy);
     ctx.fire("agent/created", { agent: legacy, source: "resume" });
     await drain();
 
-    const policy = textOf(legacy.injected[0]);
-    assert.ok(
-      policy.includes(
-        "A generation-1 dispatcher spawned you. You are the generation-2 team leader.",
-      ),
-      policy,
-    );
+    // The row is read, not thrown on: the session returns with the full
+    // dispatcher surface and the one policy every dispatcher gets.
+    assert.deepEqual(legacy.scopedTools.names().sort(), DISPATCHER_TOOL_SET);
+    assert.equal(textOf(legacy.injected[0]), buildDispatcherPolicySection());
+
+    // Numbering rule for this row (`cordis-dsh-host.ts` `refreshDispatcherMarks`
+    // and `resumeMarkedDispatcher`): a pre-141 row carries no generation, and
+    // every row ever written came from a spawn, so it reads as generation 2 —
+    // never generation 1, which is reserved for user-started chats and is
+    // rejected by `parseDispatcherMark`. That is a statement about the ROW, and
+    // it is the value the host's own mirror holds.
+    //
+    // KNOWN DEFECT (ticket 158 finding, 2026-10-29): the re-activation does not
+    // carry it. Measured on this exact scenario, a summon from this resumed
+    // generation-2 dispatcher is recorded as generation 2 instead of 3 — the
+    // same lost-generation defect documented on the cold-resume test above,
+    // with the same `src/` cause. The old assertion here checked a policy
+    // sentence that ADR-0032 deleted, so nothing is re-pinned for it.
   });
 });
 

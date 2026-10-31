@@ -26,10 +26,6 @@ function note(v: unknown): boolean {
   switch (v.kind) {
     case "cap-marker": return keys(v, ["id", "kind", "removalId"]) && text(v.removalId);
     case "negative-fact": return keys(v, ["id", "kind", "episodeId"]) && text(v.episodeId);
-    case "evict-marker": return keys(v, ["id", "kind", "episodeId", "removalId"])
-      && text(v.episodeId) && text(v.removalId);
-    case "span-marker": return keys(v, ["id", "kind", "removalId", "path", "keepLines"])
-      && text(v.removalId) && text(v.path) && array(v.keepLines, lines);
     // A shaped entry's note declares the one marker the plan accounts for and
     // nothing else: the rendered bytes come from the pinned template, never from
     // the note (ISSUE-056 chunk C4/C5).
@@ -56,10 +52,6 @@ function op(v: unknown): boolean {
     case "seal": return keys(v, ["kind", "mode", "episodeId", "removalId", "noteId"])
       && ["append", "replace"].includes(String(v.mode)) && text(v.episodeId)
       && (v.removalId === null || text(v.removalId));
-    case "evict": return keys(v, ["kind", "episodeId", "removalId", "noteId"])
-      && text(v.episodeId) && text(v.removalId);
-    case "span": return keys(v, ["kind", "removalId", "keepLines", "noteId"])
-      && text(v.removalId) && array(v.keepLines, lines);
     case "verdict": return keys(v, ["kind", "removalId", "unitId", "noteId"])
       && text(v.removalId) && text(v.unitId);
     case "proof": return keys(v, ["kind", "proofKind", "removalId", "unitId", "noteId"])

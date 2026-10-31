@@ -15,7 +15,7 @@ import { breakerState, metadata, readEntries } from './journal.js';
 import { announceBreaker, persistBreaker } from './notice.js';
 import { detectEpisodes, planApplication } from './planning.js';
 import { recoverPending } from './recovery.js';
-import { TranscriptTelemetry } from './telemetry.js';
+import { salvageShare, TranscriptTelemetry } from './telemetry.js';
 import type {
   EngineInput, EngineOptions, EngineResult, PassInvalidation, ReceiptConflict,
 } from './types.js';
@@ -337,6 +337,7 @@ export class RacoonsEngine {
         this.emit({ kind: 'revert-applied', cutIndex: revert.cutIndex,
           freedBytes: revert.cost.freedBytes, keptBytes: revert.cost.keptBytes,
           receiptBytes: revert.cost.receiptBytes, netFreedBytes: revert.cost.netFreedBytes,
+          salvageShare: salvageShare(revert.cost.keptBytes, revert.cost.freedBytes),
           survivorCount: revert.survivors.length });
       }
       return { ...applied, validation };
