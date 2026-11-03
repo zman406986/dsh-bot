@@ -1,6 +1,6 @@
 # 174 — Remove the worker access-ask feature entirely
 
-**Status:** open
+**Status:** resolved
 **Type:** task
 **Labels:** ready-for-agent
 **Blocked by:** nothing. Reverses an accepted ADR — see "Authority" below; the owner's ruling is recorded.
@@ -89,3 +89,8 @@ Do **not** restate the host's `subagent:delegation` guarantee — see the contra
 - **Authority:** this reverses ADR-0008 (accepted). The owner's dated ruling is the origin line above. ADR-0033 records the reversal and the reference evidence; ADR-0008 gets a `Superseded by ADR-0033` line in its status.
 - Order matters: regenerate `open-issue-index.md` with `node tools/issue-index.mjs`, and `docs/adr/README.md` with `node tools/adr-index.mjs --fix` if that flag exists — both are checked by `lint:docs`.
 - The client's approval pane is user-visible. Removing it means the settings card loses a field; check `test/client-settings-card.test.ts` and the locale dictionary.
+
+### 2026-11-04 — PM closure
+
+Shipped in commit `643a801` on `main`. Full suite green at closure (754 tests, 0 fail),
+both tsconfigs clean, `npm run lint:docs` clean.

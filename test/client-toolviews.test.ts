@@ -5,18 +5,24 @@
  * shape, and apply() wiring over fake client seams (idioms from tickets
  * 20/21).
  *
- * Offline only (S8): no real Cordis, no browser, no DOM harness. Component
- * rendering stays covered by build success + typecheck; everything asserted
- * here is pure logic (registration options, payload → view model parsing) or
- * fake-seam registration.
+ * Offline only (S8): no real Cordis, no browser, no DOM harness. Everything
+ * asserted here is pure logic (registration options, payload → view model
+ * parsing) or fake-seam registration. Ticket 169 adds one step beyond pure
+ * data: the row's *rendered* text, produced by `react-dom/server` static
+ * markup (no DOM, no jsdom) so a label/value/field run-on can never come back
+ * unnoticed.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { apply } from "../src/client/index.js";
 import type { ClientContext } from "../src/client/context.js";
-import {LOCALE_NAMESPACE, SHELL_OVERLAY_SLOT} from "../src/client/overlay.js";
+import {LOCALE_NAMESPACE, SHELL_OVERLAY_SLOT, localeDictionary} from "../src/client/overlay.js";
 import {TOOLVIEW_FIELD_KEYS, TOOLVIEW_TOOL_NAMES, TOOL_CALL_TOOLVIEW_SLOT, describeToolview, isDispatcherToolName, toolviewRegistration, type ToolviewModel} from "../src/client/toolviews.js";
-import {AWAIT_AGENT_TOOL, DISPATCHER_TOOL_NAMES, MESSAGE_AGENT_TOOL, SEND_PEER_TOOL, SPAWN_DISPATCHER_TOOL, SPAWN_WORKER_TOOL} from "../src/core/policy/prompts.js";
+import { createToolviewComponent } from "../src/client/toolview-panel.js";
+import { TOOLVIEW_CLASS, TOOLVIEW_CSS } from "../src/client/toolview-styles.js";
+import {AWAIT_AGENT_TOOL, CHECK_WORKERS_TOOL, DELIVER_RESULT_TOOL, DISPATCHER_TOOL_NAMES, MESSAGE_AGENT_TOOL, SEND_PEER_TOOL, SPAWN_DISPATCHER_TOOL, SPAWN_WORKER_TOOL, STEER_WORKER_TOOL, STOP_WORKER_TOOL} from "../src/core/policy/prompts.js";
 import { ROSTER_STATUS_KEYS } from "../src/core/roster-snapshot.js";
 import type { WorkerStatus } from "../src/core/types.js";
 
@@ -905,3 +911,359 @@ describe("toolview — shipped slot props (phase/block) adapt to the parsers", (
     assert.equal(view?.kind, "degraded");
   });
 });
+
+//#region ticket 169 — the rendered row keeps label, value and field apart
+
+/**
+ * The owner's reported defect (ticket 169): the row rendered every field as
+ * bare inline spans, so `Worker`, the id, `Title` and the title ran together
+ * into one unbroken string. These pins read the *rendered* markup, not the
+ * view model — the model was already correct, which is why the ticket's
+ * unit-level tests passed while the live page was unreadable.
+ */
+
+/** The translate seat the shipped kit binds (locale namespace dictionary). */
+const t = (key: string): string => localeDictionary.en[key] ?? key;
+
+/** Render one toolview component to static markup (no DOM, no jsdom). */
+function renderToolview(toolName: string, props: unknown): string {
+  const Component = createToolviewComponent(toolName, t);
+  return renderToStaticMarkup(createElement(Component, props));
+}
+
+/**
+ * The row's text as it actually reaches the eye: drop the row's own style
+ * block, turn block-element boundaries into line breaks the way `innerText`
+ * does, then fold whitespace. Inline elements (the label and value spans)
+ * deliberately get NO boundary — that is the point: if the row ever fuses a
+ * value and the next label inside inline boxes, this helper answers
+ * `Worker…Title…` and the run-on assertion fails.
+ */
+function renderedLine(markup: string): string {
+  return markup
+    .replace(/<style>[\s\S]*?<\/style>/g, "")
+    .replace(/<\/?(?:div|ul|li|style)\b[^>]*>/g, "\n")
+    .replace(/<[^>]*>/g, "")
+    .replace(/[ \t]+/g, " ")
+    .replace(/ *\n+ */g, "\n")
+    .trim()
+    .replace(/\n+/g, " → ");
+}
+
+/**
+ * Every field's label and value as separate rendered text nodes, scraped from
+ * the markup in document order: `[["Worker", "w-1"], ["Title", "…"]]`. This is
+ * the structural claim — a label and its value must be two elements, not one
+ * fused string.
+ */
+function renderedPairs(markup: string): string[][] {
+  const scrape = (attribute: string): string[] =>
+    [...markup.matchAll(new RegExp(`data-${attribute}="[^"]*"[^>]*>([^<]*)<`, "g"))].map(
+      (match) => match[1]!.trim(),
+    );
+  const labels = scrape("field-label");
+  const values = scrape("field-value");
+  assert.equal(labels.length, values.length, "a field lost its label or value");
+  return labels.map((label, index) => [label, values[index]!]);
+}
+
+describe("toolview — the rendered row separates label, value and fields (ticket 169)", () => {
+  const spawnCall = {
+    phase: "result",
+    block: {
+      kind: "tool-result",
+      callId: "c-169",
+      name: SPAWN_WORKER_TOOL,
+      args: { stream_key: "launcher-staleness-guard" },
+      call: null,
+      content: [{ type: "text", text: "ok" }],
+      isError: false,
+      meta: {
+        ok: true,
+        worker_id: "063f41a2-9897-4936-95de-1cd3f2f76132",
+        title: "Add stale-build guards to both launchers",
+        stream_key: "launcher-staleness-guard",
+      },
+    },
+  };
+
+  it("renderer imports the row stylesheet it constructs class names for", () => {
+    // The defect's root cause: the renderer built `__field*` class names but
+    // no stylesheet anywhere defined them, so every span stayed inline. The
+    // stylesheet must be non-empty and must actually style the field row.
+    assert.ok(TOOLVIEW_CSS.trim().length > 0, "row stylesheet is empty");
+    assert.match(TOOLVIEW_CSS, new RegExp(`\\.${TOOLVIEW_CLASS}__field\\{[^}]*display:flex`));
+    assert.match(TOOLVIEW_CSS, new RegExp(`\\.${TOOLVIEW_CLASS}__field\\{[^}]*gap:`));
+  });
+
+  it("the stylesheet ships inside the rendered component, not just in the module", () => {
+    // A stylesheet the component never renders is the same defect again: the
+    // class names would exist with nothing behind them.
+    const markup = renderToolview(SPAWN_WORKER_TOOL, spawnCall);
+    assert.ok(markup.includes(`.${TOOLVIEW_CLASS}__field{`), "stylesheet not rendered with the row");
+  });
+
+  it("label and value are separate elements, never one fused string", () => {
+    const markup = renderToolview(SPAWN_WORKER_TOOL, spawnCall);
+    assert.deepEqual(renderedPairs(markup), [
+      ["Worker", "063f41a2-9897-4936-95de-1cd3f2f76132"],
+      ["Title", "Add stale-build guards to both launchers"],
+      ["Stream", "launcher-staleness-guard"],
+      ["Outcome", "ok"],
+    ]);
+  });
+
+  it("the rendered line never runs a value into the next label", () => {
+    const line = renderedLine(renderToolview(SPAWN_WORKER_TOOL, spawnCall));
+    // The exact collapse the owner pasted: `…TitleAdd stale-build…Outcomeok`.
+    assert.doesNotMatch(line, /TitleAdd /, "title label ran into its value");
+    assert.doesNotMatch(line, /Outcomeok/, "outcome label ran into its value");
+    assert.doesNotMatch(line, /worker_title/, "labels stayed unresolved");
+    // And the readable shape, in the order the parser produces.
+    assert.equal(
+      line,
+      "Worker 063f41a2-9897-4936-95de-1cd3f2f76132 Title Add stale-build guards " +
+        "to both launchers Stream launcher-staleness-guard Outcome ok",
+    );
+  });
+
+  it("each field carries a separator element so the visual gap cannot collapse", () => {
+    // A `gap` alone dies the moment a selector loses the rule; a real
+    // separator element is a second, independent line of defence.
+    const markup = renderToolview(SPAWN_WORKER_TOOL, spawnCall);
+    const separators = markup.match(new RegExp(`class="${TOOLVIEW_CLASS}__sep"`, "g"));
+    assert.equal(
+      separators?.length,
+      3,
+      "expected one separator between each of the four fields",
+    );
+  });
+
+  it("the outcome appears exactly once on a settled spawn row", () => {
+    const markup = renderToolview(SPAWN_WORKER_TOOL, spawnCall);
+    const line = renderedLine(markup);
+    assert.equal(
+      line.match(/Outcome/gi)?.length,
+      1,
+      `outcome rendered more than once: ${line}`,
+    );
+    assert.equal(line.match(/\bok\b/g)?.length, 1, `"ok" rendered more than once: ${line}`);
+  });
+
+  it("a check_workers row's outcome is emitted once, above its roster rows", () => {
+    // Ticket 169 §Problem.2: the owner saw the outcome twice. The component
+    // never mirrors its outcome — the second line was the NEXT call's row,
+    // whose boundary was invisible while every field rendered inline. Pinning
+    // one emission here keeps a future edit from adding a real second one.
+    const markup = renderToolview(CHECK_WORKERS_TOOL, {
+      phase: "result",
+      block: {
+        kind: "tool-result",
+        callId: "c-169-count",
+        name: CHECK_WORKERS_TOOL,
+        args: {},
+        call: null,
+        content: [{ type: "text", text: "ok" }],
+        isError: false,
+        meta: {
+          ok: true,
+          rows: [
+            { worker_id: "w-1", title: "one", status: "completed" },
+            { worker_id: "w-2", title: "two", status: "running" },
+          ],
+        },
+      },
+    });
+    const line = renderedLine(markup);
+    assert.equal(line.match(/Outcome/gi)?.length, 1, line);
+    assert.equal(line.match(/\bok\b/g)?.length, 1, line);
+  });
+
+  it("check_workers status rows separate id, title and status", () => {
+    const markup = renderToolview(CHECK_WORKERS_TOOL, {
+      phase: "result",
+      block: {
+        kind: "tool-result",
+        callId: "c-169-check",
+        name: CHECK_WORKERS_TOOL,
+        args: {},
+        call: null,
+        content: [{ type: "text", text: "ok" }],
+        isError: false,
+        meta: {
+          ok: true,
+          rows: [
+            {
+              worker_id: "063f41a2-9897-4936-95de-1cd3f2f76132",
+              title: "Add stale-build guards to both launchers",
+              status: "completed",
+              recent_activity: "wrote two launcher guards",
+            },
+          ],
+        },
+      },
+    });
+    const line = renderedLine(markup);
+    // The status-row collapse the ticket pastes: `…launcherscompleted`.
+    assert.doesNotMatch(line, /launcherscompleted/, "title ran into status");
+    assert.doesNotMatch(line, /completedwrote/, "status ran into activity");
+    assert.match(
+      line,
+      /063f41a2-9897-4936-95de-1cd3f2f76132 Add stale-build guards to both launchers completed/,
+    );
+    // The roster row is its own styled block, not inline text.
+    assert.match(
+      TOOLVIEW_CSS,
+      new RegExp(`\\.${TOOLVIEW_CLASS}__row\\{[^}]*display:flex`),
+    );
+  });
+
+  it("the degraded row still renders its honest line", () => {
+    const markup = renderToolview(SPAWN_WORKER_TOOL, { phase: "result", block: null });
+    assert.equal(renderedLine(markup), localeDictionary.en["toolview.degraded"]);
+  });
+
+  it("all nine claimed keys separate every label from its value", () => {
+    // Acceptance covers the whole claimed set, not just the two tools the
+    // owner happened to paste. One representative payload per tool, each with
+    // at least one field, rendered and read as text.
+    const payloads: Record<string, unknown> = {
+      [SPAWN_WORKER_TOOL]: spawnCall,
+      [CHECK_WORKERS_TOOL]: {
+        phase: "result",
+        block: {
+          kind: "tool-result",
+          callId: "c-a",
+          name: CHECK_WORKERS_TOOL,
+          args: { worker_id: "w-1" },
+          call: null,
+          content: [{ type: "text", text: "ok" }],
+          isError: false,
+          meta: { ok: true, rows: [] },
+        },
+      },
+      [STEER_WORKER_TOOL]: {
+        phase: "result",
+        block: {
+          kind: "tool-result",
+          callId: "c-b",
+          name: STEER_WORKER_TOOL,
+          args: { worker_id: "w-1", message: "check the logs" },
+          call: null,
+          content: [{ type: "text", text: "ok" }],
+          isError: false,
+          meta: { ok: true },
+        },
+      },
+      [STOP_WORKER_TOOL]: {
+        phase: "result",
+        block: {
+          kind: "tool-result",
+          callId: "c-c",
+          name: STOP_WORKER_TOOL,
+          args: { worker_id: "w-1" },
+          call: null,
+          content: [{ type: "text", text: "ok" }],
+          isError: false,
+          meta: { ok: true },
+        },
+      },
+      [DELIVER_RESULT_TOOL]: {
+        phase: "result",
+        block: {
+          kind: "tool-result",
+          callId: "c-d",
+          name: DELIVER_RESULT_TOOL,
+          args: { todo_id: "t-2", attachment_paths: ["a"] },
+          call: null,
+          content: [{ type: "text", text: "ok" }],
+          isError: false,
+          meta: { ok: true, delivered: true, todo_completed: "t-2" },
+        },
+      },
+      [MESSAGE_AGENT_TOOL]: {
+        phase: "result",
+        block: {
+          kind: "tool-result",
+          callId: "c-e",
+          name: MESSAGE_AGENT_TOOL,
+          args: { target: "w-1", priority: true },
+          call: null,
+          content: [{ type: "text", text: "ok" }],
+          isError: false,
+          meta: { ok: true, target: "w-1", delivered_as: "steer" },
+        },
+      },
+      [AWAIT_AGENT_TOOL]: {
+        phase: "result",
+        block: {
+          kind: "tool-result",
+          callId: "c-f",
+          name: AWAIT_AGENT_TOOL,
+          args: { target: "w-1" },
+          call: null,
+          content: [{ type: "text", text: "ok" }],
+          isError: false,
+          meta: { ok: true, target: "w-1", status: "settled", worker_status: "completed" },
+        },
+      },
+      [SPAWN_DISPATCHER_TOOL]: {
+        phase: "result",
+        block: {
+          kind: "tool-result",
+          callId: "c-g",
+          name: SPAWN_DISPATCHER_TOOL,
+          args: { title: "second chair" },
+          call: null,
+          content: [{ type: "text", text: "ok" }],
+          isError: false,
+          meta: { ok: true, dispatcher_id: "d-1", title: "second chair" },
+        },
+      },
+      [SEND_PEER_TOOL]: {
+        phase: "result",
+        block: {
+          kind: "tool-result",
+          callId: "c-h",
+          name: SEND_PEER_TOOL,
+          args: { to_session: "s-2", priority: false },
+          call: null,
+          content: [{ type: "text", text: "ok" }],
+          isError: false,
+          meta: { ok: true, to_session: "s-2" },
+        },
+      },
+    };
+
+    assert.deepEqual(
+      Object.keys(payloads).sort(),
+      [...TOOLVIEW_TOOL_NAMES].sort(),
+      "the fixture set drifted from the claimed keys",
+    );
+
+    for (const toolName of TOOLVIEW_TOOL_NAMES) {
+      const markup = renderToolview(toolName, payloads[toolName]);
+      const pairs = renderedPairs(markup);
+      assert.ok(pairs.length > 0, `${toolName} rendered no fields`);
+      // Every pair is two non-empty strings: the label resolved through the
+      // dictionary, and the value stayed its own element.
+      for (const [label, value] of pairs) {
+        assert.notEqual(label, "", `${toolName} rendered a blank label`);
+        assert.notEqual(value, "", `${toolName} rendered a blank value`);
+        assert.notEqual(label, label.toUpperCase(), `${toolName} label not resolved: ${label}`);
+      }
+      // The rendered line has a space (or a break) wherever the row changes
+      // from a value to the next label — the collapse the ticket reported.
+      const line = renderedLine(markup);
+      for (const [label] of pairs) {
+        assert.ok(
+          line.includes(` ${label}`) || line.startsWith(label),
+          `${toolName}: label "${label}" does not start a separated run in: ${line}`,
+        );
+      }
+    }
+  });
+});
+
+//#endregion
+

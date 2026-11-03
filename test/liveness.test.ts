@@ -186,13 +186,9 @@ describe("liveness — end to end through check_workers", () => {
     lastActivityAtMs?: (workerId: string) => number | null;
   }): Promise<{ host: FakeDshHost; multitask: Multitask; tools: DispatcherToolDef[] }> {
     const host = new FakeDshHost();
-    // Collect-and-hold scheduler: a parked ask leaves no real timer armed.
-    const multitask = createMultitask(host, {
-      access: {
-        timeoutMs: 50,
-        schedule: () => () => {},
-      },
-    });
+    // Ticket 174 / ADR-0033 removed the access-ask seam and its options;
+    // the core is constructed with defaults here.
+    const multitask = createMultitask(host);
     const tools = createDispatcherTools({
       multitask,
       getSessionId: () => "session-1",

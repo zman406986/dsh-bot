@@ -110,9 +110,10 @@ export type ActivationOutcome =
 export interface DispatcherActivationOptions {
   /**
    * Ticket 141: whose dispatcher this session is. `user` (the default) is the
-   * `/dsh-bot` chat. ADR-0032: one policy text serves every dispatcher, so
-   * this reaches the policy wording only and selects nothing — never the gate,
-   * never the per-session state.
+   * `/dsh-bot` chat. Ticket 175 / ADR-0034: this is the session's POLICY
+   * CLASS, and it now reaches every model-facing block (the session section,
+   * the standing rules, the wake steps) and is recorded per session for the
+   * life of the activation. It never moves the top-level gate.
    */
   readonly origin?: DispatcherOrigin;
   /**
@@ -195,6 +196,17 @@ export interface BindDispatcherLifecycleResult {
    * one session id, this one is the depth of the dispatcher tree.
    */
   dispatcherGeneration(sessionId: string): number | null;
+  /**
+   * The policy class of an activated session (ticket 175 / ADR-0034), or
+   * null once the session is deactivated — gated on `sessions` membership
+   * exactly like {@link activationGeneration} and
+   * {@link dispatcherGeneration}.
+   *
+   * Null means "not a live activation", never a guessed class: callers that
+   * need today's behaviour for a dormant session pass `"user"` themselves,
+   * which is the same default a forgotten argument produces.
+   */
+  dispatcherOrigin(sessionId: string): DispatcherOrigin | null;
   /** Every activated dispatcher session id (ADR-0019). */
   dispatcherSessionIds(): readonly string[];
   /**
@@ -329,6 +341,21 @@ export function bindDispatcherLifecycle(
    * map is consulted before falling back to the id.
    */
   const spawnTitles = new Map<string, string>();
+  /**
+   * Policy class per session (ticket 175 / ADR-0034 decision 1): which class
+   * this activation runs — `user` (the human's chief of staff) or `spawned`
+   * (a team leader another dispatcher summoned).
+   *
+   * A separate map from its three neighbours, deliberately: `generations` is
+   * the activation counter (which activation of this session id is live),
+   * `spawnGenerations` is the tree depth, `spawnTitles` is the roster label,
+   * and this one is the policy class. They share a key and nothing else.
+   *
+   * Set at activation from the caller-supplied `origin`, and deleted at
+   * deactivation so a later activation of the same session id cannot inherit
+   * a stale class (ADR-0034 Consequences).
+   */
+  const origins = new Map<string, DispatcherOrigin>();
   let activationSeq = 0;
   let unbound = false;
   const disposers: Array<() => void> = [];
@@ -337,6 +364,7 @@ export function bindDispatcherLifecycle(
     if (!sessions.has(sessionId)) return;
     sessions.delete(sessionId);
     spawnTitles.delete(sessionId);
+    origins.delete(sessionId);
     host.unbindParent(sessionId);
     onDeactivated?.(sessionId);
   }
@@ -425,6 +453,11 @@ export function bindDispatcherLifecycle(
                 multitask.listTodos(agentSessionId),
                 peerRosterFor(agentSessionId),
                 policyLanguage,
+                // Ticket 175: the reminder carries the class's standing
+                // rules. A session the map somehow lacks falls back to
+                // `user`, which is the same default every pre-175
+                // activation produced.
+                origins.get(agentSessionId) ?? "user",
               ),
             );
           }
@@ -463,8 +496,12 @@ export function bindDispatcherLifecycle(
    * extracted verbatim from `activate` so the spawned path cannot drift from
    * the command path.
    *
-   * Ticket 141: `origin` only reaches the policy text, which ADR-0032 made a
-   * single text for every dispatcher, so nothing branches on it any more.
+   * Ticket 175 / ADR-0034: `origin` is the session's POLICY CLASS, and it is
+   * stored here so every later composition point can ask which class this
+   * activation is — the per-turn reminder (`assembleTurnReminder`) and every
+   * wake composition read it back through
+   * {@link BindDispatcherLifecycleResult.dispatcherOrigin}. Until ticket 175
+   * it reached the session policy section once and was then dropped.
    *
    * `generation` is stored so
    * {@link BindDispatcherLifecycleResult.dispatcherGeneration} can answer it,
@@ -484,6 +521,8 @@ export function bindDispatcherLifecycle(
     // ADR-0019: another chat being a dispatcher is not a refusal — each
     // session activates independently.
     sessions.set(sessionId, agent);
+    // Ticket 175: the class belongs to THIS activation and is dropped with it.
+    origins.set(sessionId, origin);
     // Ticket 155: a summoned session has no `subagent.label`, so its spawn
     // title is the label its peers read. Omitted for a user chat.
     if (title !== undefined && title.length > 0) {
@@ -531,9 +570,10 @@ export function bindDispatcherLifecycle(
       return { ok: false, reason: "already-active-here" };
     }
     // Defaults keep the user path byte-identical: generation 1, `user`
-    // wording, no spawn title. A summoned dispatcher's generation comes from
-    // its caller (the spawn carries it explicitly); origin no longer implies
-    // one, since ADR-0032 left a single policy text.
+    // class, no spawn title. A summoned dispatcher's class and generation
+    // come from its caller — the spawn path passes `origin: "spawned"`
+    // explicitly, and the cold-resume hook passes the class the durable
+    // projection reports. Neither one implies the other.
     const origin = options?.origin ?? "user";
     bindActivation(
       agent,
@@ -583,6 +623,14 @@ export function bindDispatcherLifecycle(
       // session's number comes from its durable mark row, not from here.
       if (!sessions.has(sessionId)) return null;
       return spawnGenerations.get(sessionId) ?? null;
+    },
+
+    dispatcherOrigin(sessionId: string): DispatcherOrigin | null {
+      // Same liveness gate as the two accessors above. A dormant session
+      // answers null rather than guessing: its durable class is the caller's
+      // read (the mark row / the kind projection), not this map's.
+      if (!sessions.has(sessionId)) return null;
+      return origins.get(sessionId) ?? null;
     },
 
     dispatcherSessionIds(): readonly string[] {

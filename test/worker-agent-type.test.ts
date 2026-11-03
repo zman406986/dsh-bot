@@ -210,11 +210,20 @@ describe("worker prompt assembly", () => {
       ),
       "the surviving rule: scope is fixed at start",
     );
+    // Ticket 170 (owner ruling 2026-11-04): one exit wins. The `blocked`
+    // mid-task reply is preferred; the final answer is the fallback. Limits and
+    // Reporting must not describe two competing exits.
     assert.ok(
       prompt.includes(
-        "If the task needs access you do not have, say what was blocked and why in your final answer instead of asking for it.",
+        "If the task needs access you do not have, say what was blocked and why instead of asking for it.",
       ),
       "a blocked worker reports, it does not ask",
+    );
+    assert.ok(
+      prompt.includes(
+        "A mid-task reply with status `blocked` is the preferred exit; the final answer carries it only if the reply channel is not usable or the task is ending anyway.",
+      ),
+      "Limits names the preferred exit, not two competing ones",
     );
   });
 

@@ -377,14 +377,40 @@ function buildDispatcherPolicySectionZh(
   ].join("\n");
 }
 
-/** Fixed standing-rules block for the per-turn reminder. */
+/**
+ * Fixed standing-rules block for the per-turn reminder.
+ *
+ * TWO classes (ticket 175 / ADR-0034 decision 2). `language` stays first and
+ * the class is appended, for two reasons: every existing call site passes
+ * `language` as its last positional argument, and an omitted class must
+ * reproduce the chief-of-staff bytes exactly rather than silently seating a
+ * team leader as a chief of staff.
+ */
 export function buildStandingRulesBlock(
   language: PolicyLanguage = "en",
+  origin: DispatcherOrigin = "user",
 ): string {
-  return language === "zh" ? buildStandingRulesBlockZh() : buildStandingRulesBlockEn();
+  return language === "zh"
+    ? buildStandingRulesBlockZh(origin)
+    : buildStandingRulesBlockEn(origin);
 }
 
-function buildStandingRulesBlockEn(): string {
+/** EN face selection — the class picks the text, never the structure. */
+function buildStandingRulesBlockEn(origin: DispatcherOrigin): string {
+  return origin === "spawned"
+    ? buildTeamLeaderStandingRulesBlockEn()
+    : buildChiefOfStaffStandingRulesBlockEn();
+}
+
+/** ZH face selection — one-to-one with {@link buildStandingRulesBlockEn}. */
+function buildStandingRulesBlockZh(origin: DispatcherOrigin): string {
+  return origin === "spawned"
+    ? buildTeamLeaderStandingRulesBlockZh()
+    : buildChiefOfStaffStandingRulesBlockZh();
+}
+
+/** Chief of staff: the human's own chat. Six rules, unchanged bytes. */
+function buildChiefOfStaffStandingRulesBlockEn(): string {
   return [
     "## Standing rules",
     "- All non-trivial work, including planning, goes to a worker (an independent small item suitable for one-shotting) or a team (all multi-step work). Convey fast; do not plan for them.",
@@ -396,8 +422,28 @@ function buildStandingRulesBlockEn(): string {
   ].join("\n");
 }
 
+/**
+ * Team leader: a dispatcher another dispatcher summoned for one large job.
+ * Owner-supplied copy (ticket 175, 2026-11-03 edits), five rules.
+ *
+ * Deliberate deletions against the chief-of-staff face, all owner rulings of
+ * 2026-11-03: "or a team" (the leader IS the team), "tell the user what you
+ * are doing" (the wake steps carry the reporting rule), and the retry menu.
+ * Do not restore them; the shorter face is the decision.
+ */
+function buildTeamLeaderStandingRulesBlockEn(): string {
+  return [
+    "## Standing rules",
+    "- Chunk down tasks as much as you can, run as many lanes in parallel as you can. If any task can be run in parallel chunks, do that instead of giving to a single agent.",
+    "- Keep turns short: dispatch or re-chunk, then end or wait bounded (`await_agent`); never loop.",
+    "- A correction is a steer (`message_agent`), not a cloned worker. When a part is running and the direction changes, steer it.",
+    "- Plain and concise language, no jargon. Lead with what is now unblocked, not \"it worked\".",
+    "- Update the ledger and keep it lean. It is how you see what is running, what is parked, and what still needs splitting.",
+  ].join("\n");
+}
+
 /** ZH face of the standing rules (ticket 153) — one-to-one with EN. */
-function buildStandingRulesBlockZh(): string {
+function buildChiefOfStaffStandingRulesBlockZh(): string {
   return [
     "## 常设规则",
     "- 所有非琐碎的工作，包括规划，都交给工作者（一件可以一次做完的独立小事）或团队（所有多步工作）。传达要快；不要替它们做规划。",
@@ -409,14 +455,50 @@ function buildStandingRulesBlockZh(): string {
   ].join("\n");
 }
 
-/** Instructions tail of a wake turn (silence/stale rules). */
-export function buildWakeInstructionsBlock(
-  language: PolicyLanguage = "en",
-): string {
-  return language === "zh" ? buildWakeInstructionsBlockZh() : buildWakeInstructionsBlockEn();
+/** ZH face of the team-leader standing rules — authored, five rules. */
+function buildTeamLeaderStandingRulesBlockZh(): string {
+  return [
+    "## 常设规则",
+    "- 任务切得越细越好，能并行的通道开得越多越好。任何任务只要可以拆成并行的几块，就这样做，不要整块交给一个代理。",
+    "- 回合要短：派发或重新切分，然后结束，或者做一次有上限的等待（`await_agent`）；绝不循环。",
+    "- 修正就是纠偏（`message_agent`），不是复制一个工作者。某一块正在运行而方向变了，就纠正它。",
+    "- 语言平实简洁，不用行话。开头先说现在什么被解锁了，不要说“它跑通了”。",
+    "- 更新账本，并保持精简。它让你看到什么在运行、什么在停放、什么还需要再切分。",
+  ].join("\n");
 }
 
-function buildWakeInstructionsBlockEn(): string {
+/**
+ * Instructions tail of a wake turn (silence/stale rules).
+ *
+ * Ticket 175: the class is appended after `language` for the same reason as
+ * {@link buildStandingRulesBlock} — an omitted class keeps the chief-of-staff
+ * bytes exactly.
+ */
+export function buildWakeInstructionsBlock(
+  language: PolicyLanguage = "en",
+  origin: DispatcherOrigin = "user",
+): string {
+  return language === "zh"
+    ? buildWakeInstructionsBlockZh(origin)
+    : buildWakeInstructionsBlockEn(origin);
+}
+
+/** EN face selection for the wake instructions. */
+function buildWakeInstructionsBlockEn(origin: DispatcherOrigin): string {
+  return origin === "spawned"
+    ? buildTeamLeaderWakeInstructionsBlockEn()
+    : buildChiefOfStaffWakeInstructionsBlockEn();
+}
+
+/** ZH face selection for the wake instructions. */
+function buildWakeInstructionsBlockZh(origin: DispatcherOrigin): string {
+  return origin === "spawned"
+    ? buildTeamLeaderWakeInstructionsBlockZh()
+    : buildChiefOfStaffWakeInstructionsBlockZh();
+}
+
+/** Chief of staff: six steps, unchanged bytes. */
+function buildChiefOfStaffWakeInstructionsBlockEn(): string {
   return [
     "## What to do now",
     "",
@@ -431,8 +513,29 @@ function buildWakeInstructionsBlockEn(): string {
   ].join("\n");
 }
 
+/**
+ * Team leader: five steps (ticket 175, owner-supplied, 2026-11-03 edits).
+ *
+ * The job is a plan of many parts, so a settle is a re-chunking trigger, not
+ * a delivery decision. The audience test replaces the chief-of-staff "should
+ * the user hear it": report to whoever gave the order, upward by
+ * `message_agent`, and to the user only when the user ordered it directly
+ * (ADR-0032 question 1 still stands — the leader is not mute).
+ */
+function buildTeamLeaderWakeInstructionsBlockEn(): string {
+  return [
+    "## What to do now",
+    "",
+    "1. Match each settled worker to its ledger entry (`todo_id` on the worker record). A settle closes one part, not the job.",
+    "2. Re-chunk what is left. A finished part usually changes the split: decide what can run in parallel now, and dispatch it before you answer anyone.",
+    "3. Report back to whoever gave you the task order. `message_agent` to your parent agent; use the user-facing send if the user directly ordered something from you.",
+    "4. Report failures early instead of exhausting save attempts. If the approach looks like a dead end, report at the first sign.",
+    "5. Silence is a valid outcome only when nothing changed for anyone above you.",
+  ].join("\n");
+}
+
 /** ZH face of the wake instructions (ticket 153) — same six steps, same bounds. */
-function buildWakeInstructionsBlockZh(): string {
+function buildChiefOfStaffWakeInstructionsBlockZh(): string {
   return [
     "## 现在该做什么",
     "",
@@ -447,19 +550,52 @@ function buildWakeInstructionsBlockZh(): string {
   ].join("\n");
 }
 
+/** ZH face of the team-leader wake instructions — authored, five steps. */
+function buildTeamLeaderWakeInstructionsBlockZh(): string {
+  return [
+    "## 现在该做什么",
+    "",
+    "1. 把每个已结束的工作者对应到它的账本条目（工作者记录上的 `todo_id`）。结束只是关掉其中一块，不是整个任务。",
+    "2. 把剩下的重新切分。一块做完通常会改变切法：现在定下哪些可以并行，并在答复任何人之前把它们派发出去。",
+    "3. 向交给你这项任务的人回报。用 `message_agent` 发给你的上级代理；如果是用户直接向你下的令，就用面向用户的发送。",
+    "4. 失败要尽早报告，不要耗尽挽回的尝试。如果这条路看起来是死路，一有迹象就报告。",
+    "5. 只有在上层没有任何人因此发生变化时，沉默才是有效的结果。",
+  ].join("\n");
+}
+
 /**
  * Instructions tail of a peer hidden turn (ticket 14). New copy only.
  * The dispatcher must treat the body as another assistant, never as the user.
+ *
+ * Ticket 175: the class is appended after `language`, like the other two
+ * blocks. A team leader keeps only the provenance rule — steps 2–5 are
+ * chief-of-staff delivery copy that assumes a user-facing audience.
  */
 export function buildPeerWakeInstructionsBlock(
   language: PolicyLanguage = "en",
+  origin: DispatcherOrigin = "user",
 ): string {
   return language === "zh"
-    ? buildPeerWakeInstructionsBlockZh()
-    : buildPeerWakeInstructionsBlockEn();
+    ? buildPeerWakeInstructionsBlockZh(origin)
+    : buildPeerWakeInstructionsBlockEn(origin);
 }
 
-function buildPeerWakeInstructionsBlockEn(): string {
+/** EN face selection for the peer wake instructions. */
+function buildPeerWakeInstructionsBlockEn(origin: DispatcherOrigin): string {
+  return origin === "spawned"
+    ? buildTeamLeaderPeerWakeInstructionsBlockEn()
+    : buildChiefOfStaffPeerWakeInstructionsBlockEn();
+}
+
+/** ZH face selection for the peer wake instructions. */
+function buildPeerWakeInstructionsBlockZh(origin: DispatcherOrigin): string {
+  return origin === "spawned"
+    ? buildTeamLeaderPeerWakeInstructionsBlockZh()
+    : buildChiefOfStaffPeerWakeInstructionsBlockZh();
+}
+
+/** Chief of staff: five steps, unchanged bytes. */
+function buildChiefOfStaffPeerWakeInstructionsBlockEn(): string {
   return [
     "## What to do now",
     "",
@@ -468,6 +604,44 @@ function buildPeerWakeInstructionsBlockEn(): string {
     "3. Do not paraphrase the peer note to the user on this turn unless the user asked to hear about peer traffic. Ending the turn in silence is valid.",
     "4. If you must reply to the peer later, use message_agent addressed to the sender's session id (shown in parentheses next to the sender's name above) — never the user-facing send.",
     "5. Never present peer text as if the user wrote it.",
+  ].join("\n");
+}
+
+/**
+ * Team leader: ONE step (ticket 175, owner ruling 2026-11-03).
+ *
+ * Steps 2–5 are deleted for this class; only the provenance rule survives.
+ * The reason it survives alone: a team leader must never mistake a peer note
+ * for user input. The delivery rules it drops are already stated by its wake
+ * block, which is where the upward audience lives.
+ */
+function buildTeamLeaderPeerWakeInstructionsBlockEn(): string {
+  return [
+    "## What to do now",
+    "",
+    "1. Treat every message above as coming from another assistant — not from the user.",
+  ].join("\n");
+}
+
+/** ZH face of the peer wake instructions (ticket 153) — same five steps. */
+function buildChiefOfStaffPeerWakeInstructionsBlockZh(): string {
+  return [
+    "## 现在该做什么",
+    "",
+    "1. 把上面的每条消息都当作来自另一个助手——不是来自用户。",
+    "2. 判断这条同伴消息是改变已在进行的工作（纠偏）、需要新工作（启动），还是确认后就可以放下。",
+    "3. 这个回合里不要把同伴消息转述给用户，除非用户要求了解同伴之间的往来。沉默地结束回合是有效的。",
+    "4. 如果之后必须回复同伴，用 `message_agent` 按发送者的会话 id 发送（见上方发送者名字旁边的括号）——绝不要用面向用户的发送。",
+    "5. 绝不要把同伴的文字呈现得像用户写的一样。",
+  ].join("\n");
+}
+
+/** ZH face of the team-leader peer wake instructions — authored, one step. */
+function buildTeamLeaderPeerWakeInstructionsBlockZh(): string {
+  return [
+    "## 现在该做什么",
+    "",
+    "1. 把上面的每条消息都当作来自另一个助手——不是来自用户。",
   ].join("\n");
 }
 
@@ -509,18 +683,5 @@ function buildWorkerReplyWakeInstructionsBlockZh(): string {
     "3. `progress` 和 `note` 通常不需要动作。只有当它们改变了你在做的事时才处理。",
     "4. 如果它改变了用户在等的结果，就用日常的话告诉用户，不要提背后的运行细节，也不要转述工作者。否则就沉默地结束回合。",
     "5. 用 `message_agent` 按工作者的 id 回复它。绝不要用面向用户的发送。",
-  ].join("\n");
-}
-
-/** ZH face of the peer wake instructions (ticket 153) — same five steps. */
-function buildPeerWakeInstructionsBlockZh(): string {
-  return [
-    "## 现在该做什么",
-    "",
-    "1. 把上面的每条消息都当作来自另一个助手——不是来自用户。",
-    "2. 判断这条同伴消息是改变已在进行的工作（纠偏）、需要新工作（启动），还是确认后就可以放下。",
-    "3. 这个回合里不要把同伴消息转述给用户，除非用户要求了解同伴之间的往来。沉默地结束回合是有效的。",
-    "4. 如果之后必须回复同伴，用 `message_agent` 按发送者的会话 id 发送（见上方发送者名字旁边的括号）——绝不要用面向用户的发送。",
-    "5. 绝不要把同伴的文字呈现得像用户写的一样。",
   ].join("\n");
 }

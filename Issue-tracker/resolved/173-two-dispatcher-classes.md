@@ -1,6 +1,6 @@
 # 173 — Two dispatcher classes: chief of staff (human-started) and team leader (summoned)
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Blocked by:** nothing. Copy change plus one argument at the spawn path.
 **Origin:** owner-directed, 2026-11-03. The owner supplied both texts verbatim and asked for "a class for dispatcher spawned dispatcher (not human spawned)". This **reverses** the owner ruling of 2026-10-28 (ADR-0032 open question 1, ticket 166) that one policy text served every dispatcher.
@@ -73,3 +73,27 @@ Recorded in the code comment on the cold-resume test. Fixing it means adding the
 ## Comments
 
 **2026-11-03 — implemented ahead of filing, again.** The owner asked in conversation and the change was made and tested before this ticket existed. The repo rule is to log first; this is the second time in two days that pass went the other way, recorded here rather than hidden.
+
+**2026-11-04 — closed as implemented.** Verified against the code in the tree, not against this ticket's own claims. The three open acceptance boxes are discharged or superseded, one by one.
+
+**What shipped, verified in code**
+
+- **`DispatcherOrigin` accepts both classes.** `export type DispatcherOrigin = "user" | "spawned";` — `src/core/policy/prompts.ts:68`.
+- **`buildDispatcherPolicySection` branches on the class.** `if (origin === "spawned") return language === "zh" ? buildSpawnedDispatcherSectionZh() : buildSpawnedDispatcherSectionEn();` — `src/core/policy/prompts.ts:262-275`; the team-leader EN text is `:309-328` (`"# Multitask dispatcher — team leader"`, `:311`) and its ZH face `:333-349`. The chief-of-staff section is the owner's four bullets (`:278-290`), and `POLICY_SECTION_HEADINGS` is the H1 only (`:144-146`), as the ticket describes.
+- **`onDispatcherSpawned` passes the class, so it actually loads.** `dispatcherClassBySession.set(sessionId, "spawned"); host.recordDispatcherClass(sessionId, "spawned"); lifecycle.activate(agent, { generation, origin: "spawned", … })` — `src/plugin.ts:729-734`. The host independently stamps `dispatcherClasses.set(sessionId, "spawned")` in the activation helper (`src/adapter/cordis-dsh-host.ts:1653`).
+- **The three tool-name mappings hold.** `list_agents` is absent from `src/` entirely; the team-leader text names no tool at all, and a test pins that (`test/policy-assembler.test.ts:606-614`, "the scheduling health-check block that carried `check_workers` is gone").
+- **Tool descriptions shortened on both faces.** `TOOL_DESCRIPTIONS` / `TOOL_DESCRIPTIONS_ZH` — `src/core/policy/prompts.ts:87-131`; `message_agent` no longer names `list_agents`.
+- **Both classes get the same eight tools.** `DISPATCHER_TOOL_NAMES` — `src/core/policy/prompts.ts:75-84`. Note the ONE exception the later ticket 176 added: the summoned class has seven of the eight, since `spawn_dispatcher` is withheld (`src/core/tools.ts:700-701` and `:1509-1511`). That is ticket 176's owner ruling, recorded after this ticket, and it narrows this ticket's "same eight tools" line rather than contradicting the class split.
+
+**The three open acceptance boxes**
+
+- **"Rulebook / PRD note that the 2026-10-28 one-text ruling is superseded — not yet written."** **Discharged elsewhere.** The PRD carries it (amended 2026-11-03): `PRD-dsh-multitask-dispatcher.md:126` ("the dispatcher policy is **two classes**, not one text, and both classes answer their own user directly…") and §10's two rows at `:358-359`. Accepted ADR-0034 records the reversal (`docs/adr/0034-two-dispatcher-policy-classes.md:3`), ADR-0032's Status line carries the dated note, and `docs/adr/README.md:38,40` indexes it. `docs/agents-rulebook.md` needs no edit: it holds no dispatcher-policy text to supersede (searching it for "0034", "team leader" and "dispatcher policy" returns nothing — its dispatcher references are the process rules only). The obligation the box was protecting is met by the documents that own the claim.
+- **"Live check that a summoned dispatcher really receives the team-leader text — not run."** **Left as owed work, and it does not hold this ticket open.** The whole live lane — including this check — is ticket 158's scope, which exists precisely to finish the verification this change could not run (`Issue-tracker/open/158-157-verification-sweep.md:5-6`, `:49-51`, and its acceptance at `:55-61`). Nothing in the code is waiting on it: the class reaches the policy through `lifecycle.activate(agent, { origin: "spawned" })` → `bindActivation` → `assembleSessionPolicy`, and the class is unit-tested at `test/spawn-dispatcher-activation.test.ts:784-805` ("the summoned dispatcher gets the team-leader class, not the chief-of-staff one"). No live run was performed by this sweep.
+- **"The class survives a restart — deliberately not done, see the limitation above."** **Closed by ticket 177's durable-class work, as the ticket predicted it would be.** The "Known limitation" section above is now stale: `origin` IS persisted and read back.
+  - The durable projection carries it: `sessionKindProjectionState` spreads `dispatcherClass: "spawned"` when the `dispatcher_sessions` mark answers `"dispatcher"` (`src/adapter/session-kind-projection.ts:336-342`), and `classOf(state)` otherwise (`:350-356`).
+  - The host reads it back on a parentless resume through `dispatcherClassOf` (`src/adapter/cordis-dsh-host.ts:455`, read at `:2019` via `readDispatcherClass` `:1015-1032`) and passes it into `onUserDispatcherResumed` (`:2020-2024`), with a comment naming this ticket's limitation as the thing being closed (`:2014-2018`).
+  - The plugin activates with it: `onUserDispatcherResumed: (agent, _sessionId, origin) => { … lifecycle.activate(agent, { origin }) }` — `src/plugin.ts:760-766`.
+  - A test asserts a cold-resumed summoned dispatcher comes back with the team-leader text and without the summon verb: `test/spawn-dispatcher-activation.test.ts:1321-1364`, including `"the team-leader class is restored from the durable mark"`.
+  - No test still pins a chief-of-staff fallback for a resumed summoned dispatcher; the fallback now applies only when the durable answer is genuinely unreadable, which is the fail-closed path (`src/adapter/cordis-dsh-host.ts:1029-1032`).
+
+Tickets 175 (`Issue-tracker/resolved/175-class-split-wake-and-standing-blocks.md`) finished the standing-rules and wake-instruction halves of the same split; this ticket's scope was the session section and the spawn argument, which are both present. No live dsh, LLM or browser run was performed by this sweep, and no `src/` or `test/` file was modified by it.

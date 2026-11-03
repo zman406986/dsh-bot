@@ -286,6 +286,13 @@ export function assembleActivityDigest(
  * the wake text itself, with no storage writes and no prompt-side
  * references to stored outputs.
  *
+ * `originOf` (ticket 175 / ADR-0034 decision 2) answers the POLICY CLASS of
+ * the session the wake is composed for, so the wake steps and the standing
+ * rules ride the class's face. Omitted means `"user"` — the chief-of-staff
+ * bytes every pre-175 caller produced. It is a closure rather than a plain
+ * value because the caller that builds it cannot know the class until the
+ * session is activated, which happens after the wiring below.
+ *
  * Exported for offline tests: the shipped caller is the `composeWakeText`
  * option wired into `createCordisDshHost` in `apply` below.
  */
@@ -294,16 +301,23 @@ export function composeWakeText(
   sessionId: string,
   recentActivities?: WakeActivitySource,
   language: PolicyLanguage = "en",
+  originOf?: (sessionId: string) => DispatcherOrigin | null,
 ): string | null {
   const drained = multitask.drainWake(sessionId);
   if (drained === undefined) return null;
+  const origin: DispatcherOrigin =
+    originOf?.(sessionId) ?? "user";
 
   // Peer hidden turn: dedicated other-assistant cue, never settle copy.
   if (
     drained.wake.source === "peer" &&
     (drained.wake.peerMessages ?? []).length > 0
   ) {
-    return assemblePeerWakeTurn(drained.wake.peerMessages ?? [], language);
+    return assemblePeerWakeTurn(
+      drained.wake.peerMessages ?? [],
+      language,
+      origin,
+    );
   }
 
   const roster = multitask.listWorkers(sessionId);
@@ -350,8 +364,9 @@ export function composeWakeText(
     multitask.listTodos(sessionId),
     null,
     language,
+    origin,
   );
-  const wake = assembleWakeTurn(notices, language);
+  const wake = assembleWakeTurn(notices, language, origin);
   const inboxSection =
     externalJobs.length > 0
       ? [
@@ -646,11 +661,18 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       // binding is initialized by the very call this closure is passed to,
       // and the first invocation happens at wake delivery, long after apply
       // has returned, so the closure never sees the uninitialized binding.
+      //
+      // Ticket 175: `lifecycle` is read under the same rule (`lifecycle` is
+      // assigned further below, and this closure only runs at wake delivery).
+      // The class comes from the lifecycle's per-session record, so a wake on
+      // a dormant session — or before activation — reproduces the `user`
+      // bytes instead of guessing.
       return composeWakeText(
         multitaskRef,
         sessionId,
         (workerId, n) => host.recentActivities(workerId, n),
         language,
+        (id) => lifecycle.dispatcherOrigin(id),
       );
     },
     // Ticket 122: the child's mid-task reply channel. Registered on the

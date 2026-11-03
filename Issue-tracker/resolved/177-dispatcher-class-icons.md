@@ -1,6 +1,6 @@
 # 177 — A different sidebar icon for each dispatcher class
 
-**Status:** open
+**Status:** resolved
 **Type:** task
 **Labels:** ready-for-agent
 **Blocked by:** nothing.
@@ -142,3 +142,8 @@ Implemented as follows (one line per file). The list below is what was specified
 | `test/spawned-dispatcher-kind.test.ts` | 3 pins moved from `"dispatcher"` to `TEAM_LEADER_SESSION_KIND`, since a mark row means a summon. |
 | `test/client-face-scaffold.test.ts` | Locale key list gains `indicator.team-leader`. |
 | `client/index.js` | Rebuilt bundle (git-ignored build output). |
+
+### 2026-11-04 — PM closure
+
+Shipped in commit `643a801` on `main`. Full suite green at closure (754 tests, 0 fail),
+both tsconfigs clean, `npm run lint:docs` clean.

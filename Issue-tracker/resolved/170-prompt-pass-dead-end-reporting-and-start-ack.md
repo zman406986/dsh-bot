@@ -1,6 +1,6 @@
 # 170 — Prompt pass: dead-end reporting, verification honesty, start acknowledgement, no method design
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Blocked by:** nothing. Copy change only; no behaviour, no host seam, no dependency.
 **Origin:** owner-directed prompt review, 2026-11-02, after studying the published `dsh-superagent-prototype` for prompt practice. Owner rulings in that session: add failure-mode reporting; make "failure is an acceptable and important outcome"; report a dead end at once instead of exhausting attempts; replace our "verify before claiming" line with the prototype's stronger version; remove the method-design clause from the dispatcher; add a "say what you are doing" rule.
@@ -75,3 +75,23 @@ Five gaps in the model-facing copy, four in the worker contract and two in the d
 ## Comments
 
 **2026-11-02 — implemented ahead of filing.** The owner asked for the change directly in conversation and the copy was edited and tested before this ticket existed. Filing it now records the change and its rules; the repo's "log before implementing" rule was not followed for this pass, which is recorded here rather than hidden.
+
+**2026-11-04 — live half closed.** Read this first: **the dispatcher half of this ticket is dead.** The owner replaced the per-session dispatcher section, the standing rules, the wake-turn instructions and the `spawn_worker` description with their own copy on 2026-11-02/03. Nothing here asks for dispatcher text; ticket 173 owns the two-class split. What was left was the worker contract at `src/worker/prompt.ts`.
+
+*Already present in the file, verified not re-written:*
+- `## Reporting` / `## 报告方式` exist between `## Final answer` and `## Safety`, in both `WORKER_CONTRACT_HEADINGS` / `WORKER_CONTRACT_HEADINGS_ZH`, same position.
+- `## Final answer` carries no "essentially verbatim" promise. `## Reporting` already says the parent writes the user-facing version and the worker gets no second message to correct a muddled one.
+- The dead-end rule already names `blocked` and already says to report before attempts run out ("Do not hold a dead end while you burn attempts").
+- `## Safety` already names the check, its result, and the check that could not run, plus the post-restart inspection line.
+- Both faces were 49 lines before this pass.
+
+*What this pass changed (the one open defect):* `## Limits` told a blocked worker to report in the **final answer**, while `## Reporting` told it to send a `blocked` **mid-task reply**. Two exits, no rule saying which wins. Owner ruling 2026-11-04 answered "`## Reporting`": the mid-task reply is the preferred exit; the final answer carries it only when the reply channel is unusable or the task is ending anyway.
+
+- `## Limits`, EN: the access sentence now ends with the fallback clause instead of naming the final answer as the destination, and adds "A mid-task reply with status `blocked` is the preferred exit; the final answer carries it only if the reply channel is not usable or the task is ending anyway."
+- `## Limits`, ZH: same rule on one line, same position.
+- `## Reporting`, EN and ZH: one new line, right after the existing dead-end rule, stating the same precedence and the two fallback conditions.
+- `test/worker-agent-type.test.ts`: the pin on the old `## Limits` final-answer sentence was updated to the ruling (it pinned the very defect) and a new assertion pins the preferred-exit clause.
+
+*Not changed:* no dispatcher text, no access-ask section (ADR-0033 / `643a801` deliberately removed it), no heading added or removed, no `{{`/`}}` introduced.
+
+*Verification:* EN and ZH both 50 lines, line-for-line equal; `npx tsc -p tsconfig.json --noEmit` exits 0; `test/policy-zh-assets.test.ts`, `test/worker-agent-type.test.ts`, `test/worker-composition.test.ts`, `test/worker-reply.test.ts` pass 36/36. Note: another lane was mid-edit in `src/core/policy/prompts.ts` during the first run (transient duplicate declaration); the green run is the later one. Full offline suite still not run for this ticket, and the live `blocked`-reply check is still outstanding — both were already open above and remain so.

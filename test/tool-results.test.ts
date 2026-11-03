@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import {toCheckRow} from "../src/core/tool-results.js";
+import {formatCheckRowLine, formatCheckSummary, toCheckRow} from "../src/core/tool-results.js";
 import type { WorkerSummary } from "../src/core/types.js";
 
 function summary(overrides: Partial<WorkerSummary> = {}): WorkerSummary {
@@ -33,5 +33,57 @@ describe("check row formatting", () => {
     assert.equal(row.recent_activity, null);
   });
 
+});
+
+describe("check row stage segment (ticket 171)", () => {
+  it("defaults the stage to null and renders no stage segment", () => {
+    const row = toCheckRow(summary());
+    assert.equal(row.stage, null);
+    assert.ok(!formatCheckRowLine(row).includes("stage:"));
+  });
+
+  it("renders stage when present, after the liveness segment", () => {
+    const row = toCheckRow(summary(), null, "quiet", "waiting-for-delivery");
+    assert.equal(row.stage, "waiting-for-delivery");
+    const line = formatCheckRowLine(row);
+    assert.ok(line.includes("stage: waiting-for-delivery"));
+    assert.ok(
+      line.indexOf("liveness: quiet") < line.indexOf("stage:"),
+      "stage must follow liveness, same as the documented row shape",
+    );
+  });
+
+  /**
+   * The S4 distinction the stage exists for: the two rows below carry the
+   * SAME `status` (a delivered result and an owed one both ended their turn),
+   * and only the stage separates "already read by the user" from "still owed".
+   */
+  it("distinguishes a delivered result from an owed one at equal status", () => {
+    const owed = formatCheckRowLine(
+      toCheckRow(summary({ status: "completed" }), null, "quiet", "waiting-for-delivery"),
+    );
+    const delivered = formatCheckRowLine(
+      toCheckRow(summary({ status: "completed" }), null, "quiet", "ended"),
+    );
+    assert.ok(owed.includes("completed") && delivered.includes("completed"));
+    assert.ok(owed.includes("stage: waiting-for-delivery"));
+    assert.ok(delivered.includes("stage: ended"));
+    assert.notEqual(owed, delivered);
+  });
+
+  it("the summary line carries the stage through formatCheckSummary", () => {
+    const rows = [
+      toCheckRow(summary(), null, null, "working"),
+      toCheckRow(
+        summary({ workerId: "w-2", streamKey: "todo-2" }),
+        null,
+        null,
+        "ended",
+      ),
+    ];
+    const text = formatCheckSummary(rows);
+    assert.ok(text.includes("stage: working"));
+    assert.ok(text.includes("stage: ended"));
+  });
 });
 

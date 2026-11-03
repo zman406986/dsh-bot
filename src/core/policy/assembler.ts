@@ -83,6 +83,10 @@ export function formatLedgerLine(todo: TodoItem): string {
  *
  * Empty ledger still injects the rules; ledger line becomes `(empty)`.
  *
+ * `origin` (ticket 175 / ADR-0034) selects which class's standing rules the
+ * session reads. It is trailing and defaults to `"user"`, so every existing
+ * caller and test keeps producing the chief-of-staff bytes.
+ *
  * Tail placement is load-bearing: the roster is appended after every stable
  * rule, and the bytes before it are produced by the same array join whether
  * or not peers exist. Adding the roster therefore cannot shift a single
@@ -92,6 +96,7 @@ export function assembleTurnReminder(
   todos: readonly TodoItem[],
   peers?: PeerRosterSnapshot | null,
   language: PolicyLanguage = "en",
+  origin: DispatcherOrigin = "user",
 ): string {
   const headings =
     language === "zh" ? REMINDER_SECTION_HEADINGS_ZH : REMINDER_SECTION_HEADINGS;
@@ -103,7 +108,7 @@ export function assembleTurnReminder(
     headings[0],
     ...ledgerLines,
     "",
-    buildStandingRulesBlock(language),
+    buildStandingRulesBlock(language, origin),
   ];
   const roster = renderPeerRoster(peers, language);
   if (roster !== null) {
@@ -396,9 +401,15 @@ export function noticeFromSettled(
 /**
  * Wake-turn instructions for worker-settled hidden turns.
  * Silence is a valid outcome (stale / duplicate / irrelevant).
+ *
+ * `origin` (ticket 175 / ADR-0034 decision 2) selects the class's steps: a
+ * team leader gets the re-chunk-and-report-upward face, a chief of staff the
+ * delivery-decision face. Trailing and defaulted, so an omitted class keeps
+ * the chief-of-staff bytes.
  */export function assembleWakeTurn(
   notices: readonly WakeNotice[],
   language: PolicyLanguage = "en",
+  origin: DispatcherOrigin = "user",
 ): string {
   const zh = language === "zh";
   const headings = zh ? WAKE_SECTION_HEADINGS_ZH : WAKE_SECTION_HEADINGS;
@@ -432,7 +443,7 @@ export function noticeFromSettled(
   }
 
   sections.push("");
-  sections.push(buildWakeInstructionsBlock(language));
+  sections.push(buildWakeInstructionsBlock(language, origin));
   return sections.join("\n");
 }
 
@@ -440,10 +451,16 @@ export function noticeFromSettled(
  * Hidden-turn body for a peer wake (ticket 14 / design-14 §4).
  * New copy only. The cue marks the turn as another assistant — never
  * the user. Tests assert cue tokens and structure, not full prose.
+ *
+ * `origin` (ticket 175) reaches the peer block only. The worker-reply block
+ * below stays class-free on purpose: ticket 170 still owns it, and the
+ * ticket-175 out-of-scope list records the surviving defect there (a team
+ * leader's blocked-worker reply should also point upward).
  */
 export function assemblePeerWakeTurn(
   notices: readonly PeerNotice[],
   language: PolicyLanguage = "en",
+  origin: DispatcherOrigin = "user",
 ): string {
   const zh = language === "zh";
   const headings = zh
@@ -494,7 +511,7 @@ export function assemblePeerWakeTurn(
   sections.push(
     notices.length > 0 && notices.every(isWorkerReply)
       ? buildWorkerReplyWakeInstructionsBlock(language)
-      : buildPeerWakeInstructionsBlock(language),
+      : buildPeerWakeInstructionsBlock(language, origin),
   );
   return sections.join("\n");
 }

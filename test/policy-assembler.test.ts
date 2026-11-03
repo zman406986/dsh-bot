@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
 import {
+  assemblePeerWakeTurn,
   assembleSessionPolicy,
   assembleTurnReminder,
   assembleWakeTurn,
@@ -29,6 +30,10 @@ import {
   buildWakeInstructionsBlock,
   resolvePolicyLanguage,
 } from "../src/core/policy/prompts.js";
+import type { PeerNotice } from "../src/core/peer-types.js";
+import { bindDispatcherLifecycle } from "../src/adapter/parent-agent.js";
+import type { AdapterContext, AgentLike, CordisDshHost } from "../src/adapter/cordis-dsh-host.js";
+import { createMultitask } from "../src/core/multitask.js";
 import { emptyReportPlaceholder, REPORT_CLAMP_CHARS } from "../src/core/report-clamp.js";
 import {
   formatMessageAgentDormantSteerNote,
@@ -84,13 +89,59 @@ function modelFacingCopy(): string[] {
   return [
     buildDispatcherPolicySection("user"),
     buildDispatcherPolicySection("spawned"),
-    buildStandingRulesBlock(),
-    buildWakeInstructionsBlock(),
-    buildPeerWakeInstructionsBlock(),
+    ...POLICY_LANGUAGES.flatMap((language) =>
+      (["user", "spawned"] as const).map((origin) =>
+        [
+          buildStandingRulesBlock(language, origin),
+          buildWakeInstructionsBlock(language, origin),
+          buildPeerWakeInstructionsBlock(language, origin),
+        ].join("\n"),
+      ),
+    ),
     PEER_ROSTER_INTRO,
     WAKE_CUE,
     ...DISPATCHER_TOOL_NAMES.map((name) => TOOL_DESCRIPTIONS[name]),
   ];
+}
+
+/** The owner's team-leader copy, verbatim (ticket 175). */
+const TEAM_LEADER_STANDING_RULES_EN = [
+  "## Standing rules",
+  "- Chunk down tasks as much as you can, run as many lanes in parallel as you can. If any task can be run in parallel chunks, do that instead of giving to a single agent.",
+  "- Keep turns short: dispatch or re-chunk, then end or wait bounded (`await_agent`); never loop.",
+  "- A correction is a steer (`message_agent`), not a cloned worker. When a part is running and the direction changes, steer it.",
+  "- Plain and concise language, no jargon. Lead with what is now unblocked, not \"it worked\".",
+  "- Update the ledger and keep it lean. It is how you see what is running, what is parked, and what still needs splitting.",
+].join("\n");
+
+const TEAM_LEADER_WAKE_EN = [
+  "## What to do now",
+  "",
+  "1. Match each settled worker to its ledger entry (`todo_id` on the worker record). A settle closes one part, not the job.",
+  "2. Re-chunk what is left. A finished part usually changes the split: decide what can run in parallel now, and dispatch it before you answer anyone.",
+  "3. Report back to whoever gave you the task order. `message_agent` to your parent agent; use the user-facing send if the user directly ordered something from you.",
+  "4. Report failures early instead of exhausting save attempts. If the approach looks like a dead end, report at the first sign.",
+  "5. Silence is a valid outcome only when nothing changed for anyone above you.",
+].join("\n");
+
+const TEAM_LEADER_PEER_WAKE_EN = [
+  "## What to do now",
+  "",
+  "1. Treat every message above as coming from another assistant — not from the user.",
+].join("\n");
+
+/** A peer note that is NOT a worker reply, so the peer block is selected. */
+function peerNote(): PeerNotice {
+  return {
+    messageId: "msg-1",
+    fromAgentId: "peer-session-1",
+    fromName: "Peer A",
+    to: { kind: "agent", agentId: "self-session" },
+    conversationId: "conv-1",
+    text: "How is the migration going?",
+    priority: false,
+    createdAtMs: 1_700_000_000_000,
+  };
 }
 
 describe("policy assembler", () => {
@@ -133,6 +184,11 @@ describe("policy assembler", () => {
       WAKE_CUE,
       buildWakeInstructionsBlock(),
       buildStandingRulesBlock(),
+      // Ticket 175: the team-leader faces are model-facing copy too, so the
+      // machinery vocabulary binds them exactly as it binds the chief's.
+      buildStandingRulesBlock("en", "spawned"),
+      buildWakeInstructionsBlock("en", "spawned"),
+      buildPeerWakeInstructionsBlock("en", "spawned"),
       formatSpawnAck({ title: "t", workerId: "w-1", streamKey: "s", prompt: "p" }),
       formatSteerNote("t"),
       formatDormantSteerNote("t"),
@@ -161,6 +217,120 @@ describe("policy assembler", () => {
       assert.ok(!text.includes("user has the result"));
       assert.ok(!text.includes("user actually has the result"));
     }
+    // Ticket 175: the team-leader face restates the same discipline — a
+    // settle closes one part, and nothing is marked completed there.
+    const leaderWake = buildWakeInstructionsBlock("en", "spawned");
+    assert.ok(leaderWake.includes("A settle closes one part, not the job"));
+  });
+
+  it("the chief-of-staff blocks are byte-identical to the shipped bytes (ticket 175 sha pins)", () => {
+    // Ticket 175 split three blocks into two classes each. These shas are the
+    // PRE-split chief-of-staff bytes, captured before the split landed, so
+    // any drift in the class the user still reads fails here.
+    const SHIPPED = {
+      standing: "76fccd7e67d4157d0ef1fc70f8ac54c4a0e42be0f6290e7d432d225599f3bd51",
+      wake: "79c556007306408ec59dffa2e8d935df6e1ef7ca59a3ac7d6a9f3d42fa1410a9",
+      peer: "a4429b302910a945b0b5507aae5897229c02ac1ff48b2f04b5c0c4d995e603bd",
+    } as const;
+    const sha = (text: string) =>
+      createHash("sha256").update(text, "utf8").digest("hex");
+    // Omitted class and explicit `user` are the same bytes.
+    assert.equal(sha(buildStandingRulesBlock()), SHIPPED.standing);
+    assert.equal(sha(buildStandingRulesBlock("en", "user")), SHIPPED.standing);
+    assert.equal(sha(buildWakeInstructionsBlock()), SHIPPED.wake);
+    assert.equal(sha(buildWakeInstructionsBlock("en", "user")), SHIPPED.wake);
+    assert.equal(sha(buildPeerWakeInstructionsBlock()), SHIPPED.peer);
+    assert.equal(sha(buildPeerWakeInstructionsBlock("en", "user")), SHIPPED.peer);
+  });
+
+  it("the team-leader faces carry the owner's text verbatim (ticket 175)", () => {
+    assert.equal(buildStandingRulesBlock("en", "spawned"), TEAM_LEADER_STANDING_RULES_EN);
+    assert.equal(buildWakeInstructionsBlock("en", "spawned"), TEAM_LEADER_WAKE_EN);
+    assert.equal(buildPeerWakeInstructionsBlock("en", "spawned"), TEAM_LEADER_PEER_WAKE_EN);
+    // The owner's 2026-11-03 deletions must not come back.
+    for (const text of [
+      buildStandingRulesBlock("en", "spawned"),
+      buildWakeInstructionsBlock("en", "spawned"),
+    ]) {
+      assert.ok(!text.includes("Tell the user what you are doing"));
+      assert.ok(!text.includes("whether the user should hear about it"));
+      assert.ok(!text.includes("retry as a new spawn"));
+    }
+  });
+
+  it("the three blocks branch on the class and stay distinct per class", () => {
+    for (const language of POLICY_LANGUAGES) {
+      for (const block of [
+        buildStandingRulesBlock,
+        buildWakeInstructionsBlock,
+        buildPeerWakeInstructionsBlock,
+      ] as const) {
+        assert.notEqual(block(language, "user"), block(language, "spawned"), language);
+        // Both faces are H2-led and keep their section marker.
+        assert.ok(block(language, "spawned").startsWith("## "), language);
+      }
+    }
+    // Team-leader faces are SHORTER than the chief-of-staff faces: 5 vs 6
+    // standing rules, 5 vs 6 wake steps, 1 vs 5 peer steps.
+    const bullets = (text: string) =>
+      text.split("\n").filter((line) => line.startsWith("- ")).length;
+    const numbers = (text: string) =>
+      text.split("\n").filter((line) => /^\d+\. /.test(line)).length;
+    assert.deepEqual(
+      [bullets(buildStandingRulesBlock("en", "user")), bullets(buildStandingRulesBlock("en", "spawned"))],
+      [6, 5],
+    );
+    assert.deepEqual(
+      [numbers(buildWakeInstructionsBlock("en", "user")), numbers(buildWakeInstructionsBlock("en", "spawned"))],
+      [6, 5],
+    );
+    assert.deepEqual(
+      [
+        numbers(buildPeerWakeInstructionsBlock("en", "user")),
+        numbers(buildPeerWakeInstructionsBlock("en", "spawned")),
+      ],
+      [5, 1],
+    );
+  });
+
+  it("every caller-level assembler threads the class through", () => {
+    // A team leader's reminder carries its rules; a user chat the others.
+    assert.ok(
+      assembleTurnReminder([], null, "en", "spawned").includes(
+        "Chunk down tasks as much as you can",
+      ),
+    );
+    assert.ok(
+      !assembleTurnReminder([], null, "en", "user").includes(
+        "Chunk down tasks as much as you can",
+      ),
+    );
+    // Defaults stay chief of staff — the pre-175 bytes.
+    assert.equal(assembleTurnReminder([]), assembleTurnReminder([], null, "en", "user"));
+
+    assert.ok(
+      assembleWakeTurn([notice()], "en", "spawned").includes("Re-chunk what is left"),
+    );
+    assert.ok(
+      !assembleWakeTurn([notice()], "en", "user").includes("Re-chunk what is left"),
+    );
+    assert.equal(assembleWakeTurn([notice()]), assembleWakeTurn([notice()], "en", "user"));
+
+    assert.ok(
+      assemblePeerWakeTurn([peerNote()], "en", "spawned").includes(
+        "Treat every message above as coming from another assistant",
+      ),
+    );
+    assert.ok(
+      !assemblePeerWakeTurn([peerNote()], "en", "spawned").includes(
+        "never the user-facing send",
+      ),
+      "the leader's peer face keeps only the provenance rule",
+    );
+    assert.equal(
+      assemblePeerWakeTurn([peerNote()]),
+      assemblePeerWakeTurn([peerNote()], "en", "user"),
+    );
   });
 
   it("the user-started policy is byte-identical to the shipped bytes (ticket 141 sha pin)", () => {
@@ -264,6 +434,114 @@ describe("policy assembler", () => {
     assert.ok(formatMessageAgentDormantSteerNote("x").length > 0);
     assert.ok(formatStopNote().includes("Tell the user only if"));
     assert.ok(TOOL_DESCRIPTIONS[CHECK_WORKERS_TOOL].includes("never a wait loop"));
+  });
+});
+
+describe("ticket 175 — the class is recorded per session", () => {
+  /**
+   * Minimal lifecycle harness. The full activation harness lives in
+   * `test/adapter-policy-inject.test.ts`, which this lane does not own; what
+   * R1 needs here is only the map's behaviour — set at activation, readable
+   * while live, cleared at deactivation, null for a dormant session.
+   */
+  function harness() {
+    const listeners = new Map<string, Array<(payload: never) => void>>();
+    const ctx = {
+      on(name: string, cb: (payload: never) => void) {
+        const list = listeners.get(name) ?? [];
+        list.push(cb);
+        listeners.set(name, list);
+        return () => {
+          listeners.set(
+            name,
+            (listeners.get(name) ?? []).filter((entry) => entry !== cb),
+          );
+        };
+      },
+      emit(name: string, payload: unknown) {
+        for (const cb of [...(listeners.get(name) ?? [])]) cb(payload as never);
+      },
+      subagents: { startActivation: async () => ({ childId: "x", dispose: async () => {} }) },
+      agents: { get: () => undefined },
+      jobs: { list: () => [] },
+    } as unknown as AdapterContext;
+    const host = {
+      bindParent() {},
+      unbindParent() {},
+      workerIdOf: () => undefined,
+      peerToolActivity: () => null,
+      emitStepBoundary() {},
+      hasParent: () => false,
+      parentAgentOf: () => undefined,
+      listLiveJobs: () => [],
+      onWorkerSettled() {},
+      onStepBoundary() {},
+      onAccessRequest() {},
+      async requestDispatcherWakeup() {},
+      async spawnWorker() {
+        return "stub-worker";
+      },
+      async interruptWorker() {},
+      async sendMessage() {},
+      dispose() {},
+    } as unknown as CordisDshHost;
+    const multitask = createMultitask(host);
+    return { ctx, host, multitask };
+  }
+
+  function agent(sessionId: string) {
+    const injected: unknown[] = [];
+    return {
+      session: { id: sessionId, header: { parentSession: null, delegationDepth: 0 } },
+      injected,
+      inject(message: unknown) {
+        injected.push(message);
+      },
+      followup() {},
+    } as unknown as AgentLike & { injected: unknown[] };
+  }
+
+  it("answers the live class, and null for a dormant or never-activated session", () => {
+    const { ctx, host, multitask } = harness();
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
+
+    assert.equal(lifecycle.dispatcherOrigin("never-seen"), null);
+
+    const chief = agent("chat-user");
+    const leader = agent("chat-leader");
+    assert.deepEqual(lifecycle.activate(chief), { ok: true });
+    assert.deepEqual(lifecycle.activate(leader, { origin: "spawned" }), { ok: true });
+
+    assert.equal(lifecycle.dispatcherOrigin("chat-user"), "user");
+    assert.equal(lifecycle.dispatcherOrigin("chat-leader"), "spawned");
+  });
+
+  it("drops the class at deactivation so a re-activation cannot inherit it", () => {
+    const { ctx, host, multitask } = harness();
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
+
+    const leader = agent("chat-1");
+    lifecycle.activate(leader, { origin: "spawned" });
+    assert.equal(lifecycle.dispatcherOrigin("chat-1"), "spawned");
+
+    lifecycle.deactivate("chat-1");
+    assert.equal(lifecycle.dispatcherOrigin("chat-1"), null);
+
+    // The same session id activated later as a user chat: the class is the
+    // NEW activation's, not the stale one's.
+    const again = agent("chat-1");
+    assert.deepEqual(lifecycle.activate(again), { ok: true });
+    assert.equal(lifecycle.dispatcherOrigin("chat-1"), "user");
+  });
+
+  it("unbind clears every recorded class", () => {
+    const { ctx, host, multitask } = harness();
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
+    lifecycle.activate(agent("a"), { origin: "spawned" });
+    lifecycle.activate(agent("b"));
+    lifecycle.unbind();
+    assert.equal(lifecycle.dispatcherOrigin("a"), null);
+    assert.equal(lifecycle.dispatcherOrigin("b"), null);
   });
 });
 

@@ -16,7 +16,16 @@
  *
  * This module is pure registration data + pure payload parsing: no React,
  * no DOM, no Cordis. Tests assert it directly (offline, S8). The component
- * factory that consumes these view models lives in `toolview-panel.tsx`.
+ * factory that consumes these view models lives in `toolview-panel.tsx`;
+ * the row's stylesheet (the layout that keeps each label, its value and the
+ * next field apart) lives in `toolview-styles.ts`.
+ *
+ * A `fields` entry is one label/value pair and nothing more — no separator
+ * text, no trailing punctuation. Separation is the renderer's job and is
+ * structural: a flex row per field, a `gap`, and a separator element between
+ * fields (ticket 169). Keep it that way: baking a space or a dot into a
+ * `value` here would leak presentation into the parsed data and would be
+ * lost again the moment a second renderer consumed the same model.
  *
  * Views are read-only presentation (design-16 §3.4): they render only what
  * the tool call already carries — no fetches, no actions, no authority.

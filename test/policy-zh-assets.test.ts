@@ -71,6 +71,29 @@ function bulletLines(text: string): number {
   return text.split("\n").filter((line) => line.startsWith("- ")).length;
 }
 
+/**
+ * Ticket 175 / ADR-0034: the two dispatcher classes are SHORTER for a team
+ * leader than for a chief of staff, so parity is pinned WITHIN a class.
+ * A single shared count would be a false assertion — the faces genuinely
+ * differ in length by owner ruling (2026-11-03).
+ */
+const CLASS_COUNTS = {
+  standing: { user: 6, spawned: 5 },
+  wake: { user: 6, spawned: 5 },
+  peer: { user: 5, spawned: 1 },
+} as const;
+
+const BLOCKS = {
+  standing: buildStandingRulesBlock,
+  wake: buildWakeInstructionsBlock,
+  peer: buildPeerWakeInstructionsBlock,
+} as const;
+
+/** Every backticked identifier in a face, in order. */
+function identifiersIn(text: string): string[] {
+  return [...text.matchAll(/`([^`]+)`/g)].map((match) => match[1] ?? "");
+}
+
 function peerNote(): PeerNotice {
   return {
     messageId: "msg-1",
@@ -167,9 +190,11 @@ describe("remaining model-facing copy — ZH face (ticket 153 step 2)", () => {
 
   it("no CJK reaches any EN face (the EN bytes are the shipped text)", () => {
     const enFaces: readonly string[] = [
-      buildStandingRulesBlock(EN),
-      buildWakeInstructionsBlock(EN),
-      buildPeerWakeInstructionsBlock(EN),
+      ...(["user", "spawned"] as const).flatMap((origin) =>
+        ([buildStandingRulesBlock, buildWakeInstructionsBlock, buildPeerWakeInstructionsBlock] as const).map(
+          (block) => block(EN, origin),
+        ),
+      ),
       buildWorkerSystemPrompt(EN),
       assembleWakeTurn([], EN),
       assemblePeerWakeTurn([peerNote()], EN),
@@ -188,5 +213,72 @@ describe("remaining model-facing copy — ZH face (ticket 153 step 2)", () => {
     for (const text of enFaces) {
       assert.ok(!CJK.test(text), `CJK leaked into an EN face: ${text.slice(0, 40)}…`);
     }
+  });
+
+  it("ticket 175: each class pairs its EN and ZH faces line for line", () => {
+    for (const [name, block] of Object.entries(BLOCKS) as Array<
+      [keyof typeof BLOCKS, (typeof BLOCKS)[keyof typeof BLOCKS]]
+    >) {
+      for (const origin of ["user", "spawned"] as const) {
+        const en = block(EN, origin);
+        const zh = block(ZH, origin);
+        const where = `${name}/${origin}`;
+        assert.equal(
+          zh.split("\n").length,
+          en.split("\n").length,
+          `${where}: line count differs`,
+        );
+        // Same structure: the counts are per CLASS, never one shared number.
+        const counted = name === "standing" ? bulletLines : numberedLines;
+        assert.equal(counted(zh), counted(en), `${where}: item count differs`);
+        assert.equal(counted(en), CLASS_COUNTS[name][origin], `${where}: pin drifted`);
+        // Same authored ZH face is not a copy of the EN one.
+        assert.notEqual(zh, en, `${where}: ZH face is the EN face`);
+        // Same ASCII identifiers — the tool contract survives translation.
+        // EXACT and ordered for the team-leader faces, which ticket 175
+        // authored in both languages. The chief-of-staff peer face carries a
+        // pre-existing quirk that must NOT be "fixed" here: its shipped EN
+        // text leaves `message_agent` unbackticked (step 4) while its ZH face
+        // backticks it. Those bytes are pinned by sha in
+        // `test/policy-assembler.test.ts`, so for `user` the rule is that
+        // translation loses nothing — EN's identifiers all survive in ZH.
+        const enIds = identifiersIn(en);
+        const zhIds = identifiersIn(zh);
+        if (origin === "spawned") {
+          assert.deepEqual(zhIds, enIds, `${where}: identifiers drifted`);
+        } else {
+          assert.deepEqual(
+            enIds.filter((id) => !zhIds.includes(id)),
+            [],
+            `${where}: an EN identifier was lost in ZH`,
+          );
+        }
+        // No untranslated EN fragment, no forbidden identifier.
+        assert.deepEqual(leftoversIn(zh), [], `${where}: EN leftovers`);
+        assertNewCopy(zh);
+        // Headings stay per face: neither language leaks the other's markers.
+        assert.ok(!CJK.test(en), `${where}: CJK in EN`);
+        assert.ok(CJK.test(zh), `${where}: no CJK in ZH`);
+      }
+    }
+  });
+
+  it("ticket 175: the two classes are materially different in both faces", () => {
+    for (const [name, block] of Object.entries(BLOCKS) as Array<
+      [keyof typeof BLOCKS, (typeof BLOCKS)[keyof typeof BLOCKS]]
+    >) {
+      for (const language of [EN, ZH] as const) {
+        assert.notEqual(
+          block(language, "user"),
+          block(language, "spawned"),
+          `${name}/${language}: the classes render the same text`,
+        );
+      }
+    }
+    // The classes' pinned counts must actually differ somewhere — a pin that
+    // collapsed to one number would silently stop testing the split.
+    assert.notEqual(CLASS_COUNTS.standing.user, CLASS_COUNTS.standing.spawned);
+    assert.notEqual(CLASS_COUNTS.wake.user, CLASS_COUNTS.wake.spawned);
+    assert.notEqual(CLASS_COUNTS.peer.user, CLASS_COUNTS.peer.spawned);
   });
 });

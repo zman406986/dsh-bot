@@ -1,6 +1,6 @@
 # 176 — A summoned dispatcher cannot summon another dispatcher
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Blocked by:** nothing hard. `src/core/policy/prompts.ts` is being edited by ticket 174 (access removal) and ticket 175 (class-split of the remaining blocks) — keep this ticket's prompt edit to one narrow insertion and re-read the file immediately before editing.
 **Origin:** owner-directed, 2026-11-03. *A dispatcher that another dispatcher summoned (the "spawned" / team-leader class) must NOT be able to summon more dispatchers.*
@@ -123,3 +123,8 @@ The four resume cases:
 
 Both files pass in isolation (or are mid-sweep by ticket 174), and neither imports anything this ticket changed. Every test file this ticket does touch passes in full: `spawn-dispatcher-activation` (18/18), `spawn-dispatcher-host` (14/14), `spawn-dispatcher-tool` (11/11), `adapter-dispatcher-tools` + `dispatcher-tools` (33/33), `policy-assembler` + `policy-zh-assets` (24/24), `plugin-scaffold` (16/16), `activation-lifecycle` (10/10).
 
+
+### 2026-11-04 — PM closure
+
+Shipped in commit `643a801` on `main`. Full suite green at closure (754 tests, 0 fail),
+both tsconfigs clean, `npm run lint:docs` clean.

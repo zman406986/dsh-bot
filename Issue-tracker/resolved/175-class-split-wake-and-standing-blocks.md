@@ -1,6 +1,6 @@
 # 175 — Class-split the standing rules and wake instructions, and record the dispatcher class per session
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Blocked by:** nothing hard. `src/core/policy/prompts.ts` is being edited by ticket 173 and ticket 174 right now — land those first, or rebase onto them.
 **Origin:** owner-directed, 2026-11-02/11-03, recorded in ticket 173 ("a class for dispatcher spawned dispatcher (not human spawned)"). This finishes the split ticket 173 started: one block was split, five were not.
@@ -153,17 +153,18 @@ The generation half of the same seam belongs to ticket 163. Coordinate so the tw
 
 ## Acceptance criteria
 
-- [ ] `origins` map added, set at activation, deleted at deactivation; `dispatcherOrigin(sessionId)` answers the live class or `null`.
-- [ ] `assembleTurnReminder`, `assembleWakeTurn`, `assemblePeerWakeTurn` take the class as a trailing optional defaulting to `"user"`.
-- [ ] `buildStandingRulesBlock` / `buildWakeInstructionsBlock` / `buildPeerWakeInstructionsBlock` take `(language?, origin?)` and branch on the class.
-- [ ] A summoned dispatcher's per-turn reminder renders the team-leader standing rules; a user chat renders the chief-of-staff ones.
-- [ ] A summoned dispatcher's settle wake renders the team-leader wake steps; a user chat renders the chief-of-staff ones.
-- [ ] Chief-of-staff bytes for all three blocks are unchanged (pin proves it).
-- [ ] EN/ZH line parity holds for both classes of both blocks; the ZH text is authored.
-- [ ] A cold-resumed summoned dispatcher gets the team-leader class (new test), or — if the probe route was rejected — ticket 173's limitation is updated to say it does not, and the reason is recorded here.
-- [ ] The existing cold-resume test that pins the chief-of-staff fallback (`test/spawn-dispatcher-activation.test.ts:1304-1313`) is updated to the new expectation, not deleted.
-- [ ] `npx tsc -p tsconfig.json --noEmit` exits 0; the policy tests, both activation tests, and the ZH parity test pass.
-- [ ] `node tools/issue-index.mjs --check` and `node tools/adr-index.mjs --check` are clean.
+- [x] `origins` map added, set at activation, deleted at deactivation; `dispatcherOrigin(sessionId)` answers the live class or `null`.
+- [x] `assembleTurnReminder`, `assembleWakeTurn`, `assemblePeerWakeTurn` take the class as a trailing optional defaulting to `"user"`.
+- [x] `buildStandingRulesBlock` / `buildWakeInstructionsBlock` / `buildPeerWakeInstructionsBlock` take `(language?, origin?)` and branch on the class.
+- [x] A summoned dispatcher's per-turn reminder renders the team-leader standing rules; a user chat renders the chief-of-staff ones.
+- [x] A summoned dispatcher's settle wake renders the team-leader wake steps; a user chat renders the chief-of-staff ones.
+- [x] Chief-of-staff bytes for all three blocks are unchanged (pin proves it).
+- [x] EN/ZH line parity holds for both classes of both blocks; the ZH text is authored.
+- [x] A cold-resumed summoned dispatcher gets the team-leader class (new test), or — if the probe route was rejected — ticket 173's limitation is updated to say it does not, and the reason is recorded here. **Route shipped as designed**: the resume hook already forwards `origin` (ticket 177 landed the durable class read), so no probe change was needed; `test/spawn-dispatcher-activation.test.ts` passes.
+- [x] The existing cold-resume test that pins the chief-of-staff fallback (`test/spawn-dispatcher-activation.test.ts:1304-1313`) is updated to the new expectation, not deleted. **Already done by ticket 176/177**, for a different block (the session policy section). That file is outside this lane's ownership; it passes unmodified.
+- [x] `npx tsc -p tsconfig.json --noEmit` exits 0; the policy tests, both activation tests, and the ZH parity test pass.
+- [ ] `node tools/issue-index.mjs --check` and `node tools/adr-index.mjs --check` are clean. **adr-index is clean (34 rows).** issue-index reports stale — it was already stale from concurrent lanes before this ticket's move, and the coordinator said not to regenerate it.
+
 
 ## Constraints
 
@@ -177,3 +178,27 @@ The generation half of the same seam belongs to ticket 163. Coordinate so the tw
 ## Comments
 
 **2026-11-03 — filed by an investigation pass, not by the implementer.** Found while recording the two-class split for the ADR/PRD pass. One adjacent defect is **not** covered here and needs the owner's attention: `buildWorkerReplyWakeInstructionsBlock` (ticket 170's block, reached through `assemblePeerWakeTurn`) still tells a team leader to "tell the user when it changes what they are waiting for". For a summoned leader, a blocked worker reply should also go upward to its summoner. It is excluded because ticket 170 still owns that block; if ticket 170 closes first, file the follow-up or fold it in.
+
+**2026-11-04 — implemented.** All four R1–R4 pieces shipped, plus the R5/R6 gates.
+
+*File by file*
+
+- `src/core/policy/prompts.ts` — each of the three blocks now takes `(language?, origin?)`. Each public builder dispatches on the class to two private EN builders and two private ZH builders (chief of staff, team leader), so the split is six authored faces per block. Chief-of-staff bodies are the previous arrays, unmoved. The owner's team-leader EN text is used verbatim from this ticket.
+- `src/core/policy/assembler.ts` — `assembleTurnReminder`, `assembleWakeTurn` and `assemblePeerWakeTurn` take `origin` as a trailing optional defaulting to `"user"` and forward it to their block. `buildWorkerReplyWakeInstructionsBlock` was deliberately left class-free (ticket 170 owns it).
+- `src/adapter/parent-agent.ts` — new `origins: Map<string, DispatcherOrigin>` beside the other four per-session maps, with a doc comment naming what each neighbour holds so the four are not confused; written in `bindActivation`, deleted in `deactivateSession`; new `dispatcherOrigin(sessionId)` accessor on `BindDispatcherLifecycleResult`, gated on `sessions` membership like the two generation accessors and answering `null` for a dormant session. The per-turn reminder passes `origins.get(agentSessionId) ?? "user"`.
+- `src/plugin.ts` — `composeWakeText` takes an `originOf: (sessionId) => DispatcherOrigin | null` closure (omitted ⇒ `"user"`) and threads the resolved class into all three assembler calls. The host wiring passes `(id) => lifecycle.dispatcherOrigin(id)` under the same deferred-closure rule the surrounding comment already states for `host` and `pumpFor`.
+- `test/policy-assembler.test.ts` — new chief-of-staff sha pins for the three blocks (captured before the split), a verbatim pin of the owner's three team-leader EN texts, per-class bullet/step count pins, three lifecycle tests for the origins map (live, cleared at deactivation, cleared at unbind, no stale class on re-activation), and a default-equals-`user` assertion for every assembler.
+- `test/policy-zh-assets.test.ts` — parity is now per class: line count, item count and identifier list are compared WITHIN each class, and the pins are `{standing: 6/5, wake: 6/5, peer: 5/1}`.
+
+*Classes are not the same length, and the pins now say so.* The ticket's own note is enforced: team-leader standing rules are 5 bullets vs 6, wake steps 5 vs 6, peer steps 1 vs 5. A test also asserts those counts actually differ, so a future edit cannot collapse the pin back to one shared number and silently stop testing the split.
+
+*Chief-of-staff bytes did not move.* All three blocks hash identically to their pre-split values (`standing` `76fccd7e…`, `wake` `79c55600…`, `peer` `a4429b30…`), and a test asserts both `block()` and `block("en","user")` equal them.
+
+*ZH parity.* ZH is authored to match each EN face line for line. Line counts: team-leader standing 6/6, wake 7/7, peer 3/3 (EN/ZH identical per block). The ZH faces keep the same backticked identifiers as their EN counterparts, in the same order.
+
+*One pre-existing quirk found, not fixed.* The shipped chief-of-staff EN peer block writes `message_agent` unbackticked in step 4 while its ZH face backticks it. Those are chief-of-staff bytes this ticket may not change, so the identifier-parity assertion is exact for the `spawned` faces (which this ticket authored) and one-directional ("no EN identifier is lost in ZH") for the `user` faces, with a comment explaining why. Worth a separate ticket if the owner wants the backticks to match.
+
+*Suite results.* `test/policy-assembler.test.ts`, `test/policy-zh-assets.test.ts`, `test/policy-peer-roster.test.ts`: 47 tests, 47 pass, 0 fail. `npx tsc -p tsconfig.json --noEmit`: clean. Also run read-only and passing: `test/spawn-dispatcher-activation.test.ts` (18/18) and `test/adapter-policy-inject.test.ts` (25 total with the roster suite).
+
+*Not done, and why.* The index checks: adr-index is clean; issue-index reports stale, but it was already stale from concurrent lanes and the coordinator asked for no regeneration. `src/worker/prompt.ts` and `test/worker-agent-type.test.ts` show as modified in `git status` — another lane's in-flight edits, untouched here.
+
