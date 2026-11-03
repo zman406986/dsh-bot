@@ -1,5 +1,4 @@
 import type { DshHost } from "./dsh-host.js";
-import type { AccessRequestEvent } from "./access-types.js";
 import type { AgentMessageWakeOrigin } from "./peer-types.js";
 import type {
   DispatcherSpawnOptions,
@@ -77,7 +76,6 @@ export class FakeDshHost implements DshHost {
 
   #settledCallbacks: Array<(event: SettledEvent) => void> = [];
   #stepBoundaryCallbacks: Array<(workerId: string) => void | Promise<void>> = [];
-  #accessRequestCallbacks: Array<(event: AccessRequestEvent) => void> = [];
   #nextId = 1;
   /**
    * Ticket 118: dispatcher ids use their OWN sequence so adding a dispatcher
@@ -139,10 +137,6 @@ export class FakeDshHost implements DshHost {
     this.#stepBoundaryCallbacks.push(cb);
   }
 
-  onAccessRequest(cb: (event: AccessRequestEvent) => void): void {
-    this.#accessRequestCallbacks.push(cb);
-  }
-
   /**
    * Ticket 116: `origin` is the optional structured source override. Both
    * lists record every call, so a test can assert the old surface
@@ -171,13 +165,6 @@ export class FakeDshHost implements DshHost {
   async fireStepBoundary(workerId: string): Promise<void> {
     for (const cb of [...this.#stepBoundaryCallbacks]) {
       await cb(workerId);
-    }
-  }
-
-  /** Test helper: deliver an access request to every subscriber. */
-  fireAccessRequest(event: AccessRequestEvent): void {
-    for (const cb of [...this.#accessRequestCallbacks]) {
-      cb(event);
     }
   }
 }

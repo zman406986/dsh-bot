@@ -11,6 +11,27 @@ function unwrapSpawn(result: SpawnResult): string {
 }
 
 describe("multitask core ↔ DshHost seam", () => {
+  it("a second settle for a terminal worker is ignored, and an unknown abort throws", async () => {
+    // Late settle / unknown abort are the two places a host can double-fire.
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host);
+    const workerId = unwrapSpawn(
+      await multitask.spawnWorker({
+        parentSessionId: "session-1",
+        streamKey: "late-settle",
+        title: "Late settle",
+        prompt: "Do the work.",
+      }),
+    );
+    host.fireSettled({ workerId, status: "completed", report: "one" });
+    host.fireSettled({ workerId, status: "completed", report: "two" });
+    assert.equal(multitask.getWorker(workerId)?.status, "completed");
+    assert.equal(host.wakeCalls.length, 1, "a second settle must not wake again");
+
+    await assert.rejects(() => multitask.abortWorker("never-spawned"));
+    assert.deepEqual(host.interruptCalls, [], "an unknown abort must not interrupt");
+  });
+
   it("spawnWorker is non-blocking, returns a host worker id, and records the spawn", async () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
@@ -64,28 +85,6 @@ describe("multitask core ↔ DshHost seam", () => {
     assert.deepEqual(host.wakeCalls, ["session-1"]);
   });
 
-  it("a second settle for a terminal worker is ignored", async () => {
-    const host = new FakeDshHost();
-    const multitask = createMultitask(host);
-
-    const workerId = unwrapSpawn(
-      await multitask.spawnWorker({
-        parentSessionId: "session-1",
-        streamKey: "todo-1",
-        title: "Once",
-        prompt: "Do it once.",
-      }),
-    );
-
-    host.fireSettled({ workerId, status: "completed", report: "first" });
-    host.fireSettled({ workerId, status: "error", report: "second" });
-
-    const worker = multitask.getWorker(workerId);
-    assert.ok(worker);
-    assert.equal(worker.status, "completed");
-    assert.equal(host.wakeCalls.length, 1);
-  });
-
   it("abortWorker interrupts through the host and drops a late settle", async () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
@@ -110,33 +109,6 @@ describe("multitask core ↔ DshHost seam", () => {
     host.fireSettled({ workerId, status: "completed", report: "too late" });
     assert.equal(multitask.getWorker(workerId)?.status, "aborted");
     assert.deepEqual(host.wakeCalls, []);
-  });
-
-  it("listWorkers filters by parent session", async () => {
-    const host = new FakeDshHost();
-    const multitask = createMultitask(host);
-
-    unwrapSpawn(
-      await multitask.spawnWorker({
-        parentSessionId: "session-a",
-        streamKey: "todo-a",
-        title: "A",
-        prompt: "A",
-      }),
-    );
-    unwrapSpawn(
-      await multitask.spawnWorker({
-        parentSessionId: "session-b",
-        streamKey: "todo-b",
-        title: "B",
-        prompt: "B",
-      }),
-    );
-
-    assert.equal(multitask.listWorkers("session-a").length, 1);
-    assert.equal(multitask.listWorkers("session-a")[0]?.title, "A");
-    assert.equal(multitask.listWorkers("session-b").length, 1);
-    assert.equal(multitask.listWorkers("session-c").length, 0);
   });
 
   it("the same model-authored stream_key in two sessions does not collide (ADR-0019)", async () => {
@@ -185,28 +157,6 @@ describe("multitask core ↔ DshHost seam", () => {
     }
   });
 
-  it("the same stream key twice within one session still refuses", async () => {
-    const host = new FakeDshHost();
-    const multitask = createMultitask(host);
-
-    unwrapSpawn(
-      await multitask.spawnWorker({
-        parentSessionId: "session-a",
-        streamKey: "build",
-        title: "First",
-        prompt: "go",
-      }),
-    );
-    const refused = await multitask.spawnWorker({
-      parentSessionId: "session-a",
-      streamKey: "build",
-      title: "Second",
-      prompt: "go",
-    });
-    assert.equal(refused.ok, false);
-    if (!refused.ok) assert.equal(refused.reason, "duplicate-stream-key");
-  });
-
   it("an unknown-state hold blocks only its own session's stream (ADR-0019)", async () => {
     const host = new FakeDshHost();
     const durability = createInMemoryDurability();
@@ -247,14 +197,4 @@ describe("multitask core ↔ DshHost seam", () => {
     }
   });
 
-  it("abortWorker on an unknown worker throws and does not interrupt", async () => {
-    const host = new FakeDshHost();
-    const multitask = createMultitask(host);
-
-    await assert.rejects(
-      () => multitask.abortWorker("nope"),
-      /unknown worker: nope/,
-    );
-    assert.deepEqual(host.interruptCalls, []);
-  });
 });

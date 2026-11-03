@@ -20,10 +20,9 @@
  * rows at SESSION granularity (the panel keeps the per-worker picture):
  * - status dot — aggregate session visual (working / needs-you / finished /
  *   idle), the `state-*` token roles the panel's dots already use;
- * - blocked chip — the session's waiting marker with the design-17 §4.1
- *   precedence (a pending ask outranks a landed-undelivered result),
- *   localized through the SHARED `roster.blocked.*` / `roster.landed` keys
- *   (one copy vocabulary, never a second);
+ * - waiting chip — the session's landed-undelivered marker, localized
+ *   through the SHARED `roster.landed` key (one copy vocabulary, never a
+ *   second);
  * - activity/finished markers — the per-session counters (working / needs
  *   you / finished), the session-granularity re-host of the panel's activity
  *   line;
@@ -59,7 +58,7 @@
 import { useSyncExternalStore } from "react";
 import type { ComponentType, JSX } from "react";
 import type { TranslateFn } from "./overlay.js";
-import { formatTemplate, rosterBlockedKey } from "./roster-store.js";
+import { formatTemplate } from "./roster-store.js";
 import {
   describeRowPreview,
   describeShellPanes,
@@ -130,22 +129,15 @@ export function describePresenceDot(
 }
 
 /**
- * Localize the waiting marker: the blocked phrase per access class (the
- * shared `roster.blocked.*` copy the panel uses — names only, never a
- * secret value), or the landed marker. Unknown class templates fall back to
- * the generic phrase (copy-drift guard, same as the panel).
+ * Localize the waiting marker. Ticket 174 / ADR-0033 removed the blocked-ask
+ * variant with the access-ask feature, so the landed marker is the only
+ * waiting state left.
  */
 export function waitingPhrase(
   t: TranslateFn,
-  waiting: Exclude<ShellWaitingMarker, null>,
+  _waiting: Exclude<ShellWaitingMarker, null>,
 ): string {
-  if (waiting.kind === "landed") return t("roster.landed");
-  const template = t(rosterBlockedKey(waiting.blocked.class));
-  const safe =
-    template === rosterBlockedKey(waiting.blocked.class)
-      ? t("roster.blocked.other")
-      : template;
-  return formatTemplate(safe, { target: waiting.blocked.target });
+  return t("roster.landed");
 }
 
 /**

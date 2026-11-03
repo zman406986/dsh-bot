@@ -30,7 +30,10 @@ import {
   type RecentActivityFn,
 } from "../core/tools.js";
 import type { ToolsLike } from "./cordis-dsh-host.js";
-import type { PolicyLanguage } from "../core/policy/prompts.js";
+import type {
+  DispatcherOrigin,
+  PolicyLanguage,
+} from "../core/policy/prompts.js";
 
 /** Structural tool registration shape (mirrors dsh ToolRuntime.register). */
 export interface RegisterableTool {
@@ -221,6 +224,13 @@ export interface RegisterDispatcherToolsOptions {
    * pre-153 caller keeps byte-identical descriptions.
    */
   readonly language?: PolicyLanguage;
+  /**
+   * Ticket 176: which dispatcher CLASS this surface serves. `spawned` — a
+   * team leader another dispatcher summoned — gets NO `spawn_dispatcher`
+   * definition (owner ruling 2026-11-03). Omitted means `user`, so the
+   * eight-tool surface is unchanged for every pre-176 caller.
+   */
+  readonly origin?: DispatcherOrigin;
 }
 
 /**
@@ -250,6 +260,7 @@ export function registerDispatcherTools(
       ? { spawnDispatcher: options.spawnDispatcher }
       : {}),
     ...(options.language !== undefined ? { language: options.language } : {}),
+    ...(options.origin !== undefined ? { origin: options.origin } : {}),
   });
   const disposers: Array<() => void> = [];
   for (const def of defs) {

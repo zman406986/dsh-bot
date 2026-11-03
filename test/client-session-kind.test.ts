@@ -73,9 +73,12 @@ import {
   SESSION_KIND_COPY_KEYS,
   SESSION_KIND_GLYPH_CSS,
   SIDEBAR_LEADING_SLOT,
+  TEAM_LEADER_PROJECTION_VALUE,
   WORKER_GLYPH,
+  createDispatcherClassGlyph,
   createSessionKindGlyph,
   dispatcherGlyphRegistration,
+  isDispatcherKind,
   resolveSessionKind,
   type SessionsSnapshotLike,
   type UseSessionsLike,
@@ -146,6 +149,31 @@ describe("session-kind — pure resolution", () => {
         projectionValues: { sessionKind: DISPATCHER_PROJECTION_VALUE },
       }),
       "dispatcher",
+    );
+  });
+
+  it("identifies a SUMMONED dispatcher from the ticket-175 projection value", () => {
+    assert.equal(
+      resolveSessionKind({
+        projectionValues: { sessionKind: TEAM_LEADER_PROJECTION_VALUE },
+      }),
+      "team-leader",
+    );
+    // The two dispatcher classes are distinct kinds, and both are dispatchers.
+    assert.notEqual(TEAM_LEADER_PROJECTION_VALUE, DISPATCHER_PROJECTION_VALUE);
+    assert.equal(isDispatcherKind("dispatcher"), true);
+    assert.equal(isDispatcherKind("team-leader"), true);
+    assert.equal(isDispatcherKind("worker"), false);
+    assert.equal(isDispatcherKind("normal"), false);
+  });
+
+  it("an unknown projection value stays normal — never a guessed class", () => {
+    // A value a later build adds must not be drawn as either class.
+    assert.equal(
+      resolveSessionKind({
+        projectionValues: { sessionKind: "dispatcher-admiral" },
+      }),
+      "normal",
     );
   });
 
@@ -244,6 +272,16 @@ describe("session-kind — registration contracts", () => {
       assert.ok(localeDictionary.en[key]!.length > 0);
       assert.ok(localeDictionary.zh[key]!.length > 0);
     }
+    // Ticket 177: the two dispatcher classes do not share a label — a screen
+    // reader must be able to tell them apart, in both faces.
+    assert.notEqual(
+      localeDictionary.en["indicator.dispatcher"],
+      localeDictionary.en["indicator.team-leader"],
+    );
+    assert.notEqual(
+      localeDictionary.zh["indicator.dispatcher"],
+      localeDictionary.zh["indicator.team-leader"],
+    );
   });
 });
 
@@ -511,6 +549,164 @@ describe("session-kind — dispatcher glyph rendering (jsdom)", () => {
     const mark = mounted.container.querySelector('[data-session-kind="dispatcher"]');
     assert.ok(mark);
     assert.equal(mark.textContent, "");
+    await mounted.unmount();
+  });
+});
+
+describe("session-kind — two dispatcher classes (ticket 177)", () => {
+  /** Both dispatcher rows in one snapshot, so one mount can compare them. */
+  function classSnapshot(): SessionsSnapshotLike {
+    return snapshot({
+      "s-chief": {
+        projectionValues: { sessionKind: DISPATCHER_PROJECTION_VALUE },
+      },
+      "s-leader": {
+        projectionValues: { sessionKind: TEAM_LEADER_PROJECTION_VALUE },
+      },
+    });
+  }
+
+  it("the ONE composed cell marks both classes, each with its own portrait", async () => {
+    const store = fakeUseSessions(classSnapshot());
+    const Glyph = createDispatcherClassGlyph(t);
+    const chief = await mount(
+      createElement(Glyph, { sessionId: "s-chief", useSessions: store.useSessions }),
+    );
+    const leader = await mount(
+      createElement(Glyph, { sessionId: "s-leader", useSessions: store.useSessions }),
+    );
+
+    const chiefMark = chief.container.querySelector(
+      '[data-session-kind="dispatcher"]',
+    );
+    const leaderMark = leader.container.querySelector(
+      '[data-session-kind="team-leader"]',
+    );
+    assert.ok(chiefMark, "the human-started class renders its own mark");
+    assert.ok(leaderMark, "the summoned class renders its own mark");
+
+    // Different pictures, not just different attributes: the two portraits
+    // must not be the same drawing.
+    const chiefSvg = chiefMark.querySelector("svg");
+    const leaderSvg = leaderMark.querySelector("svg");
+    assert.ok(chiefSvg, "chief of staff is drawn");
+    assert.ok(leaderSvg, "team leader is drawn");
+    assert.notEqual(chiefSvg.outerHTML, leaderSvg.outerHTML);
+
+    // The silhouettes differ in a way the eye can see at 16px: the chief of
+    // staff has a single antenna stem and round eyes, the team leader has a
+    // flat banner bar and square eyes.
+    assert.equal(
+      chiefSvg.querySelectorAll("circle").length,
+      3,
+      "chief: one antenna dot + two round eyes",
+    );
+    assert.equal(
+      leaderSvg.querySelectorAll("circle").length,
+      0,
+      "team leader: no round shapes at all",
+    );
+
+    // Each carries its own accessible name.
+    assert.equal(
+      chiefMark.getAttribute("aria-label"),
+      localeDictionary.en["indicator.dispatcher"],
+    );
+    assert.equal(
+      leaderMark.getAttribute("aria-label"),
+      localeDictionary.en["indicator.team-leader"],
+    );
+    assert.notEqual(
+      chiefMark.getAttribute("aria-label"),
+      leaderMark.getAttribute("aria-label"),
+    );
+
+    // Both are glyph-only and both bring the shared stylesheet.
+    assert.equal(chiefMark.textContent, "");
+    assert.equal(leaderMark.textContent, "");
+    assert.equal(
+      chief.container.querySelector("style")?.textContent,
+      SESSION_KIND_GLYPH_CSS,
+    );
+    assert.equal(
+      leader.container.querySelector("style")?.textContent,
+      SESSION_KIND_GLYPH_CSS,
+      "the split adds no second stylesheet",
+    );
+    await chief.unmount();
+    await leader.unmount();
+  });
+
+  it("the composed cell stays silent for a worker and a normal session", async () => {
+    const store = fakeUseSessions(
+      snapshot({
+        "s-worker": { origin: "subagent" },
+        "s-plain": { projectionValues: { sessionKind: null } },
+      }),
+    );
+    const Glyph = createDispatcherClassGlyph(t);
+    for (const sessionId of ["s-worker", "s-plain"]) {
+      const mounted = await mount(
+        createElement(Glyph, { sessionId, useSessions: store.useSessions }),
+      );
+      assert.equal(
+        mounted.container.querySelector("[data-session-kind]"),
+        null,
+        `session ${sessionId}`,
+      );
+      await mounted.unmount();
+    }
+  });
+
+  it("createSessionKindGlyph(\"dispatcher\") is now the chief-of-staff class ONLY", async () => {
+    // The narrow factory is retained for a future single-class seat; it must
+    // not silently draw the summoned class.
+    const store = fakeUseSessions(classSnapshot());
+    const ChiefGlyph = createSessionKindGlyph("dispatcher", t);
+    const leader = await mount(
+      createElement(ChiefGlyph, {
+        sessionId: "s-leader",
+        useSessions: store.useSessions,
+      }),
+    );
+    assert.equal(leader.container.querySelector("[data-session-kind]"), null);
+    await leader.unmount();
+
+    const chief = await mount(
+      createElement(ChiefGlyph, {
+        sessionId: "s-chief",
+        useSessions: store.useSessions,
+      }),
+    );
+    assert.ok(chief.container.querySelector('[data-session-kind="dispatcher"]'));
+    await chief.unmount();
+  });
+
+  it("the summoned class switches live when the projection value changes", async () => {
+    // A cell settled before the mark source answered starts as nothing, then
+    // resolves into the team-leader mark — the restart path.
+    const store = fakeUseSessions(snapshot({ "s-later": {} }));
+    const Glyph = createDispatcherClassGlyph(t);
+    const mounted = await mount(
+      createElement(Glyph, { sessionId: "s-later", useSessions: store.useSessions }),
+    );
+    assert.equal(mounted.container.querySelector("[data-session-kind]"), null);
+    await act(async () => {
+      store.publish(classSnapshot());
+    });
+    assert.equal(mounted.container.querySelector("[data-session-kind]"), null);
+    await act(async () => {
+      store.publish(
+        snapshot({
+          "s-later": {
+            projectionValues: { sessionKind: TEAM_LEADER_PROJECTION_VALUE },
+          },
+        }),
+      );
+    });
+    assert.ok(
+      mounted.container.querySelector('[data-session-kind="team-leader"]'),
+    );
     await mounted.unmount();
   });
 });

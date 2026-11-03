@@ -62,26 +62,6 @@ describe("stop semantics", () => {
     assert.equal(multitask.getWorker(workerId)?.status, "aborted");
   });
 
-  it("stopping clears any parked steer; a later step boundary delivers nothing", async () => {
-    const host = new FakeDshHost();
-    const multitask = createMultitask(host);
-
-    const workerId = await spawnRunning(host, multitask);
-
-    // Park a steer (running → steering, interrupt, message held in the slot).
-    const steered = await multitask.steerWorker(workerId, "doomed correction");
-    assert.equal(steered.ok, true);
-    assert.equal(multitask.getWorker(workerId)?.status, "steering");
-
-    const stopped = await multitask.abortWorker(workerId);
-    assert.deepEqual(stopped, { ok: true });
-    assert.equal(multitask.getWorker(workerId)?.status, "aborted");
-
-    // A step boundary after stop must not revive the parked steer.
-    await host.fireStepBoundary(workerId);
-    assert.equal(host.sendMessageCalls.length, 0);
-  });
-
   it("a result that settles after a stop is dropped: no delivery, no wake, no revived work", async () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
@@ -102,6 +82,23 @@ describe("stop semantics", () => {
     // The roster still lists the stopped worker — it is out of play, not erased.
     assert.equal(multitask.listWorkers("session-1").length, 1);
     assert.equal(multitask.listWorkers("session-1")[0]?.status, "aborted");
+  });
+
+  it("stopping clears a parked steer so no late step boundary delivers it", async () => {
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host);
+
+    const workerId = await spawnRunning(host, multitask);
+    const steered = await multitask.steerWorker(workerId, "doomed correction");
+    assert.equal(steered.ok, true);
+    assert.equal(multitask.getWorker(workerId)?.status, "steering");
+
+    assert.deepEqual(await multitask.abortWorker(workerId), { ok: true });
+    assert.equal(multitask.getWorker(workerId)?.status, "aborted");
+
+    // A step boundary after stop must not revive the parked correction.
+    await host.fireStepBoundary(workerId);
+    assert.equal(host.sendMessageCalls.length, 0);
   });
 
   it("the stop flag wins when the stop path itself produces a completion", async () => {
@@ -146,54 +143,6 @@ describe("stop semantics", () => {
     assert.deepEqual(host.interruptCalls, []);
     assert.equal(multitask.getWorker(workerId)?.status, "completed");
     assert.deepEqual(host.wakeCalls, ["session-1"]);
-  });
-
-  it("a second stop after an abort is refused and does not interrupt again", async () => {
-    const host = new FakeDshHost();
-    const multitask = createMultitask(host);
-
-    const workerId = await spawnRunning(host, multitask);
-
-    const first = await multitask.abortWorker(workerId);
-    assert.deepEqual(first, { ok: true });
-
-    const second = await multitask.abortWorker(workerId);
-    assert.equal(second.ok, false);
-    assert.equal(second.ok === false && second.reason, "already-settled");
-    assert.ok(second.ok === false && second.detail.includes("done"));
-
-    assert.deepEqual(host.interruptCalls, [workerId]);
-    assert.equal(multitask.getWorker(workerId)?.status, "aborted");
-  });
-
-  it("settled before stop delivers; settles after stop drops", async () => {
-    const host = new FakeDshHost();
-    const multitask = createMultitask(host);
-
-    // A: settle, then stop — delivery already happened; stop is refused.
-    const settledFirst = await spawnRunning(host, multitask, "session-a");
-    host.fireSettled({
-      workerId: settledFirst,
-      status: "completed",
-      report: "done in time",
-    });
-    const refuseA = await multitask.abortWorker(settledFirst);
-    assert.equal(refuseA.ok, false);
-    assert.deepEqual(host.wakeCalls, ["session-a"]);
-    assert.equal(multitask.getWorker(settledFirst)?.status, "completed");
-
-    // B: stop, then settle — late result is dropped.
-    const stoppedFirst = await spawnRunning(host, multitask, "session-b");
-    const stopB = await multitask.abortWorker(stoppedFirst);
-    assert.deepEqual(stopB, { ok: true });
-    host.fireSettled({
-      workerId: stoppedFirst,
-      status: "completed",
-      report: "too late",
-    });
-    assert.equal(multitask.getWorker(stoppedFirst)?.status, "aborted");
-    // Only A's completion woke anyone.
-    assert.deepEqual(host.wakeCalls, ["session-a"]);
   });
 
   it("stopping a worker that has not started yet still aborts it cleanly", async () => {

@@ -15,8 +15,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { mountShellPage } from "../src/client/index.js";
-import { bindCommandTransport, submitAccessResolve } from "../src/client/actions.js";
-import type { AccessAskCard } from "../src/client/approval-cards.js";
+import { bindCommandTransport } from "../src/client/actions.js";
 import type { ClientContext } from "../src/client/context.js";
 
 async function drain(): Promise<void> {
@@ -135,8 +134,10 @@ describe("posture — session lifecycle only, never worker/turn management", () 
       mount = mountShellPage(rejecting);
     });
     assert.equal(typeof mount?.hosts.conversation, "function");
-    // …and the surviving resolve action contains a rejecting transport as
-    // the honest `failed` outcome (the retired seats used this same path).
+    // …and the command transport contains a rejecting host face instead of
+    // throwing out of the send (ticket 174 / ADR-0033 removed the access-ask
+    // resolve action this case used to drive; the transport is the surviving
+    // subject).
     const transport = bindCommandTransport({
       remote: () => ({
         commands: {
@@ -148,21 +149,7 @@ describe("posture — session lifecycle only, never worker/turn management", () 
       sessions: () => undefined,
     });
     await assert.doesNotReject(async () => {
-      const card: AccessAskCard = {
-        cardKind: "access-ask",
-        requestId: "req-1",
-        workerId: "w-1",
-        workerTitle: "w-1",
-        body: { class: "tool", target: "run_tests", reason: "r" },
-        parentSessionId: "s-1",
-        createdAtMs: 0,
-        status: "pending",
-        optionSet: [],
-        locationLine: "Runs on your computer.",
-        detail: "r",
-      };
-      const outcome = await submitAccessResolve(transport, card, "allow");
-      assert.deepEqual(outcome, { kind: "failed" });
+      await assert.rejects(transport.sendCommand("s-1", "/dsh-bot"));
       await drain();
     });
   });

@@ -30,8 +30,15 @@ function assertNewCopy(text: string): void {
 }
 
 describe("report clamp — completed body", () => {
-  it("trims and returns short text unchanged", () => {
+  it("trims short text and hard-cuts a long one at the bound with a marker", () => {
     assert.equal(clampReport("  hello world  "), "hello world");
+    const long = "x".repeat(REPORT_CLAMP_CHARS + 100);
+    const out = clampReport(long, { transcriptRef: "child-1" });
+    assert.ok(out.startsWith("x".repeat(REPORT_CLAMP_CHARS)));
+    assert.ok(
+      out.includes(`[report truncated: ${REPORT_CLAMP_CHARS} of ${long.length} characters.`),
+    );
+    assert.ok(out.includes("Full transcript: child-1"), "the pointer must survive the cut");
   });
 
   it("empty or whitespace-only → placeholder", () => {
@@ -40,15 +47,6 @@ describe("report clamp — completed body", () => {
     assert.equal(clampReport(null), emptyReportPlaceholder());
     assert.equal(clampReport(undefined), emptyReportPlaceholder());
     assertNewCopy(emptyReportPlaceholder());
-  });
-
-  it("hard-cuts at REPORT_CLAMP_CHARS and appends a truncation marker", () => {
-    const long = "x".repeat(REPORT_CLAMP_CHARS + 100);
-    const out = clampReport(long, { transcriptRef: "child-1" });
-    assert.ok(out.startsWith("x".repeat(REPORT_CLAMP_CHARS)));
-    assert.ok(out.includes(`[report truncated: ${REPORT_CLAMP_CHARS} of ${long.length} characters.`));
-    assert.ok(out.includes("Full transcript: child-1"));
-    assert.ok(out.length > REPORT_CLAMP_CHARS);
   });
 
   it("never strips a path inside the kept prefix", () => {
@@ -66,16 +64,6 @@ describe("report clamp — completed body", () => {
 });
 
 describe("report clamp — error body", () => {
-  it("passes a short error through", () => {
-    assert.equal(clampError("boom"), "boom");
-  });
-
-  it("empty error → minimal note, not the completed placeholder", () => {
-    const out = clampError("");
-    assert.ok(out.includes("failed"));
-    assert.notEqual(out, emptyReportPlaceholder());
-  });
-
   it("clamps at ERROR_CLAMP_CHARS", () => {
     const long = "e".repeat(ERROR_CLAMP_CHARS + 50);
     const out = clampError(long);
@@ -87,16 +75,19 @@ describe("report clamp — error body", () => {
     const body = formatWakeReportBody("error", "disk full");
     assert.equal(body, "Worker failed:\ndisk full");
     assertNewCopy(body);
+    // An empty error gets its own minimal note, never the completed placeholder
+    // (a failure must never read as a finished result).
+    assert.notEqual(clampError(""), emptyReportPlaceholder());
+    assert.ok(clampError("").length > 0);
   });
 });
 
 describe("report clamp — aborted and activity", () => {
-  it("aborted body is bookkeeping only", () => {
-    const body = formatWakeReportBody("aborted", "should not appear");
-    assert.equal(body, abortedReportBody());
-    assert.ok(body.includes("No report"));
-    assert.ok(!body.includes("should not appear"));
-    assertNewCopy(body);
+  it("an aborted worker's body is bookkeeping only, never its report text", () => {
+    assert.ok(abortedReportBody().length > 0);
+    const rendered = formatWakeReportBody("aborted", "secret work product");
+    assert.ok(rendered.length > 0);
+    assert.ok(!rendered.includes("secret work product"), "an aborted report leaked");
   });
 
   it("activity clamp keeps null for missing lines", () => {

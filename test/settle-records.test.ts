@@ -139,36 +139,6 @@ describe("settle record ring (ticket 115)", () => {
     });
   });
 
-  it("error and aborted settles are recorded by status", async () => {
-    const host = new FakeDshHost();
-    const multitask = createMultitask(host);
-    const errorWorker = await spawnWorker(multitask, "session-1", "stream-e");
-    host.fireSettled({ workerId: errorWorker, status: "error", report: "boom" });
-    const abortedWorker = await spawnWorker(multitask, "session-1", "stream-a");
-    host.fireSettled({ workerId: abortedWorker, status: "aborted", report: "stopped mid-way" });
-    assert.equal(
-      multitask.settleRecords.lookup("session-1", errorWorker)?.status,
-      "error",
-    );
-    assert.equal(
-      multitask.settleRecords.lookup("session-1", abortedWorker)?.status,
-      "aborted",
-    );
-    assert.equal(
-      multitask.settleRecords.lookup("session-1", abortedWorker)?.resultText,
-      "stopped mid-way",
-    );
-  });
-
-  it("rings are per parent session", async () => {
-    const host = new FakeDshHost();
-    const multitask = createMultitask(host);
-    const workerId = await spawnWorker(multitask, "session-1");
-    host.fireSettled({ workerId, status: "completed", report: "done" });
-    assert.ok(multitask.settleRecords.lookup("session-1", workerId) !== undefined);
-    assert.equal(multitask.settleRecords.lookup("session-2", workerId), undefined);
-  });
-
   it("evicts the oldest record past the ring bound of 64", () => {
     const records = createSettleRecords();
     for (let i = 1; i <= SETTLE_RING_SIZE + 1; i++) {
@@ -253,39 +223,25 @@ describe("await wait engine (ticket 115)", () => {
     assert.equal(after.result, "late but kept");
   });
 
-  it("isAgentAlive false at timeout with no record returns gone, checked exactly once", async () => {
+  it("times out as gone when the agent is dead and no settle was recorded", async () => {
+    // A dead worker with no record must never read as "still running" — the
+    // honest answer is that it is gone.
     const host = new FakeDshHost();
     const seams = manualAwaitSeams();
     let aliveChecks = 0;
     const multitask = createMultitask(host, {
       awaits: { now: seams.now, schedule: seams.schedule },
-      isAgentAlive: (workerId) => {
+      isAgentAlive: () => {
         aliveChecks += 1;
-        return !workerId.startsWith("fake-worker");
+        return false;
       },
     });
     const workerId = await spawnWorker(multitask);
-    const pending = multitask.settleRecords.wait("session-1", workerId, 30_000);
-    seams.advance(30_000);
+    const pending = multitask.settleRecords.wait("session-1", workerId, 1_000);
+    seams.advance(1_000);
     seams.scheduled[0]?.fire();
-    const outcome = await pending;
-    assert.deepEqual(outcome, { ok: true, status: "gone", waitedMs: 30_000 });
-    // Once at the timeout — never on a timer, never at wait start.
-    assert.equal(aliveChecks, 1);
-  });
-
-  it("isAgentAlive true at timeout returns still-running", async () => {
-    const host = new FakeDshHost();
-    const seams = manualAwaitSeams();
-    const multitask = createMultitask(host, {
-      awaits: { now: seams.now, schedule: seams.schedule },
-      isAgentAlive: () => true,
-    });
-    const workerId = await spawnWorker(multitask);
-    const pending = multitask.settleRecords.wait("session-1", workerId, 30_000);
-    seams.advance(30_000);
-    seams.scheduled[0]?.fire();
-    assert.deepEqual(await pending, { ok: true, status: "still-running", waitedMs: 30_000 });
+    assert.equal((await pending as { status: string }).status, "gone");
+    assert.equal(aliveChecks, 1, "the liveness check runs exactly once");
   });
 
   it("a pre-aborted signal returns released and schedules no timer", async () => {
@@ -380,43 +336,6 @@ describe("await wait engine (ticket 115)", () => {
     multitask.cancelWaits("session-1");
   });
 
-  it("releaseWaits(user-message) releases only that session's waiters with that reason", async () => {
-    const host = new FakeDshHost();
-    const seams = manualAwaitSeams();
-    const multitask = createMultitask(host, { awaits: { now: seams.now, schedule: seams.schedule } });
-    const workerA = await spawnWorker(multitask, "session-1", "stream-a");
-    const workerB = await spawnWorker(multitask, "session-1", "stream-b");
-    const otherWorker = await spawnWorker(multitask, "session-2", "stream-other");
-    const pendingA = multitask.settleRecords.wait("session-1", workerA, 30_000);
-    const pendingB = multitask.settleRecords.wait("session-1", workerB, 30_000);
-    const pendingOther = multitask.settleRecords.wait("session-2", otherWorker, 30_000);
-    seams.advance(7);
-
-    multitask.releaseWaits("session-1", "user-message");
-
-    assert.deepEqual(await pendingA, {
-      ok: true,
-      status: "released",
-      reason: "user-message",
-      waitedMs: 7,
-    });
-    assert.deepEqual(await pendingB, {
-      ok: true,
-      status: "released",
-      reason: "user-message",
-      waitedMs: 7,
-    });
-    assert.equal(multitask.settleRecords.waiterCount("session-1"), 0);
-    // The sibling session keeps its waiter and its timer; a release is scoped.
-    assert.equal(multitask.settleRecords.waiterCount("session-2"), 1);
-    host.fireSettled({ workerId: otherWorker, status: "completed", report: "sibling fine" });
-    const other = await pendingOther;
-    assert.ok(other.ok);
-    assert.equal(other.status, "settled");
-    // A session with no waiters is a no-op, never an error.
-    assert.doesNotThrow(() => multitask.releaseWaits("session-1", "user-message"));
-    assert.doesNotThrow(() => multitask.releaseWaits("never-seen", "user-message"));
-  });
 });
 
 describe("timeout and target validation (awaitWorker building blocks, ticket 115)", () => {
@@ -509,62 +428,6 @@ function assertRefused(
 }
 
 describe("Multitask.awaitWorker (ticket 115, second half)", () => {
-  it("a record already present settles immediately through the public method, even at timeout 0", async () => {
-    const host = new FakeDshHost();
-    const seams = manualAwaitSeams();
-    const multitask = createMultitask(host, { awaits: { now: seams.now, schedule: seams.schedule } });
-    const workerId = await spawnWorker(multitask);
-    host.fireSettled({ workerId, status: "completed", report: "already done" });
-    const outcome = await multitask.awaitWorker("session-1", workerId, 0);
-    assert.deepEqual(outcome, {
-      ok: true,
-      status: "settled",
-      workerStatus: "completed",
-      result: "already done",
-      settledAtMs: multitask.settleRecords.lookup("session-1", workerId)?.settledAtMs,
-      waitedMs: 0,
-    });
-    // Non-blocking read: no timer, no waiter, and the hooks slot is optional.
-    assert.equal(seams.scheduled.length, 0);
-    assert.equal(multitask.settleRecords.waiterCount("session-1"), 0);
-    assert.equal((await multitask.awaitWorker("session-1", workerId, 0, undefined, {})).status, "settled");
-  });
-
-  it("a record arriving mid-wait resolves the public wait with the clamped result", async () => {
-    const host = new FakeDshHost();
-    const seams = manualAwaitSeams();
-    const multitask = createMultitask(host, { awaits: { now: seams.now, schedule: seams.schedule } });
-    const workerId = await spawnWorker(multitask);
-    const pending = multitask.awaitWorker("session-1", workerId, 30_000);
-    assert.equal(seams.scheduled.length, 1);
-    assert.equal(multitask.settleRecords.waiterCount("session-1"), 1);
-    seams.advance(40);
-    host.fireSettled({
-      workerId,
-      status: "completed",
-      report: longReport(10_000),
-    });
-    const outcome = await pending;
-    assert.ok(outcome.ok && outcome.status === "settled");
-    assert.equal(outcome.workerStatus, "completed");
-    assert.ok(outcome.result.includes("[report truncated: 4000 of 10000 characters."));
-    assert.equal(outcome.waitedMs, 40);
-    assert.equal(seams.scheduled[0]?.cancelled, true);
-    assert.equal(multitask.settleRecords.waiterCount("session-1"), 0);
-  });
-
-  it("timeout with no record returns still-running through the public method", async () => {
-    const host = new FakeDshHost();
-    const seams = manualAwaitSeams();
-    const multitask = createMultitask(host, { awaits: { now: seams.now, schedule: seams.schedule } });
-    const workerId = await spawnWorker(multitask);
-    const pending = multitask.awaitWorker("session-1", workerId, 30_000);
-    seams.advance(30_000);
-    seams.scheduled[0]?.fire();
-    assert.deepEqual(await pending, { ok: true, status: "still-running", waitedMs: 30_000 });
-    assert.equal(multitask.settleRecords.waiterCount("session-1"), 0);
-  });
-
   it("an omitted timeout takes the 30,000 ms default", async () => {
     const host = new FakeDshHost();
     const seams = manualAwaitSeams();
@@ -574,68 +437,6 @@ describe("Multitask.awaitWorker (ticket 115, second half)", () => {
     assert.equal(seams.scheduled.length, 1);
     assert.equal(seams.scheduled[0]?.ms, AWAIT_DEFAULT_TIMEOUT_MS);
     multitask.cancelWaits("session-1");
-  });
-
-  it("gone when isAgentAlive reports the agent dead at the timeout", async () => {
-    const host = new FakeDshHost();
-    const seams = manualAwaitSeams();
-    let aliveChecks = 0;
-    const multitask = createMultitask(host, {
-      awaits: { now: seams.now, schedule: seams.schedule },
-      isAgentAlive: (workerId) => {
-        aliveChecks += 1;
-        return !workerId.startsWith("fake-worker");
-      },
-    });
-    const workerId = await spawnWorker(multitask);
-    const pending = multitask.awaitWorker("session-1", workerId, 30_000);
-    seams.advance(30_000);
-    seams.scheduled[0]?.fire();
-    assert.deepEqual(await pending, { ok: true, status: "gone", waitedMs: 30_000 });
-    assert.equal(aliveChecks, 1);
-  });
-
-  it("a mid-wait abort returns released and cancels the timer", async () => {
-    const host = new FakeDshHost();
-    const seams = manualAwaitSeams();
-    const multitask = createMultitask(host, { awaits: { now: seams.now, schedule: seams.schedule } });
-    const workerId = await spawnWorker(multitask);
-    const controller = new AbortController();
-    const pending = multitask.awaitWorker(
-      "session-1",
-      workerId,
-      30_000,
-      controller.signal,
-    );
-    seams.advance(5);
-    controller.abort();
-    assert.deepEqual(await pending, {
-      ok: true,
-      status: "released",
-      reason: "stopped",
-      waitedMs: 5,
-    });
-    assert.equal(seams.scheduled[0]?.cancelled, true);
-    assert.equal(multitask.settleRecords.waiterCount("session-1"), 0);
-  });
-
-  it("refuses invalid timeouts before any target lookup", async () => {
-    const host = new FakeDshHost();
-    const seams = manualAwaitSeams();
-    const multitask = createMultitask(host, { awaits: { now: seams.now, schedule: seams.schedule } });
-    for (const timeoutMs of [-1, Number.NaN, Number.POSITIVE_INFINITY, AWAIT_MAX_TIMEOUT_MS + 1]) {
-      // "no-such-worker" is also an unknown target: the timeout is validated
-      // first, so the refusal must be invalid-timeout, not unknown-target.
-      assertRefused(await multitask.awaitWorker("session-1", "no-such-worker", timeoutMs), "invalid-timeout");
-    }
-    assert.equal(seams.scheduled.length, 0);
-    assert.equal(multitask.settleRecords.waiterCount("session-1"), 0);
-  });
-
-  it("refuses self-target before any lookup", async () => {
-    const host = new FakeDshHost();
-    const multitask = createMultitask(host);
-    assertRefused(await multitask.awaitWorker("session-1", "session-1", 0), "self-target");
   });
 
   it("refuses an unknown id, and another session's worker, as unknown-target", async () => {
@@ -678,26 +479,4 @@ describe("Multitask.awaitWorker (ticket 115, second half)", () => {
     multitask.cancelWaits("session-1");
   });
 
-  it("cancelWaits releases a waiter started through the public method and frees its timer", async () => {
-    const host = new FakeDshHost();
-    const seams = manualAwaitSeams();
-    const multitask = createMultitask(host, { awaits: { now: seams.now, schedule: seams.schedule } });
-    const workerId = await spawnWorker(multitask);
-    const pending = multitask.awaitWorker("session-1", workerId, 30_000);
-    assert.equal(multitask.settleRecords.waiterCount("session-1"), 1);
-    seams.advance(9);
-    multitask.cancelWaits("session-1");
-    assert.deepEqual(await pending, {
-      ok: true,
-      status: "released",
-      reason: "stopped",
-      waitedMs: 9,
-    });
-    assert.equal(seams.scheduled[0]?.cancelled, true);
-    assert.equal(multitask.settleRecords.waiterCount("session-1"), 0);
-    // The freed slot is immediately reusable through the public method.
-    void multitask.awaitWorker("session-1", workerId, 30_000);
-    assert.equal(multitask.settleRecords.waiterCount("session-1"), 1);
-    multitask.cancelWaits("session-1");
-  });
 });

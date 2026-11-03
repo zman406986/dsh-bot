@@ -11,6 +11,7 @@ import {
 import type { WorkerLiveness } from "./liveness.js";
 import type { AwaitWorkerOutcome } from "./settle-records.js";
 import type { TerminalWorkerStatus, WorkerStatus, WorkerSummary } from "./types.js";
+import type { WorkerStage } from "./worker-stage.js";
 
 /** One check row the model sees from `check_workers`. */
 export interface WorkerCheckRow {
@@ -32,6 +33,13 @@ export interface WorkerCheckRow {
    * here"), never a guessed verdict.
    */
   readonly liveness: WorkerLiveness | null;
+  /**
+   * Ticket 171: the one stage this worker is in (see `worker-stage.ts`).
+   * Nullable exactly like `liveness`, and for the same reason: `null` means
+   * "not derivable here", never a guess. `check_workers` always derives it;
+   * the default only protects positional callers that have no ledger.
+   */
+  readonly stage: WorkerStage | null;
 }
 
 export type SpawnWorkerToolResult =
@@ -40,16 +48,6 @@ export type SpawnWorkerToolResult =
       readonly worker_id: string;
       readonly stream_key: string;
       readonly title: string;
-      /**
-       * Ticket 69 (chunk B presentation contract): present only when the
-       * spawn proceeded THROUGH the review-posture gate (a posture row gated
-       * the dispatch class and the host approval seam answered
-       * `allowed-once`). Absent for the shipped ungated spawn, so the
-       * serialized tool-call record lets the client's dispatch-card
-       * projection derive honest `gating` provenance at presentation time
-       * (replay-safe: the marker rides the durable record, not client state).
-       */
-      readonly gated?: true;
       /** Model-facing ack text. Not user-visible. */
       readonly ack: string;
     }
@@ -57,7 +55,6 @@ export type SpawnWorkerToolResult =
       readonly ok: false;
       readonly reason:
         | "duplicate-stream-key"
-        | "auto-review-refused"
         /** Ticket 151: a given `todo_id` named no ledger entry. No spawn ran. */
         | "unknown-todo-id"
         /** Ticket 151: the id already points at a worker. No spawn ran. */
@@ -405,6 +402,7 @@ export function toCheckRow(
   summary: WorkerSummary,
   recentActivity: string | null = null,
   liveness: WorkerLiveness | null = null,
+  stage: WorkerStage | null = null,
 ): WorkerCheckRow {
   return {
     worker_id: summary.workerId,
@@ -417,13 +415,14 @@ export function toCheckRow(
     todo_id: summary.todoId,
     recent_activity: clampActivity(recentActivity),
     liveness,
+    stage,
   };
 }
 
 /**
  * Compact one-line (or two-line) row — never a JSON dump.
  *
- * running · "Rewrite auth docs" · 4m12s · 7 tool calls · todo t-3 · transcript: <ref> · liveness: quiet
+ * running · "Rewrite auth docs" · 4m12s · 7 tool calls · todo t-3 · transcript: <ref> · liveness: quiet · stage: working
  *   activity: reading src/auth/session.ts
  */
 export function formatCheckRowLine(row: WorkerCheckRow): string {
@@ -441,6 +440,8 @@ export function formatCheckRowLine(row: WorkerCheckRow): string {
   );
   // Ticket 61: the liveness verdict rides the existing row shape (R5).
   if (row.liveness !== null) parts.push(`liveness: ${row.liveness}`);
+  // Ticket 171: the stage rides the same row, in the same style.
+  if (row.stage !== null) parts.push(`stage: ${row.stage}`);
   let line = parts.join(" · ");
   if (row.recent_activity !== null) {
     line += `\n  activity: ${row.recent_activity}`;

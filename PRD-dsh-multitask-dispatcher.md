@@ -123,6 +123,13 @@ Injected as system / always-on skill. **Amended 2026-09-18 (ADR-0018, supersedes
 - If your next step truly depends on one worker's result, you may wait on that worker once, for a bounded time. Waiting is not polling: never repeat a check in a loop, and never wait when you could end the turn and be woken by the result. *(Amended 2026-10-18, ADR-0025.)*
 - Internal workings stay invisible to the user: no jargon (no “dispatching an executor”); speak like one busy person.
 
+**Amended 2026-11-03 (ADR-0034, owner-ruled 2026-11-02/03):** the dispatcher policy is **two classes**, not one text, and both classes answer their own user directly (ADR-0032's ruling stands — the split is the shape of the work, not who may speak).
+
+- **Chief of staff** — a dispatcher the human started in their own chat. The bullets above describe it.
+- **Team leader** — a dispatcher another dispatcher summoned to lead one large job, too big for one context window. It splits the job into parts one worker can finish in a single pass, dispatches every part, re-chunks what is left after each settle, and reports progress upward to the dispatcher that handed it the job while still answering its own user. It designs no method for a worker beyond the part's scope, and it does not write code, test, or diagnose itself.
+
+The class is chosen at activation and fixed for that activation. It selects the session section, the standing rules injected every turn, and the wake-turn instructions. Both classes carry the same tool surface. The two texts themselves live in the prompt assets (§10), not in this section. *(ADR-0034; tickets 173 and 175.)*
+
 ### 6.2 Worker contract
 
 | Property | Rule |
@@ -348,11 +355,12 @@ Dispatcher-facing tools map 1:1 onto core calls; do not leak core internals into
 
 | Asset | Content requirements |
 |---|---|
-| Dispatcher system section | Roles in §6.1; user-facing tone rules; the user never sees internal implementation details |
+| Dispatcher system section | Roles in §6.1; user-facing tone rules; the user never sees internal implementation details. **Two faces, one per class** *(amended 2026-11-03, ADR-0034)*: the **chief-of-staff** section for a human-started dispatcher, and the **team-leader** section for a summoned one — one large job, split into worker-sized parts, re-chunked after every settle, with a recurring health check on its own plan. |
+| Dispatcher standing rules and wake instructions | Injected every turn and on every wake. Also **two faces per class** *(amended 2026-11-03, ADR-0034)*: the chief of staff's audience is the user; the team leader's is the user **and** the dispatcher that summoned it, reported through `message_agent` rather than the user-facing send alone. Both faces move together in EN and ZH. |
 | Worker agent definition | Headless, self-contained prompt requirement, report format, no user DM |
 | Steer wrapper | “Correction from parent; incorporate; continue from here; do not restart” |
 | Todo tool description | Parallel in_progress; reconcile on wake; completed = first visible acknowledgement to the user (ADR-0018) |
-| Check/message/stop/await tool descriptions | dsh wording; behavior identical to §6.3. `check_workers` is a snapshot tool, not a wait loop; `await_agent` is the only wait. |
+| Check/message/stop/await tool descriptions | dsh wording; behavior identical to §6.3. `check_workers` is a snapshot tool, not a wait loop; `await_agent` is the only wait. Descriptions describe the tools, not a class — both classes get the same eight *(ADR-0034)*. |
 
 Deliver as separate files in the product repo (e.g. `prompts/dispatcher.md`). Review for: no Sand phrases, no product-name leaks, bilingual if product requires ZH.
 

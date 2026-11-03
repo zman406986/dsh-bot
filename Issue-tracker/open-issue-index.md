@@ -2,7 +2,7 @@
 
 # Open ticket index
 
-Generated from `Issue-tracker/open/*.md` — 13 open tickets. The row set is owned by the folder, so a ticket that moves cannot leave a stale row behind (ticket 96). Titles and labels mirror each ticket's own lines.
+Generated from `Issue-tracker/open/*.md` — 21 open tickets. The row set is owned by the folder, so a ticket that moves cannot leave a stale row behind (ticket 96). Titles and labels mirror each ticket's own lines.
 
 | # | Ticket | Title | Status | Labels |
 |---|---|---|---|---|
@@ -19,3 +19,11 @@ Generated from `Issue-tracker/open/*.md` — 13 open tickets. The row set is own
 | 167 | [167-desktop-launchers-sync](open/167-desktop-launchers-sync.md) | Desktop launchers re-sync to the vendored repo | open | ready-for-human |
 | 168 | [168-dsh-baseline-version-mismatch](open/168-dsh-baseline-version-mismatch.md) | Installed dsh is 0.2.1-rc.2 while the repo, README and launchers name 0.2.1-rc.3 | open | needs-owner-decision |
 | 169 | [169-dispatcher-tool-rows-unreadable](open/169-dispatcher-tool-rows-unreadable.md) | Dispatcher tool rows render labels and values run together, unreadable | open | ready-for-agent |
+| 170 | [170-prompt-pass-dead-end-reporting-and-start-ack](open/170-prompt-pass-dead-end-reporting-and-start-ack.md) | Prompt pass: dead-end reporting, verification honesty, start acknowledgement, no method design | open | ready-for-agent |
+| 171 | [171-stage-table-for-worker-state](open/171-stage-table-for-worker-state.md) | One stage per worker, derived by a first-match table over state we already hold | open | ready-for-agent |
+| 172 | [172-test-suite-prune](open/172-test-suite-prune.md) | Prune the test suite aggressively | open | ready-for-agent |
+| 173 | [173-two-dispatcher-classes](open/173-two-dispatcher-classes.md) | Two dispatcher classes: chief of staff (human-started) and team leader (summoned) | open | ready-for-agent |
+| 174 | [174-remove-worker-access-ask-feature](open/174-remove-worker-access-ask-feature.md) | Remove the worker access-ask feature entirely | open | ready-for-agent |
+| 175 | [175-class-split-wake-and-standing-blocks](open/175-class-split-wake-and-standing-blocks.md) | Class-split the standing rules and wake instructions, and record the dispatcher class per session | open | ready-for-agent |
+| 176 | [176-spawned-dispatcher-cannot-summon](open/176-spawned-dispatcher-cannot-summon.md) | A summoned dispatcher cannot summon another dispatcher | open | ready-for-agent |
+| 177 | [177-dispatcher-class-icons](open/177-dispatcher-class-icons.md) | A different sidebar icon for each dispatcher class | open | ready-for-agent |

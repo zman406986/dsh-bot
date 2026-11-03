@@ -22,9 +22,9 @@ import {
   type RegisterableTool,
 } from "../src/adapter/dispatcher-tools.js";
 import {
-  toRegisterableAccessTool,
-  REQUEST_ACCESS_TOOL,
-} from "../src/adapter/worker-access-tool.js";
+  createWorkerReplyTool,
+  toRegisterableWorkerTool,
+} from "../src/core/tools.js";
 import type { AdapterContext } from "../src/adapter/cordis-dsh-host.js";
 
 const JSON_SCHEMA_TYPES = new Set([
@@ -216,12 +216,19 @@ describe("tool schema shape — provider-valid JSON Schema (ticket 45)", () => {
     });
   });
 
-  it("worker-side request_access schema passes the same structural walk", () => {
-    const tool = toRegisterableAccessTool(async () => ({
-      ok: true,
-      summary: "s",
-    }));
-    assert.equal(tool.name, REQUEST_ACCESS_TOOL);
+  it("worker-side reply_to_dispatcher schema passes the same structural walk", () => {
+    // Ticket 174 / ADR-0033 removed the worker access tool; the surviving
+    // worker-side tool is the mid-task reply, and it takes this same walk.
+    const tool = toRegisterableWorkerTool(
+      createWorkerReplyTool({
+        multitask: {
+          getWorker: () => undefined,
+          sendPeer: () => ({ ok: false, messageId: "", reason: "self-target", detail: "" }),
+        } as never,
+        resolveWorkerId: () => null,
+      }),
+    );
+    assert.equal(tool.name, "reply_to_dispatcher");
     assertValidToolSchema(tool.parameters, `${tool.name}.parameters`);
   });
 });

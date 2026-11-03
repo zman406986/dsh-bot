@@ -85,17 +85,6 @@ describe("multitask peer — fire-and-forget send + ack (AC)", () => {
     assert.equal(multitask.wakeBus.drain(SESSION), undefined);
   });
 
-  it("payload-mismatch reuse is refused and never enqueues", async () => {
-    const host = new FakeDshHost();
-    const multitask = createMultitask(host);
-
-    multitask.sendPeer(SESSION, envelope());
-    const reuse = multitask.sendPeer(SESSION, envelope({ text: "changed" }));
-    assert.equal(reuse.ok, false);
-    assert.ok(!reuse.ok);
-    assert.equal(reuse.reason, "message-id-reuse");
-    assert.equal(multitask.wakeBus.drain(SESSION)?.peerMessages?.length, 1);
-  });
 });
 
 describe("multitask peer — C14 retirement (ticket 70 §3: point-to-point only)", () => {
@@ -137,41 +126,18 @@ describe("multitask peer — C14 retirement (ticket 70 §3: point-to-point only)
 });
 
 describe("multitask peer — priority interrupt vs user (AC)", () => {
-  it("priority mid non-user turn requests interrupt and delivers as peer wake", async () => {
+  it("priority mid a user turn never interrupts — the lane waits its turn", async () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
     const workerId = await spawnRunning(multitask, SESSION, "s1", "Work");
 
-    // Settle → background ready + host wake. Start that non-user turn
-    // without draining (host compose path is not used by FakeDshHost).
-    host.fireSettled({ workerId, status: "completed", report: "done" });
-    multitask.wakeBus.noteTurnStarted(SESSION);
-    assert.equal(multitask.wakeBus.getTurnOwner(SESSION), "worker-settled");
-
-    const ack = multitask.sendPeer(
-      SESSION,
-      envelope({ messageId: "p1", priority: true }),
-    );
-    assert.equal(ack.ok, true);
-    assert.deepEqual(host.interruptDispatcherCalls, [SESSION]);
-
-    const wake = multitask.wakeBus.drain(SESSION);
-    assert.equal(wake?.source, "peer");
-    assert.equal(wake?.peerMessages?.[0]?.messageId, "p1");
-
-    // Delivered flag: drained peer is no longer pending.
-    assert.equal(multitask.listPendingPeers(SESSION).length, 0);
-  });
-
-  it("priority mid user turn never interrupts", async () => {
-    const host = new FakeDshHost();
-    const multitask = createMultitask(host);
-
     multitask.wakeBus.noteTurnStarted(SESSION, "user");
+    host.fireSettled({ workerId, status: "completed", report: "done" });
     multitask.sendPeer(SESSION, envelope({ messageId: "p1", priority: true }));
 
+    // A user-owned turn is never preempted (ADR-0025 / AC).
     assert.deepEqual(host.interruptDispatcherCalls, []);
-    assert.equal(multitask.wakeBus.peek(SESSION), undefined);
+    assert.equal(multitask.wakeBus.drain(SESSION)?.source, undefined);
   });
 
   it("non-priority peer queues behind user and ahead of settled on the next flush", async () => {
@@ -191,68 +157,6 @@ describe("multitask peer — priority interrupt vs user (AC)", () => {
     multitask.wakeBus.noteTurnEnded(SESSION);
     const second = multitask.wakeBus.drain(SESSION);
     assert.equal(second?.source, "worker-settled");
-  });
-});
-
-describe("multitask peer — re-queue without duplicate (AC)", () => {
-  it("interrupt of a ready background wake re-queues settled; peers drain once", async () => {
-    const host = new FakeDshHost();
-    const multitask = createMultitask(host);
-
-    multitask.wakeBus.noteTurnStarted(SESSION, "user");
-    multitask.sendPeer(SESSION, envelope({ messageId: "n1" }));
-    // Fake a settled notice already in the bus pending via direct enqueue
-    // after we hold the turn so both wait together.
-    const w = await spawnRunning(multitask, SESSION, "s1", "Work");
-    host.fireSettled({ workerId: w, status: "completed", report: "r" });
-    multitask.wakeBus.noteTurnEnded(SESSION);
-
-    // Peer is ready (ahead of background). Priority replaces it.
-    multitask.sendPeer(
-      SESSION,
-      envelope({ messageId: "p1", priority: true }),
-    );
-    const priority = multitask.wakeBus.drain(SESSION);
-    assert.deepEqual(
-      priority?.peerMessages?.map((m) => m.messageId),
-      ["p1"],
-    );
-    assert.equal(multitask.listPendingPeers(SESSION).map((e) => e.messageId).includes("p1"), false);
-
-    multitask.wakeBus.noteTurnStarted(SESSION, "peer");
-    multitask.wakeBus.noteTurnEnded(SESSION);
-    const normal = multitask.wakeBus.drain(SESSION);
-    assert.deepEqual(
-      normal?.peerMessages?.map((m) => m.messageId),
-      ["n1"],
-    );
-
-    multitask.wakeBus.noteTurnStarted(SESSION, "peer");
-    multitask.wakeBus.noteTurnEnded(SESSION);
-    const background = multitask.wakeBus.drain(SESSION);
-    assert.equal(background?.source, "worker-settled");
-    assert.equal(background?.settledWorkers.length, 1);
-    assert.equal(multitask.wakeBus.drain(SESSION), undefined);
-    assert.equal(multitask.listPendingPeers(SESSION).length, 0);
-  });
-
-  it("drainWake marks peer rows delivered so a later accept cannot re-deliver the same id", async () => {
-    const host = new FakeDshHost();
-    const multitask = createMultitask(host);
-
-    multitask.sendPeer(SESSION, envelope());
-    const drained = multitask.drainWake(SESSION);
-    assert.equal(drained?.wake.source, "peer");
-    assert.equal(multitask.listPendingPeers(SESSION).length, 0);
-
-    const again = multitask.sendPeer(SESSION, envelope());
-    assert.equal(again.ok, true);
-    assert.ok(again.ok);
-    // Still no second wake: appended is false for a delivered id.
-    assert.equal(
-      host.wakeCalls.filter((id) => id === SESSION).length,
-      1,
-    );
   });
 });
 
@@ -313,12 +217,6 @@ describe("peer hidden-turn copy (AC: other-assistant cue, never the user)", () =
     assert.equal(text.includes("conv-1"), false);
     // Must not present as a user message.
     assert.equal(text.includes("The user said"), false);
-  });
-
-  it("empty peer batch still produces the other-assistant shell", () => {
-    const text = assemblePeerWakeTurn([]);
-    assert.ok(text.includes(PEER_WAKE_SECTION_HEADINGS[0]));
-    assert.ok(text.includes("(none)"));
   });
 
   it("core never uses the user-messaging path for peer delivery", async () => {

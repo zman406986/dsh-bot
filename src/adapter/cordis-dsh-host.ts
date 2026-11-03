@@ -1,11 +1,11 @@
 import type { DshHost } from "../core/dsh-host.js";
-import type { DurabilityPort } from "../core/durability.js";
-import type { AccessRequestEvent } from "../core/access-types.js";
+import type {
+  DurableDispatcherMarkAnswer,
+  DurabilityPort,
+} from "../core/durability.js";
 import type { AgentMessageWakeOrigin } from "../core/peer-types.js";
 import { randomUUID } from "node:crypto";
 import { clampActivity, clampRecentResultExcerpt } from "../core/report-clamp.js";
-import type { UserQuestionsLike } from "./access-prompt.js";
-import type { HostApprovalServiceLike } from "./dispatch-approval.js";
 import type { SettledEvent, SpawnOptions, TerminalWorkerStatus } from "../core/types.js";
 import type {
   DispatcherSpawnOptions,
@@ -30,7 +30,7 @@ import {
   wakeCueFor,
   wakeUserMessage,
 } from "./wake-copy.js";
-import type { PolicyLanguage } from "../core/policy/prompts.js";
+import type { DispatcherOrigin, PolicyLanguage } from "../core/policy/prompts.js";
 
 export type { WorkerAgentDef };
 
@@ -267,22 +267,6 @@ export interface AdapterContext {
    * the live plugin injects `commands` so activation can register.
    */
   commands?: CommandsLike;
-  /**
-   * Structured user-question seam (ticket 23; dsh-user-questions service).
-   * Optional so stub contexts stay minimal; when absent the access-prompt
-   * pump is inert and the shipped conversational access relay stays the
-   * ask surface (ticket 23 fallback clause).
-   */
-  userQuestions?: UserQuestionsLike;
-  /**
-   * Host approval answerer service (ticket 69 L3; `ctx.approval`,
-   * `@deepseek-ai/dsh-user-approval` — the face documented at
-   * `docs/research/dsh-adapter-api-notes.md:220-247`, inject note `:390`).
-   * Optional so stub contexts stay minimal; when absent the dispatch
-   * approval seam degrades every gated dispatch to `unavailable`, which the
-   * chunk-A spawn gate refuses (fail-closed, never a silent allow).
-   */
-  approval?: HostApprovalServiceLike;
   subagents: {
     startActivation(spec: ActivationSpecLike): Promise<ActivationLike>;
     interrupt(targetSessionId: unknown, authority: unknown): void;
@@ -422,16 +406,24 @@ export interface CordisDshHostOptions {
    *
    * It routes into the same activation path the `/dsh-bot` command uses
    * (`lifecycle.activate`, hence `bindActivation` → `onActivated` →
-   * `activateToolSurface`), so role, the 8 scoped tools, `recall`,
-   * `request_access`, the policy inject and the durability rebuild all come
-   * back together. The plugin's activation path is idempotent per session
+   * `activateToolSurface`), so role, the 8 scoped tools, `recall`, the policy
+   * inject and the durability rebuild all come back together. The plugin's activation path is idempotent per session
    * (`parent-agent.ts` `sessions` membership), and the host additionally
    * deduplicates by session id before calling.
    *
    * Absent means "no reactivation path exists" — a stub host keeps the
    * pre-147 dormant behavior.
+   *
+   * Ticket 177: the third argument is the durable CLASS the resumed session
+   * was activated with (`"user"` when {@link dispatcherClassOf} cannot
+   * answer). It is what a summoned dispatcher needs to come back as a team
+   * leader instead of falling back to the chief-of-staff instructions.
    */
-  onUserDispatcherResumed?: (agent: AgentLike, sessionId: string) => void;
+  onUserDispatcherResumed?: (
+    agent: AgentLike,
+    sessionId: string,
+    origin: DispatcherOrigin,
+  ) => void;
   /**
    * Ticket 147: the session's durable dispatcher kind, as the host's
    * session-projection registry answers it — `"dispatcher"` or `null`.
@@ -446,6 +438,21 @@ export interface CordisDshHostOptions {
    * then does nothing, exactly as before ticket 147.
    */
   sessionKindOf?: (session: unknown) => "dispatcher" | null;
+  /**
+   * Ticket 177: the durable CLASS of a resumed dispatcher — `"user"` (the
+   * chief of staff the human started) or `"spawned"` (the team leader another
+   * dispatcher summoned) — or null when it cannot be read.
+   *
+   * It exists because ADR-0032 made a summoned dispatcher top-level: its cold
+   * resume lands in the parentless branch, which before this option had no way
+   * to ask which class the session was. That is ticket 173's recorded
+   * limitation ("the class is not restored after a restart"), and passing the
+   * answer into {@link onUserDispatcherResumed} is its fix.
+   *
+   * Optional and fail-closed: absent, or an answer of null, activates as
+   * `"user"` — the pre-175 behavior.
+   */
+  dispatcherClassOf?: (session: unknown) => DispatcherOrigin | null;
   /**
    * Ticket 142 (owner ruling 2026-10-22 — children half): a worker this
    * plugin spawned was adopted back into the host's registry after the host
@@ -499,6 +506,19 @@ export interface CordisDshHost extends DshHost {
    * Host errors surface unchanged — no refusal class is invented here.
    */
   spawnDispatcher(opts: DispatcherSpawnOptions): Promise<DispatcherSpawnResult>;
+  /**
+   * Ticket 176: record which CLASS a session this host activates belongs to.
+   * `"user"` is the human's own `/dsh-bot` chat; `"spawned"` is a team leader
+   * another dispatcher summoned, which may not summon further dispatchers.
+   *
+   * The host records `"spawned"` itself for every session it activates as a
+   * summoned peer, and reads the durable class back on a cold resume, so a
+   * caller never HAS to use this. It exists for the one path the host cannot
+   * observe: the user running `/dsh-bot` in their own chat, which reaches the
+   * lifecycle directly. Recording it there keeps the no-summon check exact
+   * instead of inferring the class from an absent mark row.
+   */
+  recordDispatcherClass(sessionId: string, origin: DispatcherOrigin): void;
   /** Live job snapshots for the check surface. Process-local; not durable. */
   listLiveJobs(callerSessionId?: string): readonly JobSnapshotLike[];
   /** Durable markers (ADR-0006). */
@@ -650,11 +670,6 @@ export interface CordisDshHost extends DshHost {
   emitStepBoundary(workerId: string): void;
   /** Notify core that a worker's first turn started (spawned → running). */
   onWorkerTurnStarted?: (workerId: string) => void;
-  /**
-   * Emit a structured access request from a worker tool into core
-   * subscribers. Adapter-only helper for the request_access tool.
-   */
-  emitAccessRequest(event: AccessRequestEvent): void;
   dispose(): void;
 }
 
@@ -988,6 +1003,28 @@ function readSessionController(
   return ctx.sessionController;
 }
 
+/**
+ * Ticket 177: read a resumed session's durable dispatcher class, never
+ * letting a plugin-supplied reader break the host's resume path.
+ *
+ * Null means "cannot answer", which the caller reads as `"user"` — the
+ * pre-175 behavior — so a projection that throws or returns junk can only
+ * preserve the old fallback, never invent a class.
+ */
+function readDispatcherClass(
+  reader: ((session: unknown) => DispatcherOrigin | null) | undefined,
+  session: unknown,
+): DispatcherOrigin | null {
+  if (reader === undefined) return null;
+  let answer: unknown;
+  try {
+    answer = reader(session);
+  } catch {
+    return null;
+  }
+  return answer === "user" || answer === "spawned" ? answer : null;
+}
+
 export function createCordisDshHost(
   ctx: AdapterContext,
   options?: CordisDshHostOptions,
@@ -1005,6 +1042,7 @@ export function createCordisDshHost(
   const onWorkerReattachedRaw = options?.onWorkerReattached;
   const onUserDispatcherResumed = options?.onUserDispatcherResumed;
   const sessionKindOfSession = options?.sessionKindOf;
+  const dispatcherClassOfSession = options?.dispatcherClassOf;
 
   /**
    * Ticket 142: fire the re-attachment hook, never letting it break the
@@ -1096,6 +1134,25 @@ export function createCordisDshHost(
    */
   const dispatcherMarks = new Map<string, string | undefined>();
   /**
+   * Ticket 176 (owner ruling 2026-11-03): which CLASS each session this host
+   * activated belongs to — `"user"` (the human's own `/dsh-bot` chat) or
+   * `"spawned"` (a team leader another dispatcher summoned).
+   *
+   * A separate map, like the generation one above, and for a distinct reason:
+   * `dispatcherMarks` answers "is this a dispatcher at all", whereas the class
+   * answers "may it summon". A spawned dispatcher may NOT summon further
+   * dispatchers, so `spawnDispatcher` must be able to answer this for its
+   * CALLER before doing anything else.
+   *
+   * Written by the two activation entry points that know the answer —
+   * `activateSpawnedDispatcher` (always `"spawned"`) and
+   * `resumeUserStartedDispatcher` (the class the durable projection reported,
+   * `"user"` by default). Never removed, for the same reason `dispatcherMarks`
+   * is never removed: the classification of a session id cannot change, and a
+   * re-announcement must resolve the same answer.
+   */
+  const dispatcherClasses = new Map<string, DispatcherOrigin>();
+  /**
    * Ticket 141: spawn generation per spawned dispatcher session (1 =
    * user-started, +1 per spawn). A SEPARATE map on purpose: `dispatcherMarks`
    * is read as a bare parent id in several places, and the generation is not
@@ -1156,7 +1213,6 @@ export function createCordisDshHost(
   const parkedWorkerWakes = new Map<string, string>();
   const settledCallbacks: Array<(event: SettledEvent) => void> = [];
   const stepBoundaryCallbacks: Array<(workerId: string) => void | Promise<void>> = [];
-  const accessRequestCallbacks: Array<(event: AccessRequestEvent) => void> = [];
   // Ticket 75: firehose-observed tool calls on owned workers, fanned out to
   // subscribers (the plugin wires the core's noteToolCall onto this).
   const toolCallCallbacks: Array<(workerId: string) => void> = [];
@@ -1588,6 +1644,13 @@ export function createCordisDshHost(
     generation: number = dispatcherGenerations.get(sessionId) ?? 2,
     flushWake = true,
   ): void {
+    // Ticket 176: every session THIS function activates is spawned-class by
+    // definition — it is called only for a child a dispatcher summoned (the
+    // reservation, the durable mark, or the re-announcement of one). The class
+    // is recorded before the hook runs, so `spawnDispatcher` can refuse a
+    // summon from this session even if the plugin's own surface registration
+    // threw.
+    dispatcherClasses.set(sessionId, "spawned");
     if (onDispatcherSpawned === undefined) {
       if (flushWake) flushPendingWakeTurn(sessionId, childAgent);
       return;
@@ -1853,6 +1916,66 @@ export function createCordisDshHost(
   }
 
   /**
+   * Ticket 176 (owner ruling 2026-11-03): which class the CALLING session
+   * belongs to — the answer `spawnDispatcher` needs before it does anything.
+   *
+   * Resolution order, most specific first:
+   *
+   * 1. `dispatcherClasses` — written by the two activation entry points, so it
+   *    covers every session this process activated. Exact, not inferred.
+   * 2. the spawn-generation mirror — `>= 2` means "another dispatcher spawned
+   *    this one" (the spawn path writes spawner + 1, so 1 never appears there).
+   * 3. the durable mark answer — `"dispatcher"` means spawned,
+   *    `"not-dispatcher"` means user-started. This is the cold-resume route: a
+   *    `dispatcher_sessions` row is written only by the spawn path
+   *    (`parseDispatcherMark` rejects generation 1), so a row's presence IS
+   *    "another dispatcher summoned this session".
+   *
+   * The two unanswerable cases are deliberately NOT the same answer:
+   *
+   * - **No durable store at all** (or one with no synchronous peek) → `"user"`.
+   *   Nothing can ever be proven on that shape, the spawn path's own two
+   *   in-memory records above already covered every real spawned session, and
+   *   returning `"spawned"` would break the pre-176 behaviour for every
+   *   install that carries no marker domain. This is the historical host
+   *   shape and it keeps its historical answer.
+   * - **A store that exists but has not opened yet** → `"spawned"`, FAIL
+   *   CLOSED. Such a store can hold a `dispatcher_sessions` row this process
+   *   has not read, so absence proves nothing. The owner set this constraint
+   *   explicitly; a wrong allow creates a second dispatcher level nothing else
+   *   would catch, while a wrong deny is visible immediately and self-heals
+   *   once the store opens (which happens inside `rebuildFromDurability`, at
+   *   activation). See the ticket for the residual window.
+   */
+  function dispatcherClassForSummon(sessionId: string): DispatcherOrigin {
+    const recorded = dispatcherClasses.get(sessionId);
+    if (recorded !== undefined) return recorded;
+    const generation = dispatcherGenerations.get(sessionId);
+    if (generation !== undefined) return generation >= 2 ? "spawned" : "user";
+    if (dispatcherMarks.has(sessionId)) return "spawned";
+    const store = markers;
+    if (store === undefined || store.peekDispatcherMark === undefined) {
+      // No durable store at all, or one that cannot answer synchronously.
+      // Neither can hide a spawned dispatcher: the spawn path records BOTH the
+      // class and the generation in this process before the child's surface
+      // exists, so the two checks above already answered for one. What is left
+      // is the historical host shape, and it keeps its pre-176 behaviour.
+      return "user";
+    }
+    let kind: DurableDispatcherMarkAnswer["kind"] = "unknown";
+    try {
+      kind = store.peekDispatcherMark(sessionId).kind;
+    } catch {
+      // An unreadable table is the same "cannot answer" case as an unopened
+      // one — handled below.
+    }
+    if (kind === "not-dispatcher") return "user";
+    // "dispatcher" — or a store that exists but has not opened yet, which
+    // cannot prove the human started this chat. Deny: see the ticket.
+    return "spawned";
+  }
+
+  /**
    * Ticket 147: re-activate a USER-STARTED dispatcher whose chat the host has
    * resumed after a restart.
    *
@@ -1888,10 +2011,22 @@ export function createCordisDshHost(
     if (onUserDispatcherResumed === undefined) return;
     if (sessionKindOfSession === undefined) return;
     if (sessionKindOfSession(session) !== "dispatcher") return;
+    // Ticket 177: ADR-0032 made a summoned dispatcher top-level, so IT also
+    // arrives here — the branch name is historical and this is the seam where
+    // ticket 173's "the class falls back to chief-of-staff after a restart"
+    // limitation is closed. The class comes from the same durable projection
+    // the glyph reads, and an unreadable answer stays `"user"` (pre-175).
+    const origin: DispatcherOrigin =
+      readDispatcherClass(dispatcherClassOfSession, session) ?? "user";
+    // Ticket 176: record the class before activating. `"spawned"` here is a
+    // summoned dispatcher resuming top-level (ADR-0032), and it keeps the
+    // no-summon rule across a restart — the durable `dispatcher_sessions` row
+    // is what makes the projection answer `"spawned"` at all.
+    dispatcherClasses.set(sessionId, origin);
     if (!resumedUserDispatchers.has(sessionId)) {
       resumedUserDispatchers.add(sessionId);
       try {
-        onUserDispatcherResumed(agent, sessionId);
+        onUserDispatcherResumed(agent, sessionId, origin);
       } catch (error) {
         // The agent is already live; a failed activation must not turn the
         // host's resume into an error. The id stays recorded so a second
@@ -2051,6 +2186,15 @@ export function createCordisDshHost(
 
     isDurablyMarkedDispatcher(sessionId: string): boolean {
       return dispatcherMarks.has(sessionId);
+    },
+
+    recordDispatcherClass(sessionId: string, origin: DispatcherOrigin): void {
+      // Ticket 176: never downgrade a known `"spawned"` to `"user"`. The class
+      // of a session id cannot change (ADR-0034 decision 1: fixed for the life
+      // of the activation), and a later caller passing the default must not
+      // unlock a team leader.
+      if (dispatcherClasses.get(sessionId) === "spawned") return;
+      dispatcherClasses.set(sessionId, origin);
     },
 
     dispatcherMarkAnswer(
@@ -2250,16 +2394,6 @@ export function createCordisDshHost(
       }
     },
 
-    emitAccessRequest(event: AccessRequestEvent): void {
-      for (const cb of [...accessRequestCallbacks]) {
-        cb(event);
-      }
-    },
-
-    onAccessRequest(cb: (event: AccessRequestEvent) => void): void {
-      accessRequestCallbacks.push(cb);
-    },
-
     // Ticket 102b hardening: the adapter no longer implements the optional
     // `resolveCredential` seam. Its read was `(ctx as { credentials? }).credentials`
     // — a Cordis service declared in NEITHER `plugin.ts`'s `inject` nor
@@ -2433,6 +2567,24 @@ export function createCordisDshHost(
     async spawnDispatcher(
       opts: DispatcherSpawnOptions,
     ): Promise<DispatcherSpawnResult> {
+      // Ticket 176 (owner ruling 2026-11-03): a dispatcher that another
+      // dispatcher summoned is a TEAM LEADER for one job — it does not
+      // summon. Its tool surface already omits `spawn_dispatcher`, so this is
+      // the backstop for any other route into this method.
+      //
+      // Loud, not silent: a caller that gets here has hit a real wiring bug or
+      // reached the host directly, and both deserve a named refusal the model
+      // can act on (report to the parent; the parent summons). It is thrown as
+      // a plain Error with this file's `CordisDshHost:` prefix rather than a
+      // new error class, because nothing catches it by type.
+      //
+      // Not a depth cap and not a reversal of the 2026-10-28 "no cap of ours"
+      // ruling: the tree has no count bound, it simply has one level.
+      if (dispatcherClassForSummon(opts.parentSessionId) === "spawned") {
+        throw new Error(
+          `CordisDshHost: session ${opts.parentSessionId} is a dispatched team leader; it cannot summon another dispatcher. Report what is needed to the dispatcher that summoned it — that dispatcher spawns.`,
+        );
+      }
       // ADR-0019: the authority agent is the SPAWNING dispatcher's own
       // session, resolved exactly as `spawnWorker` does.
       const parent = parents.get(opts.parentSessionId);
@@ -2702,7 +2854,6 @@ export function createCordisDshHost(
       peerToolCalls.clear();
       settledCallbacks.length = 0;
       stepBoundaryCallbacks.length = 0;
-      accessRequestCallbacks.length = 0;
       toolCallCallbacks.length = 0;
       userMessageCallbacks.length = 0;
       parents.clear();

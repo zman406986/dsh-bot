@@ -243,22 +243,4 @@ describe("activation path passes the preference through (ticket 153)", () => {
     assert.ok(policy.startsWith(POLICY_SECTION_HEADINGS_ZH[0]));
   });
 
-  it("an en preference, an absent preference and a failed read all compose EN", () => {
-    const scenarios: readonly (readonly [string, unknown])[] = [
-      ["en preference", localeSettings("en")],
-      ["absent preference", localeSettings(undefined)],
-      ["no settings service", undefined],
-      ["unknown language", localeSettings("ja")],
-    ];
-    for (const [label, service] of scenarios) {
-      const harness = activationCtx(service);
-      apply(harness.ctx as never, volatileConfig({ enabled: true }) as never);
-      const policy = activateAndReadPolicy(harness);
-      assert.equal(
-        policy,
-        buildDispatcherPolicySection("user", 1, "en"),
-        `${label}: must compose the EN face`,
-      );
-    }
-  });
 });

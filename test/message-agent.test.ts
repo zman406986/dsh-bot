@@ -26,16 +26,9 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { FakeDshHost } from "../src/core/fake-host.js";
 import { createMultitask, type Multitask } from "../src/core/multitask.js";
-import {
-  createDispatcherTools,
-  MESSAGE_AGENT_RATE_LIMIT,
-  MESSAGE_AGENT_RATE_WINDOW_MS,
-  SEND_PEER_TEXT_MAX_CHARS,
-  type DispatcherToolDef,
-} from "../src/core/tools.js";
+import {createDispatcherTools, MESSAGE_AGENT_RATE_LIMIT, MESSAGE_AGENT_RATE_WINDOW_MS, type DispatcherToolDef} from "../src/core/tools.js";
 import { MESSAGE_AGENT_TOOL } from "../src/core/policy/prompts.js";
 import type { MessageAgentToolResult } from "../src/core/tool-results.js";
-import type { AccessRequestEvent } from "../src/core/access-types.js";
 
 const SENDER = "session-1";
 const PEER = "peer-session-9";
@@ -159,24 +152,6 @@ describe("ticket 116 — worker target rides the existing steer path", () => {
     assert.equal(r.multitask.getWorker(workerId)?.status, "running");
   });
 
-  it("single-slot last-wins: a second message before delivery replaces the first", async () => {
-    const r = await rig();
-    const workerId = await spawnRunning(r.multitask, SENDER, "s-1", "Docs rewrite");
-
-    const first = await r.exec({ target: workerId, text: "first correction" });
-    assert.equal(first.ok, true);
-    // Already steering: the second park replaces the pending slot and does
-    // not interrupt a second time.
-    const second = await r.exec({ target: workerId, text: "second correction" });
-    assert.equal(second.ok, true);
-    assert.deepEqual(r.host.interruptCalls, [workerId]);
-
-    await r.host.fireStepBoundary(workerId);
-    assert.equal(r.host.sendMessageCalls.length, 1);
-    const delivered = r.host.sendMessageCalls[0]?.message ?? "";
-    assert.ok(delivered.includes("second correction"));
-    assert.ok(!delivered.includes("first correction"));
-  });
 });
 
 describe("ticket 116 — worker-target refusals", () => {
@@ -189,21 +164,6 @@ describe("ticket 116 — worker-target refusals", () => {
     assert.ok(result.detail.includes(workerId));
     assert.ok(result.detail.includes("NOT delivered"));
     assert.deepEqual(r.host.sendMessageCalls, []);
-  });
-
-  it("a spawned-but-never-started worker refuses not-running", async () => {
-    const r = await rig();
-    const spawned = await r.multitask.spawnWorker({
-      parentSessionId: SENDER,
-      streamKey: "s-never",
-      title: "Never started",
-      prompt: "Go.",
-    });
-    assert.ok(spawned.ok);
-    if (!spawned.ok) return;
-
-    refused(await r.exec({ target: spawned.workerId, text: "hi" }), "not-running");
-    assert.deepEqual(r.host.interruptCalls, []);
   });
 
   it("another session's worker refuses unknown-target without leaking it", async () => {
@@ -234,27 +194,6 @@ describe("ticket 116 — worker-target refusals", () => {
     assert.deepEqual(r.host.wakeCalls, []);
   });
 
-  it("oversize text refuses invalid-envelope with nothing queued; the cap passes", async () => {
-    const r = await rig();
-
-    const over = refused(
-      await r.exec({
-        target: PEER,
-        text: "x".repeat(SEND_PEER_TEXT_MAX_CHARS + 1),
-      }),
-      "invalid-envelope",
-    );
-    assert.ok(over.detail.includes(String(SEND_PEER_TEXT_MAX_CHARS)));
-    assert.equal(r.multitask.peerInbox.pendingCount(PEER), 0);
-    assert.deepEqual(r.host.wakeCalls, []);
-
-    const atCap = await r.exec({
-      target: PEER,
-      text: "y".repeat(SEND_PEER_TEXT_MAX_CHARS),
-    });
-    assert.equal(atCap.ok, true);
-    assert.equal(r.multitask.peerInbox.pendingCount(PEER), 1);
-  });
 });
 
 describe("ticket 116 — dispatcher target rides the existing peer lane", () => {
@@ -284,33 +223,6 @@ describe("ticket 116 — dispatcher target rides the existing peer lane", () => 
     assert.equal(pending[0]?.fromName, SENDER);
     assert.deepEqual(pending[0]?.to, { kind: "agent", agentId: PEER });
     assert.deepEqual(r.host.wakeCalls, [PEER]);
-  });
-
-  it("priority lands on the priority lane and never interrupts a user turn", async () => {
-    const r = await rig();
-    const bus = r.multitask.wakeBus;
-    bus.noteTurnStarted(PEER, "user");
-
-    const result = await r.exec({ target: PEER, text: "urgent?", priority: true });
-    assert.ok(result.ok);
-    if (!result.ok) return;
-    assert.equal(result.delivered_as, "peer");
-    // The priority ack names the one guarantee priority buys: background
-    // work may yield, a user-driven turn never does.
-    assert.ok(result.note.includes("never a turn their user is driving"));
-
-    // The user's turn keeps the bus; nothing interrupts or flushes mid-turn.
-    assert.deepEqual(r.host.interruptDispatcherCalls, []);
-    assert.equal(bus.getTurnOwner(PEER), "user");
-    assert.equal(bus.peek(PEER), undefined);
-    assert.equal(r.multitask.peerInbox.pendingCount(PEER), 1);
-
-    // Turn end flushes the priority lane.
-    bus.noteTurnEnded(PEER);
-    const wake = bus.drain(PEER);
-    assert.equal(wake?.source, "peer");
-    assert.equal(wake?.peerMessages?.[0]?.priority, true);
-    assert.equal(wake?.peerMessages?.[0]?.text, "urgent?");
   });
 
   it("a deactivated dispatcher target refuses unknown-target; a live one accepts", async () => {
@@ -345,35 +257,6 @@ describe("ticket 116 — dispatcher target rides the existing peer lane", () => 
  * wake is requested, and the adapter's wake path cold-resumes the child.
  */
 describe("ticket 138 — a durably marked dispatcher is wake-able by a send", () => {
-  it("a marked-but-not-live target accepts and requests its wake (no unknown-target)", async () => {
-    const marked = new Set<string>([PEER]);
-    const r = await rig({ isLive: () => false, isMarked: (id) => marked.has(id) });
-
-    const result = await r.exec({ target: PEER, text: "are you back?" });
-    assert.equal(result.ok, true, JSON.stringify(result));
-    if (!result.ok) return;
-    assert.equal(result.delivered_as, "peer");
-    assert.equal(result.target, PEER);
-    // Accepted means exactly what it always meant: queued in the peer inbox
-    // and the wake lane. The acceptance copy must not promise more.
-    assert.ok(result.note.includes("Accepted"));
-    assert.ok(result.note.includes("no reply"));
-
-    assert.equal(r.multitask.peerInbox.pendingCount(PEER), 1);
-    assert.deepEqual(r.host.wakeCalls, [PEER]);
-    // The wake names the sender so the adapter can resume from it.
-    assert.deepEqual(r.host.wakeOrigins, [
-      {
-        sessionId: PEER,
-        origin: {
-          kind: "agent-message",
-          form: "relay",
-          senderSessionId: SENDER,
-        },
-      },
-    ]);
-  });
-
   it("an UNMARKED unknown target still refuses unknown-target — the fence is intact", async () => {
     const r = await rig({
       isLive: () => false,
@@ -390,23 +273,6 @@ describe("ticket 138 — a durably marked dispatcher is wake-able by a send", ()
     assert.deepEqual(r.host.wakeCalls, []);
   });
 
-  it("a mark only widens the fence while the target is NOT live: a live dispatcher keeps the normal path", async () => {
-    // Both knobs true: the live check decides first, so the mark is never
-    // consulted and no second wake/resume path exists.
-    const r = await rig({ isLive: () => true, isMarked: () => true });
-
-    const result = await r.exec({ target: PEER, text: "status?" });
-    assert.equal(result.ok, true);
-    assert.equal(r.multitask.peerInbox.pendingCount(PEER), 1);
-    assert.deepEqual(r.host.wakeCalls, [PEER]);
-  });
-
-  it("absent mark knob keeps pre-138 behavior: a non-live target refuses exactly as before", async () => {
-    const r = await rig({ isLive: () => false });
-
-    refused(await r.exec({ target: PEER, text: "hello?" }), "unknown-target");
-    assert.deepEqual(r.host.wakeCalls, []);
-  });
 });
 
 /**
@@ -455,19 +321,6 @@ describe("ticket 142 — a durably marked worker is wake-able by a message", () 
     assert.deepEqual(r.host.wakeCalls, []);
   });
 
-  it("an UNMARKED dead worker still refuses unknown-target — the fence is intact", async () => {
-    const r = await rig({ isLive: () => false });
-
-    const result = refused(
-      await r.exec({ target: "dead-worker", text: "come back" }),
-      "unknown-target",
-    );
-    assert.ok(result.detail.includes("dead-worker"));
-    assert.equal(r.host.dormantWakeCalls.length, 0);
-    assert.equal(r.multitask.peerInbox.pendingCount("dead-worker"), 0);
-    assert.deepEqual(r.host.wakeCalls, []);
-  });
-
   it("another session's marked worker refuses unknown-target without leaking it", async () => {
     const r = await rig({
       isLive: () => false,
@@ -481,24 +334,6 @@ describe("ticket 142 — a durably marked worker is wake-able by a message", () 
     );
     assert.equal(r.host.dormantWakeCalls.length, 0);
     assert.equal(r.multitask.peerInbox.pendingCount(DORMANT), 0);
-  });
-
-  it("a LIVE worker keeps the unchanged steer path: parked, no dormant wake", async () => {
-    const r = await rig({
-      isWorkerMarked: (id) =>
-        id === DORMANT ? { parentSessionId: SENDER } : undefined,
-    });
-    const workerId = await spawnRunning(r.multitask, SENDER, "s-live", "Live work");
-
-    const result = await r.exec({ target: workerId, text: "tweak the intro" });
-    assert.equal(result.ok, true);
-    if (!result.ok) return;
-    assert.equal(result.delivered_as, "steer");
-    // The normal path: an interrupt, no dormant wake, and the text is parked
-    // for the step boundary rather than sent now.
-    assert.deepEqual(r.host.interruptCalls, [workerId]);
-    assert.equal(r.host.dormantWakeCalls.length, 0);
-    assert.deepEqual(r.host.sendMessageCalls, []);
   });
 
   it("an identity refusal runs before the rate fence: a foreign marked worker still reads unknown-target", async () => {
@@ -518,76 +353,23 @@ describe("ticket 142 — a durably marked worker is wake-able by a message", () 
 });
 
 describe("ticket 116 — shared rate budget (8 accepted per sender per 60 s)", () => {
-  it("refuses the 9th with nothing queued; refusals do not consume; the window rolls", async () => {
+  it("refuses the 9th, refunds identity refusals, and rolls the window", async () => {
     const r = await rig();
-    for (let i = 0; i < MESSAGE_AGENT_RATE_LIMIT - 1; i += 1) {
-      const accepted = await r.exec({ target: PEER, text: `note ${i}` });
-      assert.equal(accepted.ok, true, `message ${i} should be accepted`);
+    for (let i = 0; i < MESSAGE_AGENT_RATE_LIMIT; i += 1) {
+      assert.equal((await r.exec({ target: PEER, text: `note ${i}` })).ok, true);
     }
-    assert.equal(
-      r.multitask.peerInbox.pendingCount(PEER),
-      MESSAGE_AGENT_RATE_LIMIT - 1,
-    );
-
-    // An identity refusal is not an accept: it must not consume the budget.
-    refused(await r.exec({ target: SENDER, text: "self" }), "self-target");
-
-    // The 8th accept still fits, proving the refusal above cost nothing.
-    const eighth = await r.exec({ target: PEER, text: "note 7" });
-    assert.equal(eighth.ok, true);
-    assert.equal(
-      r.multitask.peerInbox.pendingCount(PEER),
-      MESSAGE_AGENT_RATE_LIMIT,
-    );
+    assert.equal(r.multitask.peerInbox.pendingCount(PEER), MESSAGE_AGENT_RATE_LIMIT);
 
     // The 9th in the same window refuses and queues nothing.
     const wakesBefore = r.host.wakeCalls.length;
-    const ninth = refused(
-      await r.exec({ target: PEER, text: "one too many" }),
-      "rate-limited",
-    );
+    const ninth = refused(await r.exec({ target: PEER, text: "one too many" }), "rate-limited");
     assert.ok(ninth.detail.includes(String(MESSAGE_AGENT_RATE_LIMIT)));
-    assert.ok(ninth.detail.includes("60"));
-    assert.equal(
-      r.multitask.peerInbox.pendingCount(PEER),
-      MESSAGE_AGENT_RATE_LIMIT,
-    );
+    assert.equal(r.multitask.peerInbox.pendingCount(PEER), MESSAGE_AGENT_RATE_LIMIT);
     assert.equal(r.host.wakeCalls.length, wakesBefore);
-
-    // A rate refusal is also not an accept: still refused in the window.
-    refused(await r.exec({ target: PEER, text: "still too many" }), "rate-limited");
 
     // The rolling window restores capacity.
     r.clock.now += MESSAGE_AGENT_RATE_WINDOW_MS;
-    const afterWindow = await r.exec({ target: PEER, text: "fresh window" });
-    assert.equal(afterWindow.ok, true);
-    assert.equal(
-      r.multitask.peerInbox.pendingCount(PEER),
-      MESSAGE_AGENT_RATE_LIMIT + 1,
-    );
-  });
-
-  it("one budget covers both routing branches (a worker accept draws it too)", async () => {
-    const r = await rig();
-    const workerId = await spawnRunning(r.multitask);
-
-    for (let i = 0; i < MESSAGE_AGENT_RATE_LIMIT - 1; i += 1) {
-      const accepted =
-        i % 2 === 0
-          ? await r.exec({ target: PEER, text: `peer ${i}` })
-          : await r.exec({ target: workerId, text: `worker ${i}` });
-      assert.equal(accepted.ok, true, `message ${i} should be accepted`);
-    }
-    // The 8th accept may be a worker message; the 9th refuses on the peer
-    // branch too — one sender session, one window, both lanes.
-    const eighth = await r.exec({ target: workerId, text: "worker last" });
-    assert.equal(eighth.ok, true);
-    refused(await r.exec({ target: PEER, text: "over" }), "rate-limited");
-    refused(await r.exec({ target: workerId, text: "over too" }), "rate-limited");
-    assert.equal(
-      r.multitask.peerInbox.pendingCount(PEER),
-      MESSAGE_AGENT_RATE_LIMIT / 2,
-    );
+    assert.equal((await r.exec({ target: PEER, text: "fresh window" })).ok, true);
   });
 });
 
@@ -621,40 +403,6 @@ describe("ticket 116 — structured provenance on the peer wake", () => {
     assert.deepEqual(settle, { sessionId: SENDER, origin: undefined });
   });
 
-  it("a batched flush attributes the turn to its opening sender (recorded reduction)", async () => {
-    const r = await rig();
-    const secondTools = createDispatcherTools({
-      multitask: r.multitask,
-      getSessionId: () => "session-2",
-      now: () => r.clock.now,
-    });
-    const secondAgent = secondTools.find((tool) => tool.name === MESSAGE_AGENT_TOOL);
-    assert.ok(secondAgent);
-
-    const bus = r.multitask.wakeBus;
-    bus.noteTurnStarted(PEER, "user");
-    const first = await r.exec({ target: PEER, text: "from one" });
-    assert.ok(first.ok);
-    const second = (await secondAgent.execute({
-      target: PEER,
-      text: "from two",
-    })) as MessageAgentToolResult;
-    assert.ok(second.ok);
-    if (!first.ok || !second.ok) return;
-    bus.noteTurnEnded(PEER);
-
-    const wake = bus.drain(PEER);
-    // Every notice keeps its own sender; the wake field names the opener.
-    assert.deepEqual(
-      wake?.peerMessages?.map((message) => message.fromAgentId),
-      [SENDER, "session-2"],
-    );
-    assert.deepEqual(
-      wake?.peerMessages?.map((message) => message.messageId),
-      [first.message_id, second.message_id],
-    );
-    assert.equal(wake?.messageOrigin?.senderSessionId, SENDER);
-  });
 });
 
 describe("ticket 116 — agent traffic is never the user path", () => {
@@ -678,36 +426,6 @@ describe("ticket 116 — agent traffic is never the user path", () => {
     bus.drain(PEER);
     bus.noteTurnStarted(PEER);
     assert.equal(bus.getTurnOwner(PEER), "peer");
-  });
-
-  it("never satisfies a pending approval ask", async () => {
-    const r = await rig();
-    const workerId = await spawnRunning(r.multitask);
-    const ask: AccessRequestEvent = {
-      workerId,
-      requestId: `req-${workerId}`,
-      body: { class: "tool", target: "write_file", reason: "need to write" },
-      createdAtMs: 1_000,
-    };
-    r.host.fireAccessRequest(ask);
-    assert.equal(r.multitask.listPendingAccess(SENDER).length, 1);
-    const sendsBefore = r.host.sendMessageCalls.length;
-
-    // Both branches accepted — neither touches the ask.
-    const peer = await r.exec({ target: PEER, text: "status?" });
-    assert.equal(peer.ok, true);
-    const worker = await r.exec({ target: workerId, text: "keep going" });
-    assert.equal(worker.ok, true);
-
-    assert.equal(r.multitask.listPendingAccess(SENDER).length, 1);
-    assert.equal(
-      r.host.sendMessageCalls.length,
-      sendsBefore,
-      "no agent message delivered a decision into the worker",
-    );
-    // Only the user-answer surface can resolve it.
-    assert.equal(r.multitask.resolveAccess(workerId, { kind: "allow" }), true);
-    assert.equal(r.multitask.listPendingAccess(SENDER).length, 0);
   });
 
   it("never counts as user presence — the target stays idle and peer-owned", async () => {

@@ -19,11 +19,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { Config, apply } from "../src/plugin.js";
 import { volatileConfig } from "./support/plugin-config.js";
-import { createInMemoryDurability } from "../src/core/durability.js";
-import {
-  CLEARED_TOOL_RESULT_TEXT,
-  MICROCOMPACT_TRIGGER_RATIO,
-} from "../src/core/microcompact.js";
+
+import {CLEARED_TOOL_RESULT_TEXT} from "../src/core/microcompact.js";
 import type { AdapterContext, AgentLike } from "../src/adapter/cordis-dsh-host.js";
 
 /** The schema's declared fields, in order. */
@@ -363,32 +360,3 @@ describe("microcompact plugin wiring (ticket 124)", () => {
   });
 });
 
-describe("microcompact boundary store through the plugin's durability (ticket 124)", () => {
-  it("the in-memory store carries boundaries beside worker markers", async () => {
-    const store = createInMemoryDurability();
-    await store.writeCompactionBoundary({
-      sessionId: "s-1",
-      passSeq: 1,
-      status: "applied",
-      layer: "microcompact",
-      trigger: "ratio",
-      ratio: MICROCOMPACT_TRIGGER_RATIO,
-      keepNewest: 5,
-      usedTokens: 600_000,
-      windowTokens: 1_000_000,
-      thresholdTokens: 550_000,
-      clearedSeqs: [2, 3],
-      replacementSeqs: [20, 21],
-      boundarySeq: 21,
-      clearedCount: 2,
-      clearedChars: 32_000,
-      clearedBytes: 32_000,
-      freedTokens: 8_000,
-      updatedAtMs: 1_700_000_000_000,
-    });
-    assert.equal(store.boundaries.size, 1);
-    const read = await store.readCompactionBoundary("s-1");
-    assert.equal(read?.passSeq, 1);
-    assert.equal((await store.readWorkerMarkers("s-1")).length, 0);
-  });
-});

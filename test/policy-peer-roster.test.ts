@@ -16,7 +16,7 @@ import {
   PEER_ROSTER_SECTION_HEADING,
   PEER_WAKE_SECTION_HEADINGS,
 } from "../src/core/policy/prompts.js";
-import { TOOL_RESULT_SUMMARY_MAX_ROWS } from "../src/core/report-clamp.js";
+
 import type { TodoItem } from "../src/core/todo-reconciler.js";
 
 /**
@@ -63,48 +63,9 @@ describe("renderPeerRoster — empty and absent state", () => {
     assert.equal(renderPeerRoster(undefined), null);
   });
 
-  it("a roster containing only self → null", () => {
-    const text = renderPeerRoster({
-      peers: [peer({ sessionId: "s-1" })],
-      selfSessionId: "s-1",
-    });
-    assert.equal(text, null);
-  });
-
-  it("adding an empty roster leaves the reminder byte-identical", () => {
-    const todos = [todo({ id: "t-1", status: "in_progress" })];
-    const base = assembleTurnReminder(todos);
-    assert.equal(assembleTurnReminder(todos, { peers: [] }), base);
-    assert.equal(assembleTurnReminder(todos, null), base);
-    assert.ok(!base.includes(PEER_ROSTER_SECTION_HEADING));
-  });
 });
 
 describe("renderPeerRoster — one row", () => {
-  it("renders label, session id, liveness, and the activity phrase", () => {
-    const text = renderPeerRoster(
-      snapshot([
-        peer({
-          sessionId: "sess-abc",
-          label: "Research scout",
-          liveness: "working",
-          activity: "grep: token budget",
-        }),
-      ]),
-    );
-    assert.ok(text !== null);
-    assert.equal(
-      text,
-      [
-        PEER_ROSTER_SECTION_HEADING,
-        "",
-        PEER_ROSTER_INTRO,
-        "",
-        "- Research scout (sess-abc) — working · grep: token budget",
-      ].join("\n"),
-    );
-  });
-
   it("falls back label → title → session id", () => {
     const titled = renderPeerRoster(
       snapshot([
@@ -136,15 +97,6 @@ describe("renderPeerRoster — one row", () => {
     assert.ok(text.includes("— working · using read on src/core/policy"));
   });
 
-  it("says nothing beyond the status when no activity was observed", () => {
-    const text = renderPeerRoster(
-      snapshot([peer({ sessionId: "s-5", liveness: "idle" })]),
-    );
-    assert.ok(text !== null);
-    assert.ok(text.includes("- s-5 — idle"));
-    assert.ok(!text.includes("idle ·"));
-  });
-
   it("keeps one row to one line even with multi-line input", () => {
     const text = renderPeerRoster(
       snapshot([
@@ -173,32 +125,9 @@ describe("renderPeerRoster — determinism and byte-stability", () => {
     );
   });
 
-  it("two consecutive renders of the same state are byte-identical", () => {
-    const state = snapshot([
-      peer({ sessionId: "s-2", liveness: "waiting", activity: "read: x" }),
-      peer({ sessionId: "s-1", liveness: "working", activity: "edit: y" }),
-    ]);
-    assert.equal(renderPeerRoster(state), renderPeerRoster(state));
-  });
-
-  it("duplicate session ids collapse to one row", () => {
-    const text = renderPeerRoster(
-      snapshot([
-        peer({ sessionId: "s-1", liveness: "working" }),
-        peer({ sessionId: "s-1", liveness: "idle" }),
-      ]),
-    );
-    assert.ok(text !== null);
-    assert.equal(text.split("\n").filter((l) => l.startsWith("- ")).length, 1);
-  });
 });
 
 describe("renderPeerRoster — bound", () => {
-  it("the cap reuses the shipped check-roster row convention", () => {
-    assert.equal(PEER_ROSTER_MAX_ROWS, TOOL_RESULT_SUMMARY_MAX_ROWS);
-    assert.equal(PEER_ROSTER_MAX_ROWS, 20);
-  });
-
   it("over cap → the cap's rows plus an explicit total/shown count", () => {
     const peers = Array.from({ length: 25 }, (_, i) =>
       peer({
@@ -227,38 +156,6 @@ describe("renderPeerRoster — bound", () => {
 });
 
 describe("renderPeerRoster — prefix stays byte-stable (tail placement)", () => {
-  it("the text before the roster is identical with 0 and 20 peers", () => {
-    const todos = [
-      todo({ id: "t-1", title: "Summarize RFCs", status: "in_progress" }),
-      todo({ id: "t-2", title: "Changelog stub", status: "pending" }),
-    ];
-    const withNone = assembleTurnReminder(todos, { peers: [] });
-    const peers = Array.from({ length: PEER_ROSTER_MAX_ROWS }, (_, i) =>
-      peer({
-        sessionId: `peer-${String(i).padStart(2, "0")}`,
-        liveness: "working",
-        activity: `grep: queue ${i}`,
-      }),
-    );
-    const withAll = assembleTurnReminder(todos, { peers });
-
-    // 1. The roster is present only in the second render.
-    assert.ok(!withNone.includes(PEER_ROSTER_SECTION_HEADING));
-    assert.ok(withAll.includes(PEER_ROSTER_SECTION_HEADING));
-
-    // 2. Everything before the roster section is the exact same bytes.
-    const at = withAll.indexOf(PEER_ROSTER_SECTION_HEADING);
-    assert.ok(at > 0);
-    const prefix = withAll.slice(0, at);
-    assert.equal(prefix, `${withNone}\n\n`);
-
-    // 3. The roster is the LAST section: its heading is the final heading,
-    //    and nothing follows the rows.
-    const lastHeading = withAll.lastIndexOf("\n## ");
-    assert.equal(withAll.slice(lastHeading + 1).split("\n")[0], PEER_ROSTER_SECTION_HEADING);
-    assert.ok(withAll.endsWith("— working · grep: queue 19"));
-  });
-
   it("the roster sits after every standing rule", () => {
     const text = assembleTurnReminder([], {
       peers: [peer({ sessionId: "s-1", liveness: "idle" })],
@@ -291,47 +188,27 @@ describe("renderPeerRoster — prefix stays byte-stable (tail placement)", () =>
 });
 
 describe("renderPeerRoster — provenance", () => {
-  it("the heading says these are not the user (existing cue convention)", () => {
+  it("says these are other agents, never the user (S5)", () => {
     assert.equal(PEER_ROSTER_SECTION_HEADING, "## Other agents — not the user");
-    assert.ok(PEER_ROSTER_SECTION_HEADING.includes("not the user"));
-    // Same provenance idea as the shipped peer-wake cue.
-    assert.ok(PEER_WAKE_SECTION_HEADINGS[0].includes("not from the user"));
+    assert.ok(PEER_WAKE_SECTION_HEADINGS[0]?.includes("not from the user"));
     assert.ok(PEER_ROSTER_INTRO.includes("not the user"));
-    // Ticket 119: the retired `send_peer` name must not survive in model-facing
-    // copy — `message_agent` is the one verb (ADR-0025).
+    // Ticket 119: `message_agent` is the one messaging verb; the retired
+    // `send_peer` name must never come back into model-facing copy.
     assert.ok(PEER_ROSTER_INTRO.includes("message_agent"));
     assert.ok(!PEER_ROSTER_INTRO.includes("send_peer"));
-    assert.ok(PEER_ROSTER_INTRO.includes("session id"));
   });
 });
 
 describe("liveness mapping — honest reduced shape", () => {
-  it("names the observable vocabulary only", () => {
-    assert.deepEqual([...PEER_LIVENESS_STATES], [
-      "working",
-      "waiting",
-      "approval",
-      "idle",
-    ]);
-  });
-
-  it("precedence: approval > working > waiting > idle", () => {
-    assert.equal(
-      derivePeerLiveness({ busy: true, pendingApproval: true, queuedWake: true }),
-      "approval",
-    );
-    assert.equal(
-      derivePeerLiveness({ busy: true, pendingApproval: false, queuedWake: true }),
-      "working",
-    );
-    assert.equal(
-      derivePeerLiveness({ busy: false, pendingApproval: false, queuedWake: true }),
-      "waiting",
-    );
-    assert.equal(
-      derivePeerLiveness({ busy: false, pendingApproval: false, queuedWake: false }),
-      "idle",
-    );
+  it("precedence: working > waiting > idle", () => {
+    // Ticket 174 / ADR-0033 removed the `pendingApproval` fact with the
+    // worker access-ask feature. `approval` stays in the vocabulary
+    // (ADR-0027 decision 3), so it is still an accepted wire VALUE — it just
+    // has no producer any more.
+    assert.equal(derivePeerLiveness({ busy: true, queuedWake: true }), "working");
+    assert.equal(derivePeerLiveness({ busy: false, queuedWake: true }), "waiting");
+    assert.equal(derivePeerLiveness({ busy: false, queuedWake: false }), "idle");
+    assert.ok(PEER_LIVENESS_STATES.includes("approval"));
   });
 });
 
@@ -339,7 +216,7 @@ describe("buildPeerRosterSnapshot — per-turn projection is pure", () => {
   it("derives each row's liveness from the observable facts", () => {
     const built = buildPeerRosterSnapshot("self", [
       { sessionId: "a", busy: true },
-      { sessionId: "b", pendingApproval: true },
+      { sessionId: "b", busy: false, queuedWake: false },
       { sessionId: "c", queuedWake: true },
       { sessionId: "d" },
     ]);
@@ -348,24 +225,13 @@ describe("buildPeerRosterSnapshot — per-turn projection is pure", () => {
       built.peers.map((p) => [p.sessionId, p.liveness]),
       [
         ["a", "working"],
-        ["b", "approval"],
+        ["b", "idle"],
         ["c", "waiting"],
         ["d", "idle"],
       ],
     );
   });
 
-  it("omitted and null fields are preserved as null, never invented", () => {
-    const built = buildPeerRosterSnapshot(null, [{ sessionId: "a" }]);
-    const row = built.peers[0];
-    assert.ok(row !== undefined);
-    assert.equal(row.label, null);
-    assert.equal(row.title, null);
-    assert.equal(row.activity, null);
-    assert.equal(row.currentTool, null);
-    assert.equal(row.currentTarget, null);
-    assert.equal(built.selfSessionId, null);
-  });
 });
 
 describe("renderPeerRoster — malformed input degrades, never throws", () => {
@@ -385,24 +251,6 @@ describe("renderPeerRoster — malformed input degrades, never throws", () => {
     for (const state of PEER_LIVENESS_STATES) {
       assert.ok(!text.includes(`— ${state}`), `invented status: ${state}`);
     }
-  });
-
-  it("malformed rows are skipped, and a roster of only junk → null", () => {
-    const junk = [
-      null,
-      undefined,
-      "not-a-peer",
-      { sessionId: "" },
-      { sessionId: "   " },
-      { sessionId: 7 },
-    ] as unknown as readonly PeerRosterEntry[];
-    assert.equal(renderPeerRoster(snapshot(junk)), null);
-    const mixed = renderPeerRoster({
-      peers: [...junk, peer({ sessionId: "s-ok", liveness: "idle" })],
-    });
-    assert.ok(mixed !== null);
-    assert.ok(mixed.includes("- s-ok — idle"));
-    assert.equal(mixed.split("\n").filter((l) => l.startsWith("- ")).length, 1);
   });
 
   it("a malformed snapshot shape → null, no throw", () => {

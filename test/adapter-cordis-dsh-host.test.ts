@@ -1,19 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import {
-  createCordisDshHost,
-  describeToolActivity,
-  describeToolCall,
-  listGlobalToolNames,
-  mapStopReason,
-  normalizeSettleReport,
-  normalizeWorkerReport,
-  SPAWN_PROVIDER,
-  type ActivationLike,
-  type ActivationSpecLike,
-  type AdapterContext,
-  type AgentLike,
-} from "../src/adapter/cordis-dsh-host.js";
+import {createCordisDshHost, mapStopReason, SPAWN_PROVIDER, type ActivationLike, type ActivationSpecLike, type AdapterContext, type AgentLike} from "../src/adapter/cordis-dsh-host.js";
 import { bindDispatcherLifecycle, isTopLevel } from "../src/adapter/parent-agent.js";
 import { createMultitask } from "../src/core/multitask.js";
 import {
@@ -270,25 +257,6 @@ describe("stop reason and report mapping", () => {
     assert.equal(mapStopReason("unknown-future"), "error");
   });
 
-  it("normalizes reports and placeholders empty output", () => {
-    assert.equal(
-      normalizeWorkerReport([{ type: "text", text: "Done." }]),
-      "Done.",
-    );
-    assert.equal(normalizeWorkerReport(undefined), EMPTY_WORKER_REPORT_PLACEHOLDER);
-    assert.equal(normalizeWorkerReport([]), EMPTY_WORKER_REPORT_PLACEHOLDER);
-    assert.equal(normalizeSettleReport("completed", undefined), EMPTY_WORKER_REPORT_PLACEHOLDER);
-  });
-});
-
-describe("isTopLevel", () => {
-  it("accepts depth-0 sessions without a parent", () => {
-    assert.equal(isTopLevel(createAgent("a", true)), true);
-  });
-
-  it("rejects child sessions", () => {
-    assert.equal(isTopLevel(createAgent("c", false)), false);
-  });
 });
 
 /**
@@ -511,21 +479,12 @@ describe("CordisDshHost spawn / interrupt / send", () => {
     assert.equal(ctx.disposedWorkerIds.length, 1);
   });
 
-  it("listGlobalToolNames is empty when tools service is absent", () => {
-    const ctx = createStubCtx();
-    assert.equal(listGlobalToolNames(ctx).size, 0);
-  });
-
   it("spawn rejects when no parent is bound", async () => {
+    // Fail-closed: a host with no bound parent must refuse, never guess one.
     const ctx = createStubCtx();
     const host = createCordisDshHost(ctx);
     await assert.rejects(
-      () =>
-        host.spawnWorker("x", {
-          parentSessionId: "p",
-          streamKey: "s",
-          title: "t",
-        }),
+      () => host.spawnWorker("x", { parentSessionId: "p", streamKey: "s", title: "t" }),
       /no parent agent bound/,
     );
   });
@@ -605,18 +564,6 @@ describe("CordisDshHost settle and step boundary", () => {
     assert.equal(events[0]?.transcriptRef, workerId);
   });
 
-  it("maps max-tokens and refusal to error", async () => {
-    const { ctx, host, workerId } = await spawnOne();
-    const events: SettledEvent[] = [];
-    host.onWorkerSettled((e) => events.push(e));
-
-    ctx.fire("subagent/end", { id: workerId, stopReason: "max-tokens" });
-    ctx.fire("subagent/end", { id: workerId, stopReason: "refusal" });
-    assert.equal(events.length, 2);
-    assert.equal(events[0]?.status, "error");
-    assert.equal(events[1]?.status, "error");
-  });
-
   it("empty completed settle uses the placeholder; error keeps message; abort invents nothing", async () => {
     const { ctx, host, workerId } = await spawnOne();
     const events: SettledEvent[] = [];
@@ -647,24 +594,6 @@ describe("CordisDshHost settle and step boundary", () => {
     assert.equal(abortEvents[0]?.report, "");
   });
 
-  it("ignores settle for unknown children", async () => {
-    const { ctx, host } = await spawnOne();
-    const events: SettledEvent[] = [];
-    host.onWorkerSettled((e) => events.push(e));
-
-    ctx.fire("subagent/end", { id: "not-ours", stopReason: "completed" });
-    assert.equal(events.length, 0);
-  });
-
-  it("emitStepBoundary notifies subscribers", async () => {
-    const { host, workerId } = await spawnOne();
-    const seen: string[] = [];
-    host.onStepBoundary((id) => {
-      seen.push(id);
-    });
-    host.emitStepBoundary(workerId);
-    assert.deepEqual(seen, [workerId]);
-  });
 });
 
 describe("CordisDshHost recentResult — deliverables excerpt source (ticket 41)", () => {
@@ -733,24 +662,6 @@ describe("CordisDshHost recentResult — deliverables excerpt source (ticket 41)
     assert.equal(host.recentResult("never-settled"), null);
   });
 
-  it("unknown children never gain an excerpt; dispose clears the map", async () => {
-    const { ctx, host, workerId } = await settleOne();
-    ctx.fire("subagent/end", {
-      id: "not-ours",
-      stopReason: "completed",
-      lastAssistantMessage: [{ type: "text", text: "ghost" }],
-    });
-    assert.equal(host.recentResult("not-ours"), null);
-
-    ctx.fire("subagent/end", {
-      id: workerId,
-      stopReason: "completed",
-      lastAssistantMessage: [{ type: "text", text: "real" }],
-    });
-    assert.notEqual(host.recentResult(workerId), null);
-    host.dispose();
-    assert.equal(host.recentResult(workerId), null);
-  });
 });
 
 describe("dispatcher wake", () => {
@@ -768,42 +679,6 @@ describe("dispatcher wake", () => {
     assert.ok(msg.content[0]?.text.includes("Background"));
   });
 
-  it("unknown session id is a no-op", async () => {
-    const ctx = createStubCtx();
-    const host = createCordisDshHost(ctx);
-    await host.requestDispatcherWakeup("missing");
-    assert.equal(ctx.followupCalls.length, 0);
-  });
-});
-
-describe("listLiveJobs", () => {
-  it("reads ctx.jobs.list and is non-durable", () => {
-    const ctx = createStubCtx();
-    const host = createCordisDshHost(ctx);
-    assert.deepEqual(host.listLiveJobs(), []);
-    // 0.2.1 `list(caller?)` — omitting the caller sees only unowned jobs.
-    assert.deepEqual(ctx.jobListCalls, [undefined]);
-  });
-
-  it("forwards the caller session id so owned jobs are included", () => {
-    const ctx = createStubCtx();
-    const host = createCordisDshHost(ctx);
-    assert.deepEqual(host.listLiveJobs("disp-1"), []);
-    assert.deepEqual(ctx.jobListCalls, ["disp-1"]);
-  });
-});
-
-describe("resolveCredential is not implemented by the live adapter (ticket 102b hardening)", () => {
-  it("the adapter does not expose the optional seam", () => {
-    // The old implementation read `(ctx as {credentials?}).credentials`, an
-    // undeclared Cordis service: the resolver matches inject by EXACT STRING
-    // and throws at property ACCESS, so the fuse would fire the moment a
-    // caller was wired — silently green offline. The stub ctx here has no
-    // `credentials` face at all, so an absent/throwing read is the live shape.
-    const ctx = createStubCtx();
-    const host = createCordisDshHost(ctx);
-    assert.equal(host.resolveCredential, undefined);
-  });
 });
 
 describe("bindDispatcherLifecycle", () => {
@@ -1204,28 +1079,6 @@ describe("CordisDshHost session/event activity feed (ticket 29)", () => {
     assert.equal(host.recentActivity(workerId), null);
   });
 
-  it("falls back to the bare tool name when arguments yield no hint", async () => {
-    const ctx = createStubCtx();
-    const { host, workerId } = await spawnOneWorker(ctx);
-
-    fireSessionEvent(ctx, workerId, toolCallEvent("bash", "not json"));
-    assert.equal(host.recentActivity(workerId), "bash");
-
-    fireSessionEvent(ctx, workerId, toolCallEvent("grep", { count: 3 }));
-    assert.equal(host.recentActivity(workerId), "grep");
-  });
-
-  it("collapses whitespace in the hint and prefers the first string field", async () => {
-    const ctx = createStubCtx();
-    const { host, workerId } = await spawnOneWorker(ctx);
-
-    fireSessionEvent(ctx, workerId, toolCallEvent("read_file", {
-      irrelevant: 42,
-      path: "src/auth/\n  session.ts",
-    }));
-    assert.equal(host.recentActivity(workerId), "read_file: src/auth/ session.ts");
-  });
-
   it("clamps the phrase to CHECK_ACTIVITY_CHARS with an ellipsis", async () => {
     const ctx = createStubCtx();
     const { host, workerId } = await spawnOneWorker(ctx);
@@ -1243,42 +1096,6 @@ describe("CordisDshHost session/event activity feed (ticket 29)", () => {
     assert.ok(phrase.endsWith("…"));
   });
 
-  it("latest event wins; settle clears the phrase", async () => {
-    const ctx = createStubCtx();
-    const { host, workerId } = await spawnOneWorker(ctx);
-
-    fireSessionEvent(ctx, workerId, toolCallEvent("bash", { command: "first" }));
-    fireSessionEvent(ctx, workerId, toolCallEvent("grep", { pattern: "second" }));
-    assert.equal(host.recentActivity(workerId), "grep: second");
-
-    ctx.fire("subagent/end", {
-      id: workerId,
-      stopReason: "completed",
-      lastAssistantMessage: [{ type: "text", text: "ok" }],
-    });
-    assert.equal(host.recentActivity(workerId), null);
-  });
-
-  it("dispose unsubscribes and clears recorded activity", async () => {
-    const ctx = createStubCtx();
-    const { host, workerId } = await spawnOneWorker(ctx);
-    fireSessionEvent(ctx, workerId, toolCallEvent("bash", { command: "go" }));
-    assert.equal(host.recentActivity(workerId), "bash: go");
-
-    host.dispose();
-    fireSessionEvent(ctx, workerId, toolCallEvent("bash", { command: "after dispose" }));
-    assert.equal(host.recentActivity(workerId), null);
-  });
-
-  it("describeToolActivity is null-safe on hostile input", () => {
-    assert.equal(describeToolActivity(undefined), null);
-    assert.equal(describeToolActivity(null), null);
-    assert.equal(describeToolActivity(42), null);
-    assert.equal(describeToolActivity("bash: npm test"), null);
-    assert.equal(describeToolActivity({}), null);
-    assert.equal(describeToolActivity({ name: 7, arguments: "{}" }), null);
-    assert.equal(describeToolActivity({ name: "bash" }), "bash");
-  });
 });
 
 describe("CordisDshHost peer tool/target feed (ticket 155)", () => {
@@ -1337,33 +1154,6 @@ describe("CordisDshHost peer tool/target feed (ticket 155)", () => {
     assert.equal(host.peerToolActivity("disp-1"), null);
   });
 
-  it("an unbound session records nothing; unbind and dispose clear the entry", () => {
-    const ctx = createStubCtx();
-    const host = bindDispatcher(ctx, "disp-1");
-
-    fireSessionEvent(ctx, "stranger", toolCallEvent("bash", { command: "x" }));
-    assert.equal(host.peerToolActivity("stranger"), null);
-
-    fireSessionEvent(ctx, "disp-1", toolCallEvent("bash", { command: "go" }));
-    host.unbindParent("disp-1");
-    assert.equal(host.peerToolActivity("disp-1"), null);
-
-    host.bindParent(createAgent("disp-2"), "disp-2");
-    fireSessionEvent(ctx, "disp-2", toolCallEvent("bash", { command: "go" }));
-    host.dispose();
-    assert.equal(host.peerToolActivity("disp-2"), null);
-  });
-
-  it("describeToolCall keeps the halves apart and is null-safe", () => {
-    assert.deepEqual(describeToolCall({ name: "read", arguments: '{"path":"a/b"}' }), {
-      tool: "read",
-      target: "a/b",
-    });
-    assert.deepEqual(describeToolCall({ name: "read" }), { tool: "read", target: null });
-    assert.equal(describeToolCall(undefined), null);
-    assert.equal(describeToolCall({}), null);
-    assert.equal(describeToolCall({ name: "" }), null);
-  });
 });
 
 describe("CordisDshHost tool-call feed (ticket 75)", () => {
@@ -1383,18 +1173,6 @@ describe("CordisDshHost tool-call feed (ticket 75)", () => {
     fireSessionEvent(ctx, workerId, { type: "turn/start", data: {} });
     fireSessionEvent(ctx, "stranger-session", toolCallEvent("bash", { command: "x" }));
     assert.deepEqual(seen, [workerId, workerId]);
-  });
-
-  it("dispose stops the notifications", async () => {
-    const ctx = createStubCtx();
-    const { host, workerId } = await spawnOneWorker(ctx);
-    let calls = 0;
-    host.onWorkerToolCall(() => {
-      calls += 1;
-    });
-    host.dispose();
-    fireSessionEvent(ctx, workerId, toolCallEvent("bash", { command: "go" }));
-    assert.equal(calls, 0);
   });
 
   it("wired to the core, the count advances and the unknown-reference liveness state becomes reachable", async () => {

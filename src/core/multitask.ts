@@ -9,17 +9,6 @@ import {
   type WorkerStatus,
   type WorkerSummary,
 } from "./types.js";
-import type { AccessDecision, AccessTicket } from "./access-types.js";
-import {
-  createAccessRelay,
-  createAccessPolicyTable,
-  type AccessPolicyTable,
-  type AccessRelay,
-} from "./access-relay.js";
-import {
-  createReviewPostureTable,
-  type ReviewPostureTable,
-} from "./review-posture.js";
 import {
   createSteerQueue,
   type SteerQueue,
@@ -140,19 +129,9 @@ export interface RedriveReport {
   readonly lost: readonly TodoItem[];
 }
 
-/** Access-relay knobs (ticket 13). */
-export interface MultitaskAccessOptions {
-  /** Unanswered-ask timeout. Default 120_000. */
-  readonly timeoutMs?: number;
-  /** Injectable clock for tests. */
-  readonly now?: () => number;
-  /** Injectable one-shot scheduler for tests. Returns a cancel function. */
-  readonly schedule?: (fn: () => void, ms: number) => () => void;
-}
-
 /**
  * Ticket 108: wake-bus coalescing knobs (window size plus the clock and
- * scheduler seams, mirroring the access-relay option shape).
+ * scheduler seams).
  */
 export interface MultitaskWakeOptions {
   /**
@@ -170,8 +149,7 @@ export interface MultitaskWakeOptions {
 }
 
 /**
- * Ticket 115: await-waiter knobs (clock and scheduler seams), mirroring the
- * access-relay option shape.
+ * Ticket 115: await-waiter knobs (clock and scheduler seams).
  */
 export interface MultitaskAwaitOptions {
   /** Injectable clock for tests. */
@@ -188,8 +166,6 @@ export interface MultitaskOptions {
    * marker at spawn, updates it on settle, and can rebuild after a restart.
    */
   readonly durability?: DurabilityPort;
-  /** Access-relay configuration (timeout, test seams). */
-  readonly access?: MultitaskAccessOptions;
   /** Wake-bus coalescing configuration (ticket 108; window, test seams). */
   readonly wake?: MultitaskWakeOptions;
   /** Peer inbox knobs (ticket 14). */
@@ -197,8 +173,7 @@ export interface MultitaskOptions {
   /**
    * Roster-change observer (tickets 21 + 27). Fired after every
    * roster-affecting mutation — spawn, accepted FSM transition
-   * (turn/steer/abort/settle), durability restore, todo reconcile, a
-   * pending access ask parking or resolving (the blocked marker), and a
+   * (turn/steer/abort/settle), durability restore, todo reconcile, and a
    * todo flipping to delivered (the delivered flag) — with the affected
    * parent session id. Fire-and-forget: observer errors are swallowed so
    * telemetry can never break core flow. The observer only READS the core
@@ -439,10 +414,8 @@ export interface Multitask {
    */
   readonly wakeBus: WakeBus;
   /**
-   * Release this core's timers on teardown: the access relay's parked deny
-   * timeouts first (ticket 137 — they enqueue onto the bus from outside, so
-   * they must be gone before the bus is disarmed), then the wake bus's armed
-   * coalescing window (ticket 112 — a stale timer that still fires is a
+   * Release this core's timers on teardown: the wake bus's armed coalescing
+   * window (ticket 112 — a stale timer that still fires is a
    * generation-checked no-op, so no wake can reach a host that is being
    * disposed). Pending wake data is untouched — delivery was always the
    * caller's business. Idempotent.
@@ -467,33 +440,6 @@ export interface Multitask {
   readonly peerInbox: PeerInbox;
   /** Dispatcher-private todo ledger (ADR-0007). */
   readonly todos: TodoLedger;
-  /**
-   * Answer a pending access ask. Delivers the decision into the same
-   * worker via sendMessage (no restart). Idempotent; false when unknown
-   * or already resolved.
-   */
-  resolveAccess(workerId: string, decision: AccessDecision): boolean;
-  /** Pending access tickets, optionally filtered by parent session. */
-  listPendingAccess(parentSessionId?: string): readonly AccessTicket[];
-  /**
-   * Drop session-scope access policy rows (ticket 30). Called on
-   * deactivation/unload so an "always allow (this session)" choice never
-   * leaks into a later session. Profile rows are untouched.
-   * ADR-0019: WITH a session id, only that dispatcher session's rows are
-   * cleared — a sibling dispatcher's remembered rows survive. Without one,
-   * every session-scope row is cleared (plugin unload).
-   */
-  clearSessionAccessPolicy(sessionId?: string): void;
-  /** Stored policy table (session/profile). No hit → ask. */
-  readonly accessPolicy: AccessPolicyTable;
-  /**
-   * Review-posture table (ticket 69, chunk A). Session-scoped deterministic
-   * auto-answer consulted only on a consent "ask" miss; shipped posture is
-   * EMPTY (un-configured behavior is byte-identical). Rows enter only
-   * through this API (tests; any real seeder is a human decision) and never
-   * outlive their session — clearance rides `clearSessionAccessPolicy`.
-   */
-  readonly reviewPosture: ReviewPostureTable;
   /**
    * Ticket 115: per-target settle records — a bounded ring of 64 terminal
    * worker results per parent session, written by the settle path BEFORE the
@@ -603,9 +549,8 @@ export function createMultitask(
   const steerQueue: SteerQueue = createSteerQueue();
   const todoLedger: TodoLedger = createTodoLedger();
   const peerInbox: PeerInbox = createPeerInbox(options?.peer);
-  // Ticket 108: coalescing knobs flow through like the access seams —
-  // conditionally spread so an unset option stays truly absent (the bus
-  // applies its own defaults).
+  // Ticket 108: coalescing knobs flow through conditionally spread so an
+  // unset option stays truly absent (the bus applies its own defaults).
   const wakeOptions = options?.wake;
   const wakeBus: WakeBus = createWakeBus({
     ...(wakeOptions?.coalesceWindowMs !== undefined
@@ -642,10 +587,8 @@ export function createMultitask(
       }
     },
   });
-  const accessPolicy: AccessPolicyTable = createAccessPolicyTable();
   // Ticket 115: per-target settle records + bounded await waiters. Knobs
-  // flow through like the access seams — conditionally spread so an unset
-  // option stays truly absent.
+  // flow through conditionally spread so an unset option stays truly absent.
   const awaits = options?.awaits;
   const settleRecords: SettleRecords = createSettleRecords({
     ...(awaits?.now !== undefined ? { now: awaits.now } : {}),
@@ -654,49 +597,6 @@ export function createMultitask(
       ? { isAgentAlive: options.isAgentAlive }
       : {}),
   });
-  // Ticket 69 (chunk A): the review posture is composed AFTER the consent
-  // table at this lookupPolicy wiring — consent (allow or deny) wins; only
-  // a consent "ask" miss falls through to the posture; a posture miss is
-  // still "ask" and lands on the shipped park/wake/timeout path. Shipped
-  // posture is EMPTY, so with no rows the lookup is byte-identical.
-  const reviewPosture: ReviewPostureTable = createReviewPostureTable();
-  const accessRelay: AccessRelay = createAccessRelay({
-    ...(options?.access?.timeoutMs !== undefined
-      ? { timeoutMs: options.access.timeoutMs }
-      : {}),
-    ...(options?.access?.now !== undefined ? { now: options.access.now } : {}),
-    ...(options?.access?.schedule !== undefined
-      ? { schedule: options.access.schedule }
-      : {}),
-    lookupPolicy: (req, ctx) => {
-      const consent = accessPolicy.lookup(req, ctx);
-      if (consent !== "ask") return consent;
-      return reviewPosture.lookup(req, ctx);
-    },
-    deliver: (workerId, message) => host.sendMessage(workerId, message),
-    wakeForAsk: (notice) => {
-      wakeBus.enqueueAccessRequest({
-        parentSessionId: notice.parentSessionId,
-        workerId: notice.workerId,
-        requestId: notice.requestId,
-        title: notice.title,
-        body: notice.body,
-      });
-    },
-    onResolved: (notice, parentSessionId) => {
-      // Honest deny reporting: surface the denial on the next wake. Ticket
-      // 27: the pending-access set changed here (timeout/policy deny), so
-      // the blocked marker must re-project too.
-      notifyRosterChanged(parentSessionId);
-      wakeBus.enqueueAccessNotice({ parentSessionId, notice });
-    },
-    getWorkerTitle: (workerId) => workers.get(workerId)?.title ?? workerId,
-    isWorkerLive: (workerId) => {
-      const record = workers.get(workerId);
-      return record !== undefined && !isTerminalStatus(record.status);
-    },
-  });
-
   /** Fire the roster observer (ticket 21); never lets it break core flow. */
   function notifyRosterChanged(parentSessionId: string): void {
     const observer = options?.onRosterChanged;
@@ -862,8 +762,6 @@ export function createMultitask(
   }
 
   host.onWorkerSettled((event) => {
-    // Settle wins over a pending access ask — drop the ticket first.
-    accessRelay.clear(event.workerId);
     const next = transition(event.workerId, {
       type: "settled",
       status: event.status,
@@ -949,22 +847,6 @@ export function createMultitask(
     return host.sendMessage(workerId, wrapParentCorrection(latest)).then(() => {
       transition(workerId, { type: "steer-injected" });
     });
-  });
-
-  // Structured access ask from a worker (ticket 13). Policy may auto-answer;
-  // otherwise the relay parks a ticket, arms the timeout, and wakes us.
-  // Ticket 27: a parked ask changes the worker's blocked marker, so the
-  // roster observer fires too. Only an actual park notifies — a policy
-  // auto-answer (or a refused duplicate) leaves the pending set unchanged;
-  // auto-answer denials re-project through `onResolved` above.
-  host.onAccessRequest((event) => {
-    const record = workers.get(event.workerId);
-    if (record === undefined || isTerminalStatus(record.status)) return;
-    const pendingBefore = accessRelay.listPending(record.parentSessionId).length;
-    accessRelay.noteRequest(event, record.parentSessionId);
-    if (accessRelay.listPending(record.parentSessionId).length > pendingBefore) {
-      notifyRosterChanged(record.parentSessionId);
-    }
   });
 
   return {
@@ -1215,8 +1097,6 @@ export function createMultitask(
       }
       // Drop any parked steer — nothing is kept for a later revival.
       steerQueue.clear(workerId);
-      // Drop any pending access ask — stop wins; late resolve is a no-op.
-      accessRelay.clear(workerId);
       // Aborted → cancelled on the ledger (and pruned; dsh has no cancelled).
       cancelLinkedTodo(record);
       // Marker obligation closed: nothing to deliver after a restart.
@@ -1464,8 +1344,6 @@ export function createMultitask(
           sessionId,
           source: "user",
           settledWorkers: [],
-          accessRequests: [],
-          accessNotices: [],
         };
       const report = runReconcile(sessionId, effectiveWake);
       todoLedger.apply(report.mutations);
@@ -1495,8 +1373,6 @@ export function createMultitask(
         sessionId,
         source: "timer",
         settledWorkers: [],
-        accessRequests: [],
-        accessNotices: [],
       };
       const report = runReconcile(sessionId, emptyWake);
       todoLedger.apply(report.mutations);
@@ -1726,13 +1602,8 @@ export function createMultitask(
     wakeBus,
     dispose(): void {
       // Ticket 112: teardown reaches the bus so a pending coalesced drain
-      // can never open a turn on a host that is going away.
-      // Ticket 137: the access relay owns one timer per parked ask (the
-      // deny-on-timeout), so it is disposed FIRST — its `onResolved` enqueues
-      // onto this bus from outside, and a late fire must never re-arm a
-      // window on a bus that was already disarmed. Both calls are idempotent,
-      // so a repeated teardown is safe.
-      accessRelay.dispose();
+      // can never open a turn on a host that is going away. Idempotent, so a
+      // repeated teardown is safe.
       wakeBus.dispose();
     },
     todos: todoLedger,
@@ -1792,30 +1663,6 @@ export function createMultitask(
       return peerInbox.listPending(sessionId);
     },
     peerInbox,
-    resolveAccess(workerId: string, decision: AccessDecision): boolean {
-      const resolved = accessRelay.resolve(workerId, decision);
-      // Ticket 27: the pending-access set changed — re-project the roster
-      // so the worker's blocked marker clears promptly.
-      if (resolved) {
-        const record = workers.get(workerId);
-        if (record !== undefined) notifyRosterChanged(record.parentSessionId);
-      }
-      return resolved;
-    },
-    listPendingAccess(parentSessionId?: string): readonly AccessTicket[] {
-      return accessRelay.listPending(parentSessionId);
-    },
-    clearSessionAccessPolicy(sessionId?: string): void {
-      // Ticket 30 + ADR-0019: "always allow (this session)" rows must never
-      // outlive their session. Deactivation clears only that session's rows;
-      // plugin unload clears every session-scope row.
-      accessPolicy.clearSession(sessionId);
-      // Ticket 69 (chunk A): posture rows never outlive their session either
-      // — same attribution rules, same call sites.
-      reviewPosture.clearSession(sessionId);
-    },
-    accessPolicy,
-    reviewPosture,
     settleRecords,
     cancelWaits(sessionId: string): void {
       settleRecords.cancelWaits(sessionId);
@@ -1854,8 +1701,6 @@ export function createMultitask(
 }
 
 export type {
-  AccessDecision,
-  AccessTicket,
   AwaitWorkerHooks,
   AwaitReleasedReason,
   AwaitWorkerOutcome,
@@ -1866,7 +1711,6 @@ export type {
   PeerInboxOptions,
   PeerSendAck,
   ReconcileReport,
-  ReviewPostureTable,
   SettleRecord,
   SettleRecords,
   SpawnRequest,

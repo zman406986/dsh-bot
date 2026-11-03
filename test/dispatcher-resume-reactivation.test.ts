@@ -45,18 +45,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { apply } from "../src/plugin.js";
 import { volatileConfig } from "./support/plugin-config.js";
-import {
-  DISPATCHER_START_COMMAND,
-  SESSION_KIND_PROJECTION_KEY,
-  SESSION_KIND_PROJECTION_DEFINITION,
-  RESTART_DEGRADED_NOTICE,
-  type AgentLike,
-  type CommandDefinitionLike,
-  type CommandResultLike,
-  type SessionProjectionDefinitionLike,
-  type SessionKindProjectionState,
-  type ToolsLike,
-} from "../src/adapter/index.js";
+import {DISPATCHER_START_COMMAND, SESSION_KIND_PROJECTION_KEY, RESTART_DEGRADED_NOTICE, type AgentLike, type CommandDefinitionLike, type CommandResultLike, type SessionProjectionDefinitionLike, type SessionKindProjectionState, type ToolsLike} from "../src/adapter/index.js";
 
 function tick(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
@@ -390,14 +379,16 @@ const DISPATCHER_SCOPED_TOOLS = [
   "stop_worker",
 ];
 
-/** The reported surface: the 9 scoped tools plus the global `request_access`. */
+/**
+ * The reported surface: the 9 scoped tools. Ticket 174 / ADR-0033 removed the
+ * global `request_access`, so the full surface IS the scoped set.
+ */
 const DISPATCHER_FULL_SURFACE = [
   "await_agent",
   "check_workers",
   "deliver_result",
   "message_agent",
   "recall",
-  "request_access",
   "spawn_dispatcher",
   "spawn_worker",
   "steer_worker",
@@ -408,7 +399,7 @@ const DISPATCHER_FULL_SURFACE = [
 const TOP_LEVEL_HEADER = { parentSession: null, delegationDepth: 0 } as const;
 
 describe("ticket 147 — a user-started dispatcher re-activates after restart", () => {
-  it("a resumed generation-1 dispatcher gets its 10 tools back, one policy, no degraded notice", async () => {
+  it("a resumed generation-1 dispatcher gets its 9 tools back, one policy, no degraded notice", async () => {
     // ── first process: the owner runs /dsh-bot in a normal chat ─────────
     const storage = new Map<string, Map<string, unknown>>();
     const first = createCtx({ storage });
@@ -448,9 +439,9 @@ describe("ticket 147 — a user-started dispatcher re-activates after restart", 
     });
     await drain();
 
-    // The exact surface the owner saw removed: 9 scoped + request_access.
+    // The exact surface the owner saw removed: the 9 scoped tools.
     assert.deepEqual(resumed.scopedTools.names().sort(), DISPATCHER_SCOPED_TOOLS);
-    assert.deepEqual(second.globalToolNames(), ["request_access"]);
+    assert.deepEqual(second.globalToolNames(), []);
     assert.equal(
       resumed.scopedTools.names().length + second.globalToolNames().length,
       DISPATCHER_FULL_SURFACE.length,
@@ -466,93 +457,9 @@ describe("ticket 147 — a user-started dispatcher re-activates after restart", 
     );
   });
 
-  it("a normal (non-dispatcher) session resumes dormant: no tools, no policy", async () => {
-    const second = createCtx();
-    apply(second, volatileConfig({ enabled: true }));
-
-    // A session whose log holds no `/dsh-bot` pair — an ordinary chat.
-    const session = createSession("chat-plain", TOP_LEVEL_HEADER);
-    appendEvent(session, "user/message", { role: "user" });
-    const resumed = createAgent("chat-plain", TOP_LEVEL_HEADER);
-
-    second.fire("agent/created", {
-      agent: { ...resumed, session: { ...resumed.session, ...session } },
-      source: "resume",
-    });
-    await drain();
-
-    assert.deepEqual(resumed.scopedTools.names(), []);
-    assert.deepEqual(second.globalToolNames(), []);
-    assert.equal(resumed.injected.length, 0);
-  });
-
-  it("a repeated announcement does not double-register or double-inject", async () => {
-    const second = createCtx();
-    apply(second, volatileConfig({ enabled: true }));
-    const session = createSession("chat-1", TOP_LEVEL_HEADER);
-    appendDispatcherStart(session, "cmd-1");
-    const resumed = createAgent("chat-1", TOP_LEVEL_HEADER);
-    const announced = {
-      agent: { ...resumed, session: { ...resumed.session, ...session } },
-      source: "resume",
-    };
-
-    second.fire("agent/created", announced);
-    await drain();
-    second.fire("agent/created", announced);
-    await drain();
-
-    // The scoped registry throws on a duplicate name, so a double
-    // registration could not pass silently.
-    assert.deepEqual(resumed.scopedTools.names().sort(), DISPATCHER_SCOPED_TOOLS);
-    assert.equal(resumed.injected.length, 1);
-    assert.equal(second.projections.registers, 1);
-  });
-
-  it("a session already active in this process is left alone when re-announced", async () => {
-    const ctx = createCtx();
-    apply(ctx, volatileConfig({ enabled: true }));
-    const agent = createAgent("chat-1", TOP_LEVEL_HEADER);
-    const session = createSession("chat-1", TOP_LEVEL_HEADER);
-    appendDispatcherStart(session, "cmd-1");
-
-    // Activated by the command in THIS process, then re-announced.
-    assert.deepEqual(
-      ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent }).kind,
-      "success",
-    );
-    await drain();
-    ctx.fire("agent/created", {
-      agent: { ...agent, session: { ...agent.session, ...session } },
-      source: "resume",
-    });
-    await drain();
-
-    assert.equal(agent.injected.length, 1);
-    assert.deepEqual(agent.scopedTools.names().sort(), DISPATCHER_SCOPED_TOOLS);
-    assert.deepEqual(ctx.globalToolNames(), ["request_access"]);
-  });
-
   it("a projection that throws activates nothing (fail-closed)", async () => {
     const projections = createProjectionRegistry({ throwOnRead: true });
     const ctx = createCtx({ projections });
-    apply(ctx, volatileConfig({ enabled: true }));
-    const session = createSession("chat-1", TOP_LEVEL_HEADER);
-    appendDispatcherStart(session, "cmd-1");
-    const resumed = createAgent("chat-1", TOP_LEVEL_HEADER);
-
-    ctx.fire("agent/created", {
-      agent: { ...resumed, session: { ...resumed.session, ...session } },
-      source: "resume",
-    });
-    await drain();
-
-    assert.deepEqual(resumed.scopedTools.names(), []);
-    assert.equal(resumed.injected.length, 0);
-  });
-
-  it("no projection registry at all means the pre-147 dormant behavior", async () => {
-    const ctx = createCtx({ projections: null });
     apply(ctx, volatileConfig({ enabled: true }));
     const session = createSession("chat-1", TOP_LEVEL_HEADER);
     appendDispatcherStart(session, "cmd-1");
@@ -585,40 +492,4 @@ describe("ticket 147 — a user-started dispatcher re-activates after restart", 
     assert.equal(resumed.injected.length, 0);
   });
 
-  it("the real projection unit is the identity source (state, not a wire guess)", () => {
-    // The fold the host runs: an unanswered `command/run` does NOT mark a
-    // dispatcher; the paired success does. This is the same unit the resume
-    // seam reads, pinned here so the test cannot pass on a hand-returned flag.
-    const unpaired = createSession("s-unpaired");
-    appendEvent(unpaired, "command/run", {
-      commandId: "cmd-x",
-      name: DISPATCHER_START_COMMAND,
-      args: "",
-      source: "user",
-    });
-    const failed = createSession("s-failed");
-    appendEvent(failed, "command/run", {
-      commandId: "cmd-y",
-      name: DISPATCHER_START_COMMAND,
-      args: "",
-      source: "user",
-    });
-    appendEvent(failed, "command/done", { commandId: "cmd-y", kind: "error" });
-    const ok = createSession("s-ok");
-    appendDispatcherStart(ok, "cmd-z");
-
-    const fold = (session: StubSession): SessionKindProjectionState => {
-      let state = SESSION_KIND_PROJECTION_DEFINITION.init(
-        session.header,
-        session.inheritedEventCount,
-      );
-      for (const event of session.snapshotEvents()) {
-        state = SESSION_KIND_PROJECTION_DEFINITION.apply(state, event);
-      }
-      return state;
-    };
-    assert.equal(fold(unpaired).active, false);
-    assert.equal(fold(failed).active, false);
-    assert.equal(fold(ok).active, true);
-  });
 });

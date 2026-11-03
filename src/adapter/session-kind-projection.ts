@@ -77,6 +77,7 @@
  * contract requires (projection-cache persistence precondition).
  */
 
+import type { DispatcherOrigin } from "../core/policy/prompts.js";
 import {
   DISPATCHER_START_COMMAND,
   LEGACY_DISPATCHER_START_COMMAND,
@@ -119,11 +120,26 @@ export const SESSION_KIND_PROJECTION_KEY = "sessionKind";
  */
 export const SESSION_KIND_PROJECTION_STATE_VERSION = 1;
 
-/** The one wire value this unit publishes. */
+/** The wire value for a dispatcher the HUMAN started (chief of staff). */
 export const DISPATCHER_SESSION_KIND = "dispatcher";
 
-/** Client-visible marker value: `"dispatcher"`, or null for everything else. */
-export type DispatcherSessionKind = typeof DISPATCHER_SESSION_KIND;
+/**
+ * Ticket 177: the wire value for a dispatcher ANOTHER dispatcher summoned
+ * (team leader). A second value rather than a second projection key, for the
+ * ADR-0031 reason that still holds: the identity is already durable here, so a
+ * parallel channel would duplicate the fold, the cache row and the client read
+ * path.
+ *
+ * The `dispatcher` stem is deliberate: an older client bundle compares
+ * `=== "dispatcher"`, so it fails closed (draws nothing) on this value instead
+ * of drawing the wrong class.
+ */
+export const TEAM_LEADER_SESSION_KIND = "dispatcher-team-leader";
+
+/** Client-visible marker values; `null` means "not a dispatcher". */
+export type DispatcherSessionKind =
+  | typeof DISPATCHER_SESSION_KIND
+  | typeof TEAM_LEADER_SESSION_KIND;
 
 /**
  * Persisted-log name of the stop command before ADR-0030 / ticket 129
@@ -157,10 +173,25 @@ export interface SessionKindProjectionState {
   readonly active: boolean;
   readonly pendingStarts: readonly string[];
   readonly pendingStops: readonly string[];
-  /** False until the mirror has answered for this session (see above). */
+  /**
+   * False until the mirror has answered for this session (see above).
+   */
   readonly resolved?: boolean;
   /** The session an unresolved cell belongs to (see above). */
   readonly sessionId?: string;
+  /**
+   * Ticket 177: WHICH class of dispatcher this session is — `"user"` (the
+   * chief of staff the human started) or `"spawned"` (the team leader another
+   * dispatcher summoned). Absent means "not settled yet", and every reader
+   * treats that as the user-started class, which is what every pre-175 row
+   * could only have been.
+   *
+   * This is the durable half of the class split. It rides the state (and so
+   * the host's checkpoint) instead of the mark row because the mark row is
+   * implicitly spawned-only — see {@link settleFromAnswer} — while this state
+   * is also what the CLIENT reads to choose a glyph.
+   */
+  readonly dispatcherClass?: DispatcherOrigin;
 }
 
 /** The minimal structural event view the fold reads (never throws on junk). */
@@ -279,6 +310,14 @@ export function sessionIdOfHeader(header: unknown): string | null {
  * Ticket 140 (review fix): apply one probe answer to a state. Resolved
  * answers settle the cell and drop the remembered id; `"unknown"` keeps the
  * cell unresolved for the next read.
+ *
+ * Ticket 177: a `"dispatcher"` answer from THIS source also settles the CLASS,
+ * because the source is the `dispatcher_sessions` mark table and only a spawn
+ * ever writes a row there (`writeDispatcherMark` has exactly one caller,
+ * `spawnDispatcher`, and `parseDispatcherMark` rejects generation 1). So the
+ * row's very existence is the durable "spawned" fact — no extra column is
+ * needed, and none is invented. `"not-dispatcher"` leaves the class as the
+ * fold settled it.
  */
 function settleFromAnswer(
   state: SessionKindProjectionState,
@@ -294,12 +333,26 @@ function settleFromAnswer(
           sessionId,
         };
   }
-  const active = answer === "dispatcher" ? true : state.active;
+  const marked = answer === "dispatcher";
   return {
-    active,
+    active: marked ? true : state.active,
     pendingStarts: state.pendingStarts,
     pendingStops: state.pendingStops,
+    ...(marked ? { dispatcherClass: "spawned" as const } : classOf(state)),
   };
+}
+
+/**
+ * Ticket 177: the class fields of a state, as a spreadable object. Absent when
+ * the class was never settled, so pre-175 rows and unmarked chats keep their
+ * exact old shape instead of gaining a field that would read as a claim.
+ */
+function classOf(
+  state: SessionKindProjectionState,
+): { dispatcherClass?: DispatcherOrigin } {
+  return state.dispatcherClass === undefined
+    ? {}
+    : { dispatcherClass: state.dispatcherClass };
 }
 
 /**
@@ -453,10 +506,21 @@ export function applySessionKindProjection(
     if (startIndex >= 0) {
       // Spread from `state` so an UNRESOLVED cell keeps its re-derivation
       // marker through a log transition (review fix).
+      //
+      // Ticket 177: a SUCCESSFUL `/dsh-bot` settlement is the user-started
+      // class. The command is only ever run by the human in their own chat
+      // (`src/adapter/activation-command.ts`), and a summoned dispatcher is
+      // created programmatically, so its log carries no such pair. An explicit
+      // "spawned" from the mark source wins over this: the mark is the more
+      // specific fact, and a spawn never re-runs the command on the same id.
+      const startedHere = outcome === "success";
       return {
         ...state,
-        active: outcome === "success" ? true : state.active,
+        active: startedHere ? true : state.active,
         pendingStarts: removeAt(state.pendingStarts, startIndex),
+        ...(startedHere && state.dispatcherClass !== "spawned"
+          ? { dispatcherClass: "user" as const }
+          : classOf(state)),
       };
     }
     const stopIndex = state.pendingStops.indexOf(commandId);
@@ -473,11 +537,20 @@ export function applySessionKindProjection(
   return state;
 }
 
-/** State → wire value. A string (not an object) is `Object.is`-stable by value. */
+/**
+ * State → wire value. A string (not an object) is `Object.is`-stable by value.
+ *
+ * Ticket 177: two dispatcher values. An ACTIVE cell whose class was never
+ * settled (a checkpoint row written before this ticket) reads as the
+ * user-started class — the only class a pre-175 row could describe.
+ */
 export function viewSessionKind(
   state: SessionKindProjectionState,
 ): DispatcherSessionKind | null {
-  return state.active ? DISPATCHER_SESSION_KIND : null;
+  if (!state.active) return null;
+  return state.dispatcherClass === "spawned"
+    ? TEAM_LEADER_SESSION_KIND
+    : DISPATCHER_SESSION_KIND;
 }
 
 /** Persisted-state validation (cache rows are never authoritative). */
@@ -521,12 +594,23 @@ export function parseSessionKindProjectionState(
       "sessionKind projection state.sessionId must be a string when present",
     );
   }
+  const dispatcherClass = record["dispatcherClass"];
+  if (
+    dispatcherClass !== undefined &&
+    dispatcherClass !== "user" &&
+    dispatcherClass !== "spawned"
+  ) {
+    throw new Error(
+      'sessionKind projection state.dispatcherClass must be "user" or "spawned" when present',
+    );
+  }
   return {
     active: record["active"],
     pendingStarts: [...(starts as string[])],
     pendingStops: [...(stops as string[])],
     ...(resolved !== undefined ? { resolved } : {}),
     ...(sessionId !== undefined ? { sessionId } : {}),
+    ...(dispatcherClass !== undefined ? { dispatcherClass } : {}),
   };
 }
 
@@ -534,9 +618,16 @@ export function parseSessionKindProjectionState(
 export function parseDispatcherSessionKind(
   value: unknown,
 ): DispatcherSessionKind | null {
-  if (value === null || value === DISPATCHER_SESSION_KIND) return value;
+  if (
+    value === null ||
+    value === DISPATCHER_SESSION_KIND ||
+    value === TEAM_LEADER_SESSION_KIND
+  ) {
+    return value;
+  }
   throw new Error(
-    `sessionKind wire value must be "${DISPATCHER_SESSION_KIND}" or null`,
+    `sessionKind wire value must be "${DISPATCHER_SESSION_KIND}", ` +
+      `"${TEAM_LEADER_SESSION_KIND}", or null`,
   );
 }
 
@@ -604,24 +695,65 @@ export function resolveSessionProjections(
  *
  * `session` is the live host `Session` (its log is the fold source). The
  * structural view keeps this file free of host imports.
+ *
+ * Ticket 177: this answers the IDENTITY question ("is this a dispatcher at
+ * all"), so BOTH classes return {@link DISPATCHER_SESSION_KIND}. The CLASS is
+ * a separate read ({@link dispatcherClassOf}) on purpose: a caller that only
+ * routes resumed sessions into the dispatcher activation path must not have to
+ * learn a second value, and a client that does NOT know the second value must
+ * still see a dispatcher (see the wire value's doc).
  */
 export function sessionKindOf(
   registry: HostSessionProjectionsLike | undefined,
   session: unknown,
-): DispatcherSessionKind | null {
+): typeof DISPATCHER_SESSION_KIND | null {
+  const state = sessionKindStateOf(registry, session);
+  return state !== undefined && state.active === true
+    ? DISPATCHER_SESSION_KIND
+    : null;
+}
+
+/** The raw projection state, or undefined when nothing could answer. */
+function sessionKindStateOf(
+  registry: HostSessionProjectionsLike | undefined,
+  session: unknown,
+): SessionKindProjectionState | undefined {
   if (registry === undefined || typeof registry.stateOf !== "function") {
-    return null;
+    return undefined;
   }
   let state: unknown;
   try {
     state = registry.stateOf(session, SESSION_KIND_PROJECTION_KEY);
   } catch {
     // A projection that cannot answer must never activate a session.
-    return null;
+    return undefined;
   }
-  if (typeof state !== "object" || state === null) return null;
-  const active = (state as { active?: unknown }).active;
-  return active === true ? DISPATCHER_SESSION_KIND : null;
+  return typeof state === "object" && state !== null
+    ? (state as SessionKindProjectionState)
+    : undefined;
+}
+
+/**
+ * Ticket 177: the durable CLASS of one dispatcher session, or null when the
+ * session is not an active dispatcher.
+ *
+ * This is the seam that closes ticket 173's recorded limitation: a summoned
+ * dispatcher is top-level (ADR-0032), so on a cold resume it reaches the
+ * parentless branch, and before this accessor that branch had no way to ask
+ * "which class was this?" — it activated every resumed dispatcher as `user`.
+ *
+ * Fail-closed in the same direction as {@link sessionKindOf}: no registry, no
+ * key, a throw, or an inactive cell answers null, and the caller's default
+ * (`"user"`) stands. A cell whose `dispatcherClass` was never settled is the
+ * user-started class, which is what every pre-175 row could only have been.
+ */
+export function dispatcherClassOf(
+  registry: HostSessionProjectionsLike | undefined,
+  session: unknown,
+): DispatcherOrigin | null {
+  const state = sessionKindStateOf(registry, session);
+  if (state === undefined || state.active !== true) return null;
+  return state.dispatcherClass === "spawned" ? "spawned" : "user";
 }
 
 /**

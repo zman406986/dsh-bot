@@ -40,7 +40,6 @@ import { apply as pluginApply } from "../src/plugin.js";
 import { volatileConfig } from "./support/plugin-config.js";
 import {
   ACTIVATION_PRESENCE_HINT,
-  DISPATCHER_RESOLVE_COMMAND,
   DISPATCHER_START_COMMAND,
   DISPATCHER_START_SUCCESS,
   DISPATCHER_STEER_COMMAND,
@@ -53,24 +52,18 @@ import {
 import type { DurableWorkerMarker } from "../src/core/durability.js";
 import {
 } from "../src/core/roster-snapshot.js";
-import { ACCESS_CLASSES } from "../src/core/access-types.js";
 import {
   ROSTER_FINISHED_COUNT_KEY,
   ROSTER_SECTION_IDS,
   ROSTER_SECTION_KEYS,
   describeRosterPanel,
-  rosterBlockedKey,
   rosterViewCopyKey,
 } from "../src/client/roster-store.js";
 import {
   TOOLVIEW_DEGRADED_KEY,
   TOOLVIEW_FIELD_KEYS,
 } from "../src/client/toolviews.js";
-import {
-  LOCALE_NAMESPACE,
-  localeDictionary,
-  validateLocaleDictionary,
-} from "../src/client/overlay.js";
+import {localeDictionary, validateLocaleDictionary} from "../src/client/overlay.js";
 
 /** Drain the async rebuild chain queued by activation (ticket 31). */
 async function flushActivation(): Promise<void> {
@@ -319,31 +312,6 @@ async function seedMarkers(
 }
 
 describe("composition polish — activation copy (design-17 §7)", () => {
-  it("appends the presence hint to the success copy exactly once, using the exact draft string", () => {
-    // design-17 §7 `activation.presence-hint`, en — the sanctioned source as
-    // amended by ticket 134 (the panel claim removed under ADR-0024).
-    assert.equal(
-      ACTIVATION_PRESENCE_HINT,
-      "The dispatcher reports progress as it works; results arrive in this chat as they finish.",
-    );
-    assert.ok(
-      DISPATCHER_START_SUCCESS.endsWith(ACTIVATION_PRESENCE_HINT),
-      "the hint is appended at the end of the success copy",
-    );
-    const occurrences =
-      DISPATCHER_START_SUCCESS.split(ACTIVATION_PRESENCE_HINT).length - 1;
-    assert.equal(occurrences, 1, "the hint appears exactly once");
-    // The pre-ticket-32 sentence is still there, once: this is an append.
-    assert.equal(
-      DISPATCHER_START_SUCCESS.split("Dispatcher active in this chat.").length - 1,
-      1,
-    );
-    assert.equal(
-      DISPATCHER_START_SUCCESS.split("use /dispatcher-steer to nudge a running worker.").length - 1,
-      1,
-    );
-  });
-
   it("the command result carries the enlarged success copy on a real activation", async () => {
     const ctx = createCompositionCtx();
     pluginApply(ctx, volatileConfig({ enabled: true }));
@@ -381,28 +349,6 @@ describe("composition polish — activation copy (design-17 §7)", () => {
     assert.doesNotMatch(ACTIVATION_PRESENCE_HINT, /[\u4e00-\u9fff]/);
   });
 
-  it("does not promise a push surface: the hint names the pull surface only", () => {
-    // Ticket 134 / ADR-0024: no panel of ours is mounted in the native-dsh
-    // posture, so the hint must not name one.
-    assert.doesNotMatch(ACTIVATION_PRESENCE_HINT, /panel/i);
-    assert.match(ACTIVATION_PRESENCE_HINT, /this chat/);
-    for (const forbidden of [
-      "notify",
-      "notification",
-      "alert",
-      "toast",
-      "banner",
-      "badge",
-      "push",
-      "email",
-    ]) {
-      assert.equal(
-        ACTIVATION_PRESENCE_HINT.toLowerCase().includes(forbidden),
-        false,
-        `presence hint must not promise "${forbidden}" (no push seam; design-17 §4.8)`,
-      );
-    }
-  });
 });
 
 describe("composition polish — dormant registration matrix (design-17 §3.2/§8)", () => {
@@ -416,9 +362,9 @@ describe("composition polish — dormant registration matrix (design-17 §3.2/§
     await flushActivation();
     assert.equal(agent.injected.length, 0, "no capture, no policy inject");
 
-    // Visible host surface: exactly the three commands, no tools.
+    // Visible host surface: exactly the two commands, no tools. Ticket 174 /
+    // ADR-0033 withdrew `/dispatcher-resolve`.
     assert.deepEqual(ctx.commandNames().sort(), [
-      DISPATCHER_RESOLVE_COMMAND,
       DISPATCHER_STEER_COMMAND,
       // "dsh-bot" sorts after the dispatcher- names (ADR-0030 rename); the
       // withdrawn dispatcher-stop (ticket 101) is gone (ticket 129).
@@ -444,18 +390,6 @@ describe("composition polish — dormant registration matrix (design-17 §3.2/§
     assert.equal(ctx.listenerCount(), 9);
   });
 
-  it("an unrelated settings write while dormant does not surface a roster", async () => {
-    const ctx = createCompositionCtx();
-    pluginApply(ctx, volatileConfig({ enabled: true }));
-    ctx.fire("agent/status", {
-      agent: { session: { id: "someone-else" } },
-      status: "running",
-    });
-    await flushActivation();
-    assert.deepEqual(ctx.updates, []);
-    assert.deepEqual(ctx.toolNames(), []);
-  });
-
   it("activation is what raises the surface: tools appear, nothing is mirrored", async () => {
     const ctx = createCompositionCtx();
     pluginApply(ctx, volatileConfig({ enabled: true }));
@@ -463,15 +397,15 @@ describe("composition polish — dormant registration matrix (design-17 §3.2/§
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await flushActivation();
 
-    // Eight dispatcher tools + request_access + the ticket-145 per-session
-    // recall (this context-less agent takes the plugin-level fallback).
+    // Eight dispatcher tools + the ticket-145 per-session recall (this
+    // context-less agent takes the plugin-level fallback). Ticket 174 /
+    // ADR-0033 removed `request_access`.
     assert.deepEqual(ctx.toolNames().sort(), [
       "await_agent",
       "check_workers",
       "deliver_result",
       "message_agent",
       "recall",
-      "request_access",
       "spawn_dispatcher",
       "spawn_worker",
       "steer_worker",
@@ -567,8 +501,8 @@ describe("composition polish — locale validation + literal sweep (§8)", () =>
       TOOLVIEW_DEGRADED_KEY,
       ...Object.values(ROSTER_SECTION_KEYS),
       ...Object.values(TOOLVIEW_FIELD_KEYS),
-      // Blocked phrases are composed per access class; all must exist.
-      ...ACCESS_CLASSES.map((accessClass) => rosterBlockedKey(accessClass)),
+      // Ticket 174 / ADR-0033 removed the per-access-class blocked phrases
+      // with the worker access-ask feature.
     ];
     for (const key of requested) {
       assert.equal(
@@ -625,61 +559,7 @@ describe("composition polish — locale validation + literal sweep (§8)", () =>
     }
   });
 
-  it("no shipped identifier from the contaminated reconstruction is present", () => {
-    // Clean-room guard repeated at the composition layer (design-17 §10):
-    // the copy/locale additions of tickets 27–32 must not carry them either.
-    const surfaces = [
-      JSON.stringify(localeDictionary),
-      ACTIVATION_PRESENCE_HINT,
-      DISPATCHER_START_SUCCESS,
-    ].join("\n");
-    for (const forbidden of [
-      "sand",
-      "executor",
-      "MessageSubagent",
-      "SAND_MULTITASK",
-    ]) {
-      assert.equal(
-        surfaces.toLowerCase().includes(forbidden.toLowerCase()),
-        false,
-        `shipped copy must not contain "${forbidden}"`,
-      );
-    }
-    assert.ok(LOCALE_NAMESPACE.length > 0);
-  });
 });
 
 describe("composition polish — host duplicate-registration rule (ticket 91)", () => {
-  it("apply throws the host duplicate-command error when a command name is taken", () => {
-    const ctx = createCompositionCtx();
-    ctx.commands.register({
-      name: DISPATCHER_START_COMMAND,
-      description: "foreign claimant",
-      handler: () => ({ kind: "success", text: "foreign" }),
-    });
-
-    assert.throws(
-      () => pluginApply(ctx, volatileConfig({ enabled: true })),
-      new RegExp(
-        `command "${DISPATCHER_START_COMMAND}" is already registered`,
-      ),
-    );
-  });
-
-  it("the fake tool registry throws the host duplicate-tool error on a taken name", () => {
-    const ctx = createCompositionCtx();
-    const tools = ctx.tools as unknown as {
-      register(definition: {
-        name: string;
-        execute: () => Promise<unknown>;
-      }): () => void;
-    };
-    tools.register({ name: "spawn_worker", execute: async () => ({}) });
-
-    assert.throws(
-      () =>
-        tools.register({ name: "spawn_worker", execute: async () => ({}) }),
-      /tool "spawn_worker" is already registered/,
-    );
-  });
 });

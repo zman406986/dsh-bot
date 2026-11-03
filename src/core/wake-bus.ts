@@ -1,20 +1,14 @@
-import type {
-  AccessNotice,
-  AccessRequestNotice,
-} from "./access-types.js";
 import type { AgentMessageWakeOrigin, PeerNotice } from "./peer-types.js";
 import type { TerminalWorkerStatus } from "./types.js";
 
 /**
- * Where a wake came from. Only `user`, `worker-settled`,
- * `worker-access-request`, and `peer` produce wakes at this stage;
- * the remaining sources are accepted so later tickets can enqueue
- * them without changing the vocabulary.
+ * Where a wake came from. Only `user`, `worker-settled`, and `peer` produce
+ * wakes at this stage; the remaining sources are accepted so later tickets can
+ * enqueue them without changing the vocabulary.
  */
 export type WakeSource =
   | "user"
   | "worker-settled"
-  | "worker-access-request"
   | "peer"
   | "timer"
   | "external-event";
@@ -23,7 +17,6 @@ export type WakeSource =
 export const WAKE_SOURCES: readonly WakeSource[] = [
   "user",
   "worker-settled",
-  "worker-access-request",
   "peer",
   "timer",
   "external-event",
@@ -69,10 +62,6 @@ export interface WakeEvent {
   readonly sessionId: string;
   readonly source: WakeSource;
   readonly settledWorkers: readonly SettledWorkerNotice[];
-  /** Pending access asks for this dispatcher turn (optional; additive). */
-  readonly accessRequests?: readonly AccessRequestNotice[];
-  /** Resolved access notices (mostly denials) for honest user reporting. */
-  readonly accessNotices?: readonly AccessNotice[];
   /**
    * Present when source === "peer". FIFO of peer messages for this wake.
    * Never mixed into a worker-settled wake.
@@ -86,7 +75,7 @@ export interface WakeEvent {
   readonly messageOrigin?: AgentMessageWakeOrigin;
   /**
    * Ticket 113: external intake jobs for this wake. Background-rank —
-   * they join the settled/access batch lane, never a peer wake.
+   * they join the settled batch lane, never a peer wake.
    */
   readonly externalJobs?: readonly ExternalJobNotice[];
 }
@@ -97,19 +86,6 @@ export interface EnqueueSettledInput {
   status: TerminalWorkerStatus;
   title: string;
   resultText: string;
-}
-
-export interface EnqueueAccessRequestInput {
-  parentSessionId: string;
-  workerId: string;
-  requestId: string;
-  title: string;
-  body: AccessRequestNotice["body"];
-}
-
-export interface EnqueueAccessNoticeInput {
-  parentSessionId: string;
-  notice: AccessNotice;
 }
 
 export interface EnqueuePeerInput {
@@ -131,7 +107,7 @@ export interface EnqueueExternalJobInput {
  * Delivery rules:
  * - An idle session with nothing already waiting flushes immediately.
  * - A session that is mid-turn only queues; the batch flushes on turn end.
- * - Settles/access that arrive while a background batch is already waiting
+ * - Settles that arrive while a background batch is already waiting
  *   join that batch, so the next turn sees one wake, not several.
  * - A user wake reclaims any waiting non-user batch (settled *or* peer)
  *   back onto the pending lists and becomes the ready wake.
@@ -153,10 +129,6 @@ export interface EnqueueExternalJobInput {
 export interface WakeBus {
   /** Queue a settled-worker notice for its parent session. */
   enqueueWorkerSettled(input: EnqueueSettledInput): void;
-  /** Queue a pending access ask for its parent session. */
-  enqueueAccessRequest(input: EnqueueAccessRequestInput): void;
-  /** Queue a resolved access notice (mostly denial) for its parent session. */
-  enqueueAccessNotice(input: EnqueueAccessNoticeInput): void;
   /**
    * Queue one accepted peer notice. `effectivePriority` is already
    * target-checked by the caller (inbox). Priority may interrupt a
@@ -165,7 +137,7 @@ export interface WakeBus {
   enqueuePeer(input: EnqueuePeerInput): void;
   /**
    * Queue one external intake job (ticket 113, ADR-0023). Background-rank:
-   * joins the settled/access batching lane and the ticket-108 coalescing
+   * joins the settled batching lane and the ticket-108 coalescing
    * window exactly like a worker settle — never a peer lane, never an
    * interrupt. The core (not the bus) owns todo creation.
    */
@@ -216,10 +188,6 @@ interface SessionWakeState {
   pendingOwner: TurnOwner | null;
   /** Settled notices waiting for a future turn. */
   pending: SettledWorkerNotice[];
-  /** Access asks waiting for a future turn. */
-  pendingAccessRequests: AccessRequestNotice[];
-  /** Access notices waiting for a future turn. */
-  pendingAccessNotices: AccessNotice[];
   /** Priority peer notices (1:1 effective-priority) in FIFO order. */
   priorityPeers: PeerNotice[];
   /** Normal peer notices (non-priority 1:1; group/broadcast retired, ticket 70 §3). */
@@ -299,7 +267,6 @@ export const DEFAULT_COALESCE_FAIL_BUDGET = 3;
 function isBackground(source: WakeSource): boolean {
   return (
     source === "worker-settled" ||
-    source === "worker-access-request" ||
     // Ticket 113: external intake rides the background rank — it joins
     // settle batches and subsumes an owed redrive like any other batch.
     source === "external-event"
@@ -322,14 +289,9 @@ function isNonUser(source: WakeSource): boolean {
 
 function sourceFor(
   settled: readonly SettledWorkerNotice[],
-  accessRequests: readonly AccessRequestNotice[],
-  accessNotices: readonly AccessNotice[],
   externalJobs: readonly ExternalJobNotice[],
 ): WakeSource {
   if (settled.length > 0) return "worker-settled";
-  if (accessRequests.length > 0 || accessNotices.length > 0) {
-    return "worker-access-request";
-  }
   if (externalJobs.length > 0) return "external-event";
   return "worker-settled";
 }
@@ -374,8 +336,6 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
         currentTurn: null,
         pendingOwner: null,
         pending: [],
-        pendingAccessRequests: [],
-        pendingAccessNotices: [],
         priorityPeers: [],
         normalPeers: [],
         pendingExternalJobs: [],
@@ -461,31 +421,17 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
   /** Move pending background items into a ready batch and notify the host. */
   function flushBackground(sessionId: string, state: SessionWakeState): void {
     const hasPending =
-      state.pending.length > 0 ||
-      state.pendingAccessRequests.length > 0 ||
-      state.pendingAccessNotices.length > 0 ||
-      state.pendingExternalJobs.length > 0;
+      state.pending.length > 0 || state.pendingExternalJobs.length > 0;
     if (!hasPending) return;
     const settledWorkers = state.pending;
-    const accessRequests = state.pendingAccessRequests;
-    const accessNotices = state.pendingAccessNotices;
     const externalJobs = state.pendingExternalJobs;
     state.pending = [];
-    state.pendingAccessRequests = [];
-    state.pendingAccessNotices = [];
     state.pendingExternalJobs = [];
-    const source = sourceFor(
-      settledWorkers,
-      accessRequests,
-      accessNotices,
-      externalJobs,
-    );
+    const source = sourceFor(settledWorkers, externalJobs);
     state.ready = {
       sessionId,
       source,
       settledWorkers,
-      accessRequests,
-      accessNotices,
       externalJobs,
     };
     // A real background batch subsumes any owed redrive: this turn will
@@ -522,8 +468,6 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
       sessionId,
       source: "peer",
       settledWorkers: [],
-      accessRequests: [],
-      accessNotices: [],
       peerMessages,
       ...(opener !== undefined
         ? {
@@ -571,8 +515,6 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
         sessionId,
         source: "timer",
         settledWorkers: [],
-        accessRequests: [],
-        accessNotices: [],
       };
       state.pendingOwner = "worker-settled";
       onDeliver(sessionId);
@@ -609,10 +551,6 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
       );
     } else {
       state.pending.unshift(...state.ready.settledWorkers);
-      state.pendingAccessRequests.unshift(
-        ...(state.ready.accessRequests ?? []),
-      );
-      state.pendingAccessNotices.unshift(...(state.ready.accessNotices ?? []));
     }
     state.ready = null;
   }
@@ -657,48 +595,6 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
       // Mid-turn: queue only. Idle with a user/peer wake waiting: stay behind it.
       // Ticket 108: idle and nothing ready → join/arm the coalescing window
       // instead of waking immediately (immediate at the default window 0).
-      if (!state.busy && state.ready === null) {
-        coalesceOrFlush(input.parentSessionId, state);
-      }
-    },
-
-    enqueueAccessRequest(input: EnqueueAccessRequestInput): void {
-      const state = ensure(input.parentSessionId);
-      const notice: AccessRequestNotice = {
-        workerId: input.workerId,
-        requestId: input.requestId,
-        title: input.title,
-        body: input.body,
-      };
-      if (state.ready !== null && canJoinBackground(state.ready.source)) {
-        const existing = state.ready.accessRequests ?? [];
-        state.ready = {
-          ...state.ready,
-          accessRequests: [...existing, notice],
-          source:
-            state.ready.settledWorkers.length > 0
-              ? state.ready.source
-              : "worker-access-request",
-        };
-        return;
-      }
-      state.pendingAccessRequests.push(notice);
-      if (!state.busy && state.ready === null) {
-        coalesceOrFlush(input.parentSessionId, state);
-      }
-    },
-
-    enqueueAccessNotice(input: EnqueueAccessNoticeInput): void {
-      const state = ensure(input.parentSessionId);
-      if (state.ready !== null && canJoinBackground(state.ready.source)) {
-        const existing = state.ready.accessNotices ?? [];
-        state.ready = {
-          ...state.ready,
-          accessNotices: [...existing, input.notice],
-        };
-        return;
-      }
-      state.pendingAccessNotices.push(input.notice);
       if (!state.busy && state.ready === null) {
         coalesceOrFlush(input.parentSessionId, state);
       }
@@ -776,12 +672,10 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
           ...state.ready,
           externalJobs: [...(state.ready.externalJobs ?? []), input.job],
           // A wake that carried only a redrive flag (source "timer") is now
-          // an external-event wake; one with real settles/access keeps its
-          // more specific source.
+          // an external-event wake; one with real settles keeps its more
+          // specific source.
           source:
-            state.ready.settledWorkers.length > 0 ||
-            (state.ready.accessRequests ?? []).length > 0 ||
-            (state.ready.accessNotices ?? []).length > 0
+            state.ready.settledWorkers.length > 0
               ? state.ready.source
               : "external-event",
         };
@@ -815,8 +709,6 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
         sessionId,
         source: "user",
         settledWorkers: [],
-        accessRequests: [],
-        accessNotices: [],
       };
       state.pendingOwner = "user";
     },
@@ -847,8 +739,6 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
         sessionId,
         source: "timer",
         settledWorkers: [],
-        accessRequests: [],
-        accessNotices: [],
       };
       state.pendingOwner = "worker-settled";
       onDeliver(sessionId);

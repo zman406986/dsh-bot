@@ -54,13 +54,6 @@ export interface WorkerLivenessInput {
    * moment). `null` when nothing was ever observed or the worker settled.
    */
   readonly lastActivityAtMs: number | null;
-  /**
-   * True when a pending access ask is parked for this worker (the roster
-   * projection's blocked join). A blocked worker is parked BY DESIGN — it
-   * is not stalled, and mislabelling it would make the signal cry wolf
-   * (R3; precedent: blocked-outranks-landed in the roster projection).
-   */
-  readonly blocked: boolean;
 }
 
 /**
@@ -69,11 +62,9 @@ export interface WorkerLivenessInput {
  * Exactly-at-window is not yet stalled (same convention as
  * `isRosterSnapshotStale`).
  *
- * R3 precedence — these NEVER read `stalled`:
- * - terminal workers (completed/error/aborted are settled states with their
- *   own meanings), and
- * - workers blocked on a pending access ask (parked by design).
- * Both read `quiet`: not advancing, no problem inferred.
+ * R3 precedence: terminal workers NEVER read `stalled` (completed / error /
+ * aborted are settled states with their own meanings) — they read `quiet`,
+ * meaning "not advancing, no problem inferred".
  *
  * When activity was never observed but the core HAS counted tool calls, the
  * advancement happened at an unknown moment between start and now —
@@ -93,9 +84,9 @@ export function deriveWorkerLiveness(
   input: WorkerLivenessInput,
   nowMs: number,
 ): WorkerLiveness {
-  // R3: settled, aborted, and blocked-on-access are distinct states with
-  // their own meanings; the liveness signal must never rename them.
-  if (isTerminalStatus(input.status) || input.blocked) return "quiet";
+  // R3: settled and aborted are distinct states with their own meanings; the
+  // liveness signal must never rename them.
+  if (isTerminalStatus(input.status)) return "quiet";
   const referenceMs =
     input.lastActivityAtMs ??
     (input.toolCallCount > 0 ? null : input.startedAtMs);

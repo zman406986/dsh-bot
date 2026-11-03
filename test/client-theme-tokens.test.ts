@@ -167,13 +167,6 @@ describe("theme tokens — role mapping (ticket 49)", () => {
     assert.match(
       ruleFor(
         ROSTER_PANEL_CSS,
-        ".multitask-dispatcher-roster-panel__row-marker--blocked",
-      ),
-      /color:var\(--dsw-alias-state-warn-primary\)/,
-    );
-    assert.match(
-      ruleFor(
-        ROSTER_PANEL_CSS,
         ".multitask-dispatcher-roster-panel__row-marker--landed",
       ),
       /color:var\(--dsw-alias-state-success-primary\)/,

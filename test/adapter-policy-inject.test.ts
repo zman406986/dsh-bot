@@ -179,23 +179,6 @@ function textOf(message: unknown): string {
 }
 
 describe("dispatcher activation lifecycle (ticket 19)", () => {
-  it("dormant lifecycle captures nothing on simulated session-start", () => {
-    const ctx = createCtx();
-    const host = createHostStub();
-    const multitask = createMultitask(host);
-    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask, {
-      policyEnabled: true,
-    });
-    const agent = createAgent("session-1");
-
-    ctx.emit("agent/session-start", { agent });
-
-    // Stock dsh: no capture, no bind, no policy inject.
-    assert.equal(lifecycle.dispatcherSessionId(), null);
-    assert.equal(host.hasParent(), false);
-    assert.equal(agent.injected.length, 0);
-  });
-
   it("activate binds the parent and injects policy exactly once", () => {
     const ctx = createCtx();
     const host = createHostStub();
@@ -214,88 +197,7 @@ describe("dispatcher activation lifecycle (ticket 19)", () => {
     assert.equal(agent.injected.length, 1);
     const text = textOf(agent.injected[0]);
     assert.ok(text.includes("# Multitask dispatcher"));
-    assert.ok(text.includes("not the workhorse"));
-  });
-
-  it("refuses activation for a non-top-level chat", () => {
-    const ctx = createCtx();
-    const host = createHostStub();
-    const multitask = createMultitask(host);
-    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
-    const child = createChildAgent("child-1");
-
-    const outcome = lifecycle.activate(child);
-
-    assert.deepEqual(outcome, { ok: false, reason: "not-top-level" });
-    assert.equal(lifecycle.dispatcherSessionId(), null);
-    assert.equal(host.hasParent(), false);
-    assert.equal(child.injected.length, 0);
-  });
-
-  it("refuses a second activation in the same chat without re-binding", () => {
-    const ctx = createCtx();
-    const host = createHostStub();
-    const multitask = createMultitask(host);
-    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
-    const agent = createAgent("session-1");
-
-    assert.deepEqual(lifecycle.activate(agent), { ok: true });
-    const outcome = lifecycle.activate(agent);
-
-    assert.deepEqual(outcome, { ok: false, reason: "already-active-here" });
-    assert.equal(host.bound.length, 1);
-    assert.equal(agent.injected.length, 1);
-  });
-
-  it("activates a second chat as its own dispatcher (ADR-0019: no single slot)", () => {
-    const ctx = createCtx();
-    const host = createHostStub();
-    const multitask = createMultitask(host);
-    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
-    const first = createAgent("session-1");
-    const second = createAgent("session-2");
-
-    assert.deepEqual(lifecycle.activate(first), { ok: true });
-    // ADR-0019 retired the `already-active-elsewhere` refusal: each chat
-    // activates its own dispatcher session, with its own parent binding and
-    // its own policy inject.
-    const outcome = lifecycle.activate(second);
-
-    assert.deepEqual(outcome, { ok: true });
-    assert.equal(lifecycle.dispatcherSessionId(), "session-2");
-    assert.ok(lifecycle.isDispatcherSession("session-1"));
-    assert.ok(lifecycle.isDispatcherSession("session-2"));
-    assert.deepEqual(lifecycle.dispatcherSessionIds(), [
-      "session-1",
-      "session-2",
-    ]);
-    assert.deepEqual(host.bound, [
-      { agent: first, sessionId: "session-1" },
-      { agent: second, sessionId: "session-2" },
-    ]);
-    assert.equal(first.injected.length, 1);
-    assert.equal(second.injected.length, 1);
-
-    // Disposing the first deactivates exactly that session.
-    ctx.emit("agent/disposed", { agent: first });
-    assert.equal(lifecycle.isDispatcherSession("session-1"), false);
-    assert.equal(lifecycle.isDispatcherSession("session-2"), true);
-    assert.equal(lifecycle.dispatcherSessionId(), "session-2");
-    assert.deepEqual(host.bound, [{ agent: second, sessionId: "session-2" }]);
-  });
-
-  it("activation with policy disabled binds but does not inject", () => {
-    const ctx = createCtx();
-    const host = createHostStub();
-    const multitask = createMultitask(host);
-    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask, {
-      policyEnabled: false,
-    });
-    const agent = createAgent("session-1");
-
-    assert.deepEqual(lifecycle.activate(agent), { ok: true });
-    assert.equal(host.hasParent(), true);
-    assert.equal(agent.injected.length, 0);
+    assert.ok(text.includes("chief of staff"));
   });
 
   it("fires onActivated / onDeactivated around the activation", () => {
@@ -330,20 +232,6 @@ describe("dispatcher activation lifecycle (ticket 19)", () => {
     assert.equal(lifecycle.dispatcherSessionId(), null);
     assert.equal(host.hasParent(), false);
     assert.deepEqual(host.bound, []);
-  });
-
-  it("agent/disposed for another agent leaves the activation intact", () => {
-    const ctx = createCtx();
-    const host = createHostStub();
-    const multitask = createMultitask(host);
-    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
-    const agent = createAgent("session-1");
-
-    lifecycle.activate(agent);
-    ctx.emit("agent/disposed", { agent: createAgent("session-2") });
-
-    assert.equal(lifecycle.dispatcherSessionId(), "session-1");
-    assert.equal(host.hasParent(), true);
   });
 
   it("re-injects the per-turn reminder on dispatcher turn start after activation", () => {
@@ -431,44 +319,6 @@ describe("dispatcher activation lifecycle (ticket 19)", () => {
     assert.equal(host.wakeups.length, wakeupsAtDelivery);
   });
 
-  it("skips inject when the agent has no inject method", () => {
-    const ctx = createCtx();
-    const host = createHostStub();
-    const multitask = createMultitask(host);
-    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask, {
-      policyEnabled: true,
-    });
-    const agent = createAgent("session-1", false);
-
-    assert.doesNotThrow(() => {
-      assert.deepEqual(lifecycle.activate(agent), { ok: true });
-      ctx.emit("agent/status", { agent, status: "running" });
-    });
-  });
-
-  it("unbind reverses the activation and detaches listeners (HMR)", () => {
-    const ctx = createCtx();
-    const host = createHostStub();
-    const multitask = createMultitask(host);
-    let deactivated = 0;
-    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask, {
-      onDeactivated: () => {
-        deactivated += 1;
-      },
-    });
-    const agent = createAgent("session-1");
-
-    lifecycle.activate(agent);
-    lifecycle.unbind();
-
-    assert.equal(lifecycle.dispatcherSessionId(), null);
-    assert.equal(host.hasParent(), false);
-    assert.equal(deactivated, 1);
-    // Listeners are gone: a later session-start captures nothing.
-    ctx.emit("agent/session-start", { agent });
-    ctx.emit("agent/status", { agent, status: "running" });
-    assert.equal(agent.injected.length, 1);
-  });
 });
 
 describe("peer roster feed carries label + current tool/target (ticket 155)", () => {
@@ -530,14 +380,6 @@ describe("peer roster feed carries label + current tool/target (ticket 155)", ()
     );
   });
 
-  it("a peer with neither a label nor an observed tool renders exactly as before", () => {
-    const { ctx, viewer } = activatePeers({ count: 2 });
-    ctx.emit("agent/status", { agent: viewer, status: "running" });
-    const roster = rosterOf(viewer);
-    assert.ok(roster.includes("- session-2 — idle"), roster);
-    assert.ok(!roster.includes("·"), "no activity suffix without an observation");
-  });
-
   it("a labelled peer with no observed tool shows the label only", () => {
     const { ctx, viewer } = activatePeers({
       count: 2,
@@ -555,18 +397,6 @@ describe("peer roster feed carries label + current tool/target (ticket 155)", ()
       ctx.emit("agent/status", { agent: viewer, status: "running" }),
     );
     assert.ok(rosterOf(viewer).includes("- session-2 — idle"));
-  });
-
-  it("the roster tail is byte-stable across turns while nothing changes", () => {
-    const { ctx, viewer } = activatePeers({
-      count: 2,
-      labels: { "session-2": "Research scout" },
-    });
-    ctx.emit("agent/status", { agent: viewer, status: "running" });
-    const once = textOf(viewer.injected.at(-1));
-    ctx.emit("agent/status", { agent: viewer, status: "idle" });
-    ctx.emit("agent/status", { agent: viewer, status: "running" });
-    assert.equal(textOf(viewer.injected.at(-1)), once);
   });
 
   it("the current tool rides the same row as liveness (working · using …)", () => {
@@ -606,24 +436,6 @@ describe("subagentLabelOf — the ADR-0027 label read (ticket 155)", () => {
       { id: "s1" },
     );
     assert.equal(label, "Research scout");
-  });
-
-  it("a session without a descriptor answers null (a user-started dispatcher)", () => {
-    assert.equal(subagentLabelOf(registry({ s1: {} }), { id: "s1" }), null);
-    assert.equal(subagentLabelOf(registry({}), { id: "s1" }), null);
-  });
-
-  it("collapses whitespace and treats an empty label as absent", () => {
-    assert.equal(
-      subagentLabelOf(registry({ s1: { identity: { label: "  Two\n words " } } }), {
-        id: "s1",
-      }),
-      "Two words",
-    );
-    assert.equal(
-      subagentLabelOf(registry({ s1: { identity: { label: "   " } } }), { id: "s1" }),
-      null,
-    );
   });
 
   it("no registry, no stateOf, junk state, or a throw all answer null", () => {

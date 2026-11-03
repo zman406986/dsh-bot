@@ -12,18 +12,16 @@ import {
   noticeFromSettled,
   type WakeNotice,
 } from "./core/policy/assembler.js";
-import type { PolicyLanguage } from "./core/policy/prompts.js";
+import type {
+  DispatcherOrigin,
+  PolicyLanguage,
+} from "./core/policy/prompts.js";
 import {
-  accessExpiredNotice,
   assembleRestartNotice,
   bindDispatcherLifecycle,
-  createAccessPromptPump,
   createCordisDshHost,
-  createDispatchApprovalSeam,
   createStorageDomainDurability,
-  isWildcardAccessTarget,
   readInboxJobDiskState,
-  registerDispatcherResolveCommand,
   registerDispatcherStartCommand,
   registerDispatcherSteerCommand,
   registerDispatcherTools,
@@ -33,18 +31,16 @@ import {
   resolveInboxJobText,
   resolveSessionProjections,
   RESTART_DEGRADED_NOTICE,
-  secretStoredAccessNotice,
   sessionKindOf,
+  dispatcherClassOf,
   startInboxWatcher,
   writeInboxCancelled,
   writeInboxFailed,
   writeInboxReply,
-  type DispatchApprovalFn,
   type InboxJobCheckpoint,
   type InboxJobDiskState,
   type InboxJobState,
   type InboxQueueEntry,
-  type AccessPromptPump,
   type AdapterContext,
   type CordisDshHost,
   type DispatcherSpawnOptions,
@@ -53,7 +49,6 @@ import {
   type StorageDomainDurability,
   type TokenMeterLike,
 } from "./adapter/index.js";
-import { registerWorkerAccessTool, createPendingAskSettleWaiter } from "./adapter/worker-access-tool.js";
 import { subagentLabelOf } from "./adapter/peer-label.js";
 import type { WorkerActivityEntry } from "./adapter/cordis-dsh-host.js";
 import {
@@ -84,11 +79,6 @@ export const Config = z.object({
    * A settings change persists for the *next* session; it is not live-applied.
    */
   enabled: z.boolean().default(true).volatile(),
-  /**
-   * Unanswered access-ask timeout in ms (ticket 13).
-   * Default deny after this wait. Tests inject a tiny value.
-   */
-  accessRequestTimeoutMs: z.number().default(120_000).volatile(),
   /**
    * Ticket 108: idle-side wake coalescing window in ms. 0 (default) keeps
    * current semantics — every idle settle/peer wakes the dispatcher at once.
@@ -166,13 +156,6 @@ export const name = "multitask-dispatcher";
  *         + dispatcher tool registration (T11, deferred to activation)
  * - commands: host slash-command registry for the activation command
  *         (ticket 19, ADR-0009)
- * - userQuestions: structured user-question seam for access-ask prompts
- *         (ticket 23, design-16 §4.4)
- * - approval: the host approval answerer (`ctx.approval`,
- *         `@deepseek-ai/dsh-user-approval`; adapter notes :220/:390) — the
- *         dispatch approval seam's live face (ticket 69 L3). Optional at
- *         runtime: the seam degrades to `unavailable` when the service is
- *         absent and the chunk-A gate refuses fail-closed.
  */
 export const inject: string[] = [
   "subagents",
@@ -181,8 +164,6 @@ export const inject: string[] = [
   "storageDomain",
   "tools",
   "commands",
-  "userQuestions",
-  "approval",
 ];
 
 export interface PluginConfig {
@@ -192,7 +173,6 @@ export interface PluginConfig {
    * contexts in tests can omit a field.
    */
   enabled: { get(): boolean };
-  accessRequestTimeoutMs?: { get(): number | undefined };
   /** Ticket 145: racoons record-only mode (`true`) vs apply (`false`). */
   racoonsRecordOnly?: { get(): boolean | undefined };
   /** Ticket 145: durable racoons root; empty means the library default. */
@@ -240,41 +220,6 @@ type CordisContext = AdapterContext & {
    */
   get?: (name: string) => unknown;
 };
-
-/**
- * Ticket 69 (L3 offline half): the dispatch approval seam's live face as
- * THIS plugin wires it — `ctx.approval.request` (`@deepseek-ai/dsh-user-approval`,
- * adapter notes :220/:390) scoped to the activated dispatcher session's own
- * Agent (`host.parentAgentOf(sessionId)`; a UI answerer only answers for
- * agents it owns — the service's routing rule). Factored as an exported
- * builder so OFFLINE tests can drive the plugin's OWN construction chained
- * into the chunk-A spawn gate instead of a hand-built lookalike: the
- * shipped posture is EMPTY, so the plugin-level gate never fires without a
- * posture row, and no seeder ships (Q1 ruling / U-D) — this function is the
- * regression-visible surface for the wiring. The seam degrades every
- * failure (service absent, agent gone, throw, rogue outcome) to
- * `unavailable`; the chunk-A spawn gate refuses on anything but
- * `allowed-once`, so a gated dispatch with no live answerer refuses
- * honestly and the dispatcher re-plans — it cannot wedge the turn (design
- * §6 Q2's offline half). The ask is time-bounded with the relay's ADR-0008
- * deadline (`DEFAULT_ACCESS_TIMEOUT_MS`, `src/adapter/dispatch-approval.ts`
- * `timeoutMs`): a SILENT answerer (live pass 5 B-3, FINDING 3 — the
- * approval composer can ship without ever answering) also lands in
- * `unavailable` at the deadline, so the wedge FINDING 3 observed is
- * unreachable from this seam. Whether the shipped client approval composer
- * still answers under the wrapper's root frame stays the LIVE lane's
- * verification (L3).
- */
-export function dispatchApprovalSeamFor(
-  ctx: Pick<AdapterContext, "approval">,
-  host: Pick<CordisDshHost, "parentAgentOf">,
-  sessionId: string,
-): DispatchApprovalFn {
-  return createDispatchApprovalSeam({
-    getApproval: () => ctx.approval,
-    getAgent: () => host.parentAgentOf(sessionId),
-  });
-}
 
 /**
  * Ticket 110: digest-side view of the host's bounded per-worker activity
@@ -335,24 +280,18 @@ export function assembleActivityDigest(
  * map settle notices, and include undelivered landed items whose report
  * text is only in the child transcript (T10 follow-up).
  *
- * `suppressPromptedAccessAsk` (ticket 23) filters asks that are currently
- * presented through the host prompt seam so an ask is never rendered both
- * ways at once (design-16 §4.4 dedupe; one presentation per ask at a time).
- *
  * `recentActivities` (ticket 110) appends the inline "Recent worker
  * activity" digest for the workers referenced by the wake's settle
  * notices — the wake turn stays self-contained (D21): the digest lives in
  * the wake text itself, with no storage writes and no prompt-side
  * references to stored outputs.
  *
- * Exported for offline tests (see `dispatchApprovalSeamFor`): the shipped
- * caller is the `composeWakeText` option wired into `createCordisDshHost`
- * in `apply` below.
+ * Exported for offline tests: the shipped caller is the `composeWakeText`
+ * option wired into `createCordisDshHost` in `apply` below.
  */
 export function composeWakeText(
   multitask: Multitask,
   sessionId: string,
-  suppressPromptedAccessAsk?: (requestId: string) => boolean,
   recentActivities?: WakeActivitySource,
   language: PolicyLanguage = "en",
 ): string | null {
@@ -396,13 +335,6 @@ export function composeWakeText(
     seen.add(todo.workerId);
   }
 
-  // Ticket 23 dedupe: an ask owned by the prompt seam is not re-rendered
-  // conversationally mid-wait. Resolved-access notices are never filtered —
-  // denials must reach the user through the shipped honest-reporting path.
-  const accessRequests = (drained.wake.accessRequests ?? []).filter(
-    (request) => suppressPromptedAccessAsk?.(request.requestId) !== true,
-  );
-
   // Ticket 113: drained external (inbox) jobs render as inline sections —
   // job id plus the prompt clamped through the core report clamp (D21:
   // the wake turn is self-contained, inline text only, no stored text and
@@ -410,12 +342,7 @@ export function composeWakeText(
   // external jobs ride normal and background wakes only.
   const externalJobs = drained.wake.externalJobs ?? [];
 
-  if (
-    notices.length === 0 &&
-    accessRequests.length === 0 &&
-    (drained.wake.accessNotices ?? []).length === 0 &&
-    externalJobs.length === 0
-  ) {
+  if (notices.length === 0 && externalJobs.length === 0) {
     return null;
   }
 
@@ -424,14 +351,7 @@ export function composeWakeText(
     null,
     language,
   );
-  const wake = assembleWakeTurn(
-    notices,
-    {
-      requests: accessRequests,
-      resolved: drained.wake.accessNotices ?? [],
-    },
-    language,
-  );
+  const wake = assembleWakeTurn(notices, language);
   const inboxSection =
     externalJobs.length > 0
       ? [
@@ -471,9 +391,8 @@ export function composeWakeText(
  *   no policy, no wake handling.
  * - Enabled path boots dormant: stock experience plus the passive core/host
  *   plumbing and the `dsh-bot` command (renamed from `dispatcher-start` by
- *   ADR-0030, 2026-10-21). The six dispatcher tools
- *   and request_access register only when a session activates, and the
- *   primary chat is never captured on load.
+ *   ADR-0030, 2026-10-21). The six dispatcher tools register only when a
+ *   session activates, and the primary chat is never captured on load.
  */
 export function apply(ctx: CordisContext, config: PluginConfig): void {
   // ADR-0005: read the volatile reference once at apply; freeze for this
@@ -699,6 +618,22 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
    * title both stay correct.
    */
   const spawnTitlesInFlight: Array<{ readonly title: string }> = [];
+  /**
+   * Ticket 176 (owner ruling 2026-11-03): the CLASS of every session this
+   * plugin activates, so `activateToolSurface` knows whether to register
+   * `spawn_dispatcher`.
+   *
+   * A summoned team leader — a dispatcher another dispatcher spawned — must
+   * not summon further dispatchers. The fence is the tool surface itself
+   * (ADR-0019), so the definition is simply not registered for that class.
+   * ADR-0034 decision 1 fixes the class for the life of the activation, so
+   * entries are set at activation and dropped at deactivation.
+   *
+   * The host keeps the same fact for its own refusal (`recordDispatcherClass`,
+   * written from the two places below); this map is the plugin's read side for
+   * tool registration, which happens before any tool can be called.
+   */
+  const dispatcherClassBySession = new Map<string, DispatcherOrigin>();
   const host: CordisDshHost = createCordisDshHost(ctx, {
     markers,
     // Ticket 153: the worker contract ships in the same language as the
@@ -707,17 +642,13 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     language,
     composeWakeText: (sessionId) => {
       if (multitaskRef === null) return null;
-      // Ticket 23: `pumpFor` is declared below — this closure only runs once
-      // wakes are delivered, never during apply. Ticket 110: `host` is read
-      // under the same rule — the binding is initialized by the very call
-      // this closure is passed to, and the first invocation happens at wake
-      // delivery, long after apply has returned, so the closure never sees
-      // the uninitialized binding.
+      // Ticket 110: `host` is read under the deferred-closure rule — the
+      // binding is initialized by the very call this closure is passed to,
+      // and the first invocation happens at wake delivery, long after apply
+      // has returned, so the closure never sees the uninitialized binding.
       return composeWakeText(
         multitaskRef,
         sessionId,
-        (requestId) =>
-          pumpFor(sessionId).suppressesConversational(requestId),
         (workerId, n) => host.recentActivities(workerId, n),
         language,
       );
@@ -729,8 +660,8 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       if (multitaskRef === null) return [];
       const tools = createWorkerLocalToolDefs({
         multitask: multitaskRef,
-        // Same resolution as the worker access tool: the exec session id IS
-        // the worker id once this host owns it. The reply addresses
+        // The exec session id IS the worker id once this host owns it. The
+        // reply addresses
         // `getWorker(workerId).parentSessionId` — never a tool argument.
         resolveWorkerId: (exec) => {
           const sessionId = resolveExecSessionId(exec);
@@ -764,8 +695,19 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     // so the one place this plugin can read the label is the seam below.
     onDispatcherSpawned: (agent, sessionId, generation) => {
       const pending = spawnTitlesInFlight.shift();
+      // Owner-directed 2026-11-02: a dispatcher another dispatcher summoned is
+      // a different CLASS — a team leader for one massive job — so the spawn
+      // path must say so. Until this line, the origin defaulted to `user` and
+      // the spawned text could never load.
+      //
+      // Ticket 176: record it BEFORE `activate` — the tool surface is composed
+      // inside that call (`onActivated` → `activateToolSurface`), and it reads
+      // this map to decide whether `spawn_dispatcher` is registered at all.
+      dispatcherClassBySession.set(sessionId, "spawned");
+      host.recordDispatcherClass(sessionId, "spawned");
       lifecycle.activate(agent, {
         generation,
+        origin: "spawned",
         ...(pending === undefined ? {} : { title: pending.title }),
       });
     },
@@ -778,16 +720,28 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     // Ticket 147: a USER-STARTED dispatcher the host resumed after a restart.
     // The host asks for the durable kind of a parentless session; this closure
     // answers it from the host's projection registry and routes a `dispatcher`
-    // answer into the SAME activation path `/dsh-bot` uses, so the 10-tool
-    // surface (8 scoped + recall + request_access), the policy and the
-    // durability rebuild all return with the chat.
+    // answer into the SAME activation path `/dsh-bot` uses, so the tool
+    // surface (the scoped tools plus recall), the policy and the durability
+    // rebuild all return with the chat.
+    //
+    // Ticket 175: a SUMMONED dispatcher is top-level too (ADR-0032), so it
+    // resumes through this same branch. The class therefore has to be read
+    // back here or it falls to the `user` default — that was ticket 173's
+    // recorded limitation, and this is where it is closed.
     //
     // Both closures below run only from `agent/created`, long after apply —
     // `lifecycle` is assigned by then (the deferred-closure rule above).
     sessionKindOf: (session) =>
       sessionKindOf(resolveSessionProjections(ctx), session),
-    onUserDispatcherResumed: (agent) => {
-      const outcome = lifecycle.activate(agent);
+    dispatcherClassOf: (session) =>
+      dispatcherClassOf(resolveSessionProjections(ctx), session),
+    onUserDispatcherResumed: (agent, _sessionId, origin) => {
+      // Ticket 176: record the durable class before activating, for the same
+      // reason as the spawn hook — the tool surface composition reads it.
+      const sessionId = String(agent.session.id);
+      dispatcherClassBySession.set(sessionId, origin);
+      host.recordDispatcherClass(sessionId, origin);
+      const outcome = lifecycle.activate(agent, { origin });
       if (outcome.ok) return;
       // `already-active-here` is the normal repeat case. Anything else means
       // the durable answer and the live state disagree, and a silent no-op
@@ -813,7 +767,6 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   // AFTER construction so the unit never captured an uninitialized `host`;
   // `init` only runs on `session/created`, which cannot happen during apply.
   dispatcherMarkProbe = (sessionId) => host.dispatcherMarkAnswer(sessionId);
-  const accessTimeoutMs = config.accessRequestTimeoutMs?.get();
   // Ticket 108: clamped defensively here too — the schema enforces min 0,
   // but apply() must never trust raw config for a window that arms timers.
   const rawWakeCoalesce = config.wakeCoalesceWindowMs?.get();
@@ -823,9 +776,6 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       : 0;
   const multitask: Multitask = createMultitask(host, {
     durability: markers,
-    ...(accessTimeoutMs !== undefined
-      ? { access: { timeoutMs: accessTimeoutMs } }
-      : {}),
     // Ticket 108: the coalescing window is opt-in — omitted entirely at the
     // default so the bus keeps pre-108 semantics byte-for-byte.
     ...(wakeCoalesceWindowMs > 0
@@ -890,95 +840,6 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     multitask.releaseWaits(sessionId, "user-message");
   });
 
-  // Access-request prompt pumps (ticket 23, design-16 §4.4; ADR-0019
-  // per-session): surfaces a dispatcher session's pending asks through the
-  // host's EXISTING prompt seam (`ctx.userQuestions.ask`) while THAT session
-  // is activated, and routes each explicit Allow/Deny answer into the
-  // UNCHANGED relay via `Multitask.resolveAccess` — the same entry point a
-  // conversational answer uses. One pump per activated dispatcher session:
-  // its pending list, its agent, its suppression, and its reset are all
-  // session-scoped, so deactivating session A never abandons session B's
-  // outstanding prompts. The seam is optional: absent (or failed) prompts
-  // leave the shipped conversational relay as the ask surface, and the
-  // relay's deny-by-default timeout (ADR-0008) bounds every ask either way.
-  const accessPumps = new Map<string, AccessPromptPump>();
-  const pumpFor = (sessionId: string): AccessPromptPump => {
-    let pump = accessPumps.get(sessionId);
-    if (pump === undefined) {
-      pump = createAccessPromptPump({
-        ...(ctx.userQuestions !== undefined
-          ? { userQuestions: ctx.userQuestions }
-          : {}),
-        // Ticket 153: prompt copy and option labels follow the same language.
-        language,
-        isActive: () => lifecycle.isDispatcherSession(sessionId),
-        getAgent: () => host.parentAgentOf(sessionId),
-        listPending: () => multitask.listPendingAccess(sessionId),
-        resolve: (workerId, decision) =>
-          multitask.resolveAccess(workerId, decision),
-        // Ticket 30: "Always allow (this session)" inserts a session-scope
-        // allow row (class + exact target) attributed to the ASKING session
-        // (ADR-0019 keying table) — future matching asks of that session
-        // auto-answer on the shipped policy no-op path; a sibling
-        // dispatcher's asks never do, and clearing the session's rows on
-        // deactivation removes exactly this row. Profile/preset writes are
-        // deliberately NOT plumbed (consent boundary). Wildcard fence
-        // (ticket 30), last line: a session row is only ever written for
-        // the exact target the human consented to. The prompt path already
-        // degrades metacharacter targets, so a wildcard target reaching
-        // this sink (constructed or queued always-allow) fails closed here
-        // instead of remembering a whole class or prefix of targets.
-        alwaysAllow: (ticket) => {
-          if (isWildcardAccessTarget(ticket.body.target)) return;
-          multitask.accessPolicy.set({
-            class: ticket.body.class,
-            targetPattern: ticket.body.target,
-            decision: "allow",
-            scope: "session",
-            session: ticket.parentSessionId,
-          });
-        },
-        // Ticket 30: an answer for a ticket the relay already resolved
-        // (ADR-0008 timeout deny) surfaces honest expired copy on the next
-        // wake instead of silence; the pump resolves nothing for it.
-        notifyExpired: (ticket) => {
-          multitask.wakeBus.enqueueAccessNotice({
-            parentSessionId: ticket.parentSessionId,
-            notice: accessExpiredNotice(
-              ticket,
-              multitask.getWorker(ticket.workerId)?.title ?? ticket.workerId,
-            ),
-          });
-        },
-        // Ticket 30: an allowed credential ask reports the names-never-values
-        // reassurance as its post-decision notice.
-        notifySecretStored: (ticket) => {
-          multitask.wakeBus.enqueueAccessNotice({
-            parentSessionId: ticket.parentSessionId,
-            notice: secretStoredAccessNotice(
-              ticket,
-              multitask.getWorker(ticket.workerId)?.title ?? ticket.workerId,
-            ),
-          });
-        },
-        requeueConversational: (ticket) => {
-          // Fallback presentation after a seam failure: the same wake-bus
-          // enqueue the core relay uses for conversational asks.
-          multitask.wakeBus.enqueueAccessRequest({
-            parentSessionId: ticket.parentSessionId,
-            workerId: ticket.workerId,
-            requestId: ticket.requestId,
-            title:
-              multitask.getWorker(ticket.workerId)?.title ?? ticket.workerId,
-            body: ticket.body,
-          });
-        },
-      });
-      accessPumps.set(sessionId, pump);
-    }
-    return pump;
-  };
-
   // Activation lifecycle (ticket 19, ADR-0009; per session per ADR-0019):
   // boot dormant and stock. Nothing is captured on load or on
   // agent/session-start — the dispatcher exists in a chat only after the
@@ -991,80 +852,7 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   // exclusion), with disposers held per session; that session's
   // deactivation, session end, or our unload unregisters that session's set
   // (host-side auto-unregister is tolerated — disposers are idempotent).
-  // `request_access` alone stays a GLOBAL registration (its callers are
-  // workers in every session), reference-counted over active dispatcher
-  // sessions: acquired at the first activation, released when the last one
-  // ends.
   const sessionToolDisposers = new Map<string, Array<() => void>>();
-  /**
-   * Ticket 118 chunk 3: sessions that actually ACQUIRED the global
-   * `request_access` tool. The refcount is shared, so the release side must be
-   * paired with a real acquisition: a registration that threw before
-   * `acquireGlobalAccessTool()` leaves this session out of the holder set, and
-   * its later deactivation must not decrement somebody else's hold. In the
-   * success path the session is always in the set, so deactivation behaves
-   * exactly as before.
-   */
-  const accessToolHoldersBySession = new Set<string>();
-  let globalAccessDisposer: (() => void) | null = null;
-  let accessToolHolders = 0;
-
-  const acquireGlobalAccessTool = (): void => {
-    accessToolHolders += 1;
-    if (globalAccessDisposer !== null) return;
-    // The relay's pending-set read, shared by the duplicate-ask refusal and
-    // the FINDING 4 settle waiter below — one truth, one lambda.
-    const pendingAskOf = (workerId: string): boolean =>
-      multitask.listPendingAccess().some((t) => t.workerId === workerId);
-    // T13: worker-only request_access tool. Emits structured asks into the
-    // core. Registered on the plugin-level ctx — workers of every dispatcher
-    // session resolve it through the global layer.
-    globalAccessDisposer = registerWorkerAccessTool({
-      ctx,
-      deps: {
-        resolveWorkerId: (exec) => {
-          // Structural: pull session id from common exec shapes.
-          const sessionId = resolveExecSessionId(exec);
-          if (sessionId === null) return null;
-          return host.owns(sessionId) ? sessionId : null;
-        },
-        hasPendingAsk: pendingAskOf,
-        emit: (event) => {
-          host.emitAccessRequest(event);
-        },
-        // Ticket 69 (live FINDING 4, ticket 33 Session B-4): the ask parks
-        // the TOOL call, not the turn-end — execute stays pending while the
-        // ask sits in the relay, so the worker's turn cannot finish and dsh
-        // settlement cannot mark the worker completed+delivered while a
-        // decision is owed (the core's settle path drops a pending ticket,
-        // which is exactly how the live ask was lost). The wait is bounded
-        // by core truth: the relay ends every ticket (explicit resolve, the
-        // armed ADR-0008 timeout deny, or a stop/settle clear), so the tool
-        // always settles honestly and can never out-wait its own park.
-        awaitSettled: createPendingAskSettleWaiter({
-          isPending: pendingAskOf,
-        }),
-      },
-    });
-  };
-
-  const releaseGlobalAccessTool = (): void => {
-    if (accessToolHolders > 0) accessToolHolders -= 1;
-    if (accessToolHolders > 0 || globalAccessDisposer === null) return;
-    globalAccessDisposer();
-    globalAccessDisposer = null;
-  };
-
-  /**
-   * Ticket 118 chunk 3: release only a hold THIS session actually took. A
-   * registration that threw on the scoped surface never reached
-   * `acquireGlobalAccessTool`, and decrementing anyway would drop a sibling
-   * dispatcher's `request_access` while it is still live.
-   */
-  const releaseGlobalAccessToolForSession = (sessionId: string): void => {
-    if (!accessToolHoldersBySession.delete(sessionId)) return;
-    releaseGlobalAccessTool();
-  };
 
   const activateToolSurface = (sessionId: string): void => {
     if (sessionToolDisposers.has(sessionId)) return;
@@ -1082,11 +870,6 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       // projection's observation moments, feeding the check-row liveness
       // verdict — visibility only, no watchdog, no polling.
       lastActivityAtMs: (workerId: string) => host.lastActivityAtMs(workerId),
-      // Ticket 69 (L3 offline half): the dispatch approval seam's live
-      // face, built by `dispatchApprovalSeamFor` over the injected
-      // `ctx.approval` and THIS session's activated Agent (its doc comment
-      // carries the contract and the L3 remainder).
-      requestDispatchApproval: dispatchApprovalSeamFor(ctx, host, sessionId),
       // Ticket 118 / ADR-0025 mitosis: the host's dispatcher-spawn seam —
       // what `spawn_dispatcher` calls. Without it the registered tool THROWS
       // at execute (a missing seam is a wiring bug, never a host refusal).
@@ -1110,6 +893,13 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       },
       // Ticket 153: the tool descriptions follow the same language.
       language,
+      // Ticket 176 (owner ruling 2026-11-03): the CLASS decides whether this
+      // surface carries `spawn_dispatcher`. A summoned team leader must not
+      // summon further dispatchers, so the definition is never registered on
+      // its scope. The class is read from the same map the activation hooks
+      // write; a session the map has never seen is `user`, which is what every
+      // pre-176 activation produced.
+      origin: dispatcherClassBySession.get(sessionId) ?? "user",
     };
     // ADR-0019: register through the activated agent's own scoped context
     // (`agent.ctx.tools` — the host's per-agent scope seam). Agents without
@@ -1136,8 +926,6 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
         ),
       );
     }
-    acquireGlobalAccessTool();
-    accessToolHoldersBySession.add(sessionId);
     sessionToolDisposers.set(sessionId, disposers);
   };
 
@@ -1151,7 +939,6 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       }
       sessionToolDisposers.delete(sessionId);
     }
-    releaseGlobalAccessToolForSession(sessionId);
   };
 
   const deactivateAllToolSurfaces = (): void => {
@@ -1200,8 +987,6 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     ) {
       return;
     }
-    // Ticket 23: prompts sync runs once the rebuild has landed.
-    pumpFor(sessionId).sync();
     // Ticket 138: warm the durable mark mirror for this activation. It runs
     // HERE — after the rebuild's marker read and behind the generation guard
     // — so it can never consume a build-time marker read that ticket 90
@@ -1273,20 +1058,18 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     // here — a sibling dispatcher keeps its own.
     onDeactivated: (sessionId) => {
       deactivateToolSurface(sessionId);
-      // Ticket 30: session-scope "always allow" rows belong to their session
-      // — clear that session's rows here so no "always" leaks into a later
-      // session (and never a sibling's).
-      multitask.clearSessionAccessPolicy(sessionId);
+      // Ticket 176: the class belongs to the activation (ADR-0034 decision 1),
+      // so it ends with it — a later activation of the same session id must not
+      // inherit a stale class. The HOST's own record is deliberately not
+      // cleared: a session id's class cannot change, and clearing it there
+      // would let a deactivate → re-activate cycle unlock a team leader.
+      dispatcherClassBySession.delete(sessionId);
       // Ticket 115: this session's await waiters end here — each resolves
       // `released` and its timeout timer is cancelled, so no waiter or timer
       // outlives a deactivated dispatcher. Settle records stay: deactivation
       // is not a restart. Plugin unload reaches this too — `unbind`
       // deactivates each session through the same path.
       multitask.cancelWaits(sessionId);
-      // Ticket 23: prompts belong to their session — abandon this session's
-      // outstanding ones. Their tickets keep the armed relay timeouts
-      // (ADR-0008 deny-by-default); nothing waits indefinitely.
-      accessPumps.get(sessionId)?.reset();
     },
   });
 
@@ -1559,7 +1342,16 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     yield registerDispatcherStartCommand({
       ctx,
       activeSessionId: () => lifecycle.dispatcherSessionId(),
-      activate: (agent) => lifecycle.activate(agent),
+      // Ticket 176: this is the ONE activation entry point that is a human's
+      // own chat by definition, so its class is recorded here — the host
+      // cannot infer `user` from an absent mark row, and the tool surface
+      // composition reads this map.
+      activate: (agent) => {
+        const sessionId = String(agent.session.id);
+        dispatcherClassBySession.set(sessionId, "user");
+        host.recordDispatcherClass(sessionId, "user");
+        return lifecycle.activate(agent);
+      },
     });
   }, "multitask-dispatcher: dsh-bot command");
 
@@ -1577,50 +1369,6 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     });
   }, "multitask-dispatcher: dispatcher-steer command");
 
-  // Access-ask answer command (ticket 69, L1 offline half): the resolve
-  // TRANSPORT the wrapper's approval-card buttons execute through the
-  // composer's own command transaction (ticket 36 seam 2 / ticket 40's
-  // start precedent). The handler routes into the UNCHANGED relay via
-  // `Multitask.resolveAccess` — the same entry point the ticket-23 prompt
-  // pump uses — and "always-allow" inserts the SAME session-scope row the
-  // pump's sink inserts (ADR-0019 attribution + ticket-30 wildcard fence;
-  // the sink below is authoritative, the command re-checks defensively).
-  ctx.effect(function* () {
-    yield registerDispatcherResolveCommand({
-      ctx,
-      activeSessionIds: () => lifecycle.dispatcherSessionIds(),
-      findPending: (workerId, parentSessionId) =>
-        multitask
-          .listPendingAccess(parentSessionId)
-          .find((t) => t.workerId === workerId),
-      resolve: (workerId, decision) =>
-        multitask.resolveAccess(workerId, decision),
-      alwaysAllow: (ticket) => {
-        if (isWildcardAccessTarget(ticket.body.target)) return;
-        multitask.accessPolicy.set({
-          class: ticket.body.class,
-          targetPattern: ticket.body.target,
-          decision: "allow",
-          scope: "session",
-          session: ticket.parentSessionId,
-        });
-      },
-      isWildcardTarget: isWildcardAccessTarget,
-    });
-  }, "multitask-dispatcher: dispatcher-resolve command");
-
-  // Ticket 23: when the core parks a pending access ask, present it through
-  // the prompt seam. The core's own onAccessRequest handler was registered
-  // during createMultitask, so by the time this callback runs the relay has
-  // already parked the ticket (or auto-answered it from stored policy, in
-  // which case sync() is a no-op — no prompt for policy-answered asks).
-  // ADR-0019: each activated session's pump syncs its OWN pending asks.
-  host.onAccessRequest(() => {
-    for (const sessionId of lifecycle.dispatcherSessionIds()) {
-      pumpFor(sessionId).sync();
-    }
-  });
-
   // Unload teardown (ticket 44): under the Cordis effect contract `execute`
   // runs at apply and must RETURN the cleanup. (The previous shape passed the
   // cleanup itself as `execute` — live cordis ran it at boot, silently
@@ -1628,31 +1376,17 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   // subscriptions, and disposing the marker domain before any session
   // existed, while collecting nothing for unload.)
   // With it, unload/HMR truly reverses every activation: unbind (which
-  // deactivates EACH session — its tool surface, its policy rows, its
-  // prompts), sweep any remainder, dispose the core's timers (access relay
-  // then wake bus), dispose the host, release the marker domain.
+  // deactivates EACH session — its tool surface and its policy rows),
+  // dispose the core's timers (the wake bus), dispose the host, release the
+  // marker domain.
   ctx.effect(
     () => () => {
       lifecycle.unbind();
       deactivateAllToolSurfaces();
-      // Ticket 30 + ADR-0019: on unload every session-scope row goes —
-      // no "always" can outlive the plugin that consented to it.
-      multitask.clearSessionAccessPolicy();
-      // Ticket 23: abandon any remaining outstanding prompts on unload/HMR.
-      // Ticket 137: the pump sweep runs BEFORE the relay is closed, so an
-      // answer already in flight from a prompt lands (or is dropped as
-      // expired) while the relay still accepts it; any later resolve is a
-      // no-op once the relay is closed.
-      for (const pump of accessPumps.values()) {
-        pump.reset();
-      }
-      // Ticket 112/137: disarm every core-owned timer BEFORE the host goes
-      // away. `Multitask.dispose()` clears the access relay's parked deny
-      // timeouts first (ticket 137 — a late fire would call `onResolved`
-      // and re-arm a coalescing window on a disposed bus), then the wake
-      // bus (ticket 112 — a window armed at unload must never open a turn
-      // on a host that is being disposed). Idempotent, so a repeated
-      // teardown is safe.
+      // Ticket 112: disarm every core-owned timer BEFORE the host goes away
+      // — a coalescing window armed at unload must never open a turn on a
+      // host that is being disposed. Idempotent, so a repeated teardown is
+      // safe.
       multitask.dispose();
       host.dispose();
       void markers.dispose();

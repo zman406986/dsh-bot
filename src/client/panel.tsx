@@ -11,8 +11,8 @@
  * It renders the store's view model: title, the three ticket-28 sections
  * (Active / Needs you / Finished, design-17 §4.2), and within them one row
  * per worker carrying the design-17 §4.1 presence picture (status dot,
- * animated ring only while running/steering, blocked-with-reason chip,
- * landed marker, derived activity line, muted ledger linkage), plus the
+ * animated ring only while running/steering, landed marker, derived
+ * activity line, muted ledger linkage), plus the
  * empty state, the loading state, or the honest "unavailable" state — never
  * a spinner that hangs. Delivered terminal rows collapse into a muted count
  * line within Finished; the count comes from the view model, so the
@@ -42,7 +42,6 @@ import {
   ROSTER_STALE_RECHECK_MS,
   describeRosterPanel,
   formatTemplate,
-  rosterBlockedKey,
   type RosterRowView,
   type RosterSectionView,
   type RosterStore,
@@ -98,7 +97,6 @@ export const ROSTER_PANEL_CSS = `
 .multitask-dispatcher-roster-panel__row-activity{opacity:.55}
 .multitask-dispatcher-roster-panel__row-todo{opacity:.45;font-size:11px;max-width:16ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .multitask-dispatcher-roster-panel__row-marker{align-self:flex-start;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 6px;border-radius:8px;border:1px solid currentColor}
-.multitask-dispatcher-roster-panel__row-marker--blocked{color:var(--dsw-alias-state-warn-primary)}
 .multitask-dispatcher-roster-panel__row-marker--landed{color:var(--dsw-alias-state-success-primary)}
 .multitask-dispatcher-roster-panel__row-steer{display:flex;align-items:center;gap:6px;margin-top:2px;flex-wrap:wrap}
 .multitask-dispatcher-roster-panel__steer{align-self:flex-start;padding:1px 8px;border-radius:6px;border:1px solid var(--dsw-alias-border-l3);background:transparent;color:inherit;opacity:.75;cursor:pointer;font:inherit;font-size:11px}
@@ -107,19 +105,6 @@ export const ROSTER_PANEL_CSS = `
 .multitask-dispatcher-roster-panel__finished-count{opacity:.5;font-size:11px}
 .multitask-dispatcher-roster-panel__finished-count > summary{opacity:1;cursor:default}
 `;
-
-/** Localize the blocked waiting phrase from the structured class+target. */
-function blockedPhrase(t: TranslateFn, row: RosterRowView): string {
-  const blocked = row.blocked;
-  if (blocked === null) return "";
-  const template = t(rosterBlockedKey(blocked.class));
-  // Unknown template (copy drift) falls back to the generic class phrase.
-  const safe =
-    template === rosterBlockedKey(blocked.class)
-      ? t("roster.blocked.other")
-      : template;
-  return formatTemplate(safe, { target: blocked.target });
-}
 
 /** The activity line: `{status} · {elapsed} · {n} tool calls`. */
 function activityLine(t: TranslateFn, row: RosterRowView): string {
@@ -177,13 +162,7 @@ function RosterRow(props: {
       />
       <span className={`${PANEL_CLASS}__row-body`}>
         <span className={`${PANEL_CLASS}__row-title`}>{row.title}</span>
-        {row.marker?.kind === "blocked" ? (
-          <span
-            className={`${PANEL_CLASS}__row-marker ${PANEL_CLASS}__row-marker--blocked`}
-          >
-            {blockedPhrase(t, row)}
-          </span>
-        ) : row.marker?.kind === "landed" ? (
+        {row.marker?.kind === "landed" ? (
           <span
             className={`${PANEL_CLASS}__row-marker ${PANEL_CLASS}__row-marker--landed`}
           >

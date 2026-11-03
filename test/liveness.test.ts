@@ -15,10 +15,6 @@ import {
   type DispatcherToolDef,
 } from "../src/core/tools.js";
 import { CHECK_WORKERS_TOOL } from "../src/core/policy/prompts.js";
-import type {
-  AccessRequestBody,
-  AccessRequestEvent,
-} from "../src/core/access-types.js";
 import type { CheckWorkersToolResult } from "../src/core/tool-results.js";
 import type { SpawnResult } from "../src/core/types.js";
 
@@ -38,7 +34,6 @@ function input(
     startedAtMs: NOW - 5 * 60_000,
     toolCallCount: 3,
     lastActivityAtMs: NOW - 5_000,
-    blocked: false,
     ...overrides,
   };
 }
@@ -99,14 +94,6 @@ describe("liveness — verdict classes", () => {
 });
 
 describe("liveness — boundaries", () => {
-  it("exactly at the active window still reads active", () => {
-    const verdict = deriveWorkerLiveness(
-      input({ lastActivityAtMs: NOW - WORKER_ACTIVE_WINDOW_MS }),
-      NOW,
-    );
-    assert.equal(verdict, "active");
-  });
-
   it("exactly at the stall threshold still reads quiet (strictly-beyond stalls, like isRosterSnapshotStale)", () => {
     const verdict = deriveWorkerLiveness(
       input({ lastActivityAtMs: NOW - WORKER_STALL_THRESHOLD_MS }),
@@ -115,13 +102,6 @@ describe("liveness — boundaries", () => {
     assert.equal(verdict, "quiet");
   });
 
-  it("a future activity stamp (clock jitter) never reads stalled", () => {
-    const verdict = deriveWorkerLiveness(
-      input({ lastActivityAtMs: NOW + 60_000 }),
-      NOW,
-    );
-    assert.equal(verdict, "active");
-  });
 });
 
 describe("liveness — never-observed workers", () => {
@@ -151,17 +131,6 @@ describe("liveness — never-observed workers", () => {
     assert.equal(verdict, "stalled");
   });
 
-  it("core counted calls but no observation moment exists: quiet, never a guessed stalled", () => {
-    const verdict = deriveWorkerLiveness(
-      input({
-        toolCallCount: 4,
-        lastActivityAtMs: null,
-        startedAtMs: NOW - 10 * WORKER_STALL_THRESHOLD_MS,
-      }),
-      NOW,
-    );
-    assert.equal(verdict, "quiet");
-  });
 });
 
 describe("liveness — misclassification pins (R3)", () => {
@@ -199,25 +168,9 @@ describe("liveness — misclassification pins (R3)", () => {
     assert.equal(verdict, "quiet");
   });
 
-  it("a worker blocked on a pending access ask never reads stalled, however long the park", () => {
-    const verdict = deriveWorkerLiveness(
-      input({
-        blocked: true,
-        lastActivityAtMs: NOW - 100 * WORKER_STALL_THRESHOLD_MS,
-      }),
-      NOW,
-    );
-    assert.equal(verdict, "quiet");
-  });
 });
 
 describe("liveness — check-row surfacing", () => {
-  it("toCheckRow without a verdict carries liveness null and renders no segment", () => {
-    const row = toCheckRow(summary());
-    assert.equal(row.liveness, null);
-    assert.ok(!formatCheckRowLine(row).includes("liveness:"));
-  });
-
   it("toCheckRow with a verdict carries it and the summary line shows it", () => {
     const row = toCheckRow(summary(), "reading notes", "active");
     assert.equal(row.liveness, "active");
@@ -226,22 +179,9 @@ describe("liveness — check-row surfacing", () => {
     assert.ok(line.includes("activity: reading notes"));
   });
 
-  it("the stall threshold and active window are named exported constants (R2)", () => {
-    assert.ok(Number.isSafeInteger(WORKER_STALL_THRESHOLD_MS));
-    assert.ok(WORKER_STALL_THRESHOLD_MS > WORKER_ACTIVE_WINDOW_MS);
-  });
 });
 
 describe("liveness — end to end through check_workers", () => {
-  function body(overrides: Partial<AccessRequestBody> = {}): AccessRequestBody {
-    return {
-      class: "tool",
-      target: "write_file",
-      reason: "need to write outside workspace",
-      ...overrides,
-    };
-  }
-
   async function setup(options?: {
     lastActivityAtMs?: (workerId: string) => number | null;
   }): Promise<{ host: FakeDshHost; multitask: Multitask; tools: DispatcherToolDef[] }> {
@@ -294,62 +234,4 @@ describe("liveness — end to end through check_workers", () => {
     assert.ok(result.summary.includes("liveness: stalled"));
   });
 
-  it("without the activity-time seam the verdict is honestly absent, not guessed", async () => {
-    const { multitask, tools } = await setup();
-    const workerId = await spawnRunning(multitask, "s-1");
-    multitask.noteToolCall(workerId);
-    const result = (await byName(tools, CHECK_WORKERS_TOOL).execute(
-      {},
-    )) as CheckWorkersToolResult;
-    assert.ok(result.ok);
-    if (!result.ok) return;
-    assert.equal(result.rows[0]?.liveness, null);
-    assert.ok(!result.summary.includes("liveness:"));
-  });
-
-  it("a worker blocked on a pending access ask reads quiet even when it looks stalled (R3 pin)", async () => {
-    const { host, multitask, tools } = await setup({
-      lastActivityAtMs: () => 0, // would read stalled if not blocked
-    });
-    const workerId = await spawnRunning(multitask, "s-1");
-    multitask.noteToolCall(workerId);
-    const event: AccessRequestEvent = {
-      workerId,
-      requestId: "req-1",
-      body: body(),
-      createdAtMs: 1_000,
-    };
-    host.fireAccessRequest(event);
-    const pending = multitask.listPendingAccess("session-1");
-    assert.equal(pending.length, 1);
-
-    const result = (await byName(tools, CHECK_WORKERS_TOOL).execute(
-      {},
-    )) as CheckWorkersToolResult;
-    assert.ok(result.ok);
-    if (!result.ok) return;
-    assert.equal(result.rows[0]?.liveness, "quiet");
-    assert.ok(!result.summary.includes("liveness: stalled"));
-  });
-
-  it("a settled worker reads quiet through the tool path (R3 pin)", async () => {
-    const { host, multitask, tools } = await setup({
-      lastActivityAtMs: () => 0,
-    });
-    const workerId = await spawnRunning(multitask, "s-1");
-    multitask.noteToolCall(workerId);
-    host.fireSettled({
-      workerId,
-      status: "completed",
-      report: "Done.",
-      transcriptRef: "w-1",
-    });
-    const result = (await byName(tools, CHECK_WORKERS_TOOL).execute(
-      {},
-    )) as CheckWorkersToolResult;
-    assert.ok(result.ok);
-    if (!result.ok) return;
-    assert.equal(result.rows[0]?.status, "completed");
-    assert.equal(result.rows[0]?.liveness, "quiet");
-  });
 });

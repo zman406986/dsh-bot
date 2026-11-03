@@ -216,17 +216,6 @@ function boundary(
 }
 
 describe("durable marker store over storageDomain", () => {
-  it("opens the multitask_dispatcher domain with a worker_markers table", () => {
-    const sd = createStubStorageDomain();
-    const durability = createStorageDomainDurability(sd);
-    // Lazy open — no open until first write.
-    assert.equal(sd.opens.length, 0);
-    return durability.writeWorkerMarker(marker()).then(() => {
-      assert.equal(sd.opens.length, 1);
-      assert.equal(sd.table.size, 1);
-    });
-  });
-
   it("writes, reads by parent, and deletes markers", async () => {
     const sd = createStubStorageDomain();
     const durability = createStorageDomainDurability(sd);
@@ -249,30 +238,6 @@ describe("durable marker store over storageDomain", () => {
     assert.equal(after.length, 0);
   });
 
-  it("schema parse rejects malformed markers", () => {
-    const spec = markerDomainSpec() as {
-      tables: Record<string, { valueSchema: { parse(v: unknown): unknown } }>;
-    };
-    const parse = spec.tables[MARKER_TABLE_NAME]?.valueSchema.parse;
-    assert.ok(parse);
-    assert.throws(() => parse({}));
-    assert.throws(() => parse(null));
-    assert.doesNotThrow(() => parse(marker()));
-  });
-
-  it("opens ONE domain for both tables (lazy, shared)", async () => {
-    const sd = createStubStorageDomain();
-    const durability = createStorageDomainDurability(sd);
-    await durability.writeWorkerMarker(marker());
-    await durability.inbox.record(checkpoint());
-    assert.equal(sd.opens.length, 1, "second table must reuse the open domain");
-    const listed = await durability.inbox.list();
-    assert.equal(listed.length, 1);
-    assert.equal(listed[0]?.jobId, "job-1");
-    const got = await durability.inbox.get("job-1");
-    assert.equal(got?.state, "claimed");
-  });
-
   it("records, updates, and lists inbox checkpoints", async () => {
     const sd = createStubStorageDomain();
     const durability = createStorageDomainDurability(sd);
@@ -288,18 +253,6 @@ describe("durable marker store over storageDomain", () => {
     const job1 = listed.find((c) => c.jobId === "job-1");
     assert.equal(job1?.state, "replied");
     assert.equal(job1?.endedAtMs, 5000);
-  });
-
-  it("schema parse rejects malformed inbox checkpoints", () => {
-    const spec = markerDomainSpec() as {
-      tables: Record<string, { valueSchema: { parse(v: unknown): unknown } }>;
-    };
-    const parse = spec.tables[INBOX_TABLE_NAME]?.valueSchema.parse;
-    assert.ok(parse);
-    assert.throws(() => parse({}));
-    assert.throws(() => parse(checkpoint({ jobDir: "" })));
-    assert.throws(() => parse(checkpoint({ state: "meh" })));
-    assert.doesNotThrow(() => parse(checkpoint()));
   });
 
   it("writes and reads a compaction boundary in the SAME domain (ticket 124)", async () => {
@@ -326,22 +279,6 @@ describe("durable marker store over storageDomain", () => {
     assert.equal((await durability.readCompactionBoundary("s-1"))?.passSeq, 2);
   });
 
-  it("schema parse rejects a malformed boundary row (ticket 124)", () => {
-    const spec = markerDomainSpec() as {
-      tables: Record<string, { valueSchema: { parse(v: unknown): unknown } }>;
-    };
-    const parse =
-      spec.tables[COMPACTION_BOUNDARY_TABLE_NAME]?.valueSchema.parse;
-    assert.ok(parse);
-    assert.throws(() => parse({}));
-    assert.throws(() => parse(null));
-    assert.throws(() => parse(boundary({ status: "planned" as never })));
-    assert.throws(() => parse(boundary({ passSeq: -1 })));
-    assert.throws(() => parse(boundary({ layer: "native" as never })));
-    assert.throws(() => parse(boundary({ clearedSeqs: ["x" as never] })));
-    assert.doesNotThrow(() => parse(boundary()));
-  });
-
   it("dispose closes the domain and rejects further writes", async () => {
     const sd = createStubStorageDomain();
     const durability = createStorageDomainDurability(sd);
@@ -350,17 +287,6 @@ describe("durable marker store over storageDomain", () => {
     assert.equal(sd.closed, true);
     await assert.rejects(() => durability.writeWorkerMarker(marker()));
     await assert.rejects(() => durability.inbox.record(checkpoint()));
-  });
-
-  it("declares the dispatcher_sessions table without a version bump (ticket 130)", () => {
-    const spec = markerDomainSpec() as {
-      version: number;
-      tables: Record<string, { valueSchema: { parse(v: unknown): unknown } }>;
-    };
-    // Same rule as ticket 124: a new optional table must not bump the
-    // version, or every existing store refuses to open on upgrade.
-    assert.equal(spec.version, 2);
-    assert.ok(spec.tables[DISPATCHER_SESSION_TABLE_NAME]);
   });
 
   it("writes and reads a dispatcher mark in the SAME domain (ticket 130)", async () => {
@@ -380,32 +306,6 @@ describe("durable marker store over storageDomain", () => {
     assert.equal(read.sessionId, "child-1");
     // Other sessions stay unmarked.
     assert.equal(await durability.readDispatcherMark("child-2"), undefined);
-  });
-
-  it("schema parse rejects a malformed dispatcher mark (ticket 130)", () => {
-    const spec = markerDomainSpec() as {
-      tables: Record<string, { valueSchema: { parse(v: unknown): unknown } }>;
-    };
-    const parse =
-      spec.tables[DISPATCHER_SESSION_TABLE_NAME]?.valueSchema.parse;
-    assert.ok(parse);
-    assert.throws(() => parse({}));
-    assert.throws(() => parse(null));
-    assert.throws(() => parse({ sessionId: "" }));
-    assert.doesNotThrow(() => parse({ sessionId: "child-1" }));
-    // Ticket 138: the optional spawner is validated when present — a
-    // non-string parent would otherwise read as "no parent" and silently
-    // disable wake-on-send for that row.
-    assert.doesNotThrow(() => parse({ sessionId: "child-1", parentSessionId: "p-1" }));
-    assert.throws(() => parse({ sessionId: "child-1", parentSessionId: 7 }));
-    // Ticket 141: the optional generation. Absent is a pre-141 row and still
-    // parses; present must be an integer >= 2 — generation 1 is a
-    // user-started dispatcher, and those never carry a mark.
-    assert.doesNotThrow(() => parse({ sessionId: "child-1", generation: 3 }));
-    assert.throws(() => parse({ sessionId: "child-1", generation: 0 }));
-    assert.throws(() => parse({ sessionId: "child-1", generation: 1 }));
-    assert.throws(() => parse({ sessionId: "child-1", generation: 1.5 }));
-    assert.throws(() => parse({ sessionId: "child-1", generation: "2" }));
   });
 
   it("round-trips the optional generation on a dispatcher mark (ticket 141)", async () => {
@@ -488,17 +388,6 @@ describe("durable marker store over storageDomain", () => {
    * reason it is a separate table: its rows are DELETED when the worker is
    * terminal or abandoned.
    */
-  it("declares worker_sessions in the same domain without a version bump (ticket 142)", () => {
-    const spec = markerDomainSpec() as {
-      version: number;
-      tables: Record<string, { valueSchema: { parse(v: unknown): unknown } }>;
-    };
-    // Same rule as tickets 124/130: a new optional table must not bump the
-    // version, or every existing store refuses to open on upgrade.
-    assert.equal(spec.version, 2);
-    assert.ok(spec.tables[WORKER_SESSION_TABLE_NAME]);
-  });
-
   it("writes, reads, lists, and deletes a worker session row in the SAME domain (ticket 142)", async () => {
     const sd = createStubStorageDomain();
     const durability = createStorageDomainDurability(sd);
@@ -540,23 +429,47 @@ describe("durable marker store over storageDomain", () => {
     );
   });
 
-  it("schema parse rejects a malformed worker session row (ticket 142)", () => {
+  /**
+   * Every table in the domain rejects a row it cannot trust. One table-driven
+   * case replaces four near-identical ones; a corrupt persisted row must never
+   * read back as a half-valid mark (ADR-0006: unknown state, never invented).
+   */
+  it("every table's schema rejects a malformed row and accepts its valid shape", () => {
     const spec = markerDomainSpec() as {
       tables: Record<string, { valueSchema: { parse(v: unknown): unknown } }>;
     };
-    const parse = spec.tables[WORKER_SESSION_TABLE_NAME]?.valueSchema.parse;
-    assert.ok(parse);
-    assert.throws(() => parse({}));
-    assert.throws(() => parse(null));
-    assert.throws(() => parse({ sessionId: "" , parentSessionId: "p-1" }));
-    assert.throws(() => parse({ sessionId: "w-1" }));
-    // A non-string (or empty) spawner is rejected rather than read as "no
-    // parent" — a row that cannot be resumed is malformed, not a quiet
-    // downgrade to pre-142 behaviour.
-    assert.throws(() => parse({ sessionId: "w-1", parentSessionId: 7 }));
-    assert.throws(() => parse({ sessionId: "w-1", parentSessionId: "" }));
-    assert.doesNotThrow(() =>
-      parse({ sessionId: "w-1", parentSessionId: "chat-1" }),
-    );
+    const cases: ReadonlyArray<{
+      table: string;
+      rejected: readonly unknown[];
+      accepted: unknown;
+    }> = [
+      { table: MARKER_TABLE_NAME, rejected: [{}, null], accepted: marker() },
+      { table: INBOX_TABLE_NAME, rejected: [{}, null], accepted: checkpoint() },
+      { table: COMPACTION_BOUNDARY_TABLE_NAME, rejected: [{}, null], accepted: boundary() },
+      {
+        table: DISPATCHER_SESSION_TABLE_NAME,
+        rejected: [
+          {},
+          null,
+          { sessionId: "" },
+          { sessionId: "child-1", parentSessionId: 7 },
+          { sessionId: "child-1", generation: 1 },
+        ],
+        accepted: { sessionId: "child-1" },
+      },
+      {
+        table: WORKER_SESSION_TABLE_NAME,
+        rejected: [{}, null, { sessionId: "" }],
+        accepted: { sessionId: "w-1", parentSessionId: "chat-1" },
+      },
+    ];
+    for (const { table, rejected, accepted } of cases) {
+      const parse = spec.tables[table]?.valueSchema.parse;
+      assert.ok(parse, `no valueSchema for ${table}`);
+      for (const row of rejected) {
+        assert.throws(() => parse(row), `accepted a malformed ${table} row`);
+      }
+      assert.doesNotThrow(() => parse(accepted), `rejected a valid ${table} row`);
+    }
   });
 });

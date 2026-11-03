@@ -360,17 +360,10 @@ describe("wake bus — wake payload", () => {
 });
 
 describe("wake bus — accepted wake sources", () => {
-  it("the vocabulary accepts user, worker-settled, worker-access-request, peer, timer, and external-event", () => {
+  it("the vocabulary accepts user, worker-settled, peer, timer, and external-event", () => {
     assert.deepEqual(
       [...WAKE_SOURCES],
-      [
-        "user",
-        "worker-settled",
-        "worker-access-request",
-        "peer",
-        "timer",
-        "external-event",
-      ],
+      ["user", "worker-settled", "peer", "timer", "external-event"],
     );
     // Every listed source is a legal WakeSource; later tickets enqueue the rest.
     for (const source of WAKE_SOURCES) {
@@ -379,7 +372,7 @@ describe("wake bus — accepted wake sources", () => {
     }
   });
 
-  it("user, worker-settled, worker-access-request, and peer produce wakes; timer/external-event stay reserved", () => {
+  it("user, worker-settled, and peer produce wakes; timer/external-event stay reserved", () => {
     const delivered: string[] = [];
     const bus = createWakeBus({ onDeliver: (id) => delivered.push(id) });
 
@@ -388,19 +381,6 @@ describe("wake bus — accepted wake sources", () => {
 
     bus.enqueueUserWake("session-1");
     assert.equal(bus.drain("session-1")?.source, "user");
-
-    bus.enqueueAccessRequest({
-      parentSessionId: "session-1",
-      workerId: "w2",
-      requestId: "r1",
-      title: "Ask",
-      body: {
-        class: "tool",
-        target: "write_file",
-        reason: "need write",
-      },
-    });
-    assert.equal(bus.drain("session-1")?.source, "worker-access-request");
 
     bus.enqueuePeer({
       sessionId: "session-1",

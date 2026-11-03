@@ -33,8 +33,6 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { apply } from "../src/plugin.js";
 import {
-  ACCESS_PROMPT_ALLOW,
-  ACCESS_PROMPT_ALWAYS_ALLOW,
   DISPATCHER_START_COMMAND,
   type AccessPromptAnswerLike,
   type AccessPromptRequestLike,
@@ -371,7 +369,7 @@ async function spawnVia(
 }
 
 describe("multi-dispatcher — scoped surfaces (ADR-0019)", () => {
-  it("each dispatcher sees only its own eight tools plus recall; request_access is the one global", async () => {
+  it("each dispatcher sees only its own eight tools plus recall, and no global tool", async () => {
     const multi = createMultiCtx();
     apply(multi.ctx, volatileConfig({ enabled: true }));
     const a = createScopedAgent("s-a");
@@ -403,50 +401,9 @@ describe("multi-dispatcher — scoped surfaces (ADR-0019)", () => {
       "steer_worker",
       "stop_worker",
     ]);
-    // The global registry carries only the worker-side ask tool.
-    assert.deepEqual(multi.ctx.globalToolNames(), ["request_access"]);
-  });
-
-  it("handlers route to their own session's state", async () => {
-    const multi = createMultiCtx();
-    apply(multi.ctx, volatileConfig({ enabled: true }));
-    const a = createScopedAgent("s-a");
-    const b = createScopedAgent("s-b");
-    await activate(multi, a);
-    await activate(multi, b);
-
-    const spawnA = await spawnVia(a, "build");
-    const spawnB = await spawnVia(b, "build");
-    assert.ok(spawnA.ok);
-    assert.ok(spawnB.ok);
-
-    // Each child is host-parented under ITS dispatcher session.
-    assert.deepEqual(
-      multi.ctx.spawnedParents.map((entry) => entry.parentSessionId),
-      ["s-a", "s-b"],
-    );
-
-    // A's roster view never contains B's worker (and vice versa).
-    const checkA = a.scopedTool("check_workers");
-    assert.ok(checkA);
-    const rosterA = (await checkA.execute({}, undefined)) as {
-      ok: boolean;
-      rows: Array<{ worker_id: string }>;
-    };
-    assert.equal(rosterA.ok, true);
-    assert.equal(rosterA.rows.length, 1);
-    assert.equal(rosterA.rows[0]?.worker_id, spawnA.worker_id);
-
-    const checkB = b.scopedTool("check_workers");
-    assert.ok(checkB);
-    const rosterB = (await checkB.execute({}, undefined)) as {
-      ok: boolean;
-      rows: Array<{ worker_id: string }>;
-    };
-    assert.deepEqual(
-      rosterB.rows.map((row) => row.worker_id),
-      [spawnB.worker_id],
-    );
+    // The global registry is empty: ticket 174 / ADR-0033 removed the worker
+    // ask tool, the only global name this plugin ever claimed.
+    assert.deepEqual(multi.ctx.globalToolNames(), []);
   });
 
   it("the same stream_key in two sessions does not collide; within one session it still refuses", async () => {
@@ -546,223 +503,5 @@ describe("multi-dispatcher — scoped surfaces (ADR-0019)", () => {
   });
 });
 
-describe("multi-dispatcher — per-session prompts and policy rows (ADR-0019)", () => {
-  /**
-   * Fire a worker-side request_access from `workerId` through the global
-   * tool. FINDING 4 contract (ticket 69): the tool call PARKS until the ask
-   * settles, so this returns the settlement promise without awaiting it —
-   * the park and the prompt emission are synchronous inside the call. Await
-   * the returned promise after the answer (or the armed timeout deny).
-   */
-  function ask(
-    multi: ReturnType<typeof createMultiCtx>,
-    workerId: string,
-    target = "write_file",
-  ): Promise<void> {
-    const tool = multi.ctx.globalTool("request_access");
-    assert.ok(tool);
-    return tool
-      .execute(
-        { class: "tool", target, reason: "need it to do the work" },
-        { sessionId: workerId },
-      )
-      .then((value) => {
-        assert.equal((value as { ok: boolean }).ok, true);
-      }) as Promise<void>;
-  }
-
-  function alwaysAnswer(asked: CapturedAsk): void {
-    asked.resolve({
-      answers: [
-        {
-          id: asked.request.questions[0]?.id ?? "",
-          selected: [ACCESS_PROMPT_ALWAYS_ALLOW],
-        },
-      ],
-    });
-  }
-
-  it("deactivating session A abandons only A's outstanding prompt", async () => {
-    const seam = createFakeUserQuestions();
-    const multi = createMultiCtx(seam);
-    apply(multi.ctx, volatileConfig({ enabled: true, accessRequestTimeoutMs: 50 }));
-    const a = createScopedAgent("s-a");
-    const b = createScopedAgent("s-b");
-    await activate(multi, a);
-    await activate(multi, b);
-
-    const spawnA = await spawnVia(a, "k-a");
-    const spawnB = await spawnVia(b, "k-b");
-    assert.ok(spawnA.ok && spawnB.ok);
-
-    const settledA = ask(multi, spawnA.worker_id as string);
-    const settledB = ask(multi, spawnB.worker_id as string);
-    assert.equal(seam.asks.length, 2);
-    assert.deepEqual(
-      seam.asks.map((captured) => captured.agentSessionId).sort(),
-      ["s-a", "s-b"],
-    );
-
-    // Deactivate A: exactly A's prompt is aborted; B's stays outstanding.
-    multi.ctx.fire("agent/disposed", { agent: a });
-    await tick();
-    const askA = seam.asks.find((captured) => captured.agentSessionId === "s-a");
-    const askB = seam.asks.find((captured) => captured.agentSessionId === "s-b");
-    assert.ok(askA);
-    assert.ok(askB);
-    assert.equal(askA.aborted, true, "A's prompt is abandoned with its session");
-    assert.equal(
-      askB.aborted,
-      false,
-      "B's prompt survives the sibling's deactivation",
-    );
-
-    // Hygiene: let the armed relay timeouts deny both asks (no real 120 s
-    // timer outlives the test). B's deny reaches worker B; A's deny has no
-    // bound parent left to deliver through (A is deactivated — the relay's
-    // documented best-effort delivery) so only B's lands. The parked tool
-    // calls settle on those denies (FINDING 4: the ask holds the tool call).
-    await new Promise((resolve) => setTimeout(resolve, 120));
-    await settledA;
-    await settledB;
-    assert.equal(multi.ctx.sentMessages.length, 1);
-    assert.ok(multi.ctx.sentMessages[0]?.targetId === spawnB.worker_id);
-  });
-
-  it("session A's always-allow is cleared on deactivation; B's survives and keeps answering", async () => {
-    const seam = createFakeUserQuestions();
-    const multi = createMultiCtx(seam);
-    apply(multi.ctx, volatileConfig({ enabled: true, accessRequestTimeoutMs: 50 }));
-    const a = createScopedAgent("s-a");
-    const b = createScopedAgent("s-b");
-    await activate(multi, a);
-    await activate(multi, b);
-
-    // Both sessions' workers ask; both humans answer "Always allow".
-    const spawnA = await spawnVia(a, "k-a");
-    const spawnB = await spawnVia(b, "k-b");
-    assert.ok(spawnA.ok && spawnB.ok);
-    const settledA = ask(multi, spawnA.worker_id as string);
-    const settledB = ask(multi, spawnB.worker_id as string);
-    assert.equal(seam.asks.length, 2);
-    const askA = seam.asks.find((captured) => captured.agentSessionId === "s-a");
-    const askB = seam.asks.find((captured) => captured.agentSessionId === "s-b");
-    assert.ok(askA);
-    assert.ok(askB);
-    alwaysAnswer(askA);
-    alwaysAnswer(askB);
-    await settledA;
-    await settledB;
-    await tick();
-    // Each ask's own allow was delivered through its own parent.
-    assert.equal(multi.ctx.sentMessages.length, 2);
-
-    // Deactivate A: ONLY A's remembered row goes.
-    multi.ctx.fire("agent/disposed", { agent: a });
-    await tick();
-
-    // B's sibling worker with the same target auto-answers from B's row —
-    // no prompt, direct delivery.
-    const spawnB2 = await spawnVia(b, "k-b2");
-    assert.ok(spawnB2.ok);
-    const settledB2 = ask(multi, spawnB2.worker_id as string);
-    await settledB2;
-    await tick();
-    assert.equal(seam.asks.length, 2, "B's row still auto-answers");
-    assert.equal(multi.ctx.sentMessages.length, 3);
-    assert.ok(multi.ctx.sentMessages[2]?.targetId === spawnB2.worker_id);
-    assert.ok(
-      multi.ctx.sentMessages[2]?.text.includes("[Parent: access allowed]"),
-    );
-
-    // A's consent did NOT survive its deactivation: after re-activation the
-    // same ask prompts again (a fresh prompt scoped to A's agent).
-    await activate(multi, a);
-    const spawnA2 = await spawnVia(a, "k-a2");
-    assert.ok(spawnA2.ok);
-    const settledA2 = ask(multi, spawnA2.worker_id as string);
-    await tick();
-    assert.equal(
-      seam.asks.length,
-      3,
-      "A's remembered allow is gone — the ask prompts again",
-    );
-    assert.equal(seam.asks[2]?.agentSessionId, "s-a");
-
-    // Hygiene: deny the parked ask so no relay timeout outlives the test.
-    const parked = seam.asks[2];
-    assert.ok(parked);
-    parked.resolve({
-      answers: [
-        {
-          id: parked.request.questions[0]?.id ?? "",
-          selected: [ACCESS_PROMPT_ALLOW],
-        },
-      ],
-    });
-    await settledA2;
-    await tick();
-  });
-});
-
-describe("multi-dispatcher — host duplicate-registration rule (ticket 91)", () => {
-  it("apply throws the host duplicate-command error when a command name is taken", () => {
-    const multi = createMultiCtx();
-    multi.ctx.commands.register({
-      name: DISPATCHER_START_COMMAND,
-      description: "foreign claimant",
-      handler: () => ({ kind: "success", text: "foreign" }),
-    });
-
-    assert.throws(
-      () => apply(multi.ctx, volatileConfig({ enabled: true })),
-      new RegExp(
-        `command "${DISPATCHER_START_COMMAND}" is already registered`,
-      ),
-    );
-  });
-
-  it("the plugin-level tool registry throws the host duplicate-tool error on a taken name", () => {
-    const multi = createMultiCtx();
-    const tool = { name: "request_access", execute: async () => ({ ok: true }) };
-    multi.ctx.tools.register(tool);
-
-    assert.throws(
-      () => multi.ctx.tools.register(tool),
-      /tool "request_access" is already registered/,
-    );
-  });
-
-  it("each agent's SCOPED registry throws the host duplicate-tool error on a taken name", () => {
-    const agent = createScopedAgent("s-a");
-    const tools = agent.ctx?.tools;
-    assert.ok(tools);
-    const tool = { name: "spawn_worker", execute: async () => ({ ok: true }) };
-    tools.register(tool);
-
-    assert.throws(
-      () => tools.register(tool),
-      /tool "spawn_worker" is already registered/,
-    );
-  });
-
-  it("the settings fake throws on a duplicate namespace claim (dsh-settings:283)", () => {
-    const multi = createMultiCtx();
-    // The product's claim path is `register` (ticket 93).
-    multi.ctx.registerSettingsNamespace("multitask-dispatcher");
-
-    assert.throws(
-      () => multi.ctx.registerSettingsNamespace("multitask-dispatcher"),
-      /settings namespace "multitask-dispatcher" is already registered/,
-    );
-  });
-
-  it("the settings fake models installSection as void (ticket 93)", () => {
-    const multi = createMultiCtx();
-    // Host shape (dsh-settings lib/index.js:327-343; types :228).
-    assert.equal(
-      multi.ctx.installSettingsSection("multitask-dispatcher"),
-      undefined,
-    );
-  });
-});
+// Ticket 91's fail-loud duplicate-registration pin lives in
+// test/plugin-scaffold.test.ts: it is one host rule, pinned once.

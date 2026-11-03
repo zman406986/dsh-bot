@@ -68,21 +68,9 @@ import type {
   ScopedAgentContextLike,
   ScopedConversationLike,
 } from "./context.js";
-import type { AccessAskCard, AccessAskOptionChoice } from "./approval-cards.js";
-import type { ApprovalResolveOutcome } from "./approval-pane.js";
 
 /** The steer command name used for the per-row prefill (power path). */
 export const DISPATCHER_STEER_LINE = "/dispatcher-steer";
-
-/**
- * The access-ask resolve command name (ticket 69, L1): the wrapper's
- * approval-card buttons execute `/dispatcher-resolve <workerId> <choice>`
- * through the composer's own command transaction; the host handler
- * (`src/adapter/resolve-command.ts`) routes into the unchanged relay via
- * `Multitask.resolveAccess` — the same entry point the ticket-23 access
- * prompt uses.
- */
-export const DISPATCHER_RESOLVE_LINE = "/dispatcher-resolve";
 
 /**
  * Exactly what the per-row steer affordance writes into the composer:
@@ -303,52 +291,5 @@ export function tryPrefillSteer(
     return { kind: "prefilled" };
   } catch {
     return { kind: "unavailable" };
-  }
-}
-
-/**
- * The exact resolve line for one access-ask answer (ticket 69, L1):
- * `/dispatcher-resolve <workerId> <allow|always-allow|deny>` — the card's
- * option kinds ARE the command's choice vocabulary (one grammar, never a
- * second mapping).
- */
-export function dispatcherResolveLine(
-  workerId: string,
-  choice: AccessAskOptionChoice,
-): string {
-  return `${DISPATCHER_RESOLVE_LINE} ${workerId} ${choice}`;
-}
-
-/**
- * Submit one access-ask answer through the command transaction (ticket 69,
- * L1). The card's OWN `parentSessionId` — the dispatcher chat that owns the
- * ask — is the session the command executes in, so the answer is routed
- * even when another chat is selected. Outcomes follow the pane's contract:
- * `routed` means the host ran the command (the ONLY success truth is
- * still the relay feed — the card settles when the feed re-publishes the
- * worker unblocked); `unresolved` (host parsed no command — older host or
- * flag off) and `no-channel` both mean nothing answerable was reachable;
- * a transport rejection is an honest `failed`. No retry control exists —
- * one honest line, nothing was changed (ADR-0018 U-A).
- */
-export async function submitAccessResolve(
-  transport: CommandTransport,
-  card: AccessAskCard,
-  choice: AccessAskOptionChoice,
-): Promise<ApprovalResolveOutcome> {
-  if (card.parentSessionId.length === 0 || card.workerId.length === 0) {
-    return { kind: "no-channel" };
-  }
-  try {
-    const result = await transport.sendCommand(
-      card.parentSessionId,
-      dispatcherResolveLine(card.workerId, choice),
-    );
-    if (result.kind === "no-channel" || result.kind === "unresolved") {
-      return { kind: "no-channel" };
-    }
-    return { kind: "routed" };
-  } catch {
-    return { kind: "failed" };
   }
 }

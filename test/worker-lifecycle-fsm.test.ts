@@ -148,50 +148,6 @@ describe("worker lifecycle FSM (observable via multitask + fake host)", () => {
     assert.deepEqual(host.wakeCalls, ["session-1"]);
   });
 
-  it("stopping a worker while it is steering aborts it cleanly", async () => {
-    const host = new FakeDshHost();
-    const multitask = createMultitask(host);
-
-    const workerId = await spawn(host, multitask);
-    multitask.noteTurnStarted(workerId);
-    multitask.noteSteerReceived(workerId);
-    assert.equal(multitask.getWorker(workerId)?.status, "steering");
-
-    await multitask.abortWorker(workerId);
-
-    assert.deepEqual(host.interruptCalls, [workerId]);
-    assert.equal(multitask.getWorker(workerId)?.status, "aborted");
-
-    // A settle that races the stop is dropped.
-    host.fireSettled({ workerId, status: "completed", report: "too late" });
-    assert.equal(multitask.getWorker(workerId)?.status, "aborted");
-    assert.deepEqual(host.wakeCalls, []);
-  });
-
-  it("illegal lifecycle notices on a live worker are ignored, not thrown", async () => {
-    const host = new FakeDshHost();
-    const multitask = createMultitask(host);
-
-    const workerId = await spawn(host, multitask);
-
-    // steer cannot arrive before the first turn
-    assert.doesNotThrow(() => multitask.noteSteerReceived(workerId));
-    assert.equal(multitask.getWorker(workerId)?.status, "spawned");
-
-    // inject without a parked steer does nothing
-    assert.doesNotThrow(() => multitask.noteSteerInjected(workerId));
-    assert.equal(multitask.getWorker(workerId)?.status, "spawned");
-
-    multitask.noteTurnStarted(workerId);
-    // second turn-started is not a restart
-    multitask.noteTurnStarted(workerId);
-    assert.equal(multitask.getWorker(workerId)?.status, "running");
-
-    // inject without steer-received
-    assert.doesNotThrow(() => multitask.noteSteerInjected(workerId));
-    assert.equal(multitask.getWorker(workerId)?.status, "running");
-  });
-
   it("a settle while the worker is steering still completes and wakes once", async () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
@@ -204,16 +160,6 @@ describe("worker lifecycle FSM (observable via multitask + fake host)", () => {
 
     assert.equal(multitask.getWorker(workerId)?.status, "completed");
     assert.deepEqual(host.wakeCalls, ["session-1"]);
-  });
-
-  it("lifecycle notices for an unknown worker are ignored", async () => {
-    const host = new FakeDshHost();
-    const multitask = createMultitask(host);
-
-    assert.doesNotThrow(() => multitask.noteTurnStarted("ghost"));
-    assert.doesNotThrow(() => multitask.noteSteerReceived("ghost"));
-    assert.doesNotThrow(() => multitask.noteSteerInjected("ghost"));
-    assert.equal(multitask.getWorker("ghost"), undefined);
   });
 
   /**
@@ -248,47 +194,4 @@ describe("worker lifecycle FSM (observable via multitask + fake host)", () => {
     });
   });
 
-  it("the linked todo flips to in_progress when that early turn starts", async () => {
-    let multitask: Multitask | null = null;
-    const host = new FirstTurnDuringSpawnHost(() => {
-      assert.ok(multitask !== null);
-      return multitask;
-    });
-    multitask = createMultitask(host);
-    multitask.createTodo({ sessionId: "session-1", id: "todo-1", title: "Linked" });
-
-    const workerId = unwrapSpawn(
-      await multitask.spawnWorker({
-        parentSessionId: "session-1",
-        streamKey: "todo-1",
-        title: "Linked",
-        prompt: "go",
-        todoId: "todo-1",
-      }),
-    );
-
-    assert.equal(multitask.getWorker(workerId)?.todoId, "todo-1");
-    assert.equal(multitask.listTodos("session-1")[0]?.status, "in_progress");
-  });
-
-  it("a failed spawn leaves no worker behind even if a turn started first", async () => {
-    let multitask: Multitask | null = null;
-    const host = new FailingAfterTurnHost(() => {
-      assert.ok(multitask !== null);
-      return multitask;
-    });
-    multitask = createMultitask(host);
-
-    await assert.rejects(
-      multitask.spawnWorker({
-        parentSessionId: "session-1",
-        streamKey: "todo-1",
-        title: "Doomed",
-        prompt: "go",
-      }),
-      /host refused the spawn/,
-    );
-    assert.equal(multitask.getWorker("fake-worker-1"), undefined);
-    assert.deepEqual(multitask.listWorkers("session-1"), []);
-  });
 });

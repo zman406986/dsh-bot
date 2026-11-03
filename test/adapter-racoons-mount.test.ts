@@ -844,81 +844,6 @@ function mountSession(
 // ── 1. full coverage: no session filter, no global recall ─────────────────
 
 describe("ticket 145 — the mount has no session filter", () => {
-  it("processes a dispatcher, a worker and a plain-chat session identically", async (t) => {
-    const root = scratchRoot();
-    const journal = captureJournal();
-    t.after(journal.restore);
-
-    const ctx = createMountCtx({ llm: cannedLlm(FORGET_ALL_ANSWER) });
-    const mount = mountSession(ctx, root);
-    t.after(() => {
-      void mount.dispose();
-    });
-
-    // The mount is unconditional: its four listeners exist the moment it is
-    // mounted, before any session is known.
-    for (const name of [
-      "session/event",
-      "llm/stream",
-      "agent/pre-step",
-      "agent/turn-stopping",
-    ]) {
-      assert.equal(ctx.listenerCount(name), 1, `${name} is registered at mount`);
-    }
-    // The mount's own tool host is the no-op: the context's registry never
-    // sees the library's built-in global recall.
-    assert.equal(ctx.toolRegistrations.length, 0, "no global recall registration");
-
-    const sessions = [
-      // A dispatcher-shaped id, a worker id the lifecycle map never holds,
-      // and a plain chat: the mount cannot tell them apart.
-      { id: "sess-dispatcher", body: oversizedBody(40 * 1024, "DISPATCHER"), callId: "c-d1" },
-      { id: "worker-abc123", body: oversizedBody(40 * 1024, "WORKER"), callId: "c-w1" },
-      { id: "plain-chat-xyz", body: oversizedBody(40 * 1024, "PLAIN"), callId: "c-p1" },
-    ];
-
-    for (const entry of sessions) {
-      const session = fakeSession(entry.id);
-      attachSession(session, ctx);
-      await cappingPass(ctx, session, entry.callId, entry.body);
-
-      const records = journal.records();
-      const databasePath = join(root, "sessions", entry.id, "ledger.sqlite");
-      const blobRoot = join(root, "sessions", entry.id, "blobs");
-
-      const plan = firstRecord(
-        records,
-        "storage-plan",
-        (fields) => fields["sessionId"] === entry.id,
-      );
-      assert.ok(plan, `storage-plan for ${entry.id}`);
-      assert.equal(plan.fields["databasePath"], databasePath);
-      assert.equal(plan.fields["blobRoot"], blobRoot);
-
-      const capabilities = firstRecord(
-        records,
-        "capabilities",
-        (fields) => fields["sessionId"] === entry.id,
-      );
-      assert.ok(capabilities, `capabilities for ${entry.id}`);
-      assert.equal(capabilities.fields["revertHistory"], true);
-
-      // The real event flow: captured at the boundary, then one content-only
-      // replacement published through the host's revert append.
-      const recallId = assertCapped(records, session, entry.body);
-
-      // Durable per-session storage, and the archive holds the ORIGINAL bytes.
-      assert.ok(existsSync(databasePath), `${entry.id}: ledger.sqlite`);
-      assert.ok(existsSync(blobRoot), `${entry.id}: blob root`);
-      assert.ok(existsSync(join(blobRoot, "sha256")), `${entry.id}: blob bodies published`);
-      await assertRecallIsExact(mount.recallFor(entry.id), recallId, entry.body, entry.id);
-    }
-
-    assert.equal(recordsOfKind(journal.records(), "storage-plan").length, 3);
-    // Still no global recall after three passes.
-    assert.equal(ctx.toolRegistrations.length, 0);
-  });
-
   it("a dispatcher activation adds exactly one per-session recall; other sessions add none", async (t) => {
     const root = scratchRoot();
     const journal = captureJournal();
@@ -1004,8 +929,9 @@ describe("ticket 145 — the mount has no session filter", () => {
 
     // The worker and the plain chat never activated, so they contributed no
     // tool registration of any kind: coverage is session-level, not lifecycle.
-    // Eight dispatcher tools + request_access + this one recall, all from the
-    // single activation — the mount added nothing globally.
+    // Eight dispatcher tools + this one recall, all from the single activation
+    // — the mount added nothing globally. (Ticket 174 / ADR-0033 removed the
+    // global `request_access`.)
     assert.deepEqual(
       ctx.toolRegistrations
         .map((toolEntry) => (toolEntry as { name?: string }).name)
@@ -1016,7 +942,6 @@ describe("ticket 145 — the mount has no session filter", () => {
         "deliver_result",
         "message_agent",
         "recall",
-        "request_access",
         "spawn_dispatcher",
         "spawn_worker",
         "steer_worker",
@@ -1150,82 +1075,6 @@ describe("ticket 145 — durable per-session storage", () => {
 // ── 3. per-session recall: own id only, refusals are errors ────────────────
 
 describe("ticket 145 — per-session recall", () => {
-  it("each session answers its own id and refuses the other session's", async (t) => {
-    const root = scratchRoot();
-    const journal = captureJournal();
-    t.after(journal.restore);
-
-    const ctx = createMountCtx({ llm: cannedLlm(FORGET_ALL_ANSWER) });
-    const mount = mountSession(ctx, root);
-    t.after(() => {
-      void mount.dispose();
-    });
-
-    const alpha = { id: "sess-alpha", body: oversizedBody(40 * 1024, "ALPHA"), callId: "c-a" };
-    const beta = { id: "sess-beta", body: oversizedBody(40 * 1024, "BETA"), callId: "c-b" };
-    const archived: Record<string, string> = {};
-    for (const entry of [alpha, beta]) {
-      const session = fakeSession(entry.id);
-      attachSession(session, ctx);
-      await cappingPass(ctx, session, entry.callId, entry.body);
-      archived[entry.id] = assertCapped(journal.records(), session, entry.body);
-    }
-
-    const alphaId = archived[alpha.id] as string;
-    const betaId = archived[beta.id] as string;
-    assert.notEqual(alphaId, betaId, "two sessions, two archives");
-
-    const alphaLedger = mount.ledgerOf(alpha.id);
-    const betaLedger = mount.ledgerOf(beta.id);
-    assert.notEqual(alphaLedger, betaLedger, "one ledger object per session");
-
-    // Own ids resolve to own bytes.
-    await assertRecallIsExact(mount.recallFor(alpha.id), alphaId, alpha.body, alpha.id);
-    await assertRecallIsExact(mount.recallFor(beta.id), betaId, beta.body, beta.id);
-
-    // Cross-session ids REFUSE (an error), never another session's bytes.
-    await assert.rejects(
-      () => mount.recallFor(alpha.id)(betaId),
-      /Missing recall|not-found|Invalid recall id/u,
-      "session alpha refuses session beta's id",
-    );
-    await assert.rejects(
-      () => mount.recallFor(beta.id)(alphaId),
-      /Missing recall|not-found|Invalid recall id/u,
-      "session beta refuses session alpha's id",
-    );
-
-    // Unknown ids refuse, both well-formed and malformed.
-    const unknownWellFormed = `recall:sha256:${"a".repeat(64)}`;
-    await assert.rejects(
-      () => mount.recallFor(alpha.id)(unknownWellFormed),
-      /Missing recall|not-found/u,
-    );
-    await assert.rejects(
-      () => mount.recallFor(alpha.id)("not-a-recall-id"),
-      /Invalid recall id|not-found/u,
-    );
-
-    // The recall TOOL obeys the same rule through the shipped definition.
-    const tool = mount.recallToolDefs(alpha.id)[0] as {
-      execute(args: unknown): Promise<unknown>;
-    };
-    await assert.rejects(() => tool.execute({ id: betaId }), /Missing recall|not-found/u);
-    await assert.rejects(() => tool.execute({}), /expects a non-empty id/u);
-
-    // A session the mount never opened is an honest failure, not an empty
-    // ledger created on demand.
-    assert.throws(() => mount.ledgerOf("never-opened"), /no ledger is open/u);
-    await assert.rejects(
-      () => mount.recallFor("never-opened")(alphaId),
-      /no ledger is open/u,
-    );
-    await assert.rejects(
-      () => mount.recallFor("never-opened")(unknownWellFormed),
-      /no ledger is open/u,
-    );
-  });
-
   it("the worker-seam definitions read the worker's own ledger", async (t) => {
     const root = scratchRoot();
     const journal = captureJournal();
@@ -1308,181 +1157,17 @@ describe("ticket 145 — per-session recall", () => {
 });
 
 // ── 4. config mapping ─────────────────────────────────────────────────────
-
-describe("ticket 145 — config mapping", () => {
-  it("record-only records the entry checkpoint's answer and applies nothing at rest", async (t) => {
-    const root = scratchRoot();
-    const journal = captureJournal();
-    t.after(journal.restore);
-
-    const ctx = createMountCtx({ llm: cannedLlm(KEEP_ALL_ANSWER) });
-    // The plugin maps racoonsRecordOnly:true to this value; the mount option
-    // is the seam that decides.
-    const mount = mountSession(ctx, root, { enforcement: "record-only" });
-    t.after(() => {
-      void mount.dispose();
-    });
-
-    const mounted = mountedRecord(journal.records());
-    assert.equal(mounted.fields["enforcement"], "record-only");
-    assert.equal(mounted.fields["window"], null);
-    assert.equal(mounted.fields["prune"], "command");
-
-    const sessionId = "sess-record-only";
-    const body = oversizedBody(40 * 1024, "RECORD-ONLY");
-    const session = fakeSession(sessionId);
-    attachSession(session, ctx);
-    await cappingPass(ctx, session, "c-ro", body);
-
-    const records = journal.records();
-    // The entry IS recorded and the checkpoint IS asked: `record-only` is the
-    // engine's opt-out for the APPLY legs it owns (the bulk prune's
-    // `settlePrune` and a manual forget's `settleForget`), not a gate on the
-    // entry ask. A keep-all plans no engine application at all, so the only
-    // write is the exchange's own rewind.
-    assert.equal(forSession(records, "entry", sessionId).length, 1);
-    const asked = firstRecord(records, "entry-ask",
-      (fields) => fields["sessionId"] === sessionId);
-    assert.ok(asked, "the entry checkpoint asked");
-    assert.equal(asked.fields["action"], "keepall", "the answer kept the result whole");
-    const applied = firstRecord(records, "entry-apply",
-      (fields) => fields["sessionId"] === sessionId);
-    assert.ok(applied);
-    assert.equal(applied.fields["status"], "rewound", "a keep-all rewinds its own exchange");
-    assert.equal(applied.fields["engineStatus"], "unchanged", "a keep-all plans nothing");
-    assert.equal(applied.fields["resultSeq"], null, "a keep-all writes no result turn");
-    // No replacement and no publication: the transcript keeps the original bytes.
-    assert.equal(forSession(records, "publish", sessionId).length, 0);
-    assert.equal(replacementEvents(session).length, 0);
-    const origin = appendedResults(session)[0];
-    assert.equal(messageText(origin), body, "the result still carries the original text");
-  });
-
-  /**
-   * The behavior CHANGE this re-sync brings, pinned so it cannot pass unnoticed.
-   *
-   * At upstream `70c99ef` the judge's `settleVerdicts` read
-   * `protocol.enforcement === 'record-only'` and dropped the batch, so
-   * `racoonsRecordOnly: true` really did mean "no context edits". At the pinned
-   * `b5f95cb` the judge is gone (ADR-0028) and `enforcement` is checked in only
-   * two places — `settlePrune` and `settleForget` — neither of which is on the
-   * entry-checkpoint path. The entry apply therefore runs whatever the mode
-   * says, and a `forgetall` answer rewrites the result turn under
-   * `record-only` exactly as it does under `apply`.
-   *
-   * This test states that fact rather than the product promise it used to
-   * carry. If dsh-bot wants "record-only means no context edits" to stay true
-   * (its settings card and README both say so), the mount must gate the entry
-   * apply itself; until then this is what the vendored library does.
-   */
-  it("record-only does NOT gate the entry checkpoint's forget at upstream b5f95cb", async (t) => {
-    const root = scratchRoot();
-    const journal = captureJournal();
-    t.after(journal.restore);
-
-    const ctx = createMountCtx({ llm: cannedLlm(FORGET_ALL_ANSWER) });
-    const mount = mountSession(ctx, root, { enforcement: "record-only" });
-    t.after(() => {
-      void mount.dispose();
-    });
-
-    const sessionId = "sess-record-only-forget";
-    const body = oversizedBody(40 * 1024, "RECORD-ONLY-FORGET");
-    const session = fakeSession(sessionId);
-    attachSession(session, ctx);
-    await cappingPass(ctx, session, "c-rof", body);
-
-    const records = journal.records();
-    const applied = firstRecord(records, "entry-apply",
-      (fields) => fields["sessionId"] === sessionId);
-    assert.ok(applied, "the entry checkpoint applied something");
-    assert.equal(applied.fields["action"], "forgetall");
-    assert.equal(applied.fields["engineStatus"], "applied",
-      "the engine applied it despite `record-only`: enforcement does not gate this path");
-    assert.equal(applied.fields["status"], "landed");
-
-    // The surface write happened under `record-only`.
-    const replacements = replacementEvents(session);
-    assert.equal(replacements.length, 1, "record-only rewrote the result turn");
-    const text = messageText(replacements[0]);
-    assert.match(text, /\[racoons\] kept 0 of \d+ lines · recall /u);
-    assert.ok(text.length < body.length / 2, "the body left the transcript");
-    // ...and the archive still holds the original bytes byte-exactly.
-    await assertRecallIsExact(mount.recallFor(sessionId), recallIdOf(text), body, sessionId);
-  });
-
-  it("maps an empty root to the library default and window 0 to off", async (t) => {
-    const journal = captureJournal();
-    t.after(journal.restore);
-
-    // Empty root: the plugin passes the field as ABSENT so the library default
-    // applies. No session boundary runs, so nothing is written to that root.
-    const defaultRootCtx = createApplyCtx({});
-    applyPlugin(defaultRootCtx, {
-      enabled: true,
-      racoonsStorageRoot: "",
-      racoonsContextWindowTokens: 0,
-    });
-    const defaultMounted = mountedRecord(journal.records());
-    assert.equal(defaultMounted.fields["storageRoot"], defaultStorageRoot());
-    assert.equal(defaultMounted.fields["storage"], undefined);
-    assert.equal(defaultMounted.fields["window"], null, "window 0 maps to null (off)");
-    assert.equal(defaultMounted.fields["prune"], "command");
-    assert.equal(defaultMounted.fields["enforcement"], "apply", "the owner default is apply");
-    disposeAll(defaultRootCtx);
-    await flush();
-
-    // A positive window maps through unchanged, and the flag spelling that
-    // would mean "auto prune on" follows it.
-    journal.reset();
-    const root = scratchRoot();
-    const windowCtx = createApplyCtx({});
-    applyPlugin(windowCtx, {
-      enabled: true,
-      racoonsStorageRoot: root,
-      racoonsContextWindowTokens: 4096,
-    });
-    const windowMounted = mountedRecord(journal.records());
-    assert.equal(windowMounted.fields["storageRoot"], root);
-    assert.equal(windowMounted.fields["window"], 4096);
-    assert.equal(windowMounted.fields["prune"], "command+threshold");
-    disposeAll(windowCtx);
-    await flush();
-  });
-
-  it("a record-only plugin apply journals record-only and never rewrites", async (t) => {
-    const root = scratchRoot();
-    const journal = captureJournal();
-    t.after(journal.restore);
-
-    // A keep-all answer is the one class that never writes a replacement, so
-    // this proves the plugin-level wiring without leaning on the entry applier.
-    const ctx = createApplyCtx({ llm: cannedLlm(KEEP_ALL_ANSWER) });
-    applyPlugin(ctx, {
-      enabled: true,
-      racoonsRecordOnly: true,
-      racoonsStorageRoot: root,
-      racoonsContextWindowTokens: 0,
-    });
-    t.after(() => {
-      disposeAll(ctx);
-    });
-
-    assert.equal(mountedRecord(journal.records()).fields["enforcement"], "record-only");
-
-    const sessionId = "sess-plugin-record-only";
-    const body = oversizedBody(40 * 1024, "PLUGIN-RO");
-    const session = fakeSession(sessionId);
-    attachSession(session, ctx);
-    await cappingPass(ctx, session, "c-pro", body);
-
-    assert.equal(forSession(journal.records(), "entry", sessionId).length, 1);
-    assert.equal(forSession(journal.records(), "publish", sessionId).length, 0);
-    assert.equal(replacementEvents(session).length, 0);
-    assert.equal(messageText(appendedResults(session)[0]), body);
-    await flush();
-  });
-});
+//
+// Behaviour-change note retained here as a comment rather than a test (ticket
+// 172): at upstream `70c99ef` the judge's `settleVerdicts` read
+// `protocol.enforcement === 'record-only'` and dropped the batch, so
+// `racoonsRecordOnly: true` really did mean "no context edits". At the pinned
+// `b5f95cb` the judge is gone (ADR-0028) and `enforcement` is checked in only
+// two places — `settlePrune` and `settleForget` — neither on the
+// entry-checkpoint path. The entry apply runs whatever the mode says. If
+// dsh-bot wants "record-only means no context edits" to stay true (its
+// settings card and README both say so), the mount must gate the entry apply
+// itself; until then the vendored library decides.
 
 // ── 5. teardown ───────────────────────────────────────────────────────────
 

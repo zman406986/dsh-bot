@@ -17,6 +17,7 @@ import {
   deriveWorkerLiveness,
   type WorkerLiveness,
 } from "./liveness.js";
+import { deriveWorkerStage, type WorkerStage } from "./worker-stage.js";
 import {
   assembleTurnReminder,
 } from "./policy/assembler.js";
@@ -31,6 +32,7 @@ import {
   SPAWN_DISPATCHER_TOOL,
   TOOL_DESCRIPTIONS,
   toolDescriptionsFor,
+  type DispatcherOrigin,
   type PolicyLanguage,
 } from "./policy/prompts.js";
 import { AWAIT_INVALID_TIMEOUT_DETAIL } from "./settle-records.js";
@@ -154,33 +156,6 @@ export type DeliverToUserFn = (
 /** Optional live activity line for one worker (host jobs / step). */
 export type RecentActivityFn = (workerId: string) => string | null;
 
-/**
- * Ticket 69 (chunk A, design §4): outcome of the host approval seam for a
- * posture-gated dispatch. Same outcome vocabulary as the dsh approval
- * contract (`docs/research/dsh-adapter-api-notes.md:220`); anything that is
- * not `allowed-once` refuses the spawn (fail-closed).
- */
-export type DispatchApprovalOutcome =
-  | "allowed-once"
-  | "rejected"
-  | "cancelled"
-  | "unavailable";
-
-/** What the approval answerer sees. Names only — never the prompt body. */
-export interface DispatchApprovalRequest {
-  readonly title: string;
-  readonly streamKey: string;
-}
-
-/**
- * Injected host approval seam for a gated dispatch. Core stays host-agnostic:
- * the live wiring raises `ctx.approval.request` in the plugin (that wiring is
- * live-lane work, design L3); absent in tests unless a fake is injected.
- */
-export type DispatchApprovalFn = (
-  request: DispatchApprovalRequest,
-) => Promise<DispatchApprovalOutcome>;
-
 export interface DispatcherToolDeps {
   readonly multitask: Multitask;
   /** Dispatcher parent session id. */
@@ -201,13 +176,6 @@ export interface DispatcherToolDeps {
    * `liveness: null` rather than a guessed verdict.
    */
   readonly lastActivityAtMs?: (workerId: string) => number | null;
-  /**
-   * Ticket 69 (chunk A, A6): host approval seam consulted only when the
-   * review posture gates this dispatch (a posture row hit). Absent seam +
-   * posture hit → the spawn is refused (fail-closed): an un-answerable gate
-   * must never silently become an allow. Posture miss → never called.
-   */
-  readonly requestDispatchApproval?: DispatchApprovalFn;
   /**
    * Ticket 118 / ADR-0025 mitosis: the host's dispatcher-spawn seam. Only
    * `spawn_dispatcher` reads it; every other handler ignores it.
@@ -233,6 +201,18 @@ export interface DispatcherToolDeps {
    * means EN — the byte-stable text every pre-153 caller produced.
    */
   readonly language?: PolicyLanguage;
+  /**
+   * Which dispatcher CLASS this surface serves (owner ruling 2026-11-03,
+   * ticket 176). Omitted means `user`, so every pre-176 caller keeps the
+   * eight-tool surface byte-identically.
+   *
+   * `spawned` — a dispatcher another dispatcher summoned — must NOT be able
+   * to summon further dispatchers, so `spawn_dispatcher` is not registered at
+   * all for that class. Visibility is the fence (ADR-0019): the team leader
+   * gets host `UNKNOWN_TOOL`, not a refusal copy. The host refuses the same
+   * call as a backstop (`CordisDshHost.spawnDispatcher`).
+   */
+  readonly origin?: DispatcherOrigin;
 }
 
 /**
@@ -337,9 +317,8 @@ export const PEER_DIRECT_CONVERSATION_ID = "direct";
  * Ticket 122 / ADR-0028: the worker's mid-task reply verb.
  *
  * It is deliberately NOT part of `createDispatcherTools()` — the dispatcher
- * never sees it. Workers inherit it from the global layer (the same
- * registration shape `request_access` uses), and the handler refuses every
- * caller that is not a worker in core truth. The address is never an
+ * never sees it. Workers inherit it from the global layer, and the handler
+ * refuses every caller that is not a worker in core truth. The address is never an
  * argument: the parent dispatcher id comes from the worker's own roster
  * record, so the channel is structurally single-parent and no
  * worker→worker or worker→other-dispatcher path exists.
@@ -454,8 +433,8 @@ export interface WorkerReplyToolDeps {
   readonly multitask: Pick<Multitask, "getWorker" | "sendPeer">;
   /**
    * Resolve the calling worker id from the tool exec context. The adapter
-   * wires this from the exec's session id + `host.owns` (the request_access
-   * shape); returning null means "not a worker this plugin owns".
+   * wires this from the exec's session id + `host.owns`; returning null means
+   * "not a worker this plugin owns".
    */
   readonly resolveWorkerId: (exec: unknown) => string | null;
   /** Injectable id factory + clock for tests. */
@@ -695,6 +674,12 @@ export function registerWorkerLocalTools(
  * eight-tool shape (ticket 116 retired `send_peer` for `message_agent`;
  * ticket 117 added `await_agent`; ticket 118 added `spawn_dispatcher`).
  * Pure enough for unit tests: no ctx, no host types.
+ *
+ * Ticket 176: `deps.origin` selects the CLASS. The user-started chief of staff
+ * gets all eight tools; a spawned team leader gets seven and NO
+ * `spawn_dispatcher` (owner ruling 2026-11-03 — a summoned dispatcher may not
+ * summon further dispatchers). Omitted means `user`, so the shape is
+ * unchanged for every pre-176 caller.
  */
 export function createDispatcherTools(
   deps: DispatcherToolDeps,
@@ -703,6 +688,14 @@ export function createDispatcherTools(
   const nowMs = deps.now ?? (() => Date.now());
   /** Ticket 153: the selected description face; EN unless exactly "zh". */
   const descriptions = toolDescriptionsFor(deps.language ?? "en");
+  /**
+   * Ticket 176 (owner ruling 2026-11-03): a SPAWNED dispatcher — a team leader
+   * another dispatcher summoned — may not summon further dispatchers. The
+   * fence is the tool surface itself (ADR-0019), so the definition is never
+   * built for that class and the model never sees the name. The host refuses
+   * the same call as a backstop for any other route to `spawnDispatcher`.
+   */
+  const maySummonDispatchers = (deps.origin ?? "user") !== "spawned";
   /**
    * Ticket 116: this registration's draw on the shared agent-message
    * budget, keyed by the sender's own session id (the registration closure
@@ -788,52 +781,6 @@ export function createDispatcherTools(
         }
       }
 
-      // Ticket 69 (chunk A, design §4): worker-dispatch posture gate.
-      // Miss → spawn proceeds exactly as shipped, no approval-seam call.
-      // An allow row marks the dispatch as gated: the host approval seam
-      // decides (allowed-once proceeds; anything else refuses). A deny row
-      // auto-denies without the seam — policy already decided. Absent seam
-      // on a gated dispatch refuses (fail-closed). Gating happens inside
-      // the already-running dispatcher turn — no activation step, spawns
-      // stay the single wake kind (C15).
-      let postureGated = false;
-      const posture = multitask.reviewPosture.lookupDispatch(title, {
-        parentSessionId,
-      });
-      if (posture !== undefined) {
-        if (posture.kind === "deny") {
-          return {
-            ok: false,
-            reason: "auto-review-refused",
-            detail: posture.detail,
-          };
-        }
-        const seam = deps.requestDispatchApproval;
-        if (seam === undefined) {
-          return {
-            ok: false,
-            reason: "auto-review-refused",
-            detail:
-              `dispatch "${title}" is gated by the auto-review posture, ` +
-              `but no approval answerer is available; refusing (fail-closed)`,
-          };
-        }
-        const outcome = await seam({ title, streamKey });
-        if (outcome !== "allowed-once") {
-          return {
-            ok: false,
-            reason: "auto-review-refused",
-            detail:
-              `dispatch "${title}" was not approved ` +
-              `(approval outcome: ${outcome}); re-plan without this dispatch`,
-          };
-        }
-        // Chunk B marker: the durable tool-result record carries the gating
-        // provenance so the client's dispatch card derives `approval-allowed`
-        // at presentation time (never from client-side state).
-        postureGated = true;
-      }
-
       // Ticket 151 (ruling 2026-10-28, PM under owner grant): no todo_id →
       // the spawn itself creates the linked ledger entry. The entry is
       // system-authored and lifecycle-bound (ADR-0007 / DD-164: no
@@ -883,7 +830,6 @@ export function createDispatcherTools(
         worker_id: result.workerId,
         stream_key: streamKey,
         title,
-        ...(postureGated ? { gated: true as const } : {}),
         ack: formatSpawnAck({
           title,
           workerId: result.workerId,
@@ -914,14 +860,6 @@ export function createDispatcherTools(
       const workerId = optionalString(args, "worker_id");
       const activity = deps.recentActivity;
       const lastActivityAtMs = deps.lastActivityAtMs;
-      // Ticket 61 (R3): a worker parked on a pending access ask is blocked
-      // by design and must never read `stalled` — the same join the roster
-      // projection's blocked marker uses.
-      const blockedWorkerIds = new Set(
-        multitask
-          .listPendingAccess(parentSessionId)
-          .map((ticket) => ticket.workerId),
-      );
       /**
        * Ticket 61: liveness verdict over the row's own fields. Only when
        * the activity-time seam exists; otherwise `null` (honest absence).
@@ -936,11 +874,25 @@ export function createDispatcherTools(
             startedAtMs: summary.startedAtMs,
             toolCallCount: summary.toolCallCount,
             lastActivityAtMs: lastActivityAtMs(summary.workerId) ?? null,
-            blocked: blockedWorkerIds.has(summary.workerId),
           },
           Date.now(),
         );
       };
+      /**
+       * Ticket 171: the ledger index, built once for both branches. The
+       * stage joins the row's own status to the structural todo link
+       * (ADR-0007) — every input is truth the core already holds, so nothing
+       * new is stored or fetched.
+       */
+      const todosById = new Map(
+        multitask.listTodos(parentSessionId).map((t) => [t.id, t]),
+      );
+      const stageOf = (summary: WorkerSummary): WorkerStage =>
+        deriveWorkerStage({
+          status: summary.status,
+          linkedTodo:
+            summary.todoId !== null ? todosById.get(summary.todoId) : undefined,
+        });
 
       if (workerId !== undefined) {
         const record = multitask.getWorker(workerId);
@@ -967,6 +919,7 @@ export function createDispatcherTools(
           summary,
           activity?.(workerId) ?? null,
           livenessOf(summary),
+          stageOf(summary),
         );
         return {
           ok: true,
@@ -981,6 +934,7 @@ export function createDispatcherTools(
           summary,
           activity?.(summary.workerId) ?? null,
           livenessOf(summary),
+          stageOf(summary),
         ),
       );
       return {
@@ -1542,7 +1496,9 @@ export function createDispatcherTools(
     },
   };
 
-  return [
+  // Ticket 176: the spawned class stops here. Every other tool is identical
+  // for both classes — only the summon verb is withheld.
+  const tools: DispatcherToolDef[] = [
     spawnWorker,
     checkWorkers,
     steerWorker,
@@ -1550,8 +1506,9 @@ export function createDispatcherTools(
     deliverResult,
     messageAgent,
     awaitAgent,
-    spawnDispatcher,
   ];
+  if (maySummonDispatchers) tools.push(spawnDispatcher);
+  return tools;
 }
 
 /**

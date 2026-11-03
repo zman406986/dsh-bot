@@ -6,7 +6,6 @@ export {
   blocksToText,
   createCordisDshHost,
   createDispatcherStartCommand,
-  createRequestAccessHandler,
   createStorageDomainDurability,
   DISPATCHER_START_ALREADY_HERE,
   DISPATCHER_START_COMMAND,
@@ -21,8 +20,6 @@ export {
   normalizeSettleReport,
   registerDispatcherStartCommand,
   registerDispatcherTools,
-  registerWorkerAccessTool,
-  REQUEST_ACCESS_TOOL,
   resolveExecSessionId,
   SETTINGS_NAMESPACE,
   SPAWN_PROVIDER,
@@ -79,39 +76,9 @@ export { createMultitask } from "./core/multitask.js";
 export type {
   DrainedWake,
   Multitask,
-  MultitaskAccessOptions,
   MultitaskOptions,
   RedriveReport,
 } from "./core/multitask.js";
-export {
-  createAccessPolicyTable,
-  createAccessRelay,
-  defaultProfileAskSeed,
-  DEFAULT_ACCESS_TIMEOUT_MS,
-  matchTargetPattern,
-  wrapAccessDecision,
-} from "./core/access-relay.js";
-export type {
-  AccessPolicyTable,
-  AccessRelay,
-  AccessRelayOptions,
-} from "./core/access-relay.js";
-export {
-  ACCESS_CLASSES,
-  isDenyDecision,
-  toAccessClass,
-} from "./core/access-types.js";
-export type {
-  AccessClass,
-  AccessDecision,
-  AccessNotice,
-  AccessRequestBody,
-  AccessRequestEvent,
-  AccessRequestNotice,
-  AccessTicket,
-  PolicyEntry,
-  PolicyLookupCtx,
-} from "./core/access-types.js";
 export {
   createInMemoryDurability,
   toDurableMarker,
@@ -167,8 +134,6 @@ export type {
 } from "./core/todo-reconciler.js";
 export { createWakeBus, WAKE_SOURCES } from "./core/wake-bus.js";
 export type {
-  EnqueueAccessNoticeInput,
-  EnqueueAccessRequestInput,
   EnqueuePeerInput,
   EnqueueSettledInput,
   SettledWorkerNotice,
@@ -218,6 +183,14 @@ export type {
   WorkerLivenessInput,
 } from "./core/liveness.js";
 export {
+  deriveWorkerStage,
+  WORKER_STAGES,
+} from "./core/worker-stage.js";
+export type {
+  WorkerStage,
+  WorkerStageInput,
+} from "./core/worker-stage.js";
+export {
   formatAwaitNote,
   formatCheckRowLine,
   formatCheckSummary,
@@ -243,7 +216,6 @@ export type {
   WorkerCheckRow,
 } from "./core/tool-results.js";
 export {
-  assembleAccessSection,
   assemblePeerWakeTurn,
   assembleSessionPolicy,
   assembleTurnReminder,
@@ -252,9 +224,7 @@ export {
 } from "./core/policy/assembler.js";
 export type { WakeNotice } from "./core/policy/assembler.js";
 export {
-  ACCESS_SECTION_HEADING,
   AWAIT_AGENT_TOOL,
-  buildAccessPolicyBlock,
   buildDispatcherPolicySection,
   buildPeerWakeInstructionsBlock,
   CHECK_WORKERS_TOOL,

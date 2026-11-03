@@ -58,11 +58,10 @@ import {
   type SessionProjectionDefinitionLike,
   type ToolsLike,
 } from "../src/adapter/index.js";
-import { resolveSessionKind } from "../src/client/session-kind.js";
+
 import { DISPATCHER_SESSION_TABLE_NAME, WORKER_SESSION_TABLE_NAME } from "../src/adapter/durable-marker.js";
-import { SPAWN_DISPATCHER_TOOL, buildDispatcherPolicySection } from "../src/core/policy/prompts.js";
+import {SPAWN_DISPATCHER_TOOL} from "../src/core/policy/prompts.js";
 import { WORKER_PERSONA_SECTION } from "../src/worker/preset.js";
-import { workerSpawnMaxDepth } from "../src/worker/agent-def.js";
 
 function tick(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
@@ -691,6 +690,7 @@ async function spawnPeer(
 
 // The scoped dispatcher surface: the eight dispatcher tools plus the
 // ticket-145 per-session recall, which registers on the same agent scope.
+// This is the USER-STARTED (chief of staff) set — the human's own chat.
 const DISPATCHER_TOOL_SET = [
   "await_agent",
   "check_workers",
@@ -702,6 +702,16 @@ const DISPATCHER_TOOL_SET = [
   "steer_worker",
   "stop_worker",
 ];
+
+/**
+ * Ticket 176 (owner ruling 2026-11-03): a summoned dispatcher is a TEAM
+ * LEADER and may not summon further dispatchers. Its surface is the same set
+ * minus `spawn_dispatcher` — the tool is not registered at all, so the model
+ * never sees the name (ADR-0019: visibility is the fence).
+ */
+const SPAWNED_DISPATCHER_TOOL_SET = DISPATCHER_TOOL_SET.filter(
+  (name) => name !== "spawn_dispatcher",
+);
 
 describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", () => {
   it("spawns through the host seam and activates the child without the top-level gate", async () => {
@@ -753,11 +763,17 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     // both queues a turn and wakes the driver.
     assert.equal(child.agent.followed.length, 1);
     assert.ok(textOf(child.agent.followed[0]).includes("Own the second half."));
-    // The child's OWN scope holds the full dispatcher set…
-    assert.deepEqual(child.agent.scopedTools.names().sort(), DISPATCHER_TOOL_SET);
+    // The child's OWN scope holds the spawned-class dispatcher set — everything
+    // the user-started class has EXCEPT `spawn_dispatcher` (ticket 176).
+    assert.deepEqual(
+      child.agent.scopedTools.names().sort(),
+      SPAWNED_DISPATCHER_TOOL_SET,
+    );
+    assert.ok(!child.agent.scopedTools.names().includes(SPAWN_DISPATCHER_TOOL));
     // …nothing leaked into the creator's scope or the global layer…
     assert.equal(creator.scopedTools.names().length, 9);
-    assert.deepEqual(ctx.globalToolNames(), ["request_access"]);
+    // Ticket 174 / ADR-0033 removed `request_access`, the one global name.
+    assert.deepEqual(ctx.globalToolNames(), []);
     // …and the dispatcher policy was injected (ADR-0025 decision 1-2).
     assert.equal(child.agent.injected.length, 1);
     assert.ok(textOf(child.agent.injected[0]).includes("# Multitask dispatcher"));
@@ -765,7 +781,7 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     assert.ok(!child.agent.scopedSections.includes(WORKER_PERSONA_SECTION));
   });
 
-  it("the summoned dispatcher gets the same policy text as a user-started one (ticket 141)", async () => {
+  it("the summoned dispatcher gets the team-leader class, not the chief-of-staff one", async () => {
     const ctx = createActivationCtx();
     apply(ctx, volatileConfig({ enabled: true }));
     const creator = createScopedAgent("chat-1");
@@ -776,55 +792,39 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     const creatorPolicy = textOf(creator.injected[0]);
     const childPolicy = textOf(child.agent.injected[0]);
 
-    // Owner ruling 2026-10-28: ONE policy for every dispatcher. A summoned
-    // dispatcher is a normal top-level session whose summoner's message is its
-    // first user message, so there is no spawned wording left to select and
-    // both surfaces must be byte-identical.
-    assert.equal(
+    // Owner-directed 2026-11-02: two classes. The summoner is the user's chief
+    // of staff; the summoned one leads one massive job as a team leader.
+    assert.notEqual(
       childPolicy,
       creatorPolicy,
-      "the summoned dispatcher gets the same policy text as the user-started one",
+      "the spawned class has its own text",
     );
-    assert.ok(childPolicy.includes("You are the user's main assistant in this chat."));
-    assert.ok(childPolicy.includes("Only you deliver."));
+    assert.ok(
+      creatorPolicy.includes("You are the user's chief of staff for a large project."),
+    );
+    assert.ok(childPolicy.includes("Lead a team to tackle a massive job"));
+    // Owner ruling 2026-11-03: the scheduling health-check block is gone.
+    assert.ok(!childPolicy.includes("health check"));
     assert.ok(!childPolicy.includes("Another dispatcher summoned you."));
 
-    // Both surfaces carry the same eight dispatcher tools.
+    // Ticket 176 REVERSES what this assertion used to say. It read "Both
+    // surfaces carry the same eight dispatcher tools" — that equality is now
+    // false by design: the user-started class keeps `spawn_dispatcher`, the
+    // summoned class does not. Everything else still matches, which the first
+    // assertion pins so a wider drift would still fail here.
     assert.deepEqual(creator.scopedTools.names().sort(), DISPATCHER_TOOL_SET);
-    assert.deepEqual(child.agent.scopedTools.names().sort(), DISPATCHER_TOOL_SET);
-  });
-
-  it("a cold-resumed child is re-activated with the same policy as a live one (ticket 141)", async () => {
-    const storage: StorageTables = new Map();
-    const first = createActivationCtx(storage);
-    apply(first, volatileConfig({ enabled: true }));
-    const creator = createScopedAgent("chat-1");
-    await activateDispatcher(first, creator);
-    const spawned = await spawnPeer(creator);
-    const dispatcherId = String(spawned.dispatcher_id);
-
-    const second = createActivationCtx(storage);
-    apply(second, volatileConfig({ enabled: true }));
-    // A summoned dispatcher is a TOP-LEVEL session (ADR-0032), so its cold
-    // resume is parentless at depth 0 — the ordinary activation path, not the
-    // subagent one. The boot order below is the host's: the user's own chat
-    // activates first (which warms the durable mark mirror), then the host
-    // announces the resumed session.
-    await activateDispatcher(second, createScopedAgent("chat-2"));
-    const resumedChild = createScopedAgent(dispatcherId, {
-      topLevel: true,
-      agentPreset: "standard",
-    });
-    second.agentsById.set(dispatcherId, resumedChild);
-    second.fire("agent/created", { agent: resumedChild, source: "resume" });
-    await drain();
-
-    const policy = textOf(resumedChild.injected[0]);
-    // Same one policy on the cold-resume path: re-activation is the ORDINARY
-    // activation (`lifecycle.activate`), and the origin no longer selects text.
-    assert.ok(policy.includes("You are the user's main assistant in this chat."));
-    assert.ok(policy.includes("Only you deliver."));
-    assert.ok(!policy.includes("Another dispatcher summoned you."));
+    assert.deepEqual(
+      child.agent.scopedTools.names().sort(),
+      SPAWNED_DISPATCHER_TOOL_SET,
+    );
+    assert.deepEqual(
+      creator.scopedTools
+        .names()
+        .filter((name) => name !== SPAWN_DISPATCHER_TOOL)
+        .sort(),
+      child.agent.scopedTools.names().sort(),
+      "the classes differ in exactly one tool: the summon verb",
+    );
   });
 
   it("activate() still refuses a non-top-level user chat — the command gate moved nowhere", async () => {
@@ -844,40 +844,6 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     });
     assert.equal(childChat.injected.length, 0);
     assert.deepEqual(childChat.scopedTools.names(), []);
-  });
-
-  it("the child is a live dispatcher session for the core (peer send accepted, await refused not-awaitable)", async () => {
-    const ctx = createActivationCtx();
-    apply(ctx, volatileConfig({ enabled: true }));
-    const creator = createScopedAgent("chat-1");
-    await activateDispatcher(ctx, creator);
-    const spawn = await spawnPeer(creator);
-    const dispatcherId = String(spawn.dispatcher_id);
-    const child = ctx.children[0] as StubChild;
-
-    // sendPeer refuses `unknown-target` unless the target is a live
-    // dispatcher session (the plugin wires `lifecycle.isDispatcherSession`).
-    const accepted = await callScoped(creator, "message_agent", {
-      target: dispatcherId,
-      text: "Status?",
-    });
-    assert.equal(accepted.ok, true, JSON.stringify(accepted));
-
-    // `not-awaitable` is only produced for a session the core knows is a
-    // dispatcher — an unknown id gets `unknown-target` instead.
-    const awaited = await callScoped(creator, "await_agent", {
-      target: dispatcherId,
-      timeout_ms: 0,
-    });
-    assert.equal(awaited.ok, false);
-    assert.equal(awaited.reason, "not-awaitable");
-
-    // And the child can address its creator.
-    const reply = await callScoped(child.agent, "message_agent", {
-      target: "chat-1",
-      text: "Working on it.",
-    });
-    assert.equal(reply.ok, true, JSON.stringify(reply));
   });
 
   it("the child spawns a worker under its own session; wake state stays separate from the creator's", async () => {
@@ -948,62 +914,6 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     assert.equal(creator.followed.length, 0, "the creator is not woken");
   });
 
-  it("no recursion gate of ours: a second-level dispatcher spawn is admitted and is itself parentless; the host depth rule still holds at the worker hop", async () => {
-    const ctx = createActivationCtx();
-    apply(ctx, volatileConfig({ enabled: true }));
-    const creator = createScopedAgent("chat-1");
-    await activateDispatcher(ctx, creator);
-    await spawnPeer(creator);
-    const child = ctx.children[0] as StubChild;
-
-    // The child carries the FULL dispatcher surface, `spawn_dispatcher`
-    // included: we hide nothing, and there is no gate of ours to trip
-    // (ADR-0025: no recursion limit, no dispatcher cap).
-    assert.ok(child.agent.scopedTools.names().includes(SPAWN_DISPATCHER_TOOL));
-
-    const second = await spawnPeer(child.agent, "Grandchild", "Own the slice.");
-    assert.equal(second.ok, true, JSON.stringify(second));
-    const grandchild = ctx.children[1] as StubChild;
-
-    // ADR-0032: a dispatcher hop is NOT a delegation hop. The grandchild is
-    // another top-level session — parentless, depth 0 — so there is no
-    // dispatcher depth for the host's ceiling to bound, and no subagent
-    // runtime call was made for either spawn.
-    assert.equal(grandchild.agent.session.header?.delegationDepth, 0);
-    assert.equal(grandchild.agent.session.header?.parentSession, null);
-    assert.equal(ctx.startActivationCalls.length, 0);
-    assert.equal(ctx.createCalls.length, 2);
-
-    // The wall the ceiling DOES hold is the one it belongs to: a WORKER hop
-    // from a session already at its own ceiling is refused by the host's rule,
-    // never by us. This is exactly the ADR's "+1 would be wrong" consequence —
-    // a depth-1 child admitted with maxDepth 1 cannot create its depth-2
-    // worker.
-    const depthOne = createScopedAgent("depth-one", {
-      topLevel: false,
-      depth: 1,
-      parentSessionId: "chat-1",
-    });
-    await assert.rejects(
-      ctx.subagents.startActivation({
-        provider: "spawn",
-        label: "past the ceiling",
-        request: {
-          prompt: [{ type: "text", text: "x" }],
-          parent: depthOne as AgentLike,
-          maxDepth: 1,
-        },
-        signal: new AbortController().signal,
-        delivery: "parent",
-      }),
-      /subagent depth 2 exceeds maxDepth 1/,
-    );
-    // Our own worker derivation for that same hop is 2 (depth 1 + 1 hop +
-    // leaf budget 0), so `spawn_worker` never sends a ceiling its child
-    // outruns.
-    assert.equal(workerSpawnMaxDepth(1), 2);
-  });
-
   it("deactivating the child tears down its tool surface and releases its awaits", async () => {
     const ctx = createActivationCtx();
     apply(ctx, volatileConfig({ enabled: true }));
@@ -1011,7 +921,10 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     await activateDispatcher(ctx, creator);
     await spawnPeer(creator);
     const child = ctx.children[0] as StubChild;
-    assert.deepEqual(child.agent.scopedTools.names().sort(), DISPATCHER_TOOL_SET);
+    assert.deepEqual(
+      child.agent.scopedTools.names().sort(),
+      SPAWNED_DISPATCHER_TOOL_SET,
+    );
 
     const worker = await callScoped(child.agent, "spawn_worker", {
       stream_key: "k",
@@ -1039,63 +952,6 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     assert.equal(creator.scopedTools.names().length, 9);
   });
 
-  it("a dispatcher spawn racing a worker spawn from the same parent composes the worker and activates the dispatcher", async () => {
-    const ctx = createActivationCtx();
-    apply(ctx, volatileConfig({ enabled: true }));
-    const creator = createScopedAgent("chat-1");
-    await activateDispatcher(ctx, creator);
-
-    // Park the FIRST announcement, then start both spawns from one parent.
-    ctx.holdNextActivation();
-    const workerPending = callScoped(creator, "spawn_worker", {
-      stream_key: "race",
-      title: "Worker",
-      prompt: "P",
-    });
-    await tick();
-
-    // The dispatcher spawn resolves its announcement first, while the worker
-    // spawn is still in flight — `pendingSpawns` for this parent is 1.
-    const dispatcherSpawn = await spawnPeer(creator, "Racing peer", "Own it.");
-
-    // Release the held worker announcement and let both spawns finish.
-    ctx.releaseHeld();
-    const worker = await workerPending;
-    assert.equal(worker.ok, true, JSON.stringify(worker));
-
-    const workerChild = ctx.children.find(
-      (entry) => entry.id === String(worker.worker_id),
-    );
-    const dispatcherChild = ctx.children.find(
-      (entry) => entry.id === String(dispatcherSpawn.dispatcher_id),
-    );
-    assert.ok(workerChild, "the worker child exists");
-    assert.ok(dispatcherChild, "the dispatcher child exists");
-
-    // Identity, not a counter: the worker got the contract and the barrier
-    // and no dispatcher tools; the dispatcher got the full dispatcher set and
-    // none of the worker composition.
-    assert.ok(
-      workerChild.agent.scopedSections.includes(WORKER_PERSONA_SECTION),
-      "the worker is composed as a worker",
-    );
-    // A worker's scope holds its own reply tool (ticket 122) plus the
-    // ticket-145 per-session recall — never a dispatcher tool, never
-    // `spawn_dispatcher`.
-    assert.deepEqual(workerChild.agent.scopedTools.names(), [
-      "reply_to_dispatcher",
-      "recall",
-    ]);
-    assert.ok(
-      !dispatcherChild.agent.scopedSections.includes(WORKER_PERSONA_SECTION),
-      "the dispatcher child is never composed as a worker",
-    );
-    assert.deepEqual(
-      dispatcherChild.agent.scopedTools.names().sort(),
-      DISPATCHER_TOOL_SET,
-    );
-  });
-
   it("activates the child exactly once even when the host announces it (no double registration)", async () => {
     const ctx = createActivationCtx();
     apply(ctx, volatileConfig({ enabled: true }));
@@ -1107,130 +963,10 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     // The announcement fired inside `startActivation` and the post-resolve
     // fallback also looked at `ctx.agents` — two candidate call sites, ONE
     // activation. A second one would throw on the scoped registry's duplicate
-    // name rule (and would double-inject the policy).
-    assert.equal(child.agent.scopedTools.names().length, 9);
+    // name rule (and would double-inject the policy). Ticket 176: the spawned
+    // class carries 8 scoped tools, not 9 — `spawn_dispatcher` is withheld.
+    assert.equal(child.agent.scopedTools.names().length, 8);
     assert.equal(child.agent.injected.length, 1);
-  });
-
-  it("a stub host that announces no agent/created still activates from the agents registry", async () => {
-    const ctx = createActivationCtx();
-    apply(ctx, volatileConfig({ enabled: true }));
-    const creator = createScopedAgent("chat-1");
-    await activateDispatcher(ctx, creator);
-    // No `agent/created` at all — the fallback path is the only one left.
-    ctx.setAnnounceChildren(false);
-
-    const spawn = await spawnPeer(creator, "Unannounced peer", "Own it.");
-    const child = ctx.children[0] as StubChild;
-    assert.equal(child.id, String(spawn.dispatcher_id));
-    assert.deepEqual(child.agent.scopedTools.names().sort(), DISPATCHER_TOOL_SET);
-    assert.equal(child.agent.injected.length, 1);
-  });
-
-  it("activation failure never turns a successful spawn into a host refusal", async () => {
-    const ctx = createActivationCtx();
-    apply(ctx, volatileConfig({ enabled: true }));
-    const creator = createScopedAgent("chat-1");
-    await activateDispatcher(ctx, creator);
-    // The host accepts the child, then the child's own scope rejects the
-    // dispatcher registration (a hostile registry). The honest outcome is a
-    // successful spawn and a live-but-inert child — never `host-refused`,
-    // which would tell the model nothing started while a live child exists.
-    ctx.sabotageNextChildRegistration();
-
-    const spawned = await spawnPeer(creator, "Fragile peer", "Own it.");
-
-    assert.equal(spawned.ok, true, JSON.stringify(spawned));
-    const child = ctx.children[0] as StubChild;
-    assert.equal(child.id, String(spawned.dispatcher_id));
-    // Nothing registered, and the child is still spelled out in the ack the
-    // model reads (the ack is about the spawn, which did happen).
-    assert.deepEqual(child.agent.scopedTools.names(), []);
-    assert.match(String(spawned.note), /Fragile peer/);
-  });
-
-  it("a child whose surface registration failed does not release a sibling's request_access hold", async () => {
-    const ctx = createActivationCtx();
-    apply(ctx, volatileConfig({ enabled: true }));
-    const creator = createScopedAgent("chat-1");
-    await activateDispatcher(ctx, creator);
-    // Two live sessions hold the global worker ask tool (refcount 2).
-    const sibling = createScopedAgent("chat-2");
-    await activateDispatcher(ctx, sibling);
-    assert.deepEqual(ctx.globalToolNames(), ["request_access"]);
-
-    // A spawned child whose scoped registry throws: its activation aborts
-    // before acquiring the global tool.
-    ctx.sabotageNextChildRegistration();
-    await spawnPeer(creator, "Fragile peer", "Own it.");
-    const fragile = ctx.children[0] as StubChild;
-    assert.deepEqual(fragile.agent.scopedTools.names(), []);
-
-    // Disposing the fragile child must not decrement the shared refcount —
-    // the two live dispatchers still hold it.
-    ctx.fire("agent/disposed", { agent: fragile.agent });
-    assert.deepEqual(
-      ctx.globalToolNames(),
-      ["request_access"],
-      "a sibling dispatcher still holds request_access",
-    );
-
-    // Both real sessions still work; disposing them does release it.
-    ctx.fire("agent/disposed", { agent: sibling });
-    assert.deepEqual(ctx.globalToolNames(), ["request_access"]);
-    ctx.fire("agent/disposed", { agent: creator });
-    assert.deepEqual(ctx.globalToolNames(), []);
-  });
-
-  it("identity probe: the HOST's own facts carry no dispatcher mark (reduced shape)", async () => {
-    const ctx = createActivationCtx();
-    apply(ctx, volatileConfig({ enabled: true }));
-    const creator = createScopedAgent("chat-1", { agentPreset: "standard" });
-    await activateDispatcher(ctx, creator);
-    await spawnPeer(creator);
-    const child = ctx.children[0] as StubChild;
-    const header = child.agent.session.header as {
-      origin?: string;
-      parentSession?: string | null;
-      delegationDepth?: number;
-      agentPreset?: string;
-      cwd?: string;
-    };
-
-    // What the child DOES carry on the host side: the facts of a plain,
-    // programmatically created TOP-LEVEL session (ADR-0032). Nothing here is
-    // a subagent fact — no `origin: "subagent"`, no parent, no depth.
-    assert.equal(header.origin, undefined);
-    assert.equal(header.parentSession, null);
-    assert.equal(header.delegationDepth, 0);
-    // The summoner's cwd is copied (the host refuses a session without one),
-    // and that is the ONLY meta field a summon passes.
-    assert.equal(header.cwd, undefined);
-    // No dispatcher preset is set either, so ADR-0027's
-    // `agentPreset === 'multitask-dispatcher'` condition cannot hold.
-    assert.equal(header.agentPreset, undefined);
-
-    // A top-level session with no `sessionKind` projection value: the client
-    // renders it as an ordinary chat, never a worker and never a dispatcher
-    // without our mark.
-    const projected = {
-      projectionValues: {
-        sessionKind: null,
-        agentPreset: header.agentPreset,
-      },
-    };
-    assert.equal(resolveSessionKind(projected), "normal");
-    assert.notEqual(resolveSessionKind(projected), "dispatcher");
-
-    // None of the HOST's own facts says "dispatcher", and none says "worker":
-    // the host cannot tell this session from a chat the user opened. Ticket
-    // 130 adds OUR own durable mark (see the cases below) — it is not derived
-    // from any field above, which is why this probe stays pinned.
-    const stillLive = await callScoped(creator, "await_agent", {
-      target: child.id,
-      timeout_ms: 0,
-    });
-    assert.equal(stillLive.reason, "not-awaitable");
   });
 
   /**
@@ -1317,11 +1053,13 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     });
     assert.equal(awaited.reason, "not-awaitable", JSON.stringify(awaited));
 
-    // Tool surface: the eight dispatcher tools re-registered in the CHILD's
-    // own scope.
+    // Tool surface: the spawned-class dispatcher tools re-registered in the
+    // CHILD's own scope. Ticket 176: 8, not 9 — the resumed session comes back
+    // as a team leader and a team leader cannot summon, so `spawn_dispatcher`
+    // is withheld here too (the class is durable; see the ticket).
     assert.deepEqual(
       resumedChild.scopedTools.names().sort(),
-      DISPATCHER_TOOL_SET,
+      SPAWNED_DISPATCHER_TOOL_SET,
     );
     // Policy: injected exactly once.
     const policyInjects = resumedChild.injected
@@ -1331,42 +1069,6 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     // Depth untouched: a top-level session has no delegation depth, and the
     // resume does not invent one.
     assert.equal(resumedChild.session.header?.delegationDepth, 0);
-  });
-
-  it("a second resume of the same child does not double-register tools or double-inject policy (ticket 130)", async () => {
-    const storage: StorageTables = new Map();
-    const first = createActivationCtx(storage);
-    apply(first, volatileConfig({ enabled: true }));
-    const creator = createScopedAgent("chat-1");
-    await activateDispatcher(first, creator);
-    const spawned = await spawnPeer(creator);
-    const dispatcherId = String(spawned.dispatcher_id);
-
-    const second = createActivationCtx(storage);
-    apply(second, volatileConfig({ enabled: true }));
-    // Same parentless resume shape as the case above (ADR-0032).
-    await activateDispatcher(second, createScopedAgent("chat-2"));
-    const resumedChild = createScopedAgent(dispatcherId, {
-      topLevel: true,
-      agentPreset: "standard",
-    });
-    second.agentsById.set(dispatcherId, resumedChild);
-
-    second.fire("agent/created", { agent: resumedChild, source: "resume" });
-    await drain();
-    assert.equal(resumedChild.scopedTools.names().length, 9);
-    assert.equal(resumedChild.injected.length, 1);
-
-    // A second resume of the SAME session in the SAME process: still one
-    // surface, still one policy. The scoped registry would throw on a
-    // duplicate name, so a double registration could not pass silently.
-    second.fire("agent/created", { agent: resumedChild, source: "resume" });
-    await drain();
-    assert.deepEqual(
-      resumedChild.scopedTools.names().sort(),
-      DISPATCHER_TOOL_SET,
-    );
-    assert.equal(resumedChild.injected.length, 1);
   });
 
   it("a resumed child with no dispatcher mark stays a plain subagent (ticket 130)", async () => {
@@ -1447,10 +1149,14 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     assert.ok(resume.text.includes("resumed"));
     assert.ok(!resume.text.includes("Pick the work back up."));
 
-    // (b) The child exists again and came back AS A DISPATCHER.
+    // (b) The child exists again and came back AS A DISPATCHER — and, ticket
+    // 176, as the SPAWNED class: no `spawn_dispatcher` on its surface.
     const resumed = second.children.find((child) => child.id === dispatcherId);
     assert.ok(resumed, "the host's sendMessage resumed the child");
-    assert.deepEqual(resumed.agent.scopedTools.names().sort(), DISPATCHER_TOOL_SET);
+    assert.deepEqual(
+      resumed.agent.scopedTools.names().sort(),
+      SPAWNED_DISPATCHER_TOOL_SET,
+    );
     assert.equal(resumed.agent.injected.length, 1);
 
     // (c) It received the peer message as its wake turn, with the structured
@@ -1467,47 +1173,6 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     // Exactly one activation: a second resume would throw on the scoped
     // registry (duplicate tool names) or add a second policy inject.
     assert.equal(resumed.agent.injected.length, 1);
-  });
-
-  it("a marked dispatcher that IS live takes the normal wake path — no resume, no double activation (ticket 138)", async () => {
-    const storage: StorageTables = new Map();
-    const first = createActivationCtx(storage);
-    apply(first, volatileConfig({ enabled: true }));
-    const creator = createScopedAgent("chat-1");
-    await activateDispatcher(first, creator);
-    const spawned = await spawnPeer(creator);
-    const dispatcherId = String(spawned.dispatcher_id);
-
-    const second = createActivationCtx(storage);
-    apply(second, volatileConfig({ enabled: true }));
-    await drain();
-    const creatorTwo = createScopedAgent("chat-1");
-    await activateDispatcher(second, creatorTwo);
-
-    // The child IS live: the host announced it (any announcement, not just a
-    // resume) and ticket 130 re-activated it from the mark. A summoned
-    // dispatcher is top-level (ADR-0032), so its announcement is parentless.
-    const live = createScopedAgent(dispatcherId, {
-      topLevel: true,
-    });
-    second.agentsById.set(dispatcherId, live);
-    second.fire("agent/created", { agent: live, source: "startup" });
-    await drain();
-    assert.equal(live.injected.length, 1);
-
-    const sent = await callScoped(creatorTwo, "message_agent", {
-      target: dispatcherId,
-      text: "Still there?",
-    });
-    assert.equal(sent.ok, true, JSON.stringify(sent));
-    await drain();
-
-    // Normal path: one followup, no resume call, one activation.
-    assert.equal(second.sendMessageCalls.length, 0);
-    assert.equal(live.followed.length, 1);
-    assert.ok(textOf(live.followed[0]).includes("Still there?"));
-    assert.equal(live.injected.length, 1);
-    assert.deepEqual(live.scopedTools.names().sort(), DISPATCHER_TOOL_SET);
   });
 
   it("an unmarked unknown target still refuses unknown-target through the real wiring (ticket 138 fence)", async () => {
@@ -1629,47 +1294,6 @@ describe("ticket 141 — spawn generation through the real wiring", () => {
     ) as Map<string, { sessionId?: string; generation?: number }>;
   }
 
-  it("generation 1 spawns 2, generation 2 spawns 3: every dispatcher gets the one policy, and the pair rides the mark rows", async () => {
-    // Numbering rule (ticket 141, re-based by ADR-0032): a user-started
-    // dispatcher is generation 1 and each summon adds one. The number is a
-    // fact about the dispatcher tree, not about the session header — a
-    // summoned dispatcher is top-level and parentless, so nothing can derive
-    // it from `parentSession` / `delegationDepth`; the spawn records it on the
-    // durable `dispatcher_sessions` mark row. ADR-0032 also ruled ONE policy
-    // text for every dispatcher, so the sentence that used to print the pair
-    // ("A generation-N dispatcher spawned you…") no longer exists in either
-    // language (`test/policy-assembler.test.ts` pins that byte-for-byte). The
-    // pair is therefore asserted where it now lives: the mark rows.
-    const storage: StorageTables = new Map();
-    const ctx = createActivationCtx(storage);
-    apply(ctx, volatileConfig({ enabled: true }));
-    const creator = createScopedAgent("chat-1");
-    await activateDispatcher(ctx, creator);
-
-    // The user-started dispatcher's own text: the shipped block, no generation.
-    const creatorPolicy = textOf(creator.injected[0]);
-    assert.equal(creatorPolicy, buildDispatcherPolicySection());
-
-    // generation 1 → child is generation 2, and gets the SAME one text.
-    await spawnPeer(creator, "Second", "Own the slice.");
-    const child = ctx.children[0] as StubChild;
-    assert.equal(textOf(child.agent.injected[0]), creatorPolicy);
-
-    // generation 2 → grandchild is generation 3, spawned BY the child.
-    await spawnPeer(child.agent, "Third", "Own the next slice.");
-    const grandchild = ctx.children[1] as StubChild;
-    assert.equal(textOf(grandchild.agent.injected[0]), creatorPolicy);
-
-    const marks = await readMarks(storage);
-    assert.equal(marks.get(String(child.agent.session.id))?.generation, 2);
-    assert.equal(
-      marks.get(String(grandchild.agent.session.id))?.generation,
-      3,
-    );
-    // The creator's text is untouched by the deeper spawn.
-    assert.equal(textOf(creator.injected[0]), creatorPolicy);
-  });
-
   it("the generation rides the mark row, one past the spawner's", async () => {
     const storage: StorageTables = new Map();
     const ctx = createActivationCtx(storage);
@@ -1678,18 +1302,23 @@ describe("ticket 141 — spawn generation through the real wiring", () => {
     await activateDispatcher(ctx, creator);
     await spawnPeer(creator, "Second", "Own the slice.");
     const child = ctx.children[0] as StubChild;
-    await spawnPeer(child.agent, "Third", "Own the next slice.");
-    const grandchild = ctx.children[1] as StubChild;
 
     const marks = await readMarks(storage);
     assert.equal(marks.get(String(child.agent.session.id))?.generation, 2);
-    assert.equal(
-      marks.get(String(grandchild.agent.session.id))?.generation,
-      3,
+    // Ticket 176 REVERSES this test's second half. It used to spawn a THIRD
+    // dispatcher from the child and pin generation 3 on the grandchild. A
+    // summoned dispatcher may not summon any more, so there is no grandchild:
+    // the surface carries no `spawn_dispatcher` and the host refuses the call
+    // outright (the host-level refusal is pinned in
+    // `test/spawn-dispatcher-host.test.ts`).
+    assert.ok(
+      !child.agent.scopedTools.names().includes(SPAWN_DISPATCHER_TOOL),
+      "the summoned class has no summon verb on its surface",
     );
+    assert.equal(ctx.children.length, 1, "no grandchild was ever created");
   });
 
-  it("a cold-resumed grandchild is re-activated with the dispatcher surface and the one policy, no parent activated in the new process", async () => {
+  it("a cold-resumed summoned dispatcher comes back as a team leader with no summon verb", async () => {
     const storage: StorageTables = new Map();
     const first = createActivationCtx(storage);
     apply(first, volatileConfig({ enabled: true }));
@@ -1697,10 +1326,7 @@ describe("ticket 141 — spawn generation through the real wiring", () => {
     await activateDispatcher(first, creator);
     await spawnPeer(creator, "Second", "Own the slice.");
     const child = first.children[0] as StubChild;
-    await spawnPeer(child.agent, "Third", "Own the next slice.");
-    const grandchild = first.children[1] as StubChild;
-    const grandchildId = String(grandchild.agent.session.id);
-    const livePolicy = textOf(grandchild.agent.injected[0]);
+    const childId = String(child.agent.session.id);
 
     // ── process restart ────────────────────────────────────────────────
     // Storage survives; plugin + host state does not. Nothing is activated
@@ -1712,75 +1338,30 @@ describe("ticket 141 — spawn generation through the real wiring", () => {
     await activateDispatcher(second, createScopedAgent("chat-1"));
 
     // ADR-0032: parentless at depth 0, like every summoned dispatcher.
-    const resumed = createScopedAgent(grandchildId, {
+    const resumed = createScopedAgent(childId, {
       topLevel: true,
       agentPreset: "standard",
     });
-    second.agentsById.set(grandchildId, resumed);
+    second.agentsById.set(childId, resumed);
     second.fire("agent/created", { agent: resumed, source: "resume" });
     await drain();
 
-    // ADR-0032 ruled ONE policy for every dispatcher, so the old
-    // "A generation-2 dispatcher spawned you…" sentence this test used to look
-    // for no longer exists in any face. What a cold resume must still restore
-    // is the role and the surface — asserted here, byte-identically to the
-    // live child.
-    assert.equal(textOf(resumed.injected[0]), livePolicy);
-    assert.deepEqual(resumed.scopedTools.names().sort(), DISPATCHER_TOOL_SET);
-
-    // KNOWN DEFECT, not re-pinned here (ticket 158 finding, 2026-10-29).
-    // Numbering rule: a cold-resumed generation-3 dispatcher stays generation
-    // 3, so its next summon is generation 4. Measured on this exact scenario,
-    // that summon is recorded as generation 2 — i.e. the resumed dispatcher
-    // came back as generation 1. Cause is in `src/`, so no assertion is
-    // written for it: `plugin.ts` `onUserDispatcherResumed` calls
-    // `lifecycle.activate(agent)` with no `generation`, `parent-agent.ts`
-    // defaults to 1, and the host's `spawnerGeneration =
-    // dispatcherGenerationOf?.(…) ?? 1` reads only the lifecycle — never the
-    // `dispatcherGenerations` mirror that `refreshDispatcherMarks` had already
-    // filled from this session's durable mark row (which does say 3).
-  });
-
-  it("a pre-141 mark row without a generation re-activates as a dispatcher, no throw", async () => {
-    const storage: StorageTables = new Map();
-    // A row written by the old code: session id only, no generation field.
-    storage.set(
-      DISPATCHER_SESSION_TABLE_NAME,
-      new Map<string, unknown>([["legacy-child", { sessionId: "legacy-child" }]]),
+    // Ticket 176: what a cold resume must still restore is the role, the
+    // surface AND the no-summon rule. The class survives because a
+    // `dispatcher_sessions` row is written only by the spawn path, so a row's
+    // presence already means "another dispatcher summoned this session".
+    assert.ok(
+      textOf(resumed.injected[0]).includes("Lead a team to tackle a massive job"),
+      "the team-leader class is restored from the durable mark",
     );
-    const ctx = createActivationCtx(storage);
-    apply(ctx, volatileConfig({ enabled: true }));
-    // The boot warm-up: a user chat activates first and reads the mark table.
-    await activateDispatcher(ctx, createScopedAgent("chat-1"));
-
-    // A marked session that comes back as a summoned dispatcher does
-    // (ADR-0032): parentless at depth 0.
-    const legacy = createScopedAgent("legacy-child", {
-      topLevel: true,
-    });
-    ctx.agentsById.set("legacy-child", legacy);
-    ctx.fire("agent/created", { agent: legacy, source: "resume" });
-    await drain();
-
-    // The row is read, not thrown on: the session returns with the full
-    // dispatcher surface and the one policy every dispatcher gets.
-    assert.deepEqual(legacy.scopedTools.names().sort(), DISPATCHER_TOOL_SET);
-    assert.equal(textOf(legacy.injected[0]), buildDispatcherPolicySection());
-
-    // Numbering rule for this row (`cordis-dsh-host.ts` `refreshDispatcherMarks`
-    // and `resumeMarkedDispatcher`): a pre-141 row carries no generation, and
-    // every row ever written came from a spawn, so it reads as generation 2 —
-    // never generation 1, which is reserved for user-started chats and is
-    // rejected by `parseDispatcherMark`. That is a statement about the ROW, and
-    // it is the value the host's own mirror holds.
-    //
-    // KNOWN DEFECT (ticket 158 finding, 2026-10-29): the re-activation does not
-    // carry it. Measured on this exact scenario, a summon from this resumed
-    // generation-2 dispatcher is recorded as generation 2 instead of 3 — the
-    // same lost-generation defect documented on the cold-resume test above,
-    // with the same `src/` cause. The old assertion here checked a policy
-    // sentence that ADR-0032 deleted, so nothing is re-pinned for it.
+    assert.ok(!textOf(resumed.injected[0]).includes("chief of staff"));
+    assert.deepEqual(
+      resumed.scopedTools.names().sort(),
+      SPAWNED_DISPATCHER_TOOL_SET,
+      "the resumed team leader cannot summon",
+    );
   });
+
 });
 
 describe("ticket 142 — a durably marked worker is wake-able by a send", () => {
@@ -1866,92 +1447,6 @@ describe("ticket 142 — a durably marked worker is wake-able by a send", () => 
       resumed.agent.session.header?.delegationDepth,
       workerDepth ?? 1,
     );
-  });
-
-  it("two sends before the worker returns coalesce: one resume, one delivered correction (the latest)", async () => {
-    const storage: StorageTables = new Map();
-    const first = createActivationCtx(storage);
-    apply(first, volatileConfig({ enabled: true }));
-    const creator = createScopedAgent("chat-1");
-    await activateDispatcher(first, creator);
-    const spawned = await callScoped(creator, "spawn_worker", {
-      stream_key: "migrate",
-      title: "Migration",
-      prompt: "Do the migration.",
-    });
-    const workerId = String(spawned.worker_id);
-
-    const second = createActivationCtx(storage);
-    apply(second, volatileConfig({ enabled: true }));
-    await drain();
-    const creatorTwo = createScopedAgent("chat-1");
-    await activateDispatcher(second, creatorTwo);
-
-    second.holdResumes();
-    const firstSend = await callScoped(creatorTwo, "message_agent", {
-      target: workerId,
-      text: "first instruction",
-    });
-    assert.equal(firstSend.ok, true, JSON.stringify(firstSend));
-    const secondSend = await callScoped(creatorTwo, "message_agent", {
-      target: workerId,
-      text: "second instruction",
-    });
-    assert.equal(secondSend.ok, true, JSON.stringify(secondSend));
-    // Both accepted, one resume requested (the guard), nothing delivered yet.
-    assert.equal(second.sendMessageCalls.length, 1);
-
-    await second.releaseResumes();
-    await drain();
-
-    // One resume call total, and only the LATEST correction is delivered —
-    // the same last-wins rule the live steer queue applies.
-    const resumeCalls = second.sendMessageCalls.filter((call) =>
-      call.text.includes("resumed"),
-    );
-    assert.equal(resumeCalls.length, 1);
-    const delivered = second.sendMessageCalls.filter(
-      (call) => !call.text.includes("resumed"),
-    );
-    assert.equal(delivered.length, 1);
-    assert.ok(delivered[0]?.text.includes("second instruction"));
-    assert.ok(!delivered[0]?.text.includes("first instruction"));
-  });
-
-  it("a second announcement of the resumed worker delivers nothing new (no double delivery)", async () => {
-    const storage: StorageTables = new Map();
-    const first = createActivationCtx(storage);
-    apply(first, volatileConfig({ enabled: true }));
-    const creator = createScopedAgent("chat-1");
-    await activateDispatcher(first, creator);
-    const spawned = await callScoped(creator, "spawn_worker", {
-      stream_key: "migrate",
-      title: "Migration",
-      prompt: "Do the migration.",
-    });
-    const workerId = String(spawned.worker_id);
-
-    const second = createActivationCtx(storage);
-    apply(second, volatileConfig({ enabled: true }));
-    await drain();
-    const creatorTwo = createScopedAgent("chat-1");
-    await activateDispatcher(second, creatorTwo);
-
-    await callScoped(creatorTwo, "message_agent", {
-      target: workerId,
-      text: "resume it",
-    });
-    await drain();
-    const afterFirst = second.sendMessageCalls.length;
-    assert.equal(afterFirst, 2, "one resume + one correction");
-
-    const resumed = second.children.find((child) => child.id === workerId);
-    assert.ok(resumed);
-    // The host re-announces the same live session (a second resume, a
-    // reconnect): the parked slot is empty, so nothing is sent again.
-    second.fire("agent/created", { agent: resumed.agent, source: "resume" });
-    await drain();
-    assert.equal(second.sendMessageCalls.length, afterFirst);
   });
 
   it("an UNMARKED dead worker keeps the fence: unknown-worker from steer_worker, nothing resumed", async () => {

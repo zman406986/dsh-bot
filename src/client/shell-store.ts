@@ -57,7 +57,6 @@
  */
 import type {
   RosterSnapshot,
-  RosterSnapshotBlocked,
   RosterSnapshotRecentResult,
 } from "../core/roster-snapshot.js";
 import { ROSTER_STALE_WINDOW_MS, parseRosterSnapshot } from "../core/roster-snapshot.js";
@@ -68,21 +67,18 @@ import { rosterSectionFor } from "./roster-store.js";
 export interface ShellPresenceSummary {
   /** Non-terminal rows (spawned / running / steering). */
   readonly working: number;
-  /** Blocked or terminal-and-undelivered rows — the user is on the hook. */
+  /** Terminal-and-undelivered rows — the user is on the hook. */
   readonly needsYou: number;
   /** Terminal and delivered rows. */
   readonly finished: number;
 }
 
 /**
- * The row's waiting marker — the sidebar's blocked chip data, with the
- * design-17 §4.1 precedence (a blocked ask outranks a landed-undelivered
- * result). `blocked` carries class + target (names only, never a secret).
+ * The row's waiting marker — the sidebar's chip data. The `blocked` variant
+ * went with the worker access-ask feature (ticket 174 / ADR-0033), so the only
+ * waiting state left is a landed-undelivered result.
  */
-export type ShellWaitingMarker =
-  | { readonly kind: "blocked"; readonly blocked: RosterSnapshotBlocked }
-  | { readonly kind: "landed" }
-  | null;
+export type ShellWaitingMarker = { readonly kind: "landed" } | null;
 
 /** One sidebar row: a dsh session the shell knows about. */
 export interface ShellSessionRow {
@@ -95,10 +91,7 @@ export interface ShellSessionRow {
    * arrived (honest "unavailable" — never fabricated zeros).
    */
   readonly presence: ShellPresenceSummary | null;
-  /**
-   * Highest-precedence waiting marker from the session's snapshot
-   * (blocked ask > landed-undelivered), or `null`.
-   */
+  /** The session's waiting marker (landed-undelivered), or `null`. */
   readonly waiting: ShellWaitingMarker;
   /**
    * The snapshot's `recentResult` excerpt — the hover preview's "last
@@ -147,11 +140,7 @@ export function describePresence(
 ): ShellPresenceSummary {
   const counters = { working: 0, needsYou: 0, finished: 0 };
   for (const worker of snapshot.workers) {
-    const section = rosterSectionFor(
-      worker.status,
-      worker.blocked,
-      worker.delivered,
-    );
+    const section = rosterSectionFor(worker.status, worker.delivered);
     if (section === "active") counters.working += 1;
     else if (section === "needs-you") counters.needsYou += 1;
     else counters.finished += 1;
@@ -160,19 +149,12 @@ export function describePresence(
 }
 
 /**
- * The waiting marker for a snapshot: the FIRST blocked row wins (roster
- * order is the deterministic tie-break), else the landed-undelivered marker,
- * else nothing — blocked outranks landed (design-17 §4.1), the same
- * precedence the panel's per-row markers follow.
+ * The waiting marker for a snapshot: the landed-undelivered marker, else
+ * nothing (ticket 174 / ADR-0033 removed the blocked-ask variant).
  */
 export function describeWaiting(
   snapshot: RosterSnapshot,
 ): ShellWaitingMarker {
-  for (const worker of snapshot.workers) {
-    if (worker.blocked !== null) {
-      return { kind: "blocked", blocked: worker.blocked };
-    }
-  }
   if (
     snapshot.workers.some(
       (worker) => isTerminalStatus(worker.status) && !worker.delivered,

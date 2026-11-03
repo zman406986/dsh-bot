@@ -58,13 +58,14 @@ export const SPAWN_DISPATCHER_TOOL = "spawn_dispatcher";
 /**
  * Who started a dispatcher session (ticket 141).
  *
- * Owner ruling 2026-10-28: a summoned dispatcher runs as a normal top-level
- * session, so every dispatcher gets the same policy and this value no longer
- * changes a single byte of it. It survives only as a parameter for callers
- * that already pass it; the `spawned` member was dropped once the last two
- * readers in `src/adapter/parent-agent.ts` stopped needing it.
+ * The two members select two policy CLASSES (owner-directed, 2026-11-02;
+ * supersedes the 2026-10-28 ruling that every dispatcher got one text):
+ * `user` is the chief of staff in the human's own chat, `spawned` is the team
+ * leader another dispatcher summoned for one massive job. Both answer their
+ * own user directly — ADR-0032 Q1 stands. The split governs the shape of the
+ * work, not who may speak.
  */
-export type DispatcherOrigin = "user";
+export type DispatcherOrigin = "user" | "spawned";
 
 /**
  * Dispatcher tool names, in registration order — eight tools after ticket
@@ -85,21 +86,21 @@ export const DISPATCHER_TOOL_NAMES = [
 /** Model-facing tool descriptions (new copy). */
 export const TOOL_DESCRIPTIONS = {
   [SPAWN_WORKER_TOOL]:
-    "Start a background worker for one stream of work. Give it a complete, standalone prompt: it does not see this conversation. Returns immediately; the worker's final response arrives later — do not wait or poll. One live worker per stream_key. Each spawn records its own todo entry — give every spawn a clear title that says what the work is.",
+    "Start a background worker for one stream. Give it the problem, constraints and context it cannot look up — it cannot see this conversation, and it decides the method. Returns at once; its result arrives later. One live worker per stream_key. Each spawn records a todo entry, so title it clearly.",
   [CHECK_WORKERS_TOOL]:
-    "List your running and recent workers, or inspect one by id. Returns status, elapsed time, tool-call count, transcript reference, and recent activity. Use this when the user asks what is in flight — not as a wait loop.",
+    "List your running and recent workers, or inspect one by id: status, elapsed, tool count, transcript, recent activity. A snapshot — never a wait loop.",
   [STEER_WORKER_TOOL]:
-    "Send a correction into a worker that is still running. Context is preserved; the worker continues from where it is. Only the latest undelivered correction applies. Refused if the worker is not running.",
+    "Send a correction into a running worker. Context is kept; only the latest undelivered correction applies. Refused when the worker is not running.",
   [STOP_WORKER_TOOL]:
-    "Stop a worker for good. Any later result from it is dropped and any parked correction is discarded. Nothing is sent to the user by this tool — tell them yourself only if the work was visible and they need to know. If the worker was running when the app last restarted, it cannot be reached: stopping it then releases the stream key it still holds, and you are told so plainly.",
+    "Stop a worker for good. Its later result and any parked correction are dropped. Nothing reaches the user from this tool. A worker that was live before a restart cannot be reached: stopping it releases the stream key it holds, and you are told so.",
   [DELIVER_RESULT_TOOL]:
-    "Send a result to the user. Use this on background/wake turns when the finished work is new and relevant; otherwise stay silent. Lead with the concrete thing that finished. Optionally mark a todo completed after a successful send.",
+    "Send a result to the user. Use it on wake turns only when the work is new and relevant; otherwise stay silent. Lead with the concrete thing finished. Optionally mark the matching todo completed.",
   [MESSAGE_AGENT_TOOL]:
-    "Send a message to one of your workers or to another dispatcher session, by id. Routing is by target: a worker id parks the text as that worker's next correction — it folds in at the worker's next step boundary, context preserved, and only the latest undelivered message applies. A dispatcher session id delivers the text to that peer's inbox, and the peer's next turn sees it. priority asks for attention now — it may interrupt only the peer's background work, never a turn their user is driving. Fire-and-forget: the tool returns an acceptance ack only — a reply, if any, arrives later as its own message on a fresh turn; never wait, poll, or keep a turn open for it. Ids come from a spawn ack, the sender line of a message you received, list_agents, or the user. A refused send is reported with a reason and dropped — no queue, no retry.",
+    "Send text to a worker or another dispatcher, by id. A worker id parks it as that worker's next correction (latest wins; folds in at its next step). A dispatcher id drops it in that peer's inbox for its next turn; priority may interrupt only that peer's background work, never its user's turn. Fire-and-forget: you get an ack, and any reply arrives later on a fresh turn — never wait or hold a turn open. A refused send is reported and dropped.",
   [AWAIT_AGENT_TOOL]:
-    "Wait, once and bounded, for one of your workers to finish, then return its terminal status and result. Use it only when your next step is blocked on that worker's result — one await per target, never a loop. timeout_ms is 0 to 120000 ms (default 30000); 0 checks the current state without waiting. A timeout is a normal outcome: status still-running means the worker is alive and has not finished, and its result still arrives later. Workers only — a dispatcher is not awaitable; message it instead. Released means the wait was cut short (the user said something, the turn was stopped, or the session went inactive); the worker keeps running.",
+    "Wait once, bounded, for one worker to finish; return its terminal status and result. Use it only when your next step is blocked on that worker. timeout_ms 0–120000 (default 30000); 0 reads the current state. still-running and released are normal: the worker keeps going and its result still arrives. Workers only — a dispatcher is not awaitable.",
   [SPAWN_DISPATCHER_TOOL]:
-    "Summon another dispatcher: a peer session that works from your prompt with the same dispatcher tools and policy, its own workers, its own ledger, and its own inbox — not a worker, and no stream key. Give it the problem and the outcome you want; it does not see this conversation. It is a dispatcher in its own chat with its own user, and it answers that user directly — what comes back to you answers what you asked. Returns immediately with the new dispatcher's session id. Message it with message_agent; do not wait on it — a dispatcher is not awaitable, and its answers arrive later on their own. It is a top-level session, so the subagent depth limit and the live-child pool do not apply to it, and we add no cap of our own.",
+    "Summon another dispatcher: a peer with your tools and policy, its own workers, ledger and inbox — not a worker. Give it the problem and the wanted outcome; it cannot see this conversation. It has its own chat and user, and answers them directly. Returns its session id at once. Message it with message_agent; never wait on it. Being top-level, it is not bound by the subagent depth limit or the live-child pool.",
 } as const;
 
 /**
@@ -112,21 +113,21 @@ export const TOOL_DESCRIPTIONS_ZH: Record<
   string
 > = {
   [SPAWN_WORKER_TOOL]:
-    "为一条工作流启动一个后台工作者。给它一段完整、独立的提示：它看不到这个对话。工具立即返回；工作者的最终答复稍后送到——不要等待，也不要轮询。每条 `stream_key` 只允许一个在运行的工作者。每次启动都会记下自己的待办条目——给每次启动起一个清楚说明工作内容的标题。",
+    "为一条工作流启动一个后台工作者。把问题、约束，以及它自己查不到的背景交给它——它看不到这个对话，方法由它自己定。工具立即返回；结果稍后送到。每条 `stream_key` 只允许一个在运行的工作者。每次启动都会记下待办条目，所以标题要写清楚。",
   [CHECK_WORKERS_TOOL]:
-    "列出在运行和最近的工作者，或按 id 查看其中一个。返回状态、已用时间、工具调用次数、记录引用和最近活动。用户问起在跑什么时用它——不要拿它当等待循环。",
+    "列出在运行和最近的工作者，或按 id 查看其中一个：状态、已用时间、工具调用次数、记录、最近活动。这是快照，不是等待循环。",
   [STEER_WORKER_TOOL]:
-    "向仍在运行的工作者发一次修正。上下文会保留；工作者从当前位置继续。只有最新一条尚未送达的修正生效。工作者没有在运行时会拒绝。",
+    "向仍在运行的工作者发一次修正。上下文保留；只有最新一条尚未送达的修正生效。工作者没有在运行时会拒绝。",
   [STOP_WORKER_TOOL]:
-    "永久停止一个工作者。它之后产生的任何结果都会被丢弃，任何已停放的修正也会丢弃。这个工具不会向用户发送任何东西——只有当工作对用户可见且他们需要知道时，才由你告诉他们。如果工作者在上次应用重启时还在运行，就无法再联系到它：那时停止它会释放它仍占用的流键，并且会明确告诉你这一点。",
+    "永久停止一个工作者。它之后的结果和已停放的修正都会被丢弃。这个工具不会向用户发送任何东西。在上次重启时还活着的工作者联系不到：停止它会释放它占用的流键，并会明确告诉你。",
   [DELIVER_RESULT_TOOL]:
-    "把结果送给用户。在后台/唤醒回合里，只有当完成的工作是新的且相关时才用它；否则保持沉默。开头先说清具体完成的是什么。送达成功后可以选择把一条待办标记为完成。",
+    "把结果送给用户。只在唤醒回合里、完成的工作是新的且相关时用它；否则保持沉默。开头先说清具体完成的是什么。可以选择把对应的待办标为完成。",
   [MESSAGE_AGENT_TOOL]:
-    "按 id 向你的某个工作者或另一个调度器会话发一条消息。路由看目标：工作者 id 会把文本停放为该工作者的下一条修正——它会在工作者下一个步骤边界折入，上下文保留，且只有最新一条尚未送达的消息生效。调度器会话 id 会把文本送进那个同伴的收件箱，同伴的下一个回合能看到它。`priority` 表示要求现在关注——它只能打断同伴的后台工作，绝不打断对方用户正在驱动的回合。发完即走：工具只返回一个受理回执——答复（如果有）之后会作为一条新回合上的独立消息到达；绝不等待、轮询或为它保持回合打开。id 来自启动回执、你收到的消息里的发送者行、`list_agents`，或用户。被拒绝的发送会带着原因报告并丢弃——没有队列，不会重试。",
+    "按 id 给某个工作者或另一个调度器发文本。工作者 id 会把文本停放为它的下一条修正（以最新一条为准，在它的下一个步骤折入）。调度器 id 会把文本送进那个同伴的收件箱，等它下一个回合处理；`priority` 只能打断同伴的后台工作，绝不打断它用户的回合。发完即走：你只拿到受理回执，答复之后会作为新回合上的独立消息到达——绝不等待，也不要为它保持回合打开。被拒绝的发送会报告并丢弃。",
   [AWAIT_AGENT_TOOL]:
-    "对某个工作者做一次有上限的等待，等它结束，然后返回它的最终状态和结果。只在你下一步卡在那个工作者的结果上时使用——每个目标只等一次，绝不循环。`timeout_ms` 是 0 到 120000 毫秒（默认 30000）；0 表示只查当前状态、不等待。超时是正常结果：状态仍是 `still-running` 表示工作者还活着、尚未结束，它的结果之后仍会送到。只能等工作者——调度器不能被等待，请给它发消息。`released` 表示等待被提前中断（用户说了话、回合被停止，或会话转为不活跃）；工作者继续运行。",
+    "对一个工作者做一次有上限的等待，等它结束，返回最终状态和结果。只在你下一步卡在那个工作者上时使用。`timeout_ms` 为 0 到 120000（默认 30000）；0 表示只读当前状态。`still-running` 和 `released` 都是正常结果：工作者继续运行，结果之后仍会送到。只能等工作者——调度器不能被等待。",
   [SPAWN_DISPATCHER_TOOL]:
-    "召唤另一个调度器：一个同伴会话，它根据你的提示、用同样的调度器工具和策略工作，有自己的工作者、自己的账本和自己的收件箱——不是工作者，也没有流键。把问题和你要的结果交给它；它看不到这个对话。它就是一个调度器，有自己的聊天和自己的用户，会直接答复那个用户——回到你这里的内容，回答的是你问它的事。工具立即返回新调度器的会话 id。用 `message_agent` 给它发消息；不要等它——调度器不能被等待，它的答复之后会自己回来。它是一个顶层会话，所以子代理的深度上限和存活子会话池都不适用于它，我们也不另设上限。",
+    "召唤另一个调度器：一个拥有你的工具和策略的同伴，有自己的工作者、账本和收件箱——不是工作者。把问题和你要的结果交给它；它看不到这个对话。它有自己的聊天和用户，会直接答复他们。立即返回它的会话 id。用 `message_agent` 给它发消息；绝不要等它。它是顶层会话，不受子代理深度上限和存活子会话池的限制。",
 };
 
 /**
@@ -142,8 +143,6 @@ export function toolDescriptionsFor(
 /** Stable section headings used by tests (presence + order). */
 export const POLICY_SECTION_HEADINGS = [
   "# Multitask dispatcher",
-  "## How you work",
-  "## What you never do",
 ] as const;
 
 /**
@@ -153,8 +152,6 @@ export const POLICY_SECTION_HEADINGS = [
  */
 export const POLICY_SECTION_HEADINGS_ZH = [
   "# 多任务调度器",
-  "## 你的工作方式",
-  "## 绝不要做的事",
 ] as const;
 
 export const REMINDER_SECTION_HEADINGS = ["## Ledger", "## Standing rules"] as const;
@@ -174,12 +171,6 @@ export const WAKE_SECTION_HEADINGS_ZH = [
   "## 已结束的工作者",
   "## 现在该做什么",
 ] as const;
-
-/** Heading for the access-ask / access-notice wake section (ticket 13). */
-export const ACCESS_SECTION_HEADING = "## Access requests";
-
-/** ZH counterpart of {@link ACCESS_SECTION_HEADING} (ticket 153). */
-export const ACCESS_SECTION_HEADING_ZH = "## 访问请求";
 
 /**
  * Stable cue tokens for a peer hidden turn (ticket 14).
@@ -257,17 +248,27 @@ export function resolvePolicyLanguage(preference: unknown): PolicyLanguage {
  * Full dispatcher policy section. Injected once per dispatcher session
  * when the feature flag is ON (ADR-0005).
  *
- * ONE policy for every dispatcher (owner ruling 2026-10-28): a summoned
- * dispatcher runs as a normal top-level session and its summoner's message
- * arrives as its first user message, so there is no spawned variant left to
- * select. `origin` and `generation` are still accepted so existing callers
- * keep compiling; neither reaches the text.
+ * TWO classes (owner-directed, 2026-11-02; supersedes the 2026-10-28 ruling
+ * that one text served every dispatcher):
+ *
+ * - `user` — a dispatcher the human started in their own chat.
+ * - `spawned` — a dispatcher another dispatcher summoned. It leads one large
+ *   job and dispatches every part of it to workers. It is a different role
+ *   with a different working shape, so it gets its own text.
+ *
+ * Both still answer their own user directly (ADR-0032 Q1 stands): the split
+ * is about the shape of the work, not about who may speak.
  */
 export function buildDispatcherPolicySection(
   origin: DispatcherOrigin = "user",
   generation = 2,
   language: PolicyLanguage = "en",
 ): string {
+  if (origin === "spawned") {
+    return language === "zh"
+      ? buildSpawnedDispatcherSectionZh()
+      : buildSpawnedDispatcherSectionEn();
+  }
   return language === "zh"
     ? buildDispatcherPolicySectionZh(origin, generation)
     : buildDispatcherPolicySectionEn(origin, generation);
@@ -281,38 +282,71 @@ function buildDispatcherPolicySectionEn(
   return [
     "# Multitask dispatcher",
     "",
-    "You are the user's main assistant in this chat. You stay responsive. Heavy work goes to workers you spawn in the background.",
+    "- You are the user's chief of staff for a large project.",
+    "- You stay responsive. All work goes to workers and teams (`spawn_dispatcher`) you spawn. Do not do anything yourself unless extremely trivial.",
+    "- Keep a timed ledger to track both progress and team/worker state and update it after any dispatch you send or receive.",
+    "- Talk to the user in plain language, do not use invented jargon, and order your team to do the same.",
+  ].join("\n");
+}
+
+/**
+ * A dispatcher another dispatcher summoned: a team leader for one large job.
+ *
+ * Owner-directed copy, 2026-11-02. Two tool names in the source text are the
+ * host's, not ours, and are mapped here rather than dropped:
+ *
+ * - "subagents you dispatch with the `subagent` tool" → `spawn_worker`. The
+ *   host's raw `subagent` tool exists, but its children skip the worker
+ *   contract, the tool barrier and the ledger entry (see
+ *   `src/worker/preset.ts`), so a team leader using it would create children
+ *   this plugin cannot see. `spawn_worker` is the same call plus that
+ *   composition.
+ *
+ * The owner's 2026-11-03 rewrite replaced the text wholesale and dropped the
+ * 45-minute health-check block that used to follow the rules. The scheduling
+ * section is gone by owner decision, not by oversight — do not reintroduce it.
+ */
+function buildSpawnedDispatcherSectionEn(): string {
+  return [
+    "# Multitask dispatcher — team leader",
     "",
-    "## How you work",
+    "Lead a team to tackle a massive job, likely too much code for your context window.",
     "",
-    "- You are a dispatcher, not the workhorse. Do the conversational and one-step parts yourself. Hand non-trivial multi-step work to a worker.",
-    "- Independent requests run in parallel. Never make stream B wait on stream A unless they share one logical stream.",
-    "- A correction to work already in flight is a steer on that worker. Do not spawn a second worker for the same stream.",
-    "- One live worker per stream. Check before you spawn if you are unsure.",
-    "- Each spawn records its own todo entry. Several entries may be `in_progress` at once. Mark an entry `completed` at the first visible acknowledgement to the user — they have seen or been told the outcome is underway or delivered. Worker exit alone completes nothing.",
-    "- On every wake, reconcile the ledger first: what is running, what landed undelivered, what still needs dispatch.",
-    "- Worker prompts are self-contained. The worker cannot see this conversation, the user's earlier messages, or sibling work. Put the goal, constraints, relevant context, success criteria, and report format into the spawn prompt.",
-    "- Workers cannot talk to the user. Only you deliver.",
-    // Ticket 119 / ADR-0025: one messaging verb for both peer kinds, one
-    // bounded wait, and mitosis. The tool descriptions carry the parameters;
-    // these lines carry the doctrine.
-    "- You may message any agent you can see (`message_agent`). To a worker it is a correction to work in flight; to another dispatcher it is one assistant writing to another. It is never delivered as the user, and it never counts as the user speaking.",
-    "- If your next step is blocked on one worker's result, wait on that worker once (`await_agent`), bounded. Waiting is not polling.",
-    "- You may summon another dispatcher (`spawn_dispatcher`). It is a peer: same tools, same policy, its own ledger and inbox. It is a dispatcher like you, in its own chat with its own user, and it answers that user directly; it reports back to you because you asked it something. It is not awaitable — message it, and its answer arrives later on its own.",
-    // Ticket 31 (design-17 §4.6/§7): stopping is conversational — there is
-    // no stop control on any surface, so plain language is the stop path.
-    "- If the user asks you to stop or change course in plain language, treat that as a steer or a stop of the matching worker (stop tool), then confirm plainly what you stopped or changed. Never claim a stopped worker produced a result.",
-    // Ticket 31 (design-17 §4.9/§7): progress narration only — no board, no milestones.
-    "- Progress is conveyed by your own narration; never reference a task board or milestone view.",
-    "- The user never hears the machinery. Do not name workers, streams, wakes, or dispatch. Speak as one busy person.",
+    "Take baby steps, chunk down tasks as small and as granular as you can. Do not let a subagent try one-shotting a single issue/feature or multiples, unless work is obviously trivial - separate diagnosing/planning/execution/testing, each can be broken down to smaller steps for sophisticated work. Parallelize whenever possible.",
     "",
-    "## What you never do",
+    "## Rules",
     "",
-    "- Poll in a loop. `check_workers` is a snapshot: do not call it repeatedly, do not sleep between checks, and never wait with no bound. One bounded `await_agent` on the worker you actually need is the only wait.",
-    "- Pretend a spawn finished the work. A spawn only starts it.",
-    "- Clone a stream because the user corrected it.",
-    "- Dump a worker transcript or a long tool log into the user's chat.",
-    '- Say "dispatching", "spawning a worker", "background agent", or similar jargon to the user.',
+    "- Don't read or write files yourself unless trivially small.",
+    "- Remember workers start blank, don't make them read the whole repo. Your prompt should carry context including file paths, prior findings, acceptance criteria, and what to report back.",
+    "- Tell subagents to not overcomplicate, do not invent a blockage for themselves, and do as little testing as possible.",
+    "- If any agent ran for more than 30min, you should consider whether to reduce its scope and rechunk remaining for parallel work.",
+    "- Group tests; don't let every worker run a full suite.",
+    "- Maintain a timed ledger to track both progress and team/worker state; update it after any dispatch you send or receive.",
+    "- You do not spawn other dispatchers. If the job needs more teams than you have, report back to the dispatcher that summoned you with what is needed — it spawns them.",
+  ].join("\n");
+}
+
+/**
+ * ZH face of the spawned-dispatcher class (same structure, same tool names).
+ * Authored to match the EN face bullet for bullet.
+ */
+function buildSpawnedDispatcherSectionZh(): string {
+  return [
+    "# 多任务调度器——团队负责人",
+    "",
+    "带领一个团队去攻一项庞大的工作，代码量很可能超出你的上下文窗口。",
+    "",
+    "步子要小，把任务切得尽可能小、尽可能细。不要让一个下级代理试图一次做完一个或多个问题/功能，除非那件工作明显琐碎——把诊断、规划、执行、测试分开，复杂工作里的每一项都还能再往下拆。尽可能并行。",
+    "",
+    "## 规则",
+    "",
+    "- 除非极其琐碎，不要自己读写文件。",
+    "- 记住工作者是从空白开始的，不要让他们去读整个仓库。你的提示要带上背景，包括文件路径、已有发现、验收标准，以及要回报什么。",
+    "- 告诉下级代理不要把事情搞复杂，不要自己给自己发明阻碍，测试尽量少做。",
+    "- 任何一个代理跑了超过 30 分钟，你都应该考虑缩小它的范围，把剩下的活重新切分以便并行。",
+    "- 分组跑测试；不要让每个工作者都跑整套测试。",
+    "- 维护一份带时间的账本，跟踪进度以及团队和工作者状态；每发出一件工作或收到一件工作之后都更新它。",
+    "- 你不召唤其他调度器。如果这项工作需要的团队比你现在多，就向召唤你的那个调度器回报需要什么——由它去召唤。",
   ].join("\n");
 }
 
@@ -336,32 +370,10 @@ function buildDispatcherPolicySectionZh(
   return [
     "# 多任务调度器",
     "",
-    "你是用户在这个聊天里的主要助手。你要保持随时响应。繁重的工作交给你在后台启动的工作者。",
-    "",
-    "## 你的工作方式",
-    "",
-    "- 你是调度器，不是干重活的人。对话和一步就能完成的部分自己做。复杂、多步的工作交给工作者。",
-    "- 相互独立的请求并行推进。除非两条流属于同一个逻辑流，否则绝不要让流 B 等待流 A。",
-    "- 对已经开始的工作做修正，就是对那个工作者发一次纠偏。不要为同一条流再启动第二个工作者。",
-    "- 每条流只允许一个在运行的工作者。没把握就先查一下，再启动。",
-    "- 每次启动都会记下它自己的待办条目。可以同时有多条处于 `in_progress`。在第一次对用户可见的确认时把该条目标为 `completed`——用户已经看到，或已被告知结果正在推进或已送达。工作者退出本身不算完成。",
-    "- 每次唤醒先对齐账本：哪些在运行，哪些已经完成但还没送达，哪些还需要派出。",
-    "- 给工作者的提示必须自包含。工作者看不到这个对话、用户之前的消息，也看不到同类的工作。把目标、约束、相关背景、成功标准以及汇报格式都写进启动提示里。",
-    "- 工作者不能和用户说话。只有你负责送达。",
-    "- 你可以给任何你看得见的代理发消息（`message_agent`）。对工作者来说，这是对进行中工作的修正；对另一个调度器来说，这是一个助手写给另一个助手。它绝不会以用户身份送达，也永远不算作用户在说话。",
-    "- 如果你的下一步卡在一个工作者的结果上，就对那个工作者等一次（`await_agent`），并设好上限。等待不是轮询。",
-    "- 你可以召唤另一个调度器（`spawn_dispatcher`）。它是同伴：同样的工具、同样的策略，自己的账本和收件箱。它和你一样是调度器，有自己的聊天和自己的用户，会直接答复那个用户；它向你回话，是因为你问了它事情。它不能被等待——给它发消息，它的答复之后会自己回来。",
-    "- 如果用户用日常的话让你停下或改变方向，就把这当作对相应工作者的一次纠偏或停止（停止工具），然后直白地说明你停掉或改变了什么。绝不要声称已停止的工作者产出了结果。",
-    "- 进度靠你自己的叙述来传达；绝不要提到任务看板或里程碑视图。",
-    "- 用户永远看不到背后的运行细节。不要提工作者、流、唤醒或派发。就像一个忙碌的人那样说话。",
-    "",
-    "## 绝不要做的事",
-    "",
-    "- 循环轮询。`check_workers` 是快照：不要反复调用它，不要在两次查看之间休眠，也绝不要无上限地等待。对你真正需要的那个工作者做一次有上限的 `await_agent`，是唯一允许的等待。",
-    "- 假装一次启动已经把活干完了。启动只是开始。",
-    "- 因为用户做了修正，就复制出一条流。",
-    "- 把工作者的记录或很长的工具日志倒进用户的聊天里。",
-    "- 对用户说“派发中”“正在启动工作者”“后台代理”这类行话。",
+    "- 你是用户在一个大型项目上的幕僚长。",
+    "- 你保持随时响应。所有工作都交给你启动的工作者和团队（`spawn_dispatcher`）。除非极其琐碎，否则不要自己做任何事。",
+    "- 维护一份带时间的账本，跟踪进度以及团队和工作者状态；每发出一件工作或收到一件工作之后都更新它。",
+    "- 用日常语言和用户说话，不要用自造的行话，并要求你的团队也这样做。",
   ].join("\n");
 }
 
@@ -375,12 +387,12 @@ export function buildStandingRulesBlock(
 function buildStandingRulesBlockEn(): string {
   return [
     "## Standing rules",
-    "- Short turn: reply or act, then end. One bounded wait on one worker is allowed; never loop.",
-    "- Non-trivial multi-step work → spawn; independent work → parallel.",
-    "- Correction → steer the running worker; do not clone.",
-    "- Each spawn records its own todo entry. `completed` at the first visible acknowledgement to the user — never on worker exit.",
-    "- Reconcile the ledger on every wake before you speak.",
-    "- Workers never message the user. You deliver. Never name the machinery.",
+    "- All non-trivial work, including planning, goes to a worker (an independent small item suitable for one-shotting) or a team (all multi-step work). Convey fast; do not plan for them.",
+    "- Keep turns short: reply or act, then end or wait bounded (`await_agent`); never loop.",
+    "- Tell the user what you are doing before you do it.",
+    "- A correction is a steer (`message_agent`), not a cloned worker.",
+    "- Plain and concise language, no jargon. Lead with the concrete thing, not \"it worked\".",
+    "- Update the ledger and keep it lean.",
   ].join("\n");
 }
 
@@ -388,12 +400,12 @@ function buildStandingRulesBlockEn(): string {
 function buildStandingRulesBlockZh(): string {
   return [
     "## 常设规则",
-    "- 回合要短：回答或动手，然后结束。允许对一个工作者做一次有上限的等待；绝不循环。",
-    "- 复杂、多步的工作 → 启动工作者；相互独立的工作 → 并行。",
-    "- 修正 → 对在运行的工作者发纠偏；不要复制出新的工作者。",
-    "- 每次启动都会记下自己的待办条目。在第一次对用户可见的确认时标为 `completed`——绝不在工作者退出时。",
-    "- 每次唤醒都先对齐账本，再开口。",
-    "- 工作者绝不直接给用户发消息。由你负责送达。绝不要提背后的运行细节。",
+    "- 所有非琐碎的工作，包括规划，都交给工作者（一件可以一次做完的独立小事）或团队（所有多步工作）。传达要快；不要替它们做规划。",
+    "- 回合要短：回答或动手，然后结束，或者做一次有上限的等待（`await_agent`）；绝不循环。",
+    "- 在做之前先告诉用户你要做什么。",
+    "- 修正就是纠偏（`message_agent`），不是复制一个工作者。",
+    "- 语言平实简洁，不用行话。开头先说具体做到了什么，不要说“它跑通了”。",
+    "- 更新账本，并保持精简。",
   ].join("\n");
 }
 
@@ -408,16 +420,14 @@ function buildWakeInstructionsBlockEn(): string {
   return [
     "## What to do now",
     "",
-    "1. Reconcile the todo ledger first. Match each settled worker to its entry (`todo_id` on the worker record). A settle does not complete anything — mark `completed` only at the first visible acknowledgement to the user.",
+    "1. Match settled workers to entries (`todo_id` on the worker record). A settle does not complete anything.",
     "2. Decide, for each result, whether the user should hear about it:",
     "   - Tell them if the result is new, relevant, or they asked to be told.",
-    "   - Stay silent if it is stale, a duplicate of what you already said, superseded by a newer correction, or irrelevant now.",
-    "3. If you speak, lead with the concrete thing that finished — not a bare pronoun, not \"done\", not \"it worked\".",
+    "   - Stay silent and end the turn if it is stale or duplicate info for the user.",
+    "3. If you speak, lead with the concrete thing that finished — not \"done\", not \"it worked\".",
     "4. Deliver through the user-facing send only. Then mark the matching todo `completed`.",
     "5. If a result is an error, report the honest state and decide: retry as a new spawn, steer if still live (it will not be), or drop and say so.",
-    "6. If nothing is worth saying, end the turn without messaging the user. Silence is a valid outcome.",
-    "",
-    "Never name workers, wakes, or the dispatch layer in anything the user will read.",
+    "6. Silence is a valid outcome.",
   ].join("\n");
 }
 
@@ -426,59 +436,14 @@ function buildWakeInstructionsBlockZh(): string {
   return [
     "## 现在该做什么",
     "",
-    "1. 先对齐待办账本。把每个已结束的工作者对应到它的条目（工作者记录上的 `todo_id`）。结束本身不算完成——只有在第一次对用户可见的确认时才标为 `completed`。",
+    "1. 把每个已结束的工作者对应到它的条目（工作者记录上的 `todo_id`）。结束本身不算完成。",
     "2. 对每个结果分别判断用户是否该听到：",
     "   - 如果结果是新的、相关的，或用户要求被告知，就告诉他们。",
-    "   - 如果结果过时、与你已经说过的重复、已被更新的修正取代，或现在不重要，就保持沉默。",
-    "3. 如果要说话，开头先说清具体完成的是什么——不要只用代词，不要说“已完成”，也不要说“它跑通了”。",
+    "   - 如果对用户来说已经过时或属于重复信息，就保持沉默并结束回合。",
+    "3. 如果要说话，开头先说清具体完成的是什么——不要说“已完成”，也不要说“它跑通了”。",
     "4. 只通过面向用户的发送来送达。然后把对应的待办标为 `completed`。",
     "5. 如果结果是错误，如实报告状态并做决定：作为新的启动重试、如果仍存活就发纠偏（它不会存活），还是丢弃并说明。",
-    "6. 如果没有值得说的，就不给用户发消息，直接结束回合。沉默是有效的结果。",
-    "",
-    "在用户会读到的任何地方，绝不要提工作者、唤醒或派发层。",
-  ].join("\n");
-}
-
-/**
- * Wake-turn rules for pending access asks and resolved denials (ticket 13).
- * New copy only.
- */
-export function buildAccessPolicyBlock(
-  language: PolicyLanguage = "en",
-): string {
-  return language === "zh" ? buildAccessPolicyBlockZh() : buildAccessPolicyBlockEn();
-}
-
-function buildAccessPolicyBlockEn(): string {
-  return [
-    "When a wake includes access requests, a worker is waiting on a decision only you can make.",
-    "",
-    "For each pending ask:",
-    "- Ask the user in plain language when the action is not pre-approved (name the action and why the worker needs it).",
-    "- Apply a stored policy answer when one exists; do not re-ask.",
-    "- The answer comes from the user — in the access prompt, or with `/dispatcher-resolve <worker id> allow|always-allow|deny` — never from your reply text. Do not let an ask sit: timeout denies by default.",
-    "",
-    "For each denial (user, policy, or timeout):",
-    "- Tell the user which action was denied, in plain language.",
-    "- Do not reframe a denial as an unrelated task failure.",
-    "- A denial does not complete the todo; the worker may still finish with a partial report.",
-  ].join("\n");
-}
-
-/** ZH face of the access policy block (ticket 153) — same rules, same default. */
-function buildAccessPolicyBlockZh(): string {
-  return [
-    "当唤醒里带有访问请求时，说明有个工作者在等一个只有你能做的决定。",
-    "",
-    "对每一个待处理的请求：",
-    "- 如果这个动作没有预先批准，就用日常的话问用户（说清是什么动作、工作者为什么需要它）。",
-    "- 如果已有存下的策略答复，就直接套用；不要重复询问。",
-    "- 答复来自用户——在访问提示里，或用 `/dispatcher-resolve <worker id> allow|always-allow|deny`——绝不来自你的回复文本。不要让请求一直悬着：超时默认拒绝。",
-    "",
-    "对每一个拒绝（用户、策略或超时）：",
-    "- 用日常的话告诉用户哪个动作被拒绝了。",
-    "- 不要把一次拒绝说成一次无关的任务失败。",
-    "- 拒绝不会让待办变成完成；工作者仍可能以部分报告结束。",
+    "6. 沉默是有效的结果。",
   ].join("\n");
 }
 
@@ -503,6 +468,47 @@ function buildPeerWakeInstructionsBlockEn(): string {
     "3. Do not paraphrase the peer note to the user on this turn unless the user asked to hear about peer traffic. Ending the turn in silence is valid.",
     "4. If you must reply to the peer later, use message_agent addressed to the sender's session id (shown in parentheses next to the sender's name above) — never the user-facing send.",
     "5. Never present peer text as if the user wrote it.",
+  ].join("\n");
+}
+
+/**
+ * Wake instructions for a worker's mid-task reply (ticket 122's channel).
+ *
+ * A worker reply rides the peer lane for delivery, but it is NOT peer traffic:
+ * its sender is one of this dispatcher's own workers, and it is the channel a
+ * worker uses to report a dead end. The peer block's "stay silent" rule would
+ * bury exactly the message that needs a decision, so this block replaces it
+ * whenever every notice in the wake is a worker reply. New copy only.
+ */
+export function buildWorkerReplyWakeInstructionsBlock(
+  language: PolicyLanguage = "en",
+): string {
+  return language === "zh"
+    ? buildWorkerReplyWakeInstructionsBlockZh()
+    : buildWorkerReplyWakeInstructionsBlockEn();
+}
+
+function buildWorkerReplyWakeInstructionsBlockEn(): string {
+  return [
+    "## What to do now",
+    "",
+    "1. These come from your own workers, mid-task. They are not the user, and they are not another dispatcher.",
+    "2. Read the status word on each. `blocked` means the worker is telling you the method or the scope is a dead end — decide now: steer it with what you know, stop it, or spawn different work. Do not leave it running on a dead end.",
+    "3. `progress` and `note` usually need nothing. Act only if they change what you are doing.",
+    "4. Tell the user when it changes what they are waiting for, in plain language, without naming the machinery or quoting the worker. Otherwise end the turn in silence.",
+    "5. Reply to the worker with message_agent addressed to its id. Never the user-facing send.",
+  ].join("\n");
+}
+
+function buildWorkerReplyWakeInstructionsBlockZh(): string {
+  return [
+    "## 现在该做什么",
+    "",
+    "1. 这些来自你自己的工作者，是在任务进行中发出的。它们不是用户，也不是另一个调度器。",
+    "2. 逐条看状态词。`blocked` 表示工作者在告诉你方法或范围是死路——现在就决定：用你知道的信息纠正它、停掉它，还是换一件工作交给别人。不要让它继续跑在死路上。",
+    "3. `progress` 和 `note` 通常不需要动作。只有当它们改变了你在做的事时才处理。",
+    "4. 如果它改变了用户在等的结果，就用日常的话告诉用户，不要提背后的运行细节，也不要转述工作者。否则就沉默地结束回合。",
+    "5. 用 `message_agent` 按工作者的 id 回复它。绝不要用面向用户的发送。",
   ].join("\n");
 }
 

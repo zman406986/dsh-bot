@@ -1,6 +1,6 @@
 # Worker access asks use a custom structured relay, not dsh's child approval waterfall
 
-**Status:** accepted
+**Status:** superseded by ADR-0033 (owner ruling 2026-11-03 removed the feature in full; see `0033-worker-access-ask-removed.md`)
 
 Workers that hit a gated action or need a credential emit a **structured `request_access` tool ask**, relayed through the dispatcher core. The answer rides the existing `host.sendMessage` path into the same worker (context preserved, no restart). We do **not** override dsh's child `approval/policy` pin and we do **not** relay worker asks through `dsh-user-approval`'s waterfall.
 

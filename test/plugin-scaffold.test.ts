@@ -16,7 +16,6 @@ import { describe, it } from "node:test";
 import { Config, apply, inject, name } from "../src/plugin.js";
 import { volatileConfig } from "./support/plugin-config.js";
 import {
-  DISPATCHER_RESOLVE_COMMAND,
   DISPATCHER_START_COMMAND,
   DISPATCHER_STEER_COMMAND,
 } from "../src/adapter/index.js";
@@ -308,6 +307,8 @@ function createStubCtx(options?: {
 describe("plugin scaffold", () => {
   it("exports the Cordis plugin contract", () => {
     assert.equal(name, "multitask-dispatcher");
+    // Ticket 174 / ADR-0033 removed `userQuestions` (the access-prompt seam)
+    // and `approval` (the dispatch-approval seam) from the inject list.
     assert.deepEqual(inject, [
       "subagents",
       "agents",
@@ -315,8 +316,6 @@ describe("plugin scaffold", () => {
       "storageDomain",
       "tools",
       "commands",
-      "userQuestions",
-      "approval",
     ]);
     assert.ok(Config);
   });
@@ -355,7 +354,6 @@ describe("plugin scaffold", () => {
     assert.deepEqual(ctx.registeredCommands.map((c) => c.name), [
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
-      DISPATCHER_RESOLVE_COMMAND,
     ]);
     // Deferred to activation (ticket 19): the tool surface stays stock.
     assert.equal(ctx.registeredTools.length, 0);
@@ -374,11 +372,11 @@ describe("plugin scaffold", () => {
     assert.deepEqual(ctx.registeredCommands.map((c) => c.name), [
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
-      DISPATCHER_RESOLVE_COMMAND,
     ]);
-    // Three command registrations + the teardown + the ticket-145 racoons
-    // mount (which always registers inside the enabled path).
-    assert.equal(ctx.disposers.length, 5);
+    // Two command registrations + the teardown + the ticket-145 racoons
+    // mount (which always registers inside the enabled path). Ticket 174 /
+    // ADR-0033 removed the `/dispatcher-resolve` command.
+    assert.equal(ctx.disposers.length, 4);
     for (const dispose of [...ctx.disposers]) dispose();
     assert.equal(ctx.registeredCommands.length, 0);
   });
@@ -393,7 +391,8 @@ describe("plugin scaffold", () => {
 
     // Eight dispatcher tools (ticket 116 retired send_peer for message_agent;
     // ticket 117 added await_agent; ticket 118 added spawn_dispatcher)
-    // + worker access tool (T13) + the ticket-145 per-session recall.
+    // + the ticket-145 per-session recall. Ticket 174 / ADR-0033 removed the
+    // worker access tool.
     const names = ctx.registeredTools.map((t) => t.name);
     for (const tool of [
       "spawn_worker",
@@ -404,7 +403,6 @@ describe("plugin scaffold", () => {
       "message_agent",
       "await_agent",
       "spawn_dispatcher",
-      "request_access",
     ]) {
       assert.ok(names.includes(tool), `missing tool: ${tool}`);
     }
@@ -416,7 +414,7 @@ describe("plugin scaffold", () => {
     // Re-activation registers a fresh surface.
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(ctx.registeredTools.length, 10);
+    assert.equal(ctx.registeredTools.length, 9);
   });
 
   it("tool executions route to the registering session (ADR-0019: gate retired)", async () => {
@@ -493,8 +491,15 @@ describe("plugin scaffold", () => {
 
     // `setup` composed the child's OWN tool surface before publication
     // (ADR-0019): the spawned session is a dispatcher, not a blank chat.
+    //
+    // Ticket 176 REVERSES the old second assertion here. It read
+    // `assert.ok(ctx.createdToolNames.includes("spawn_dispatcher"))` — i.e.
+    // the summoned child carried the summon verb too. The owner ruled on
+    // 2026-11-03 that a spawned dispatcher may not summon further dispatchers,
+    // so the child's surface is composed WITHOUT `spawn_dispatcher`. Every
+    // other dispatcher tool is still there, which the first line pins.
     assert.ok(ctx.createdToolNames.includes("spawn_worker"));
-    assert.ok(ctx.createdToolNames.includes("spawn_dispatcher"));
+    assert.ok(!ctx.createdToolNames.includes("spawn_dispatcher"));
 
     // The first turn is part of the summon — a created-but-unprompted session
     // stays blank and the sidebar hides it.
@@ -514,8 +519,8 @@ describe("plugin scaffold", () => {
     const agent = createAgent("session-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await new Promise((resolve) => setImmediate(resolve));
-    // Eight dispatcher tools + the worker access tool + per-session recall.
-    assert.equal(ctx.registeredTools.length, 10);
+    // Eight dispatcher tools + per-session recall.
+    assert.equal(ctx.registeredTools.length, 9);
 
     for (const dispose of ctx.disposers) dispose();
 
@@ -534,7 +539,7 @@ describe("plugin scaffold", () => {
     const agent = createAgent("session-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(ctx.registeredTools.length, 10);
+    assert.equal(ctx.registeredTools.length, 9);
 
     for (const dispose of [...ctx.disposers]) dispose();
     assert.equal(ctx.registeredCommands.length, 0);
@@ -547,14 +552,13 @@ describe("plugin scaffold", () => {
     assert.deepEqual(ctx.registeredCommands.map((c) => c.name), [
       DISPATCHER_START_COMMAND,
       DISPATCHER_STEER_COMMAND,
-      DISPATCHER_RESOLVE_COMMAND,
     ]);
     ctx.runCommand({
       commandId: DISPATCHER_START_COMMAND,
       agent: createAgent("session-2"),
     });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(ctx.registeredTools.length, 10);
+    assert.equal(ctx.registeredTools.length, 9);
   });
 
   it("a firehose tool/call advances the count check_workers shows (ticket 75)", async () => {
@@ -668,7 +672,7 @@ describe("plugin scaffold", () => {
 
     // Nothing was unregistered and no state changed by observation alone.
     assert.deepEqual(ctx.registeredTools.map((t) => t.name), before);
-    assert.equal(before.length, 10);
+    assert.equal(before.length, 9);
   });
 
   // Ticket 112: plugin teardown must disarm the wake bus. Under the ticket-108
@@ -730,84 +734,6 @@ describe("plugin scaffold", () => {
       agent.followups.length,
       0,
       "no wake may open a turn after plugin teardown",
-    );
-  });
-
-  // Ticket 137: plugin teardown must also cancel the access relay's parked
-  // deny timers. Before the fix, a parked ask's `setTimeout` survived unload,
-  // fired later, delivered into a disposed host, and called `onResolved` →
-  // `wakeBus.enqueueAccessNotice` — which bypasses the bus's generation bump
-  // because the call arrives from outside. The control arm (no teardown)
-  // proves the timer really does deny and wake, so the teardown assertion
-  // cannot pass for the wrong reason.
-  it("plugin teardown cancels a parked access deny timer (ticket 137)", async (t) => {
-    t.mock.timers.enable({ apis: ["setTimeout"] });
-
-    const agent = createRecordingAgent("session-1");
-    const agentsById = new Map<string, AgentLike>([["session-1", agent]]);
-
-    /** Activate, spawn a worker, park one real access ask, count effects. */
-    const parkAsk = async (ctx: ReturnType<typeof createStubCtx>) => {
-      apply(
-        ctx,
-        volatileConfig({ enabled: true, accessRequestTimeoutMs: 50 }),
-      );
-      ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
-      await new Promise((resolve) => setImmediate(resolve));
-
-      const spawn = ctx.registeredTools.find((tool) => tool.name === "spawn_worker");
-      assert.ok(spawn);
-      const spawned = (await spawn.execute(
-        { stream_key: "s", title: "T", prompt: "P" },
-        { agent: { session: { id: "session-1" } } },
-      )) as { ok: boolean; worker_id?: string };
-      assert.equal(spawned.ok, true);
-      const workerId = spawned.worker_id;
-      assert.ok(workerId);
-
-      const sent: string[] = [];
-      ctx.subagents.sendMessage = async () => {
-        sent.push("send");
-        return "msg-stub";
-      };
-
-      const requestAccess = ctx.registeredTools.find(
-        (tool) => tool.name === "request_access",
-      );
-      assert.ok(requestAccess);
-      // The tool parks until the ask settles (ticket 69); the promise is
-      // deliberately not awaited — the relay's timer is the subject here.
-      void requestAccess.execute(
-        { class: "tool", target: "write_file", reason: "need write" },
-        { agent: { session: { id: workerId } } },
-      );
-
-      // The park itself wakes the dispatcher once; reset so the assertion
-      // reads only what the deny timer causes.
-      assert.equal(agent.followups.length, 1, "the park wakes the parent");
-      agent.followups.length = 0;
-      return { sent };
-    };
-
-    // Control: no teardown — the parked timer denies, delivers, and wakes.
-    const controlCtx = createStubCtx({ agentsById });
-    const control = await parkAsk(controlCtx);
-    t.mock.timers.tick(50);
-    assert.equal(control.sent.length, 1, "the timeout deny is delivered");
-    assert.equal(agent.followups.length, 1, "the deny notice wakes the parent");
-    for (const dispose of controlCtx.disposers) dispose();
-    agent.followups.length = 0;
-
-    // Teardown: the same parked ask, then the collected cleanups run.
-    const ctx = createStubCtx({ agentsById });
-    const teardown = await parkAsk(ctx);
-    for (const dispose of ctx.disposers) dispose();
-    t.mock.timers.tick(50);
-    assert.equal(teardown.sent.length, 0, "no delivery after plugin teardown");
-    assert.equal(
-      agent.followups.length,
-      0,
-      "no access wake may open a turn after plugin teardown",
     );
   });
 

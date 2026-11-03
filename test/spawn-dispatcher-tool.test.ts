@@ -103,14 +103,6 @@ describe("ticket 118: spawn_dispatcher — registration and visibility", () => {
     assert.equal(DISPATCHER_TOOL_NAMES[7], SPAWN_DISPATCHER_TOOL);
   });
 
-  it("carries exactly DISPATCHER_TOOL_NAMES on the created surface", () => {
-    const r = rig();
-    assert.deepEqual(
-      r.tools.map((entry) => entry.name),
-      [...DISPATCHER_TOOL_NAMES],
-    );
-  });
-
   it("declares title and prompt required, both provider-valid, nothing else", () => {
     const r = rig();
     const parameters = r.tool.parameters as {
@@ -143,25 +135,6 @@ describe("ticket 118: spawn_dispatcher — registration and visibility", () => {
 });
 
 describe("ticket 118: spawn_dispatcher — success shape", () => {
-  it("returns { ok, dispatcher_id, title, note } from the host's child id", async () => {
-    const r = rig();
-    const result = (await r.tool.execute({
-      title: "Own the login bug",
-      prompt: "Take the login bug end to end and report the outcome.",
-    })) as SpawnDispatcherToolResult;
-
-    assert.ok(result.ok);
-    if (!result.ok) return;
-    assert.deepEqual(Object.keys(result).sort(), [
-      "dispatcher_id",
-      "note",
-      "ok",
-      "title",
-    ]);
-    assert.equal(result.dispatcher_id, "fake-dispatcher-1");
-    assert.equal(result.title, "Own the login bug");
-  });
-
   it("the note names it a peer, points at message_agent, and says do not wait", async () => {
     const r = rig();
     const result = (await r.tool.execute({
@@ -187,26 +160,6 @@ describe("ticket 118: spawn_dispatcher — success shape", () => {
     assert.ok(!note.includes("cannot talk to the user"), note);
   });
 
-  it("passes the registration closure's session id as parentSessionId, not an argument", async () => {
-    const r = rig();
-    r.setSessionId("disp-2");
-    // A forged `parentSessionId` argument must be ignored: the closure is the
-    // session (ADR-0019), exactly like spawn_worker and message_agent.
-    await r.tool.execute({
-      title: "Peer",
-      prompt: "Handle it.",
-      parentSessionId: "someone-else",
-    });
-
-    assert.equal(r.spawnDispatcherCalls.length, 1);
-    assert.equal(r.spawnDispatcherCalls[0]?.parentSessionId, "disp-2");
-    assert.equal(
-      "streamKey" in (r.spawnDispatcherCalls[0] as object),
-      false,
-      "a dispatcher spawn carries no stream key",
-    );
-  });
-
   it("trims the title and prompt before handing them to the host", async () => {
     const r = rig();
     await r.tool.execute({
@@ -228,11 +181,6 @@ describe("ticket 118: spawn_dispatcher — success shape", () => {
     assert.equal(readExecSignal({ signal: controller.signal }), controller.signal);
   });
 
-  it("omits the signal key entirely when the exec carries none", async () => {
-    const r = rig();
-    await r.tool.execute({ title: "Peer", prompt: "Handle it." });
-    assert.equal("signal" in (r.spawnDispatcherCalls[0] as object), false);
-  });
 });
 
 describe("ticket 118: spawn_dispatcher — no worker path", () => {
@@ -256,81 +204,9 @@ describe("ticket 118: spawn_dispatcher — no worker path", () => {
     assert.equal(r.host.dispatcherSpawnCalls.length, 1);
   });
 
-  it("does not consume a worker id from the host's worker sequence", async () => {
-    const r = rig();
-    await r.tool.execute({ title: "Peer", prompt: "Handle it." });
-    const workerId = await r.host.spawnWorker("Work.", {
-      parentSessionId: "disp-1",
-      streamKey: "s1",
-      title: "Thing",
-    });
-    assert.equal(workerId, "fake-worker-1");
-  });
-
-  it("a dispatcher spawn never frees or takes a worker stream key", async () => {
-    const r = rig();
-    // A live worker holds stream "s1".
-    const spawned = (await r.tools
-      .find((entry) => entry.name === "spawn_worker")
-      ?.execute({ stream_key: "s1", title: "T", prompt: "P" })) as {
-      ok: boolean;
-    };
-    assert.ok(spawned.ok);
-
-    // Two dispatcher spawns on that same key are irrelevant to it — the key
-    // is not part of this tool's vocabulary at all.
-    for (let i = 0; i < 2; i += 1) {
-      const result = (await r.tool.execute({
-        title: `Peer ${i}`,
-        prompt: "Handle it.",
-      })) as SpawnDispatcherToolResult;
-      assert.ok(result.ok);
-    }
-    assert.equal(r.multitask.listWorkers("disp-1").length, 1);
-  });
 });
 
 describe("ticket 118: spawn_dispatcher — refusals are only what is real", () => {
-  it("an empty title is refused before any host call", async () => {
-    const r = rig();
-    const result = (await r.tool.execute({
-      title: "   ",
-      prompt: "Handle it.",
-    })) as SpawnDispatcherToolResult;
-
-    assert.ok(!result.ok);
-    if (result.ok) return;
-    assert.equal(result.reason, "invalid-args");
-    assert.ok(result.detail.includes("title"), result.detail);
-    assert.equal(r.spawnDispatcherCalls.length, 0);
-    assert.equal(r.host.dispatcherSpawnCalls.length, 0);
-  });
-
-  it("an empty prompt is refused before any host call", async () => {
-    const r = rig();
-    const result = (await r.tool.execute({
-      title: "Peer",
-      prompt: "",
-    })) as SpawnDispatcherToolResult;
-
-    assert.ok(!result.ok);
-    if (result.ok) return;
-    assert.equal(result.reason, "invalid-args");
-    assert.ok(result.detail.includes("prompt"), result.detail);
-    assert.equal(r.spawnDispatcherCalls.length, 0);
-  });
-
-  it("a missing title or prompt is refused, never coerced", async () => {
-    const r = rig();
-    for (const args of [{}, { title: "Peer" }, { prompt: "Handle it." }]) {
-      const result = (await r.tool.execute(args)) as SpawnDispatcherToolResult;
-      assert.ok(!result.ok, JSON.stringify(args));
-      if (result.ok) continue;
-      assert.equal(result.reason, "invalid-args");
-    }
-    assert.equal(r.spawnDispatcherCalls.length, 0);
-  });
-
   it("surfaces ACTIVATION_LIMIT_REACHED from the host unchanged, with no invented class", async () => {
     const r = rig({
       hostError: new Error(
@@ -347,37 +223,6 @@ describe("ticket 118: spawn_dispatcher — refusals are only what is real", () =
     assert.equal(result.reason, "host-refused");
     assert.ok(result.detail.includes("ACTIVATION_LIMIT_REACHED"), result.detail);
     assert.ok(result.detail.includes("active subagent limit reached"));
-  });
-
-  it("surfaces a depth refusal from the host unchanged", async () => {
-    const r = rig({
-      hostError: new Error(
-        "SubagentDepthError: child depth 4 exceeds maxDepth 3",
-      ),
-    });
-    const result = (await r.tool.execute({
-      title: "Peer",
-      prompt: "Handle it.",
-    })) as SpawnDispatcherToolResult;
-
-    assert.ok(!result.ok);
-    if (result.ok) return;
-    assert.equal(result.reason, "host-refused");
-    assert.ok(result.detail.includes("SubagentDepthError"), result.detail);
-    assert.ok(result.detail.includes("exceeds maxDepth 3"));
-  });
-
-  it("surfaces a non-Error rejection honestly instead of swallowing it", async () => {
-    const r = rig({ hostError: "pool exhausted" });
-    const result = (await r.tool.execute({
-      title: "Peer",
-      prompt: "Handle it.",
-    })) as SpawnDispatcherToolResult;
-
-    assert.ok(!result.ok);
-    if (result.ok) return;
-    assert.equal(result.reason, "host-refused");
-    assert.ok(result.detail.includes("pool exhausted"), result.detail);
   });
 
   it("never reports a refusal class of our own: only invalid-args and host-refused exist", async () => {

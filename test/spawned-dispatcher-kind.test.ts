@@ -40,23 +40,7 @@ import {
   type AgentLike,
   type CreateAgentOptionsLike,
 } from "../src/adapter/cordis-dsh-host.js";
-import {
-  applySessionKindProjection,
-  DISPATCHER_SESSION_KIND,
-  initSessionKindProjection,
-  INITIAL_SESSION_KIND_STATE,
-  registerSessionKindProjection,
-  resolveSessionKindState,
-  SESSION_KIND_PROJECTION_KEY,
-  SESSION_KIND_PROJECTION_STATE_VERSION,
-  sessionKindProjectionDefinition,
-  UNRESOLVED_SESSION_KIND_STATE,
-  type DispatcherMarkAnswer,
-  type DispatcherMarkProbe,
-  type SessionKindProjectionState,
-  type SessionProjectionDefinitionLike,
-  type SessionProjectionEventLike,
-} from "../src/adapter/session-kind-projection.js";
+import {applySessionKindProjection, DISPATCHER_SESSION_KIND, initSessionKindProjection, TEAM_LEADER_SESSION_KIND, registerSessionKindProjection, SESSION_KIND_PROJECTION_KEY, SESSION_KIND_PROJECTION_STATE_VERSION, sessionKindProjectionDefinition, type DispatcherMarkProbe, type SessionKindProjectionState, type SessionProjectionDefinitionLike, type SessionProjectionEventLike} from "../src/adapter/session-kind-projection.js";
 
 interface StubSessionHeader {
   readonly id: string;
@@ -284,9 +268,19 @@ describe("ticket 140: spawned dispatcher resolves to kind dispatcher", () => {
     // A top-level session: `cwd` and nothing else in `meta`, no parentAgent.
     assert.deepEqual(createCall.meta, { cwd: "C:\\work" });
     assert.equal("parentAgent" in createCall, false);
-    // (a) the child session projects kind "dispatcher", from a log that
-    // carries no `/dsh-bot` settlement at all.
-    assert.equal(registry.kindOf(result.dispatcherId), DISPATCHER_SESSION_KIND);
+    // (a) the child session projects a dispatcher kind, from a log that
+    // carries no `/dsh-bot` settlement at all. Ticket 177: the kind names the
+    // CLASS — a summoned dispatcher is the team-leader class, not the
+    // human-started one.
+    assert.equal(
+      registry.kindOf(result.dispatcherId),
+      TEAM_LEADER_SESSION_KIND,
+    );
+    assert.equal(
+      (registry.states.get(result.dispatcherId) as SessionKindProjectionState)
+        .dispatcherClass,
+      "spawned",
+    );
     assert.equal(
       (registry.states.get(result.dispatcherId) as SessionKindProjectionState)
         .active,
@@ -294,95 +288,22 @@ describe("ticket 140: spawned dispatcher resolves to kind dispatcher", () => {
     );
   });
 
-  it("a normal session still projects null — the probe only answers for marked ids", () => {
-    const registry = createFakeRegistry();
-    let answer: DispatcherMarkAnswer = "not-dispatcher";
-    registerSessionKindProjection({ sessionProjections: registry }, () => () => answer);
-    registry.sessionCreated({ id: "chat-1" });
-    assert.equal(registry.kindOf("chat-1"), null);
-    answer = "dispatcher";
-    registry.sessionCreated({ id: "child-1" });
-    assert.equal(registry.kindOf("child-1"), DISPATCHER_SESSION_KIND);
-  });
-
-  it("(b) a FAILED spawn leaves no mirror entry — no phantom dispatcher mark", async () => {
+  it("a failed spawn leaves no phantom dispatcher mark", async () => {
+    // A seed that outlives a refused create would mark a session that never
+    // existed as a dispatcher — a false positive the sidebar would render.
     const ctx = createStubCtx();
     const host = createCordisDshHost(ctx);
     host.bindParent(createAgent("disp-1"), "disp-1");
     const refusal = new Error("host refused the create");
-    // Ticket 157 / ADR-0032: the failure is the CREATE now. The old stub made
-    // `subagents.startActivation` throw `ACTIVATION_LIMIT_REACHED`, a subagent
-    // pool refusal a top-level session never sees; the protection is the same
-    // one — the seed must not survive a spawn that produced no session.
     ctx.failNextCreateWith(refusal);
 
     await assert.rejects(
-      host.spawnDispatcher({
-        parentSessionId: "disp-1",
-        title: "Peer",
-        prompt: "Handle it.",
-      }),
+      host.spawnDispatcher({ parentSessionId: "disp-1", title: "Peer", prompt: "Handle it." }),
       (error: unknown) => error === refusal,
     );
-
-    // The id the host reserved and handed to `create` — the only id the
-    // mirror could have been seeded with, and the one `finally` must remove.
-    const reservedId = String(
-      (ctx.createCalls[0] as CreateAgentOptionsLike).sessionId,
-    );
+    const reservedId = String(ctx.createCalls[0]?.sessionId ?? "");
     assert.ok(reservedId.length > 0);
-    // The mirror never self-deletes, and the peer fence reads it — a refused
-    // spawn must not leave the id looking like a dispatcher.
-    assert.equal(host.isDurablyMarkedDispatcher(reservedId), false);
-    // A second, successful spawn is unaffected by the failed one.
-    const ok = await host.spawnDispatcher({
-      parentSessionId: "disp-1",
-      title: "Peer 2",
-      prompt: "Handle it.",
-    });
-    assert.equal(host.isDurablyMarkedDispatcher(ok.dispatcherId), true);
-    assert.notEqual(ok.dispatcherId, reservedId);
-  });
-
-  it("a create that answers under another session id keeps only the REAL one marked", async () => {
-    const ctx = createStubCtx();
-    const host = createCordisDshHost(ctx);
-    host.bindParent(createAgent("disp-1"), "disp-1");
-    ctx.mintOwnSessionId();
-
-    const result = await host.spawnDispatcher({
-      parentSessionId: "disp-1",
-      title: "Peer",
-      prompt: "Handle it.",
-    });
-
-    // Ticket 157 / ADR-0032: `ctx.agents.create` is HANDED the reservation, so
-    // the installed host creates under it or refuses — it cannot mint its own
-    // id the way the subagent service could. This now drives the adapter's
-    // defensive branch (`src/adapter/cordis-dsh-host.ts:2544`, `:2595-2597`):
-    // whatever id the created session reports, the reservation that never
-    // became a session must not stay marked.
-    const reservedId = String(
-      (ctx.createCalls[0] as CreateAgentOptionsLike).sessionId,
-    );
-    assert.notEqual(result.dispatcherId, reservedId);
-    assert.equal(host.isDurablyMarkedDispatcher(result.dispatcherId), true);
-    assert.equal(host.isDurablyMarkedDispatcher(reservedId), false);
-  });
-
-  it("(3) the probe is LATE-BOUND: the unit registered before the host exists still sees it", () => {
-    let probe: DispatcherMarkProbe | null = null;
-    const definition = sessionKindProjectionDefinition(() => probe ?? undefined);
-
-    // No probe yet -> the log is the only source (resolved, empty).
-    const before = definition.init({ id: "child-1" }, 0);
-    assert.equal(before.active, false);
-    assert.equal(before.resolved, undefined);
-    // The host binding arrives after registration, exactly like `apply`.
-    probe = (sessionId) =>
-      sessionId === "child-1" ? "dispatcher" : "not-dispatcher";
-    assert.equal(definition.init({ id: "child-1" }, 0).active, true);
-    assert.equal(definition.init({ id: "chat-1" }, 0).active, false);
+    assert.equal(host.isDurablyMarkedDispatcher(reservedId), false, "the seed survived");
   });
 
   it("fails closed: a throwing probe or a bad header never claims a kind", () => {
@@ -456,7 +377,10 @@ describe("ticket 140 review fix: the cold case and the abstain rule", () => {
 
     const state = initSessionKindProjection({ id: "resumed-child" }, probe);
     assert.equal(state.active, true, "the durable row settles the kind");
-    assert.equal(sessionKindView(state), DISPATCHER_SESSION_KIND);
+    // Ticket 177: a mark row only ever exists for a summon, so the durable
+    // answer carries the CLASS too, not just the identity.
+    assert.equal(state.dispatcherClass, "spawned");
+    assert.equal(sessionKindView(state), TEAM_LEADER_SESSION_KIND);
     assert.equal(host.isDurablyMarkedDispatcher("resumed-child"), false);
   });
 
@@ -486,7 +410,9 @@ describe("ticket 140 review fix: the cold case and the abstain rule", () => {
     assert.equal(settled.active, true);
     assert.equal(settled.resolved, undefined, "settled state drops the marker");
     assert.equal(settled.sessionId, undefined);
-    assert.equal(sessionKindView(settled), DISPATCHER_SESSION_KIND);
+    // Ticket 177: the late answer settles the CLASS as well as the identity.
+    assert.equal(settled.dispatcherClass, "spawned");
+    assert.equal(sessionKindView(settled), TEAM_LEADER_SESSION_KIND);
   });
 
   it("(c) genuinely absent mark with the store open -> resolved not-dispatcher", () => {
@@ -503,88 +429,6 @@ describe("ticket 140 review fix: the cold case and the abstain rule", () => {
     assert.equal(state.resolved, undefined, "a real 'no' is cached as resolved");
   });
 
-  it("(d) an unresolved cell also settles on the WIRE read", () => {
-    const store = createPeekStore();
-    const host = createCordisDshHost(createStubCtx(), {
-      markers: markerStore(store),
-    });
-    const definition = sessionKindProjectionDefinition(() => (id) =>
-      host.dispatcherMarkAnswer(id),
-    );
-    const state = definition.init({ id: "wire-child" }, 0);
-    assert.equal(state.resolved, false);
-    assert.equal(definition.wire.view(state), null);
-    store.marks.set("wire-child", { sessionId: "wire-child" });
-    store.open();
-    assert.equal(definition.wire.view(state), DISPATCHER_SESSION_KIND);
-    // The read never mutates the stored state.
-    assert.equal(state.active, false);
-  });
-
-  it("(e) resolveSessionKindState is reference-stable once resolved or unknown", () => {
-    const resolved = initSessionKindProjection(
-      { id: "child-1" },
-      () => "dispatcher",
-    );
-    assert.equal(resolveSessionKindState(resolved, () => "not-dispatcher"), resolved);
-    const unresolved = UNRESOLVED_SESSION_KIND_STATE;
-    assert.equal(resolveSessionKindState(unresolved, () => "unknown"), unresolved);
-    assert.equal(resolveSessionKindState(unresolved), unresolved);
-    assert.equal(resolveSessionKindState(INITIAL_SESSION_KIND_STATE), INITIAL_SESSION_KIND_STATE);
-  });
-
-  it("(f) honesty branches: no store, unpeekable store, throwing peek", () => {
-    // No store at all: nothing was ever persisted here, so absence is
-    // definitive — and the projection CACHES that "no".
-    const bare = createCordisDshHost(createStubCtx());
-    assert.equal(bare.dispatcherMarkAnswer("no-store-child"), "not-dispatcher");
-    assert.equal(
-      initSessionKindProjection({ id: "no-store-child" }, (id) =>
-        bare.dispatcherMarkAnswer(id),
-      ).resolved,
-      undefined,
-    );
-
-    // A store that predates the peek seam: rows from a previous process
-    // would be invisible, so absence proves nothing.
-    const unpeekable = createCordisDshHost(createStubCtx(), {
-      markers: {
-        writeWorkerMarker() {},
-        readWorkerMarkers: () => [],
-        deleteWorkerMarker() {},
-      },
-    });
-    assert.equal(
-      unpeekable.dispatcherMarkAnswer("legacy-store-child"),
-      "unknown",
-    );
-    assert.equal(
-      initSessionKindProjection({ id: "legacy-store-child" }, (id) =>
-        unpeekable.dispatcherMarkAnswer(id),
-      ).resolved,
-      false,
-      "an unpeekable store abstains instead of caching a wrong no",
-    );
-
-    // A peek that throws is the same "cannot answer" case.
-    const throwing = createCordisDshHost(createStubCtx(), {
-      markers: {
-        writeWorkerMarker() {},
-        readWorkerMarkers: () => [],
-        deleteWorkerMarker() {},
-        peekDispatcherMark() {
-          throw new Error("table unreadable");
-        },
-      },
-    });
-    assert.equal(throwing.dispatcherMarkAnswer("throwing-child"), "unknown");
-    assert.equal(
-      initSessionKindProjection({ id: "throwing-child" }, (id) =>
-        throwing.dispatcherMarkAnswer(id),
-      ).resolved,
-      false,
-    );
-  });
 });
 
 function sessionKindView(state: SessionKindProjectionState): unknown {

@@ -218,7 +218,7 @@ function stringFieldSpec(
 
 /**
  * The schema fields this card edits — EXACTLY the fields of the host half's
- * `Config` (`src/plugin.ts`: `enabled`, `accessRequestTimeoutMs`,
+ * `Config` (`src/plugin.ts`: `enabled`,
  * `wakeCoalesceWindowMs`, `inboxEnabled`, `racoonsRecordOnly`,
  * `racoonsStorageRoot`, `racoonsContextWindowTokens`, `inboxDir`,
  * `inboxRescanIntervalMs`, `microcompactEnabled`), in schema order. The pair
@@ -234,11 +234,6 @@ export const SETTINGS_CARD_FIELDS: readonly SettingsCardFieldSpec[] = [
     "enabled",
     "settings.card.field.enabled.label",
     "settings.card.field.enabled.hint",
-  ),
-  numberFieldSpec(
-    "accessRequestTimeoutMs",
-    "settings.card.field.accessRequestTimeoutMs.label",
-    "settings.card.field.accessRequestTimeoutMs.hint",
   ),
   numberFieldSpec(
     "wakeCoalesceWindowMs",

@@ -78,7 +78,7 @@ import { SPAWN_WORKER_TOOL } from "../core/policy/prompts.js";
 import {
   projectDispatchCard,
   type WorkerDispatchCard,
-} from "./approval-cards.js";
+} from "./dispatch-card.js";
 
 /** Minimal structural face of one durable session event (envelope + data). */
 export interface ConversationEventLike {

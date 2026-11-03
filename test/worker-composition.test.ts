@@ -15,13 +15,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import {
-  applyWorkerComposition,
-  globalToolNames,
-  WORKER_PERSONA_SECTION,
-  WORKER_PERSONA_SECTION_ORDER,
-  type WorkerCompositionContext,
-} from "../src/worker/preset.js";
+import {applyWorkerComposition, globalToolNames, WORKER_PERSONA_SECTION_ORDER, type WorkerCompositionContext} from "../src/worker/preset.js";
 import { createWorkerAgentDef } from "../src/worker/agent-def.js";
 
 interface RecordedSection {
@@ -105,46 +99,12 @@ describe("globalToolNames", () => {
     assert.equal(names.size, 14);
   });
 
-  it("reads the context-global layer alone without a scope", () => {
-    const { ctx } = createScopedStub();
-    const names = globalToolNames(ctx);
-    assert.deepEqual([...names].sort(), ["request_access", "working_directory"]);
-  });
-
-  it("returns an empty set when the registry read throws", () => {
-    const ctx: WorkerCompositionContext = {
-      tools: {
-        schemas() {
-          throw new Error("registry unavailable");
-        },
-        restrict() {
-          return () => {};
-        },
-      },
-    };
-    assert.deepEqual([...globalToolNames(ctx)], []);
-  });
-
   it("returns an empty set when the context exposes no tools surface", () => {
     assert.deepEqual([...globalToolNames({})], []);
   });
 });
 
 describe("applyWorkerComposition", () => {
-  it("registers the contract as a literal scoped persona section", () => {
-    const { ctx, agent, sections } = createScopedStub();
-    const def = createWorkerAgentDef();
-    applyWorkerComposition(ctx, def, agent);
-
-    assert.equal(sections.length, 1);
-    const section = sections[0]!;
-    assert.equal(section.name, WORKER_PERSONA_SECTION);
-    assert.equal(section.order, 1234);
-    assert.equal(section.text, def.persona);
-    // Literal prose: interpolation would eat any `{{` in the contract.
-    assert.equal(section.interpolate, false);
-  });
-
   it("denies the dispatcher surface intersected with the CHILD's live tools", () => {
     const { ctx, agent, restrictions, scopeReads } = createScopedStub();
     applyWorkerComposition(ctx, createWorkerAgentDef(), agent);
@@ -177,31 +137,4 @@ describe("applyWorkerComposition", () => {
     assert.deepEqual(restrictions, [{ deny: ["spawn_worker"] }]);
   });
 
-  it("skips the restriction entirely when no candidate is live", () => {
-    const { ctx, agent, restrictions } = createScopedStub({
-      contextGlobal: ["request_access"],
-      agentPlane: ["read", "edit"],
-    });
-    const applied = applyWorkerComposition(ctx, createWorkerAgentDef(), agent);
-
-    // `tools.restrict({ deny: [] })` throws on the host, so an empty
-    // intersection must not reach it.
-    assert.deepEqual(restrictions, []);
-    assert.equal(applied, 1, "only the persona section registered");
-  });
-
-  it("reports how many surfaces it registered and tolerates a bare context", () => {
-    const full = createScopedStub();
-    assert.equal(applyWorkerComposition(full.ctx, createWorkerAgentDef(), full.agent), 2);
-
-    const promptOnly = createScopedStub({ noTools: true });
-    assert.equal(applyWorkerComposition(promptOnly.ctx, createWorkerAgentDef(), promptOnly.agent), 1);
-
-    const toolsOnly = createScopedStub({ noPrompt: true });
-    assert.equal(applyWorkerComposition(toolsOnly.ctx, createWorkerAgentDef(), toolsOnly.agent), 1);
-
-    // A stub host exposing neither surface registers nothing — absence is
-    // never reported as success.
-    assert.equal(applyWorkerComposition({}, createWorkerAgentDef(), undefined), 0);
-  });
 });

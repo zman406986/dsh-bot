@@ -1,48 +1,10 @@
 export {
-  ACCESS_PROMPT_ALLOW,
-  ACCESS_PROMPT_ALWAYS_ALLOW,
-  ACCESS_PROMPT_DENY,
-  ACCESS_PROMPT_DENY_DETAIL,
-  APPROVAL_DETAIL_CLAMP_CHARS,
-  APPROVAL_EXPIRED_COPY,
-  APPROVAL_LOCATION_LOCAL,
-  APPROVAL_LOCATION_REMOTE,
-  APPROVAL_PRODUCER_KINDS,
-  APPROVAL_SECRET_STORED_COPY,
-  accessExpiredNotice,
-  accessPromptQuestion,
-  accessPromptQuestionId,
-  approvalDetailOmissionMarker,
-  approvalLocationLineFor,
-  clampApprovalDetail,
-  createAccessPromptPump,
-  describeAccessAction,
-  isWildcardAccessTarget,
-  parseAccessPromptAnswer,
-  secretStoredAccessNotice,
-  type AccessPromptAnswerItemLike,
-  type AccessPromptAnswerLike,
-  type AccessPromptOptionLike,
-  type AccessPromptPump,
-  type AccessPromptPumpOptions,
-  type AccessPromptQuestionLike,
-  type AccessPromptRequestLike,
-  type UserQuestionsLike,
-} from "./access-prompt.js";
-export {
   blocksToText,
   textBlock,
   textBlocks,
   type ContentBlock,
   type TextBlock,
 } from "./content-blocks.js";
-export {
-  createDispatchApprovalSeam,
-  DISPATCH_APPROVAL_TOOL_NAME,
-  type DispatchApprovalFn,
-  type DispatchApprovalSeamOptions,
-  type HostApprovalServiceLike,
-} from "./dispatch-approval.js";
 export {
   registerDispatcherTools,
   resolveExecSessionId,
@@ -149,6 +111,7 @@ export {
 export {
   applySessionKindProjection,
   DISPATCHER_SESSION_KIND,
+  dispatcherClassOf,
   initSessionKindProjection,
   INITIAL_SESSION_KIND_STATE,
   parseDispatcherSessionKind,
@@ -162,6 +125,7 @@ export {
   SESSION_KIND_PROJECTION_STATE_VERSION,
   sessionKindOf,
   sessionKindProjectionDefinition,
+  TEAM_LEADER_SESSION_KIND,
   UNRESOLVED_SESSION_KIND_STATE,
   viewSessionKind,
   type DispatcherMarkAnswer,
@@ -202,16 +166,6 @@ export {
   restartUnknownStateLine,
 } from "./restart-notice.js";
 export {
-  createRequestAccessHandler,
-  registerWorkerAccessTool,
-  REQUEST_ACCESS_DESCRIPTION,
-  REQUEST_ACCESS_TOOL,
-  toAccessRequestBody,
-  type RegisterWorkerAccessToolOptions,
-  type RequestAccessResult,
-  type WorkerAccessToolDeps,
-} from "./worker-access-tool.js";
-export {
   createDispatcherSteerCommand,
   DISPATCHER_STEER_COMMAND,
   DISPATCHER_STEER_DESCRIPTION,
@@ -228,24 +182,6 @@ export {
   type ParsedSteerInput,
   type RegisterDispatcherSteerCommandOptions,
 } from "./steer-command.js";
-export {
-  createDispatcherResolveCommand,
-  DISPATCHER_RESOLVE_COMMAND,
-  DISPATCHER_RESOLVE_DESCRIPTION,
-  DISPATCHER_RESOLVE_DENY_DETAIL,
-  DISPATCHER_RESOLVE_INPUT_HINT,
-  DISPATCHER_RESOLVE_NOT_ACTIVE,
-  DISPATCHER_RESOLVE_NOT_DISPATCHER,
-  DISPATCHER_RESOLVE_USAGE,
-  dispatcherResolveNoPendingAsk,
-  dispatcherResolveSettled,
-  dispatcherResolveSuccess,
-  parseResolveInput,
-  registerDispatcherResolveCommand,
-  type DispatcherResolveChoice,
-  type ParsedResolveInput,
-  type RegisterDispatcherResolveCommandOptions,
-} from "./resolve-command.js";
 export {
   PLUGIN_NAME,
   PEER_WAKE_CUE,

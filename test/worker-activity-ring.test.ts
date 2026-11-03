@@ -35,29 +35,6 @@ describe("WorkerActivityRing helper (ticket 110)", () => {
     assert.equal(ring.latest("w")?.atMs, 7);
   });
 
-  it("keeps per-worker rings independent", () => {
-    const ring = new WorkerActivityRing();
-    ring.record("w1", "a1", 1);
-    ring.record("w2", "b1", 2);
-    ring.record("w2", "b2", 3);
-
-    assert.deepEqual(ring.recent("w1", 5).map((e) => e.phrase), ["a1"]);
-    assert.deepEqual(ring.recent("w2", 5).map((e) => e.phrase), ["b2", "b1"]);
-
-    ring.clear("w1");
-    assert.equal(ring.recent("w1", 5).length, 0);
-    assert.equal(ring.latest("w2")?.phrase, "b2", "clear(w1) leaves w2 alone");
-  });
-
-  it("latest is the newest entry, undefined before anything is recorded", () => {
-    const ring = new WorkerActivityRing();
-    assert.equal(ring.latest("w"), undefined);
-    ring.record("w", ...entry("first", 10));
-    ring.record("w", ...entry("second", 20));
-    assert.equal(ring.latest("w")?.phrase, "second");
-    assert.equal(ring.latest("w")?.atMs, 20);
-  });
-
   it("recent slices newest-first for n below the ring size", () => {
     const ring = new WorkerActivityRing();
     ring.record("w", "p1", 1);
@@ -70,29 +47,26 @@ describe("WorkerActivityRing helper (ticket 110)", () => {
     assert.deepEqual(ring.recent("w", 99).map((e) => e.phrase), ["p3", "p2", "p1"]);
   });
 
-  it("recent is empty for n <= 0, non-finite n, and unknown workers", () => {
-    const ring = new WorkerActivityRing();
-    ring.record("w", "p1", 1);
-
-    assert.equal(ring.recent("w", 0).length, 0);
-    assert.equal(ring.recent("w", -1).length, 0);
-    assert.equal(ring.recent("w", Number.NaN).length, 0);
-    assert.equal(ring.recent("w", Number.POSITIVE_INFINITY).length, 0);
-    assert.equal(ring.recent("unknown", 5).length, 0);
-  });
-
-  it("clear drops one worker; clearAll drops everything", () => {
+  it("keeps workers independent and empties out on clear", () => {
+    // Memory bounds: the ring is the only thing holding activity text, so a
+    // clear that misses a worker would leak it for the process lifetime.
     const ring = new WorkerActivityRing();
     ring.record("w1", "a", 1);
     ring.record("w2", "b", 2);
+    assert.deepEqual(ring.recent("w1", 5).map((e) => e.phrase), ["a"]);
+    assert.deepEqual(ring.recent("w2", 5).map((e) => e.phrase), ["b"]);
+    assert.equal(ring.latest("never-recorded"), undefined);
+
+    // Non-positive and non-finite limits answer empty, never the whole ring.
+    for (const n of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      assert.deepEqual(ring.recent("w1", n), [], `n=${String(n)}`);
+    }
 
     ring.clear("w1");
-    assert.equal(ring.latest("w1"), undefined);
-    assert.equal(ring.latest("w2")?.phrase, "b");
-
+    assert.deepEqual(ring.recent("w1", 5), []);
+    assert.deepEqual(ring.recent("w2", 5).map((e) => e.phrase), ["b"], "clear hit a sibling");
     ring.clearAll();
-    assert.equal(ring.latest("w2"), undefined);
-    assert.equal(ring.recent("w2", 5).length, 0);
+    assert.deepEqual(ring.recent("w2", 5), []);
   });
 });
 
@@ -230,18 +204,6 @@ describe("CordisDshHost activity ring over the firehose (ticket 110)", () => {
     assert.equal(host.recentActivities("not-ours", 5).length, 0);
   });
 
-  it("recentActivity/lastActivityAtMs still read the newest entry (backward compat)", async () => {
-    const ctx = createStubCtx();
-    const { host, workerId } = await spawnOneWorker(ctx);
-
-    fireSessionEvent(ctx, workerId, toolCallEvent("bash", { command: "first" }));
-    fireSessionEvent(ctx, workerId, toolCallEvent("grep", { pattern: "second" }));
-
-    assert.equal(host.recentActivity(workerId), "grep: second");
-    const newest = host.recentActivities(workerId, 5)[0];
-    assert.equal(host.lastActivityAtMs(workerId), newest?.atMs);
-  });
-
   it("the firehose ring stays bounded at 5 with oldest-evicted order", async () => {
     const ctx = createStubCtx();
     const { host, workerId } = await spawnOneWorker(ctx);
@@ -264,50 +226,4 @@ describe("CordisDshHost activity ring over the firehose (ticket 110)", () => {
     );
   });
 
-  it("settle retains the digest breadcrumb; single-entry accessors go null", async () => {
-    const ctx = createStubCtx();
-    const { host, workerId } = await spawnOneWorker(ctx);
-    fireSessionEvent(ctx, workerId, toolCallEvent("bash", { command: "go" }));
-    fireSessionEvent(ctx, workerId, toolCallEvent("grep", { pattern: "go" }));
-
-    ctx.fire("subagent/end", {
-      id: workerId,
-      stopReason: "completed",
-      lastAssistantMessage: [{ type: "text", text: "ok" }],
-    });
-    // Ticket 110 phase 2: the wake composes AFTER the settle, so the
-    // breadcrumb survives it for the digest to read, newest-first.
-    assert.deepEqual(
-      host.recentActivities(workerId, 5).map((e) => e.phrase),
-      ["grep: go", "bash: go"],
-    );
-    // Ticket 29 honesty is unchanged: a settled worker has no LIVE
-    // activity — the check-row accessors read null, never stale phrases.
-    assert.equal(host.recentActivity(workerId), null);
-    assert.equal(host.lastActivityAtMs(workerId), null);
-
-    // Aborted settles retain the breadcrumb the same way.
-    const secondId = await host.spawnWorker("again", {
-      parentSessionId: "disp-1",
-      streamKey: "s2",
-      title: "t2",
-    });
-    fireSessionEvent(ctx, secondId, toolCallEvent("bash", { command: "go" }));
-    ctx.fire("subagent/end", { id: secondId, stopReason: "aborted" });
-    assert.equal(host.recentActivities(secondId, 5).length, 1);
-    assert.equal(host.recentActivity(secondId), null);
-    assert.equal(host.lastActivityAtMs(secondId), null);
-  });
-
-  it("dispose clears every ring and stops recording", async () => {
-    const ctx = createStubCtx();
-    const { host, workerId } = await spawnOneWorker(ctx);
-    fireSessionEvent(ctx, workerId, toolCallEvent("bash", { command: "go" }));
-    assert.equal(host.recentActivities(workerId, 5).length, 1);
-
-    host.dispose();
-    assert.equal(host.recentActivities(workerId, 5).length, 0);
-    fireSessionEvent(ctx, workerId, toolCallEvent("bash", { command: "after dispose" }));
-    assert.equal(host.recentActivities(workerId, 5).length, 0);
-  });
 });

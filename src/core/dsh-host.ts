@@ -1,4 +1,3 @@
-import type { AccessRequestEvent } from "./access-types.js";
 import type { AgentMessageWakeOrigin } from "./peer-types.js";
 import type {
   DispatcherSpawnOptions,
@@ -102,11 +101,6 @@ export interface DshHost {
    * waits for turn end and still jumps ahead of everything non-user.
    */
   requestDispatcherInterrupt?(sessionId: string): Promise<void>;
-  /**
-   * Subscribe to structured access requests from workers.
-   * Host invokes callbacks when a worker's request_access tool is used.
-   */
-  onAccessRequest(cb: (event: AccessRequestEvent) => void): void;
   /**
    * Optional: resolve a credential *name* to a value for scoped injection.
    * Adapter-only; core never sees the string. Tests never call this.

@@ -42,11 +42,7 @@ import { useSyncExternalStore } from "react";
 import type { JSX } from "react";
 import type { TranslateFn } from "./overlay.js";
 import { TOOLVIEW_DEGRADED_KEY, type ToolviewModel } from "./toolviews.js";
-import {
-  createApprovalCardsSection,
-  DispatchCardView,
-  type ApprovalCardsSeat,
-} from "./approval-pane.js";
+import { DispatchCardView } from "./dispatch-card-view.js";
 import type {
   ConversationItem,
   ConversationStore,
@@ -379,20 +375,14 @@ function Item(props: { t: TranslateFn; item: ConversationItem }): JSX.Element {
  * (the shell passes the selected session); the composer is keyed by session
  * so a switch starts a fresh, empty draft (U-B: no draft persistence).
  *
- * The optional `approvals` seat (ticket 81) mounts the "Needs you"
- * approval-cards area above the transcript: the fed-or-unfed card store plus
- * the composition's resolve seat. Without the seat the pane simply renders
- * no cards area — never an invented queue.
+ * Ticket 174 / ADR-0033 removed the "Needs you" approval-cards area with the
+ * worker access-ask feature; the pane no longer takes an approvals seat.
  */
 export function createConversationPane(
   t: TranslateFn,
   store: ConversationStore,
   actions: ConversationActions,
-  approvals?: ApprovalCardsSeat,
 ): (props: { sessionId: string }) => JSX.Element {
-  const ApprovalCards = approvals
-    ? createApprovalCardsSection(t, approvals)
-    : null;
   return (props) => {
     const sessionId = props.sessionId;
     useSyncExternalStore(store.subscribe, store.getBox);
@@ -401,7 +391,6 @@ export function createConversationPane(
     return (
       <div className={CONVERSATION_CLASS} data-pane="conversation">
         <style>{CONVERSATION_CSS}</style>
-        {ApprovalCards !== null ? <ApprovalCards /> : null}
         {state.kind !== "ready" ? (
           <div className={`${CONVERSATION_CLASS}__notice`} data-state={state.kind}>
             {t(

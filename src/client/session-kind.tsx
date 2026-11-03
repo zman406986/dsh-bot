@@ -139,6 +139,9 @@ export const SESSION_KIND_GLYPH_CSS = `
  * localized label, so the drawing adds no second announcement. Colours are
  * the row's inherited `currentColor` plus one host token for the eyes
  * (`SESSION_KIND_GLYPH_CSS`), never a raw literal.
+ *
+ * Ticket 177: this is the CHIEF OF STAFF portrait — the dispatcher the human
+ * started. The summoned class draws {@link TeamLeaderPortrait} instead.
  */
 function DispatcherPortrait(): JSX.Element {
   return (
@@ -218,23 +221,126 @@ function DispatcherPortrait(): JSX.Element {
 }
 
 /**
+ * Ticket 177: the TEAM LEADER portrait — a dispatcher another dispatcher
+ * summoned. Same 16×16 grid, same two motion classes (so the stylesheet, the
+ * keyframe count and the reduced-motion override are unchanged), deliberately
+ * different geometry so the two classes are distinguishable at 16px:
+ *
+ * - a flat bar on two short posts instead of a single antenna stem and dot —
+ *   it reads as a team banner, not one bot's antenna;
+ * - square-cornered head with no side ears, so the silhouette is a box against
+ *   the chief of staff's rounded shell;
+ * - square eyes instead of round ones;
+ * - a two-tick mouth instead of one calm line.
+ *
+ * Authored here from scratch like the other portrait: no asset file, no data
+ * URI, `currentColor` plus the one host token the stylesheet already names.
+ */
+function TeamLeaderPortrait(): JSX.Element {
+  return (
+    <svg
+      className="multitask-dispatcher-kind-glyph__bot"
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      focusable="false"
+    >
+      {/* Flat banner bar, held up by two short posts (not an antenna). */}
+      <rect
+        x="3.4"
+        y=".8"
+        width="9.2"
+        height="1.7"
+        rx=".85"
+        fill="currentColor"
+      />
+      <rect x="4.9" y="2.4" width="1.2" height="1.7" fill="currentColor" />
+      <rect x="9.9" y="2.4" width="1.2" height="1.7" fill="currentColor" />
+      {/* Blockier head: square corners, no side ears. */}
+      <rect
+        x="1.6"
+        y="4"
+        width="12.8"
+        height="9.5"
+        rx="1.5"
+        fill="currentColor"
+        fillOpacity=".1"
+        stroke="currentColor"
+        strokeWidth="1.2"
+      />
+      {/* Eyes: square, and the only animated parts (same blink class). */}
+      <rect
+        className="multitask-dispatcher-kind-glyph__eye"
+        x="4.55"
+        y="7"
+        width="2.2"
+        height="2.2"
+        rx=".35"
+      />
+      <rect
+        className="multitask-dispatcher-kind-glyph__eye"
+        x="9.25"
+        y="7"
+        width="2.2"
+        height="2.2"
+        rx=".35"
+      />
+      {/* Mouth: two ticks — a briefing, not a remark. */}
+      <line
+        x1="5.9"
+        y1="11.3"
+        x2="7.2"
+        y2="11.3"
+        stroke="currentColor"
+        strokeWidth="1.1"
+        strokeLinecap="round"
+      />
+      <line
+        x1="8.7"
+        y1="11.3"
+        x2="10"
+        y2="11.3"
+        stroke="currentColor"
+        strokeWidth="1.1"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+/**
  * The projection key our adapter registers for dispatcher identity
  * (`src/adapter/session-kind-projection.ts`). Read-only: this module never
  * writes a session marker.
  */
 export const DISPATCHER_PROJECTION_KEY = "sessionKind";
 
-/** The wire value the projection publishes for an active dispatcher. */
+/** The wire value the projection publishes for a user-started dispatcher. */
 export const DISPATCHER_PROJECTION_VALUE = "dispatcher";
 
-/** Locale keys for the two glyph labels (accessible name + tooltip). */
+/**
+ * Ticket 177: the wire value for a dispatcher another dispatcher summoned.
+ * Mirrors `TEAM_LEADER_SESSION_KIND` in
+ * `src/adapter/session-kind-projection.ts` — the client bundle is built
+ * separately, so the literal is repeated here rather than imported from the
+ * host tree.
+ */
+export const TEAM_LEADER_PROJECTION_VALUE = "dispatcher-team-leader";
+
+/** Locale keys for the glyph labels (accessible name + tooltip). */
 export const SESSION_KIND_COPY_KEYS = {
   dispatcher: "indicator.dispatcher",
+  "team-leader": "indicator.team-leader",
   worker: "indicator.worker",
 } as const;
 
-/** The three kinds the owner ruling names. */
-export type SessionKind = "dispatcher" | "worker" | "normal";
+/**
+ * The kinds this module can mark. Ticket 177 splits the owner's original
+ * `dispatcher` kind in two, because the two dispatcher classes are different
+ * roles (ticket 173) and now draw different portraits.
+ */
+export type SessionKind = "dispatcher" | "team-leader" | "worker" | "normal";
 
 /**
  * The subset of a client session-list row this module reads
@@ -278,6 +384,7 @@ export function resolveSessionKind(
     facts.projectionValues !== null
       ? facts.projectionValues.sessionKind
       : undefined;
+  if (kind === TEAM_LEADER_PROJECTION_VALUE) return "team-leader";
   if (kind === DISPATCHER_PROJECTION_VALUE) return "dispatcher";
   return "normal";
 }
@@ -327,29 +434,55 @@ export interface SessionKindGlyphProps {
 type MarkedKind = Exclude<SessionKind, "normal">;
 
 /**
+ * Ticket 177: the two dispatcher classes. Both draw a portrait and both are
+ * marked by the ONE composed sidebar entry, so the composed cell accepts
+ * either — that is what keeps ADR-0024's rider at one registration.
+ */
+export const DISPATCHER_KINDS = ["dispatcher", "team-leader"] as const;
+
+/** Whether a resolved kind is one of the two dispatcher classes. */
+export function isDispatcherKind(kind: SessionKind): boolean {
+  return kind === "dispatcher" || kind === "team-leader";
+}
+
+/**
  * One rendered mark: the wrapper span (accessible name, `role="img"`, the
- * `data-session-kind` test/styling hook) plus — for the dispatcher — the bot
- * portrait and its stylesheet.
+ * `data-session-kind` test/styling hook) plus — for either dispatcher class —
+ * its portrait and the shared stylesheet.
+ *
+ * The label follows the RESOLVED class, not the factory: one composed entry
+ * serves both dispatcher classes, so the accessible name has to name the
+ * class the row actually is.
  */
 function SessionKindMark(props: {
   readonly kind: MarkedKind;
-  readonly label: string;
+  readonly t: TranslateFn;
 }): JSX.Element {
+  const label = props.t(SESSION_KIND_COPY_KEYS[props.kind]);
+  const drawn =
+    props.kind === "dispatcher" ? (
+      <DispatcherPortrait />
+    ) : props.kind === "team-leader" ? (
+      <TeamLeaderPortrait />
+    ) : (
+      WORKER_GLYPH
+    );
   const mark = (
     <span
       className="multitask-dispatcher-kind-glyph"
       data-session-kind={props.kind}
       role="img"
-      aria-label={props.label}
-      title={props.label}
+      aria-label={label}
+      title={label}
     >
-      {props.kind === "dispatcher" ? <DispatcherPortrait /> : WORKER_GLYPH}
+      {drawn}
     </span>
   );
-  // The worker mark stays a bare text node; only the dispatcher portrait brings
-  // its stylesheet, as a sibling of the mark so the mark's own text content
-  // stays empty (the cell is glyph-only).
-  if (props.kind !== "dispatcher") return mark;
+  // The worker mark stays a bare text node; only the portraits bring the
+  // stylesheet, as a sibling of the mark so the mark's own text content stays
+  // empty (the cell is glyph-only). Both classes share it, so the CSS, its
+  // keyframes and its reduced-motion override are unchanged by the split.
+  if (!isDispatcherKind(props.kind)) return mark;
   return (
     <>
       <style>{SESSION_KIND_GLYPH_CSS}</style>
@@ -365,17 +498,17 @@ function SessionKindMark(props: {
  * `normal` — and any session the snapshot cannot resolve — renders `null`.
  */
 function KindGlyphBody(props: {
-  readonly kind: MarkedKind;
-  readonly label: string;
+  readonly t: TranslateFn;
   readonly sessionId: string;
   readonly useSessions: UseSessionsLike;
   readonly resolve: (facts: SessionKindFactsLike | undefined) => SessionKind;
+  readonly accepts: (resolved: SessionKind) => boolean;
 }): JSX.Element | null {
   const resolved = props.useSessions((state) =>
     props.resolve(state?.byId?.[props.sessionId]),
   );
-  if (resolved !== props.kind) return null;
-  return <SessionKindMark kind={props.kind} label={props.label} />;
+  if (!props.accepts(resolved)) return null;
+  return <SessionKindMark kind={resolved as MarkedKind} t={props.t} />;
 }
 
 /**
@@ -388,21 +521,40 @@ function KindGlyphBody(props: {
  * - the matching kind → one `<span role="img">` carrying the mark (the
  *   dispatcher bot portrait, or the worker character), its accessible label,
  *   and a `data-session-kind` hook for styling/tests.
+ *
+ * Ticket 177: `"dispatcher"` means the chief-of-staff class specifically. Use
+ * {@link createDispatcherClassGlyph} for the composed sidebar cell, which must
+ * mark BOTH dispatcher classes without a second registration.
  */
 export function createSessionKindGlyph(
   kind: MarkedKind,
   t: TranslateFn,
 ): (props: SessionKindGlyphProps) => JSX.Element | null {
-  return createKindGlyph(kind, t, resolveSessionKind);
+  const accepts = (resolved: SessionKind): boolean => resolved === kind;
+  return createKindGlyph(t, resolveSessionKind, accepts);
+}
+
+/**
+ * Ticket 177: the ONE composed dispatcher cell. It marks a session when the
+ * projection says it is a dispatcher of EITHER class, then draws the portrait
+ * for the class the row actually is.
+ *
+ * Why one component instead of two registrations: ADR-0024's rider licenses
+ * exactly one additive entry in `sidebar.session.row.leading`. A second entry
+ * would spend that rider on an icon.
+ */
+export function createDispatcherClassGlyph(
+  t: TranslateFn,
+): (props: SessionKindGlyphProps) => JSX.Element | null {
+  return createKindGlyph(t, resolveSessionKind, isDispatcherKind);
 }
 
 /** The shared factory body (composed by the sidebar cell only). */
 function createKindGlyph(
-  kind: MarkedKind,
   t: TranslateFn,
   resolve: (facts: SessionKindFactsLike | undefined) => SessionKind,
+  accepts: (resolved: SessionKind) => boolean,
 ): (props: SessionKindGlyphProps) => JSX.Element | null {
-  const label = t(SESSION_KIND_COPY_KEYS[kind]);
   return function SessionKindGlyph(
     props: SessionKindGlyphProps,
   ): JSX.Element | null {
@@ -416,11 +568,11 @@ function createKindGlyph(
     }
     return (
       <KindGlyphBody
-        kind={kind}
-        label={label}
+        t={t}
         sessionId={sessionId}
         useSessions={useSessions}
         resolve={resolve}
+        accepts={accepts}
       />
     );
   };

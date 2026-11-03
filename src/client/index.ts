@@ -65,7 +65,6 @@ import {
 } from "./overlay.js";
 import {
   bindCommandTransport,
-  submitAccessResolve,
   tryPrefillSteer,
   type SteerPrefillOutcome,
 } from "./actions.js";
@@ -103,18 +102,9 @@ import {
 } from "./conversation-store.js";
 import { bindConversationFeed, requestOlder } from "./conversation-feed.js";
 import {
-  createApprovalCardsStore,
-  type ApprovalCardsStore,
-} from "./approval-cards.js";
-import {
-  createApprovalRelayFeed,
-  type ApprovalRelayFeed,
-} from "./approval-feed.js";
-import {
   createShellMirrorFeed,
   type ShellMirrorFeed,
 } from "./shell-mirror-feed.js";
-import type { ApprovalCardActions } from "./approval-pane.js";
 import {
   createConversationPane,
   type ConversationSendOutcome,
@@ -125,7 +115,7 @@ import {
 } from "./onboarding.js";
 import { createOnboardingPane } from "./onboarding-pane.js";
 import {
-  createSessionKindGlyph,
+  createDispatcherClassGlyph,
   dispatcherGlyphRegistration,
 } from "./session-kind.js";
 
@@ -169,8 +159,6 @@ export function apply(ctx: ClientContext): void {
  * REAL wiring instead of reconstructing it by hand (ticket 69, L1 offline
  * composition pin). Three facts, all live references:
  *
- * - `approvalsFeed` — the relay feed every mount may attach to (the shared
- *   hub). No live channel feeds it on 0.2.1.
  * - `mirrorsFeed` — the per-session mirror hub every mount's shell store may
  *   join. No live channel feeds it on 0.2.1.
  * - `mounts` — every `mountShellPage` result the slot injects created, in
@@ -186,7 +174,6 @@ export function apply(ctx: ClientContext): void {
  * previously reachable only through the React component closure.
  */
 export interface ClientModuleComposition {
-  readonly approvalsFeed: ApprovalRelayFeed;
   /** Ticket 94: the per-session mirror hub every mount's shell store joins. */
   readonly mirrorsFeed: ShellMirrorFeed;
   readonly mounts: readonly ShellPageMount[];
@@ -216,13 +203,12 @@ export function applyClientModule(
     "multitask-dispatcher: locale dictionaries",
   );
 
-  // Roster/approval/mirror data path: NOT composed. dsh 0.2.1 removed the
-  // client settings-scope service this watch rode, and the host half's
+  // Roster/mirror data path: NOT composed. dsh 0.2.1 removed the client
+  // settings-scope service this watch rode, and the host half's
   // `roster`/`roster.<id>` keys are no longer accepted by the settings
   // document (undeclared keys are rejected as non-volatile). The feeds stay
   // as retained machinery with no live channel: a surface that returns needs
   // a 0.2.1-native transport, not a smuggled config key (ADR-0024).
-  const approvalFeed = createApprovalRelayFeed();
   /**
    * The shell stores' mirror hub. It has no live channel on 0.2.1; offline
    * tests attach the real `mountShellPage` to it to drive the mount data
@@ -305,13 +291,18 @@ export function applyClientModule(
   // `/dsh-bot` already writes — so the identity is durable and needs no event
   // of our own. `agentPreset` is unusable here (every durable header reads
   // "standard").
+  //
+  // Ticket 177: the ONE entry marks BOTH dispatcher classes and draws the
+  // portrait for the class the row actually is (chief of staff vs team
+  // leader). Still one registration — a second entry for the second icon
+  // would spend ADR-0024's single licensed seat on a decoration.
   ctx.slots.inject(
     dispatcherGlyphRegistration().name,
     () => {
       const t = ctx.locale.bind(LOCALE_NAMESPACE);
       return ctx.slots.register(
         dispatcherGlyphRegistration(),
-        createSessionKindGlyph("dispatcher", t),
+        createDispatcherClassGlyph(t),
       );
     },
   );
@@ -344,7 +335,7 @@ export function applyClientModule(
   // app is never shadowed. The retired-path tests remain records of that
   // machinery in `test/client-shell-mount.test.ts`.
 
-  return { approvalsFeed: approvalFeed, mirrorsFeed, mounts };
+  return { mirrorsFeed, mounts };
 }
 
 /**
@@ -378,14 +369,6 @@ export interface ShellPageMount {
   readonly seat: RosterStore;
   /** The conversation store feeding the main seat (ticket 80). */
   readonly conversation: ConversationStore;
-  /**
-   * Ticket 81: the approval-cards store behind the conversation pane's
-   * "Needs you" area. Fed from the shared relay feed when the composition
-   * provides it (ticket 69 L1 — the roster snapshot's v4 `pendingAsks`),
-   * else honestly `unfed`; exposed so tests can drive the data path end to
-   * end without a second store.
-   */
-  readonly approvals: ApprovalCardsStore;
   /** Host seats handed to `createDispatcherShell`. */
   readonly hosts: ShellHosts;
 }
@@ -402,16 +385,6 @@ export interface ShellOnboardingWiring {
 }
 
 /**
- * The approval-cards relay feed the composition shares (ticket 69, L1).
- * Optional so a composition (or a test) can mount the shell without it —
- * the approvals store then stays `unfed` and the pane renders no cards
- * area (honest unknown, never a fabricated "nothing needs you").
- */
-export interface ShellApprovalFeedWiring {
-  readonly approvalsFeed?: ApprovalRelayFeed;
-}
-
-/**
  * The per-session mirror feed the composition shares (ticket 94). Optional so
  * a composition (or a test) can mount the shell without it — the store then
  * keeps `mirrors` empty and the sidebar renders its honest
@@ -423,39 +396,20 @@ export interface ShellMirrorFeedWiring {
 
 export function mountShellPage(
   ctx: ClientContext,
-  wiring?: ShellOnboardingWiring &
-    ShellApprovalFeedWiring &
-    ShellMirrorFeedWiring,
+  wiring?: ShellOnboardingWiring & ShellMirrorFeedWiring,
 ): ShellPageMount {
   const onboarding = wiring && wiring.store ? wiring : undefined;
-  const approvals =
-    wiring && wiring.approvalsFeed !== undefined ? wiring : undefined;
   const mirrors =
     wiring && wiring.mirrorsFeed !== undefined ? wiring : undefined;
   const store = createDispatcherShellStore();
   const seat = createRosterStore();
   const conversation = createConversationStore();
-  // Ticket 81/69: the approval-cards store (the "Needs you" area's data
-  // seam). Fed through the shared relay hub when the wiring provides it
-  // (below); unfed stores render nothing — honest unknown, never a
-  // fabricated "nothing needs you".
-  const approvalsStore = createApprovalCardsStore();
   let binding: ShellFeedBinding | undefined;
-
-  // Approval relay feed attach (ticket 69, L1 offline half): this mount's
-  // store joins the shared hub — replaying the last good pending set
-  // immediately, then every publish — and detaches with the mount's fiber
-  // (the sessions-feed-binding pattern: unsubscribes on unload/HMR).
-  ctx.effect(() => {
-    const feed = approvals?.approvalsFeed;
-    if (feed === undefined) return () => {};
-    return feed.attach(approvalsStore);
-  }, "multitask-dispatcher: shell approval relay feed");
 
   // Per-session mirror attach (ticket 94): this mount's shell store joins the
   // shared hub — replaying the last-known `roster.<sessionId>` mirrors
-  // immediately, then every publish — and detaches with the mount's fiber
-  // (same pattern as the approvals feed above). WITHOUT this the sidebar's
+  // immediately, then every publish — and detaches with the mount's fiber.
+  // WITHOUT this the sidebar's
   // `data-dispatcher` flag, the presence chips, the needs-you marker, and the
   // hosted roster panel have no live data at all (the live-found bug).
   ctx.effect(() => {
@@ -503,19 +457,7 @@ export function mountShellPage(
   });
 
   // The pane factory: bound once to the translate seat, the conversation
-  // store, and the two verified actions — plus ticket 81's approvals seat
-  // WITH ticket 69's resolve seat (L1): a card answer executes the host's
-  // `/dispatcher-resolve` command through the SAME command transaction the
-  // start transport used (ticket 36 seam 2 — the composer's exact
-  // transaction, `ctx.remote.commands.execute`, verbatim line, no second
-  // channel). The card's own `parentSessionId` addresses the dispatcher
-  // chat, so the answer routes regardless of the current selection.
-  // Await-truth, no optimism: `routed` only means the host ran the command;
-  // the card settles when the relay feed re-publishes the worker unblocked
-  // (the store's pending-outranks-notice design).
-  const approvalActions: ApprovalCardActions = {
-    onResolve: (card, choice) => submitAccessResolve(sendTransport, card, choice),
-  };
+  // store, and the two verified actions.
   const conversationPane = createConversationPane(
     ctx.locale.bind(LOCALE_NAMESPACE),
     conversation,
@@ -532,7 +474,6 @@ export function mountShellPage(
       },
       onLoadOlder: (sessionId) => requestOlder(ctx.sessions, sessionId),
     },
-    { cards: approvalsStore, actions: approvalActions },
   );
 
   // The hosted panel's per-row steer affordance uses the same verified
@@ -626,5 +567,5 @@ export function mountShellPage(
     onboarding: onboardingPane,
   };
 
-  return { store, seat, conversation, approvals: approvalsStore, hosts };
+  return { store, seat, conversation, hosts };
 }

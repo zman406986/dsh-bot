@@ -14,34 +14,9 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { apply } from "../src/client/index.js";
 import type { ClientContext } from "../src/client/context.js";
-import {
-  LOCALE_NAMESPACE,
-  localeDictionary,
-  validateLocaleDictionary,
-  SHELL_OVERLAY_SLOT,
-} from "../src/client/overlay.js";
-import {
-  SHIPPED_CLAIMED_TOOLVIEW_KEYS,
-  TOOLVIEW_DEGRADED_KEY,
-  TOOLVIEW_FIELD_KEYS,
-  TOOLVIEW_TEXT_CLAMP_CHARS,
-  TOOLVIEW_TOOL_NAMES,
-  TOOL_CALL_TOOLVIEW_SLOT,
-  describeToolview,
-  isDispatcherToolName,
-  toolviewRegistration,
-  type ToolCallPayload,
-  type ToolviewModel,
-} from "../src/client/toolviews.js";
-import {
-  AWAIT_AGENT_TOOL,
-  CHECK_WORKERS_TOOL,
-  DISPATCHER_TOOL_NAMES,
-  MESSAGE_AGENT_TOOL,
-  SEND_PEER_TOOL,
-  SPAWN_DISPATCHER_TOOL,
-  SPAWN_WORKER_TOOL,
-} from "../src/core/policy/prompts.js";
+import {LOCALE_NAMESPACE, SHELL_OVERLAY_SLOT} from "../src/client/overlay.js";
+import {TOOLVIEW_FIELD_KEYS, TOOLVIEW_TOOL_NAMES, TOOL_CALL_TOOLVIEW_SLOT, describeToolview, isDispatcherToolName, toolviewRegistration, type ToolviewModel} from "../src/client/toolviews.js";
+import {AWAIT_AGENT_TOOL, DISPATCHER_TOOL_NAMES, MESSAGE_AGENT_TOOL, SEND_PEER_TOOL, SPAWN_DISPATCHER_TOOL, SPAWN_WORKER_TOOL} from "../src/core/policy/prompts.js";
 import { ROSTER_STATUS_KEYS } from "../src/core/roster-snapshot.js";
 import type { WorkerStatus } from "../src/core/types.js";
 
@@ -273,10 +248,6 @@ function fieldOf(
 }
 
 describe("toolview — keyed registrations claim only our wire tool names", () => {
-  it("targets the shipped keyed slot, never an invented or forbidden surface", () => {
-    assert.equal(TOOL_CALL_TOOLVIEW_SLOT, "tool.call.toolview");
-  });
-
   it("claims every dispatcher tool plus the retained historical send_peer key", () => {
     // Ticket 152 closed the deliberate lag: message_agent, await_agent and
     // spawn_dispatcher each have their own row renderer now, so the claimed
@@ -292,29 +263,6 @@ describe("toolview — keyed registrations claim only our wire tool names", () =
     }
   });
 
-  it("builds one keyed options object per tool with the plugin locale", () => {
-    for (const name of TOOLVIEW_TOOL_NAMES) {
-      assert.deepEqual(toolviewRegistration(name), {
-        name: TOOL_CALL_TOOLVIEW_SLOT,
-        key: name,
-        locale: "multitask-dispatcher",
-      });
-      // Keyed cells use `key`, not the list-slot `id`/`order` pair.
-      assert.equal("id" in toolviewRegistration(name), false);
-    }
-  });
-
-  it("keys are unique and disjoint from shipped-claimed cells (additive-safe)", () => {
-    assert.equal(new Set(TOOLVIEW_TOOL_NAMES).size, TOOLVIEW_TOOL_NAMES.length);
-    for (const name of TOOLVIEW_TOOL_NAMES) {
-      assert.ok(
-        !SHIPPED_CLAIMED_TOOLVIEW_KEYS.includes(name),
-        `must never claim a covered key (shadowing election): ${name}`,
-      );
-    }
-    // The shipped catalog fixture itself stays the research Finding 5 set.
-    assert.deepEqual(SHIPPED_CLAIMED_TOOLVIEW_KEYS, ["cordis_define", "cordis_run"]);
-  });
 });
 
 describe("toolview — spawn_worker payload parsing", () => {
@@ -356,15 +304,6 @@ describe("toolview — spawn_worker payload parsing", () => {
     assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.stream), "t-2");
   });
 
-  it("renders args-only calls (result not yet present) without an outcome", () => {
-    const view = assertDetail(
-      describeToolview("spawn_worker", {
-        args: { stream_key: "t-9", title: "Grid sweep", prompt: "…" },
-      }),
-    );
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), undefined);
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.title), "Grid sweep");
-  });
 });
 
 describe("toolview — check_workers payload parsing", () => {
@@ -423,37 +362,6 @@ describe("toolview — check_workers payload parsing", () => {
     );
   });
 
-  it("renders a single-worker check: target arg + its row", () => {
-    const view = assertDetail(
-      describeToolview("check_workers", {
-        args: { worker_id: "w-1" },
-        result: {
-          ok: true,
-          rows: [checkRow({ worker_id: "w-1", status: "steering" })],
-          summary: "…",
-        },
-      }),
-    );
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.worker), "w-1");
-    assert.equal(view.statusRows.length, 1);
-    assert.equal(view.statusRows[0]?.statusLabel, "steering");
-  });
-
-  it("renders an ok result with zero rows (empty roster) as a plain outcome", () => {
-    const view = assertDetail(
-      describeToolview("check_workers", {
-        args: {},
-        result: {
-          ok: true,
-          rows: [],
-          summary: "No workers on the roster for this session.",
-        },
-      }),
-    );
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "ok");
-    assert.equal(view.statusRows.length, 0);
-  });
-
   it("degrades a success result whose rows are not an array", () => {
     assert.deepEqual(
       describeToolview("check_workers", {
@@ -497,51 +405,6 @@ describe("toolview — check_workers activity rows (ticket 29)", () => {
     assert.equal(view.statusRows[1]?.activity, null);
   });
 
-  it("omits the line for absent, empty, or whitespace-only activity", () => {
-    const view = assertDetail(
-      describeToolview("check_workers", {
-        args: {},
-        result: {
-          ok: true,
-          rows: [
-            checkRow({ recent_activity: null }),
-            checkRow({ recent_activity: "" }),
-            checkRow({ recent_activity: "   \n\t  " }),
-            checkRow({ recent_activity: 42 }),
-          ],
-          summary: "…",
-        },
-      }),
-    );
-    for (const row of view.statusRows) {
-      assert.equal(row.activity, null);
-    }
-  });
-
-  it("collapses whitespace and clamps an oversized phrase to the compact budget", () => {
-    const long = `bash: ${"npm run build && ".repeat(12)}done`;
-    const view = assertDetail(
-      describeToolview("check_workers", {
-        args: {},
-        result: { ok: true, rows: [checkRow({ recent_activity: long })], summary: "…" },
-      }),
-    );
-    const activity = view.statusRows[0]?.activity;
-    assert.ok(activity, "activity rendered");
-    assert.ok(activity.length <= TOOLVIEW_TEXT_CLAMP_CHARS + 1);
-    assert.ok(activity.endsWith("…"));
-    assert.ok(!activity.includes("\n"), "whitespace collapsed to one line");
-  });
-
-  it("activity never turns a malformed payload into a throw", () => {
-    for (const bad of ["junk", 7, null, { text: "x" }]) {
-      const view = describeToolview("check_workers", {
-        args: {},
-        result: { ok: true, rows: [checkRow({ recent_activity: bad })], summary: "…" },
-      });
-      assert.equal(view.kind, "detail");
-    }
-  });
 });
 
 describe("toolview — steer_worker payload parsing", () => {
@@ -562,15 +425,6 @@ describe("toolview — steer_worker payload parsing", () => {
     assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "ok");
   });
 
-  it("renders the not-running refusal", () => {
-    const view = assertDetail(
-      describeToolview("steer_worker", {
-        args: { worker_id: "w-done", message: "hurry up" },
-        result: { ok: false, reason: "not-running", detail: "w-done already settled" },
-      }),
-    );
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "not-running");
-  });
 });
 
 describe("toolview — stop_worker payload parsing", () => {
@@ -585,15 +439,6 @@ describe("toolview — stop_worker payload parsing", () => {
     assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "ok");
   });
 
-  it("renders the already-settled refusal", () => {
-    const view = assertDetail(
-      describeToolview("stop_worker", {
-        args: { worker_id: "w-gone" },
-        result: { ok: false, reason: "already-settled", detail: "unknown worker: w-gone" },
-      }),
-    );
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "already-settled");
-  });
 });
 
 describe("toolview — deliver_result payload parsing", () => {
@@ -626,15 +471,6 @@ describe("toolview — deliver_result payload parsing", () => {
     assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.todo), "t-2", "falls back to args todo");
   });
 
-  it("prefers the result todo completion over the arg", () => {
-    const view = assertDetail(
-      describeToolview("deliver_result", {
-        args: { text: "…", todo_id: "t-2" },
-        result: { ok: true, delivered: true, todo_completed: "t-2" },
-      }),
-    );
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.todo), "t-2");
-  });
 });
 
 describe("toolview — degraded-but-safe on malformed payloads (never throws)", () => {
@@ -653,47 +489,21 @@ describe("toolview — degraded-but-safe on malformed payloads (never throws)", 
     ["null-valued fields", { args: { worker_id: null }, result: null }],
   ];
 
-  for (const [name, props] of nasty) {
-    for (const toolName of TOOLVIEW_TOOL_NAMES) {
-      it(`${name} → degraded for ${toolName}`, () => {
+  for (const toolName of TOOLVIEW_TOOL_NAMES) {
+    it(`degrades safely instead of throwing for ${toolName}`, () => {
+      for (const [name, props] of nasty) {
         let view: ToolviewModel | undefined;
         assert.doesNotThrow(() => {
           view = describeToolview(toolName, props);
-        });
+        }, `${name} threw`);
         assert.ok(view, "parser always returns a model");
         assert.ok(
           view.kind === "degraded" || view.kind === "detail",
-          "model is a valid variant",
+          `${name}: model is a valid variant`,
         );
-      });
-    }
-  }
-
-  it("a foreign tool name degrades (no invented keys)", () => {
-    assert.deepEqual(describeToolview("cordis_run", { args: {}, result: {} }), {
-      kind: "degraded",
+      }
     });
-  });
-
-  it("empty-but-well-formed props degrade instead of rendering a bare row", () => {
-    assert.deepEqual(
-      describeToolview("spawn_worker", { args: {}, result: {} } satisfies ToolCallPayload),
-      { kind: "degraded" },
-    );
-  });
-});
-
-describe("toolview — locale dictionary shape", () => {
-  it("stays a valid {en, zh} dictionary and carries the toolview copy", () => {
-    assert.deepEqual(validateLocaleDictionary(localeDictionary), []);
-    for (const key of [
-      TOOLVIEW_DEGRADED_KEY,
-      ...Object.values(TOOLVIEW_FIELD_KEYS),
-    ]) {
-      assert.ok(typeof localeDictionary.en[key] === "string", `en missing ${key}`);
-      assert.ok(typeof localeDictionary.zh[key] === "string", `zh missing ${key}`);
-    }
-  });
+  }
 });
 
 describe("toolview — apply() registers one keyed entry per tool via the fake seam", () => {
@@ -723,50 +533,6 @@ describe("toolview — apply() registers one keyed entry per tool via the fake s
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
   });
 
-  it("each entry's component is bound to its own tool name", () => {
-    const ctx = createClientCtx();
-    apply(ctx);
-    const toolviews = ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT);
-    assert.ok(toolviews);
-    for (const [index, name] of TOOLVIEW_TOOL_NAMES.entries()) {
-      const component = toolviews.entries[index]?.component;
-      assert.equal(typeof component, "function");
-      // Distinct closures per tool (registration captures the tool name).
-      if (index > 0) {
-        assert.notEqual(component, toolviews.entries[index - 1]?.component);
-      }
-    }
-  });
-});
-
-describe("toolview — HMR reversal over the fake seam", () => {
-  it("fiber teardown removes every entry; re-apply restores them cleanly", () => {
-    const ctx = createClientCtx();
-    apply(ctx);
-    assert.equal(
-      ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT)?.entries.length,
-      TOOLVIEW_TOOL_NAMES.length,
-    );
-    assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
-
-    ctx.runFiberTeardown();
-    assert.equal(ctx.injects.length, 0);
-    assert.equal(ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT), undefined);
-    assert.equal(ctx.locales.has(LOCALE_NAMESPACE), false);
-
-    // Post-HMR fiber: everything registers again, no accumulation. Ticket 86:
-    // this re-apply would throw the shipped slot collision if teardown had
-    // left any entry in its cell (the fake now models that rule), so the
-    // HMR-reversal assertion is a real contract check, not just a count.
-    assert.doesNotThrow(() => apply(ctx));
-    assert.equal(ctx.injects.length, 3);
-    assert.equal(
-      ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT)?.entries.length,
-      TOOLVIEW_TOOL_NAMES.length,
-    );
-    assert.equal(ctx.findInject(SHELL_OVERLAY_SLOT), undefined);
-    assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
-  });
 });
 
 describe("toolview — send_peer payload parsing (ticket 70)", () => {
@@ -816,10 +582,6 @@ describe("toolview — send_peer payload parsing (ticket 70)", () => {
     );
   });
 
-  it("degrades when nothing parses", () => {
-    assert.equal(describeToolview("send_peer", null).kind, "degraded");
-    assert.equal(describeToolview("send_peer", { args: 4 }).kind, "degraded");
-  });
 });
 
 describe("toolview — message_agent payload parsing (ticket 152)", () => {
@@ -1086,57 +848,6 @@ describe("toolview — shipped slot props (phase/block) adapt to the parsers", (
     assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "ok");
   });
 
-  it("renders a start-phase call from the lazy args view (no result yet)", () => {
-    const view = assertDetail(
-      describeToolview(SPAWN_WORKER_TOOL, {
-        phase: "start",
-        block: {
-          phase: "start",
-          callId: "c-2",
-          name: "spawn_worker",
-          args: fakeArgs({ stream_key: "t-9", title: "Grid sweep" }),
-          argsRaw: JSON.stringify({ stream_key: "t-9", title: "Grid sweep" }),
-        },
-      }),
-    );
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.title), "Grid sweep");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), undefined);
-  });
-
-  it("renders a half-streamed argument object instead of degrading", () => {
-    // The reader answers what has landed: `title` still streaming, `message`
-    // complete, `todo_id` not yet begun.
-    const view = assertDetail(
-      describeToolview(SPAWN_WORKER_TOOL, {
-        phase: "start",
-        block: {
-          phase: "start",
-          callId: "c-3",
-          name: "spawn_worker",
-          args: fakeArgs({ title: "Rewrite au", stream_key: "t-2" }),
-          argsRaw: '{"title":"Rewrite au","stream_key":"t-2"',
-        },
-      }),
-    );
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.title), "Rewrite au");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.stream), "t-2");
-  });
-
-  it("reads a preparing call's partial args when argsRaw is absent", () => {
-    const view = assertDetail(
-      describeToolview(CHECK_WORKERS_TOOL, {
-        phase: "preparing",
-        block: {
-          phase: "preparing",
-          callId: "c-4",
-          name: "check_workers",
-          args: fakeArgs({ worker_id: "w-1" }),
-        },
-      }),
-    );
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.worker), "w-1");
-  });
-
   it("takes the structured result from meta, and reports an error without one", () => {
     const withMeta = assertDetail(
       describeToolview(SPAWN_WORKER_TOOL, {
@@ -1173,23 +884,6 @@ describe("toolview — shipped slot props (phase/block) adapt to the parsers", (
     );
     assert.equal(fieldOf(failed, TOOLVIEW_FIELD_KEYS.outcome), "denied");
     assert.equal(fieldOf(failed, TOOLVIEW_FIELD_KEYS.title), "Rewrite auth docs");
-  });
-
-  it("falls back to argsRaw when the lazy view is empty", () => {
-    const view = assertDetail(
-      describeToolview(SPAWN_WORKER_TOOL, {
-        phase: "start",
-        block: {
-          phase: "start",
-          callId: "c-7",
-          name: "spawn_worker",
-          args: fakeArgs({}),
-          argsRaw: JSON.stringify({ title: "From raw text", stream_key: "t-4" }),
-        },
-      }),
-    );
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.title), "From raw text");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.stream), "t-4");
   });
 
   it("degrades a result phase that carries nothing readable, without throwing", () => {

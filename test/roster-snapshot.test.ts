@@ -31,20 +31,8 @@ import {
 } from "../src/core/multitask.js";
 import { createInMemoryDurability } from "../src/core/durability.js";
 import { RECENT_RESULT_EXCERPT_CHARS } from "../src/core/report-clamp.js";
-import {
-  ROSTER_SETTINGS_KEY,
-  ROSTER_SNAPSHOT_SCHEMA_VERSION,
-  ROSTER_STALE_WINDOW_MS,
-  ROSTER_STATUS_KEYS,
-  isRosterSnapshotStale,
-  parseRosterSnapshot,
-  projectRosterSnapshot,
-  type RosterSnapshot,
-} from "../src/core/roster-snapshot.js";
-import {
-  rosterSessionKey,
-  sessionOfRosterKey,
-} from "../src/adapter/roster-channel.js";
+import {ROSTER_SETTINGS_KEY, ROSTER_SNAPSHOT_SCHEMA_VERSION, ROSTER_STALE_WINDOW_MS, isRosterSnapshotStale, parseRosterSnapshot, projectRosterSnapshot, type RosterSnapshot} from "../src/core/roster-snapshot.js";
+import {sessionOfRosterKey} from "../src/adapter/roster-channel.js";
 import {
   DISPATCHER_START_COMMAND,
   type AdapterContext,
@@ -56,19 +44,17 @@ import { volatileConfig } from "./support/plugin-config.js";
 function makeCore(
   observer?: (sessionId: string) => void,
   durability: ReturnType<typeof createInMemoryDurability> = createInMemoryDurability(),
-  access?: MultitaskOptions["access"],
 ) {
   const host = new FakeDshHost();
   const multitask = createMultitask(host, {
     durability,
     ...(observer === undefined ? {} : { onRosterChanged: observer }),
-    ...(access === undefined ? {} : { access }),
   });
   return { host, durability, multitask };
 }
 
 describe("roster snapshot — projection is a pure core projection (ticket 21)", () => {
-  it("projects the v2 presence row: id, title, FSM status, todo link, clock, count, delivered, blocked", async () => {
+  it("projects the presence row: id, title, FSM status, todo link, clock, count, delivered", async () => {
     const { host, multitask } = makeCore();
     const todo = multitask.createTodo({
       sessionId: "s-1",
@@ -89,10 +75,7 @@ describe("roster snapshot — projection is a pure core projection (ticket 21)",
       "s-1",
       multitask.listWorkers("s-1"),
       1_000,
-      {
-        pendingAccess: multitask.listPendingAccess("s-1"),
-        todos: multitask.listTodos("s-1"),
-      },
+      { todos: multitask.listTodos("s-1") },
     );
     assert.equal(snapshot.schemaVersion, ROSTER_SNAPSHOT_SCHEMA_VERSION);
     assert.equal(snapshot.dispatcherSessionId, "s-1");
@@ -108,87 +91,12 @@ describe("roster snapshot — projection is a pure core projection (ticket 21)",
       toolCallCount: 0,
       // Linked todo exists and has not been delivered — landed marker fuel.
       delivered: false,
-      blocked: null,
     });
   });
 
-  it("projects each core FSM status verbatim (the vocabulary is the label)", () => {
-    for (const status of ROSTER_STATUS_KEYS) {
-      const snapshot = projectRosterSnapshot("s", [
-        {
-          workerId: "w",
-          parentSessionId: "s",
-          streamKey: "k",
-          title: "T",
-          status,
-          startedAtMs: 0,
-          elapsedMs: 0,
-          toolCallCount: 0,
-          transcriptRef: null,
-          todoId: null,
-        },
-      ], 5);
-      assert.equal(snapshot.workers[0]?.status, status);
-    }
-  });
 });
 
 describe("roster snapshot — v2 presence fields join existing core truth (ticket 27)", () => {
-  it("joins a pending access ask by workerId — class+target names only", async () => {
-    const { host, multitask } = makeCore();
-    const spawn = await multitask.spawnWorker({
-      parentSessionId: "s-1",
-      streamKey: "k",
-      title: "T",
-      prompt: "P",
-    });
-    const workerId = spawn.ok ? spawn.workerId : "";
-    multitask.noteTurnStarted(workerId);
-    host.fireAccessRequest({
-      workerId,
-      requestId: "r-1",
-      body: {
-        class: "credential",
-        target: "API_TOKEN",
-        reason: "to call the deploy service",
-        credentialName: "API_TOKEN",
-      },
-      createdAtMs: 1,
-    });
-
-    const snapshot = projectRosterSnapshot(
-      "s-1",
-      multitask.listWorkers("s-1"),
-      1_000,
-      { pendingAccess: multitask.listPendingAccess("s-1") },
-    );
-    assert.deepEqual(snapshot.workers[0]?.blocked, {
-      class: "credential",
-      target: "API_TOKEN",
-    });
-    // Names only: reason text and any credential reference never ride the
-    // roster wire (access-types hard rule mirrored by the projection).
-    const blockedKeys = Object.keys(snapshot.workers[0]?.blocked ?? {}).sort();
-    assert.deepEqual(blockedKeys, ["class", "target"]);
-  });
-
-  it("a worker without a pending ask projects blocked: null", async () => {
-    const { multitask } = makeCore();
-    await multitask.spawnWorker({
-      parentSessionId: "s-1",
-      streamKey: "k",
-      title: "T",
-      prompt: "P",
-    });
-    const snapshot = projectRosterSnapshot(
-      "s-1",
-      multitask.listWorkers("s-1"),
-      1_000,
-      { pendingAccess: multitask.listPendingAccess("s-1") },
-    );
-    assert.equal(snapshot.workers[0]?.blocked, null);
-  });
-
   it("delivered follows the ledger: no todo → true; linked todo → false until markDelivered", async () => {
     const { host, multitask } = makeCore();
     const todo = multitask.createTodo({ sessionId: "s-1", title: "T" });
@@ -202,10 +110,7 @@ describe("roster snapshot — v2 presence fields join existing core truth (ticke
     const workerId = spawn.ok ? spawn.workerId : "";
     host.fireSettled({ workerId, status: "completed", report: "done" });
 
-    const sources = () => ({
-      pendingAccess: multitask.listPendingAccess("s-1"),
-      todos: multitask.listTodos("s-1"),
-    });
+    const sources = () => ({ todos: multitask.listTodos("s-1") });
     const before = projectRosterSnapshot(
       "s-1",
       multitask.listWorkers("s-1"),
@@ -224,24 +129,6 @@ describe("roster snapshot — v2 presence fields join existing core truth (ticke
     assert.equal(after.workers[0]?.delivered, true);
   });
 
-  it("a todo-less worker projects delivered: true — it can never sit landed-undelivered", async () => {
-    const { host, multitask } = makeCore();
-    const spawn = await multitask.spawnWorker({
-      parentSessionId: "s-1",
-      streamKey: "k",
-      title: "T",
-      prompt: "P",
-    });
-    const workerId = spawn.ok ? spawn.workerId : "";
-    host.fireSettled({ workerId, status: "completed", report: "done" });
-    const snapshot = projectRosterSnapshot(
-      "s-1",
-      multitask.listWorkers("s-1"),
-      1_000,
-      { todos: multitask.listTodos("s-1") },
-    );
-    assert.equal(snapshot.workers[0]?.delivered, true);
-  });
 });
 
 describe("roster snapshot — core observer fires on roster-affecting transitions", () => {
@@ -349,151 +236,6 @@ describe("roster snapshot — core observer fires on roster-affecting transition
     assert.equal(multitask.getWorker("w-done")?.status, "completed");
   });
 
-  it("a throwing observer never breaks core flow", async () => {
-    const { multitask } = makeCore(() => {
-      throw new Error("observer exploded");
-    });
-    const spawn = await multitask.spawnWorker({
-      parentSessionId: "s-1",
-      streamKey: "k",
-      title: "T",
-      prompt: "P",
-    });
-    assert.equal(spawn.ok, true);
-    assert.equal(multitask.listWorkers("s-1").length, 1);
-  });
-});
-
-describe("roster snapshot — observer covers the presence-field mutations (ticket 27)", () => {
-  it("fires when a pending ask parks and again when it resolves; a policy auto-answer stays silent", async () => {
-    const seen: string[] = [];
-    const { host, multitask } = makeCore((s) => seen.push(s));
-    const spawn = await multitask.spawnWorker({
-      parentSessionId: "s-1",
-      streamKey: "k",
-      title: "T",
-      prompt: "P",
-    });
-    const workerId = spawn.ok ? spawn.workerId : "";
-    multitask.noteTurnStarted(workerId);
-    const afterStart = seen.length;
-
-    host.fireAccessRequest({
-      workerId,
-      requestId: "r-1",
-      body: { class: "tool", target: "edit", reason: "need" },
-      createdAtMs: 1,
-    });
-    assert.equal(multitask.listPendingAccess("s-1").length, 1);
-    assert.equal(seen.length - afterStart, 1, "park notifies once");
-
-    assert.equal(multitask.resolveAccess(workerId, { kind: "allow" }), true);
-    assert.equal(multitask.listPendingAccess("s-1").length, 0);
-    assert.equal(seen.length - afterStart, 2, "resolve notifies once");
-  });
-
-  it("an auto-answered allow never parks, so no observer noise; a policy deny notifies via onResolved", async () => {
-    const seen: string[] = [];
-    const { host, multitask } = makeCore((s) => seen.push(s));
-    multitask.accessPolicy.set({
-      class: "tool",
-      targetPattern: "allowed-*",
-      decision: "allow",
-      scope: "session",
-    });
-    multitask.accessPolicy.set({
-      class: "tool",
-      targetPattern: "denied-*",
-      decision: "deny",
-      scope: "session",
-    });
-    const spawn = await multitask.spawnWorker({
-      parentSessionId: "s-1",
-      streamKey: "k",
-      title: "T",
-      prompt: "P",
-    });
-    const workerId = spawn.ok ? spawn.workerId : "";
-    multitask.noteTurnStarted(workerId);
-    const afterStart = seen.length;
-
-    host.fireAccessRequest({
-      workerId,
-      requestId: "r-1",
-      body: { class: "tool", target: "allowed-thing", reason: "need" },
-      createdAtMs: 1,
-    });
-    assert.equal(multitask.listPendingAccess("s-1").length, 0);
-    assert.equal(seen.length - afterStart, 0, "auto-allow is roster-silent");
-
-    host.fireAccessRequest({
-      workerId,
-      requestId: "r-2",
-      body: { class: "tool", target: "denied-thing", reason: "need" },
-      createdAtMs: 2,
-    });
-    assert.equal(multitask.listPendingAccess("s-1").length, 0);
-    assert.equal(seen.length - afterStart, 1, "deny re-projects the marker");
-  });
-
-  it("the timeout deny re-projects through the relay's onResolved", async () => {
-    const seen: string[] = [];
-    const scheduled: Array<() => void> = [];
-    const { host, multitask } = makeCore(
-      (s) => seen.push(s),
-      createInMemoryDurability(),
-      {
-        timeoutMs: 5,
-        schedule: (fn) => {
-          scheduled.push(fn);
-          return () => {};
-        },
-      },
-    );
-    const spawn = await multitask.spawnWorker({
-      parentSessionId: "s-1",
-      streamKey: "k",
-      title: "T",
-      prompt: "P",
-    });
-    const workerId = spawn.ok ? spawn.workerId : "";
-    multitask.noteTurnStarted(workerId);
-    const afterStart = seen.length;
-
-    host.fireAccessRequest({
-      workerId,
-      requestId: "r-1",
-      body: { class: "network", target: "example.test", reason: "need" },
-      createdAtMs: 1,
-    });
-    assert.equal(seen.length - afterStart, 1);
-
-    const timeout = scheduled[0];
-    assert.ok(timeout, "deny timeout was armed");
-    timeout();
-    assert.equal(multitask.listPendingAccess("s-1").length, 0);
-    assert.equal(seen.length - afterStart, 2, "timeout deny notifies once");
-  });
-
-  it("markDelivered notifies the todo's session so the landed marker clears", async () => {
-    const seen: string[] = [];
-    const { host, multitask } = makeCore((s) => seen.push(s));
-    const todo = multitask.createTodo({ sessionId: "s-1", title: "T" });
-    const spawn = await multitask.spawnWorker({
-      parentSessionId: "s-1",
-      streamKey: "k",
-      title: "T",
-      prompt: "P",
-      todoId: todo.id,
-    });
-    const workerId = spawn.ok ? spawn.workerId : "";
-    host.fireSettled({ workerId, status: "completed", report: "done" });
-    const before = seen.length;
-
-    assert.equal(multitask.markDelivered(todo.id), true);
-    assert.equal(seen.length - before, 1);
-    assert.equal(seen.at(-1), "s-1");
-  });
 });
 
 describe("roster snapshot — deliverables excerpt (ticket 41, schema v3)", () => {
@@ -606,19 +348,6 @@ describe("roster snapshot — deliverables excerpt (ticket 41, schema v3)", () =
     assert.equal(running.recentResult, null);
   });
 
-  it("an absent seat or an empty observed report projects null — count-only, never invented", () => {
-    const noSeat = projectRosterSnapshot("s-1", [landedRow], 1_000, {
-      todos: [landedTodo],
-    });
-    assert.equal(noSeat.recentResult, null);
-
-    const emptyReport = projectRosterSnapshot("s-1", [landedRow], 1_000, {
-      todos: [landedTodo],
-      recentResultOf: () => ({ text: "   ", settledAtMs: 500 }),
-    });
-    assert.equal(emptyReport.recentResult, null);
-  });
-
   it("parse fail-closed matrix: v1 AND v2 payloads, missing/malformed/unbounded excerpts all fail to null", () => {
     const valid = projectRosterSnapshot("s-1", [], 1_000);
     assert.equal(valid.recentResult, null);
@@ -699,16 +428,6 @@ describe("roster snapshot — parse and staleness (v3 wire contract)", () => {
       ],
       1_000,
       {
-        pendingAccess: [
-          {
-            workerId: "w-1",
-            requestId: "r-1",
-            body: { class: "filesystem", target: "/etc/hosts", reason: "need" },
-            createdAtMs: 1,
-            parentSessionId: "s-1",
-            status: "pending",
-          },
-        ],
         todos: [
           {
             id: "todo-1",
@@ -770,7 +489,6 @@ describe("roster snapshot — parse and staleness (v3 wire contract)", () => {
       startedAtMs: 0,
       toolCallCount: 0,
       delivered: true,
-      blocked: null,
     };
     assert.equal(
       parseRosterSnapshot({
@@ -806,7 +524,6 @@ describe("roster snapshot — parse and staleness (v3 wire contract)", () => {
       startedAtMs: 0,
       toolCallCount: 0,
       delivered: true,
-      blocked: null,
     };
     const withRow = (row: Record<string, unknown>) =>
       parseRosterSnapshot({ ...valid, workers: [row] });
@@ -818,28 +535,13 @@ describe("roster snapshot — parse and staleness (v3 wire contract)", () => {
     assert.equal(withRow({ ...v2Row, toolCallCount: 1.5 }), null);
     assert.equal(withRow({ ...v2Row, toolCallCount: -3 }), null);
     assert.equal(withRow({ ...v2Row, delivered: "yes" }), null);
+  });
 
-    // Structured blocked: null is fine; anything malformed fails the row.
-    assert.equal(withRow({ ...v2Row, blocked: "tool:edit" }), null);
-    assert.equal(withRow({ ...v2Row, blocked: {} }), null);
-    assert.equal(withRow({ ...v2Row, blocked: { class: "tool" } }), null);
-    assert.equal(
-      withRow({ ...v2Row, blocked: { class: "laser", target: "x" } }),
-      null,
-      "unknown access class is version skew — fail closed",
-    );
-    assert.equal(
-      withRow({ ...v2Row, blocked: { class: "tool", target: 7 } }),
-      null,
-    );
-    const parsed = withRow({
-      ...v2Row,
-      blocked: { class: "other", target: "something" },
-    });
-    assert.deepEqual(parsed?.workers[0]?.blocked, {
-      class: "other",
-      target: "something",
-    });
+  it("rejects a v4 payload — the version bump at ticket 174 fails parse", () => {
+    // v4 carried `pendingAsks` and a per-row `blocked`; both are gone in v5,
+    // and the version gate is the ONLY thing that must reject the old shape.
+    assert.equal(parseRosterSnapshot({ ...valid, schemaVersion: 4 }), null);
+    assert.equal(parseRosterSnapshot({ ...valid, schemaVersion: 5 }) !== null, true);
   });
 
   it("staleness boundary: exactly at the window is fresh, beyond is stale", () => {
@@ -861,15 +563,6 @@ describe("roster snapshot — mirror key grammar (0.2.1: no settings channel)", 
   // 0.2.1 rejects undeclared settings keys and has no scope-registration API,
   // so the write channel is gone. The client read-sides still parse the key
   // family, so the grammar stays and is pinned here.
-  it("names session mirror keys unambiguously (dots in ids stay parseable)", () => {
-    assert.equal(rosterSessionKey("s-abc"), "roster.s-abc");
-    // The legacy whole-snapshot key is NOT a session key.
-    assert.equal(sessionOfRosterKey("roster"), null);
-    // The remainder is taken WHOLE, so dotted ids round-trip.
-    assert.equal(sessionOfRosterKey("roster.s.a.b"), "s.a.b");
-    assert.equal(rosterSessionKey("s.a.b"), "roster.s.a.b");
-  });
-
   it("only the dotted prefix is a session mirror", () => {
     assert.equal(sessionOfRosterKey("rosterx"), null);
     assert.equal(sessionOfRosterKey(""), null);
@@ -1056,61 +749,7 @@ describe("roster snapshot — no settings-document publish (0.2.1)", () => {
     assert.equal(typeof spawned.worker_id, "string");
   });
 
-  it("dormant boot registers no publish path: no listener fans a snapshot out", () => {
-    const ctx = createSettingsAwareCtx();
-    pluginApply(ctx, volatileConfig({ enabled: true }));
-    // The plugin subscribes to the host firehose and status events only.
-    // `onRosterChanged` (the publish trigger) is no longer wired at all, so
-    // no settings watch or document-updated listener exists to fan a
-    // snapshot anywhere.
-    assert.equal(
-      (ctx as unknown as { listeners: Map<string, unknown[]> }).listeners.has(
-        "settings/document-updated",
-      ),
-      false,
-    );
-    assert.equal(
-      (ctx as unknown as { listeners: Map<string, unknown[]> }).listeners.has(
-        "settings/change",
-      ),
-      false,
-    );
-  });
-
-  it("flag OFF registers nothing at all", () => {
-    const ctx = createSettingsAwareCtx();
-    pluginApply(ctx, volatileConfig({ enabled: false }));
-    assert.throws(
-      () => ctx.runCommand(DISPATCHER_START_COMMAND),
-      /command not registered/,
-    );
-  });
 });
 
-describe("roster snapshot — host duplicate-registration rule (ticket 91)", () => {
-  it("apply throws the host duplicate-command error when a command name is taken", () => {
-    const ctx = createSettingsAwareCtx();
-    ctx.commands.register({
-      name: DISPATCHER_START_COMMAND,
-      handler: () => ({ kind: "success", text: "foreign" }),
-    });
-
-    assert.throws(
-      () => pluginApply(ctx, volatileConfig({ enabled: true })),
-      new RegExp(
-        `command "${DISPATCHER_START_COMMAND}" is already registered`,
-      ),
-    );
-  });
-
-  it("the fake tool registry throws the host duplicate-tool error on a taken name", () => {
-    const ctx = createSettingsAwareCtx();
-    const tool = { name: "deliver_result", execute: async () => ({ ok: true }) };
-    ctx.tools.register(tool);
-
-    assert.throws(
-      () => ctx.tools.register(tool),
-      /tool "deliver_result" is already registered/,
-    );
-  });
-});
+// Ticket 91's fail-loud duplicate-registration pin lives in
+// test/plugin-scaffold.test.ts: it is one host rule, pinned once.

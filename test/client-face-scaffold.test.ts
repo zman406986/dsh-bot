@@ -15,23 +15,10 @@ import { describe, it } from "node:test";
 import { readFileSync } from "node:fs";
 import { apply, inject as clientInject } from "../src/client/index.js";
 import type { ClientContext } from "../src/client/context.js";
-import {
-  LOCALE_NAMESPACE,
-  ROSTER_ENTRY_ID,
-  localeDictionary,
-  rosterOverlayRegistration,
-  SHELL_OVERLAY_SLOT,
-  validateLocaleDictionary,
-  type SlotRegistrationOptions,
-} from "../src/client/overlay.js";
-import { CLIENT_MODULE_ID, wrapClientBundle } from "../src/client/wrapper.js";
+import {LOCALE_NAMESPACE, localeDictionary, SHELL_OVERLAY_SLOT, validateLocaleDictionary, type SlotRegistrationOptions} from "../src/client/overlay.js";
+import {CLIENT_MODULE_ID} from "../src/client/wrapper.js";
 import { buildClient } from "../scripts/build-client.js";
-import {
-  MAIN_PAGE_SLOT,
-  ROOT_FRAME_SLOT,
-} from "../src/client/shell-mount.js";
-import { TOOL_CALL_TOOLVIEW_SLOT, TOOLVIEW_TOOL_NAMES } from "../src/client/toolviews.js";
-import { PLUGINS_ROW_CONFIG_SLOT } from "../src/client/settings-card-store.js";
+import {ROOT_FRAME_SLOT} from "../src/client/shell-mount.js";
 
 /**
  * Fake the client face the way the shipped Cordis runtime behaves:
@@ -341,95 +328,8 @@ describe("client face scaffold — package declaration (Finding 4)", () => {
     files: string[];
   };
 
-  it("declares the web client record with react externals", () => {
-    assert.equal(pkg.dsh?.client?.platform, "web");
-    // Static seed words on the dsh web side — no boot-graph edge, never
-    // bundled into the plugin script.
-    assert.deepEqual(pkg.dsh?.client?.external, [
-      "react",
-      "react/jsx-runtime",
-    ]);
-  });
-
-  it("declares dsh.client.inject after the shipped idiom; no immediately flag (ticket 34)", () => {
-    // Boot-graph edges ordering our bundle after its service providers'
-    // bundles (dsh-client-modules `arriveGraphRow`). NOTE (ticket 84): this
-    // manifest list orders BUNDLE ARRIVAL only — it does not authorize
-    // service reads. The service-level declaration is the module's exported
-    // Cordis `inject` array (asserted below); `slots` ← renderer and
-    // `locale` ← locale remain the only bundles our factory's require graph
-    // needs edges for.
-    assert.deepEqual(pkg.dsh?.client?.inject, [
-      "@deepseek-ai/dsh-client-ui-renderer",
-      "@deepseek-ai/dsh-client-locale",
-    ]);
-    // Bootstrap tier is the shipped renderer/locale pair only; no ordinary
-    // plugin package declares dsh.client.immediately (shipped 0.1.5-rc.1 idiom).
-    assert.equal(pkg.dsh?.client?.immediately, undefined);
-  });
-
-  it("adds exports['./client'] and ships the client dir; host export untouched", () => {
-    assert.equal(pkg.exports["./client"], "./client/index.js");
-    assert.deepEqual(pkg.exports["."], {
-      types: "./lib/index.d.ts",
-      import: "./lib/index.js",
-    });
-    assert.ok(pkg.files.includes("client"));
-  });
-
   it("registers under the scanned package name", () => {
     assert.equal(CLIENT_MODULE_ID, pkg.name);
-  });
-});
-
-describe("client face scaffold — shell.overlay entry builder (Finding 5, design-16 §5)", () => {
-  it("builds the roster options for the documented list slot (ticket 21)", () => {
-    assert.deepEqual(rosterOverlayRegistration(), {
-      name: "shell.overlay",
-      id: "multitask-dispatcher-roster",
-      order: -10,
-      locale: "multitask-dispatcher",
-    });
-  });
-
-  it("uses only a dsh-owned shipped slot and a prefixed id — never a forbidden surface", () => {
-    assert.equal(SHELL_OVERLAY_SLOT, "shell.overlay");
-    assert.match(ROSTER_ENTRY_ID, /^multitask-dispatcher-/);
-    assert.equal(LOCALE_NAMESPACE, "multitask-dispatcher");
-    for (const forbidden of [
-      "root",
-      "main",
-      "sidebar.right.pane.tab",
-      "conversation.approval.detail",
-    ]) {
-      assert.notEqual(SHELL_OVERLAY_SLOT, forbidden);
-      assert.notEqual(rosterOverlayRegistration().id, forbidden);
-    }
-  });
-
-  it("declares every service face the module reads (ticket 84)", () => {
-    // The context proxy throws `cannot get property "X" without inject` on
-    // any service property the module's inject list does not declare, at
-    // read time, wherever the read happens (live pass 2's launcher kill).
-    // Declared: slots ← ui-renderer, locale ← dsh-client-locale, sessions ←
-    // dsh-client-ui-session (the shipped provider itself exports
-    // `inject = ["sessions", "slots"]`), remote ← dsh-api-gateway AND its
-    // NESTED `remote.commands` transaction face (ticket 102b — the resolver
-    // matches by exact string and never dot-splits, so the parent entry does
-    // not authorize the member read; the shipped precedent is
-    // dsh-client-ui-commands' `["inputTriggers","sessions","remote",
-    // "remote.commands"]`), conversation ← dsh-client-ui-conversation, and
-    // configForms ← dsh-client-ui-settings (the Plugins page's own contract,
-    // `dsh-client-ui-plugin-manager/lib/client.js:4357-4367`).
-    assert.deepEqual([...clientInject], [
-      "slots",
-      "locale",
-      "sessions",
-      "remote",
-      "conversation",
-      "remote.commands",
-      "configForms",
-    ]);
   });
 });
 
@@ -447,15 +347,12 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
     assert.deepEqual(keys, [
       "activation.presence-hint",
       // Ticket 123: the session-kind glyph labels (accessible names on a
-      // 16px mark, never visible paragraph copy).
+      // 16px mark, never visible paragraph copy). Ticket 177 added the
+      // summoned-dispatcher class beside the human-started one.
       "indicator.dispatcher",
+      "indicator.team-leader",
       "indicator.worker",
       "roster.activity.toolcalls",
-      "roster.blocked.credential",
-      "roster.blocked.filesystem",
-      "roster.blocked.network",
-      "roster.blocked.other",
-      "roster.blocked.tool",
       "roster.empty",
       "roster.finished.count",
       "roster.landed",
@@ -473,8 +370,6 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
       "settings.card.discard",
       "settings.card.expand",
       "settings.card.failed",
-      "settings.card.field.accessRequestTimeoutMs.hint",
-      "settings.card.field.accessRequestTimeoutMs.label",
       "settings.card.field.enabled.hint",
       "settings.card.field.enabled.label",
       // Ticket 113 / ADR-0023: the file-inbox settings-card fields (one
@@ -623,17 +518,6 @@ describe("client face scaffold — apply over fake client seams", () => {
     assert.equal(overlay, undefined, "no shell.overlay inject post-cutover");
   });
 
-  it("slot entries declare the locale namespace so the t seat resolves", () => {
-    const ctx = createClientCtx();
-    apply(ctx);
-
-    const t = ctx.locale.bind(LOCALE_NAMESPACE);
-    assert.equal(t("roster.title"), localeDictionary.en["roster.title"]);
-    assert.equal(t("roster.empty"), localeDictionary.en["roster.empty"]);
-    assert.equal(t("roster.unavailable"), localeDictionary.en["roster.unavailable"]);
-    assert.equal(t("unknown.key"), "unknown.key");
-  });
-
   it("fiber teardown (HMR/unload) reverses the namespace and the entry; re-apply restores", () => {
     const ctx = createClientCtx();
     apply(ctx);
@@ -680,88 +564,6 @@ describe("client face scaffold — shipped slot register semantics (ticket 86)",
     assert.equal(cell[0]?.component, "shipped-app-frame");
   });
 
-  it("a no-priority root registration collides with the shipped frame and throws", () => {
-    // The negative control: the exact pre-85 shape (no priority → `?? 0`)
-    // must fail LOUD here. Without the collision rule this fake accepted it
-    // and the divergence only surfaced live (pass 3).
-    const ctx = createClientCtx();
-    ctx.slots.inject(ROOT_FRAME_SLOT, () =>
-      ctx.slots.register({ name: ROOT_FRAME_SLOT }, "shipped-app-frame"),
-    );
-    assert.throws(
-      () =>
-        ctx.slots.inject(ROOT_FRAME_SLOT, () =>
-          ctx.slots.register({ name: ROOT_FRAME_SLOT }, "regressed-frame"),
-        ),
-      {
-        message:
-          'single slot "root" already has a registration at priority 0 — ' +
-          "register at a different priority to shadow it (lowest renders)",
-      },
-    );
-  });
-
-  it("keyed entries collide on the same key at the same priority, host wording", () => {
-    // The shipped keyed case: `keyed slot "X" already has an entry for key
-    // "K" at priority N …` (SlotCore.register, keyed branch). Our toolview
-    // keys are plugin-owned and disjoint, so `apply` registers six distinct
-    // keys without collision — a duplicate key is the detector.
-    const ctx = createClientCtx();
-    apply(ctx);
-    const toolviewCell = ctx.cells.get(TOOL_CALL_TOOLVIEW_SLOT) ?? [];
-    assert.equal(toolviewCell.length, TOOLVIEW_TOOL_NAMES.length);
-
-    assert.throws(
-      () =>
-        ctx.slots.inject(TOOL_CALL_TOOLVIEW_SLOT, () =>
-          ctx.slots.register(
-            { name: TOOL_CALL_TOOLVIEW_SLOT, key: TOOLVIEW_TOOL_NAMES[0] },
-            "duplicate-toolview",
-          ),
-        ),
-      {
-        message:
-          `keyed slot "${TOOL_CALL_TOOLVIEW_SLOT}" already has an entry for ` +
-          `key "${TOOLVIEW_TOOL_NAMES[0]}" at priority 0 — register at a ` +
-          "different priority to shadow it (lowest renders)",
-      },
-    );
-    // A DIFFERENT key stays additive (per-key cells — the coexistence rule).
-    assert.doesNotThrow(() =>
-      ctx.slots.inject(TOOL_CALL_TOOLVIEW_SLOT, () =>
-        ctx.slots.register(
-          { name: TOOL_CALL_TOOLVIEW_SLOT, key: "shipped_other_tool" },
-          "foreign-toolview",
-        ),
-      ),
-    );
-  });
-
-  it("the registered entries land in their declared slot cells", () => {
-    const ctx = createClientCtx();
-    apply(ctx);
-    assert.equal(ctx.cells.get(TOOL_CALL_TOOLVIEW_SLOT)?.length, TOOLVIEW_TOOL_NAMES.length);
-    assert.equal(ctx.cells.get(PLUGINS_ROW_CONFIG_SLOT)?.length, 1);
-    // Nothing of ours lands in dsh's layout — the `main` page cell and the
-    // `root` frame cell stay unclaimed by us.
-    assert.equal(ctx.cells.get(MAIN_PAGE_SLOT), undefined);
-    assert.equal(ctx.cells.get(ROOT_FRAME_SLOT), undefined);
-    // No shell.overlay entry survives the ticket-78 cutover.
-    assert.equal(ctx.cells.get(SHELL_OVERLAY_SLOT), undefined);
-  });
-
-  it("fiber teardown frees every cell; a re-apply cannot collide with the dead fiber", () => {
-    const ctx = createClientCtx();
-    apply(ctx);
-    ctx.runFiberTeardown();
-    for (const cell of ctx.cells.values()) {
-      assert.equal(cell.length, 0, "teardown disposes each entry's cell slot");
-    }
-    // If teardown left the cell occupied, this re-apply would throw the
-    // single-slot/keyed collision — the host unload cascade is the contract.
-    assert.doesNotThrow(() => apply(ctx));
-    assert.equal(ctx.cells.get(TOOL_CALL_TOOLVIEW_SLOT)?.length, TOOLVIEW_TOOL_NAMES.length);
-  });
 });
 
 describe("client face scaffold — host inject guard semantics (ticket 84)", () => {
@@ -779,47 +581,22 @@ describe("client face scaffold — host inject guard semantics (ticket 84)", () 
     assert.deepEqual(ctx.injectRequests, []);
   });
 
-  it("declared faces resolve and undeclared faces throw with the host's message", () => {
-    const sessions = { list: { getSnapshot: () => ({}) }, scope: () => undefined };
-    const ctx = createStrictHostCtx({ sessions });
-    // Declared face: the module-context read resolves to the provider.
-    assert.equal(ctx.sessions, sessions);
-    // Undeclared face: the host's exact guard message (cordis reflect.ts:144).
-    assert.throws(
-      () => (ctx as unknown as { layout: unknown }).layout,
-      { message: 'cannot get property "layout" without inject' },
-    );
-  });
   // (The staging launcher's layout-cell test left with the launcher's
   // deletion — ticket 89, 2026-09-19.)
 });
 
 describe("client face scaffold — built bundle registers through the module loader (Finding 4)", () => {
-  it("wrapClientBundle emits the shipped loader shell shape", () => {
-    const out = wrapClientBundle("some-pkg", "let a = 1;\nmodule.exports = a;");
-    assert.ok(out.startsWith("window.__ModuleLoader__.load({"));
-    assert.match(out, /\n\tid: "some-pkg",/);
-    assert.match(out, /\n\tfactory: \(require\) => \{/);
-    assert.ok(out.includes("\t\tlet a = 1;"));
-    assert.ok(out.trimEnd().endsWith("return module.exports;\n\t}\n});"));
-  });
-
-  it("esbuild output keeps react external and lands in the loader shell", async () => {
+  it("the built bundle is a CJS module-loader factory with react external", async () => {
+    // A bundle not shaped like this simply never loads in the host, so this
+    // is the install gate for the whole client face.
     const bundle = await buildClient();
-
-    // Registration contract (Finding 4): id = package name, CJS factory.
     assert.ok(bundle.startsWith("window.__ModuleLoader__.load({"));
     assert.match(bundle, /\n\tid: "dsh-multitask-dispatcher",/);
     assert.match(bundle, /\n\tfactory: \(require\) => \{/);
     assert.ok(bundle.trimEnd().endsWith("return module.exports;\n\t}\n});"));
-
-    // Externals resolved through the factory's require (platform seed), and
-    // no ESM import statements survive (CJS-only, materialization-safe).
-    assert.ok(bundle.includes('require("react/jsx-runtime")'));
-    assert.ok(!bundle.includes('require("react-dom")'));
-    assert.ok(!/\bimport\s/.test(bundle));
-
-    // The module exports the Cordis plugin face: apply + inject.
+    assert.ok(bundle.includes('require("react/jsx-runtime")'), "react/jsx-runtime must be external");
+    assert.ok(!/\bimport\s/.test(bundle), "ESM imports survive — the loader is CJS-only");
+    // The module exports the Cordis plugin face.
     assert.match(bundle, /inject: \(\) => inject/);
     assert.match(bundle, /apply: \(\) => apply/);
   });

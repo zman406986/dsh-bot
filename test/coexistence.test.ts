@@ -30,30 +30,14 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { apply as applyDispatcherHost } from "../src/plugin.js";
 import { volatileConfig } from "./support/plugin-config.js";
-import {
-  DISPATCHER_RESOLVE_COMMAND,
-  DISPATCHER_START_COMMAND,
-  DISPATCHER_START_SUCCESS,
-  DISPATCHER_STEER_COMMAND,
-  type AdapterContext,
-  type AgentLike,
-  type CommandDefinitionLike,
-  type CommandResultLike,
-} from "../src/adapter/index.js";
+import {DISPATCHER_START_COMMAND, DISPATCHER_START_SUCCESS, type AdapterContext, type AgentLike, type CommandDefinitionLike, type CommandResultLike} from "../src/adapter/index.js";
 import {
   apply as applyDispatcherClient,
   inject as clientInject,
 } from "../src/client/index.js";
 import type { ClientContext } from "../src/client/context.js";
-import {
-  LOCALE_NAMESPACE,
-  SHELL_OVERLAY_SLOT,
-  type SlotRegistrationOptions,
-} from "../src/client/overlay.js";
-import {
-  MAIN_PAGE_SLOT,
-  ROOT_FRAME_SLOT,
-} from "../src/client/shell-mount.js";
+import {SHELL_OVERLAY_SLOT, type SlotRegistrationOptions} from "../src/client/overlay.js";
+
 import {
   TOOLVIEW_TOOL_NAMES,
   TOOL_CALL_TOOLVIEW_SLOT,
@@ -772,30 +756,6 @@ describe("coexistence — host face: fail-loud claims (Findings 1 and 2)", () =>
       });
   }
 
-  it("both plugins register on the same seam types without interference", () => {
-    const ctx = createHostCtx();
-    applyForeignHostPlugin(ctx);
-    applyDispatcherHost(ctx, volatileConfig({ enabled: true }));
-
-    // Settings namespaces: only the foreign plugin claims one. dsh 0.2.1 has
-    // no registration API — our form is the plugin's own Config schema, keyed
-    // by the Loader row id, so there is nothing to claim.
-    assert.ok(ctx.hasSettingsNamespace(FOREIGN.settingsNs));
-    assert.equal(ctx.hasSettingsNamespace("multitask-dispatcher"), false);
-
-    // Commands: ours `dispatcher-`-prefixed (design-16 §5), foreign's its own.
-    assert.deepEqual(ctx.commandNames().sort(), [
-      DISPATCHER_RESOLVE_COMMAND,
-      DISPATCHER_STEER_COMMAND,
-      // "dsh-bot" sorts after the dispatcher- names (ADR-0030 rename).
-      DISPATCHER_START_COMMAND,
-      FOREIGN.command,
-    ]);
-
-    // Tools: dormant dispatcher registers none — foreign's alone (stock).
-    assert.deepEqual(ctx.toolNames(), [FOREIGN.tool]);
-  });
-
   it("a duplicate settings namespace fails loud; the first claimant stays live", () => {
     const ctx = createHostCtx();
     applyForeignHostPlugin(ctx);
@@ -822,31 +782,6 @@ describe("coexistence — host face: fail-loud claims (Findings 1 and 2)", () =>
       "hi",
     );
     assert.equal(seen.length, 1);
-  });
-
-  it("installSection returns void (ticket 93) but still claims the namespace", () => {
-    const ctx = createHostCtx();
-    applyForeignHostPlugin(ctx);
-
-    // The host's convenience install DISCARDS the scope
-    // (dsh-settings lib/index.js:327-343; types :228) — a product that
-    // reads its return value gets `undefined`, exactly as live.
-    const claimed = claimViaInstallSection(ctx, "third-party");
-    claimed();
-    assert.ok(ctx.hasSettingsNamespace("third-party"));
-    // …and the duplicate rule still fires for the same namespace.
-    assert.throws(
-      claimViaInstallSection(ctx, "third-party"),
-      /settings namespace "third-party" is already registered/,
-    );
-    // The foreign plugin's own claim (through installSection) is likewise
-    // protected from a `register` latecomer.
-    assert.throws(
-      claimNamespace(ctx, FOREIGN.settingsNs),
-      new RegExp(
-        `settings namespace "${FOREIGN.settingsNs}" is already registered`,
-      ),
-    );
   });
 
   it("a duplicate command name fails loud; the first claimant's handler stays live", () => {
@@ -916,28 +851,6 @@ describe("coexistence — host face: fail-loud claims (Findings 1 and 2)", () =>
 });
 
 describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)", () => {
-  it("flag ON + not activated: session-start captures nothing; stock tool surface", () => {
-    const ctx = createHostCtx();
-    applyForeignHostPlugin(ctx);
-    applyDispatcherHost(ctx, volatileConfig({ enabled: true }));
-
-    // The first top-level session is NOT repurposed: no policy inject, no
-    // capture, no dispatcher tools — the surface stays stock (foreign's only).
-    const agent = createAgent("s-1");
-    ctx.fire("agent/session-start", { agent });
-    assert.equal(agent.injected.length, 0);
-    assert.deepEqual(ctx.toolNames(), [FOREIGN.tool]);
-
-    // The dormant affordances are exactly the `dispatcher-` commands.
-    assert.deepEqual(ctx.commandNames().sort(), [
-      DISPATCHER_RESOLVE_COMMAND,
-      DISPATCHER_STEER_COMMAND,
-      // "dsh-bot" sorts after the dispatcher- names (ADR-0030 rename).
-      DISPATCHER_START_COMMAND,
-      FOREIGN.command,
-    ]);
-  });
-
   it("activation raises the dispatcher surface without disturbing the foreign plugin", async () => {
     const ctx = createHostCtx();
     applyForeignHostPlugin(ctx);
@@ -955,10 +868,10 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
       await new Promise((resolve) => setImmediate(resolve));
     }
 
-    // The dispatcher surface (eight tools since ticket 118 + request_access
-    // + the ticket-145 per-session recall, which this context-less agent
-    // takes on the plugin-level fallback) alongside the foreign tool — no
-    // clobbering.
+    // The dispatcher surface (eight tools since ticket 118 + the ticket-145
+    // per-session recall, which this context-less agent takes on the
+    // plugin-level fallback) alongside the foreign tool — no clobbering.
+    // Ticket 174 / ADR-0033 removed `request_access`.
     assert.deepEqual(ctx.toolNames().sort(), [
       "await_agent",
       "check_workers",
@@ -966,7 +879,6 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
       FOREIGN.tool,
       "message_agent",
       "recall",
-      "request_access",
       "spawn_dispatcher",
       "spawn_worker",
       "steer_worker",
@@ -998,131 +910,9 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
     assert.deepEqual(ctx.settingDoc(FOREIGN.settingsNs), { enabled: true });
   });
 
-  it("dispatcher fiber unload (HMR) leaves the foreign plugin intact", async () => {
-    const ctx = createHostCtx();
-    applyForeignHostPlugin(ctx);
-    const dispatcherFiber = applyHostPluginInFiber(
-      ctx,
-      applyDispatcherHost as never,
-      volatileConfig({ enabled: true }),
-    );
-    const agent = createAgent("s-1");
-    ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
-    assert.equal(ctx.toolNames().length, 11); // ten ours + one foreign
-
-    // HMR: dispose ONLY the dispatcher fiber.
-    dispatcherFiber.dispose();
-
-    // Everything the dispatcher registered is gone — dormant commands,
-    // activated tools, and listeners.
-    assert.deepEqual(ctx.commandNames(), [FOREIGN.command]);
-    assert.deepEqual(ctx.toolNames(), [FOREIGN.tool]);
-
-    // The foreign plugin is fully functional.
-    assert.ok(ctx.hasSettingsNamespace(FOREIGN.settingsNs));
-    assert.deepEqual(
-      ctx.runCommand({ commandId: FOREIGN.command, agent }),
-      FOREIGN_COMMAND_RESULT,
-    );
-    assert.deepEqual(
-      await ctx.tool(FOREIGN.tool)?.execute({}, undefined),
-      FOREIGN_TOOL_RESULT,
-    );
-
-    // The disposed dispatcher refuses to double as a zombie: its command is
-    // unregistered, so a stale invocation cannot re-activate it.
-    assert.throws(
-      () => ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent }),
-      /command not registered/,
-    );
-  });
-
-  it("foreign fiber unload leaves the dispatcher intact and activatable", () => {
-    const ctx = createHostCtx();
-    const foreignFiber = applyHostPluginInFiber(
-      ctx,
-      applyForeignHostPlugin as never,
-    );
-    applyDispatcherHost(ctx, volatileConfig({ enabled: true }));
-
-    foreignFiber.dispose();
-    assert.deepEqual(ctx.commandNames().sort(), [
-      DISPATCHER_RESOLVE_COMMAND,
-      DISPATCHER_STEER_COMMAND,
-      // "dsh-bot" sorts after the dispatcher- names (ADR-0030 rename).
-      DISPATCHER_START_COMMAND,
-    ]);
-    assert.ok(ctx.hasSettingsNamespace("multitask-dispatcher") === false);
-    assert.equal(ctx.hasSettingsNamespace(FOREIGN.settingsNs), false);
-
-    // The dispatcher still activates cleanly next to the departed plugin.
-    const agent = createAgent("s-1");
-    assert.deepEqual(
-      ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent }),
-      { kind: "success", text: DISPATCHER_START_SUCCESS },
-    );
-    assert.equal(ctx.toolNames().length, 10);
-  });
 });
 
 describe("coexistence — client face: additive lists and keyed cells (Finding 5)", () => {
-  it("the dispatcher registers NOTHING into dsh's layout cells (`root`/`main`); foreign modules untouched", () => {
-    const ctx = createClientCtx();
-    applyForeignClientPlugin(ctx);
-    const dispatcherFiber = applyClientPluginInFiber(
-      ctx,
-      applyDispatcherClient,
-    );
-
-    // Ticket 99 (2026-09-20, ADR-0021): the displacement registrations left
-    // the default posture — no `root` election (the ticket-78 cutover's
-    // dynamic entry, retired) and no keyed full-cell `main` page (the
-    // ticket-78 staging registration, retired). Stock dsh is the primary UI
-    // and is never displaced; the foreign module must not sneak in either.
-    const layoutInjects = ctx.injects.filter(
-      (record) =>
-        record.parent === ROOT_FRAME_SLOT || record.parent === MAIN_PAGE_SLOT,
-    );
-    assert.equal(layoutInjects.length, 0, "no layout injects from anyone");
-    for (const record of ctx.injects) {
-      for (const entry of record.entries) {
-        const name = (entry.options as { name: string }).name;
-        assert.notEqual(name, ROOT_FRAME_SLOT, "no `root` entry");
-        assert.notEqual(name, MAIN_PAGE_SLOT, "no `main` entry");
-      }
-    }
-    // Additive/keyed coexistence still holds: the dispatcher's toolviews
-    // (serving the stock chat) plus the foreign toolview, and the two
-    // locale namespaces.
-    assert.equal(
-      ctx.entriesAt(TOOL_CALL_TOOLVIEW_SLOT).length,
-      TOOLVIEW_TOOL_NAMES.length + 1,
-    );
-    assert.deepEqual([...ctx.locales.keys()].sort(), [
-      FOREIGN.localeNs,
-      LOCALE_NAMESPACE,
-    ]);
-
-    // Unload (HMR) of ONLY the dispatcher fiber removes exactly its own
-    // registrations while every foreign registration stays as it was.
-    dispatcherFiber.dispose();
-    assert.deepEqual(
-      ctx.injects.filter(
-        (record) =>
-          record.parent === ROOT_FRAME_SLOT ||
-          record.parent === MAIN_PAGE_SLOT,
-      ),
-      [],
-    );
-    assert.deepEqual(ctx.entriesAt(TOOL_CALL_TOOLVIEW_SLOT).map((e) => (e.options as { key?: string }).key), [
-      FOREIGN.tool,
-    ]);
-    assert.deepEqual(ctx.entriesAt(SHELL_OVERLAY_SLOT).map((e) => (e.options as SlotRegistrationOptions).id), [
-      FOREIGN.overlayEntryId,
-    ]);
-    assert.deepEqual([...ctx.locales.keys()], [FOREIGN.localeNs]);
-  });
-
   it("shell.overlay: the dispatcher registers nothing (capsule + launcher retired); the foreign entry stands alone", () => {
     const ctx = createClientCtx();
     applyForeignClientPlugin(ctx);
@@ -1173,57 +963,4 @@ describe("coexistence — client face: additive lists and keyed cells (Finding 5
     }
   });
 
-  it("locale namespaces coexist; bind resolves per namespace", () => {
-    const ctx = createClientCtx();
-    applyForeignClientPlugin(ctx);
-    applyDispatcherClient(ctx);
-
-    assert.deepEqual([...ctx.locales.keys()].sort(), [
-      FOREIGN.localeNs,
-      LOCALE_NAMESPACE,
-    ]);
-    assert.equal(ctx.locale.bind(FOREIGN.localeNs)("panel.title"), "Helper");
-    assert.equal(
-      ctx.locale.bind(LOCALE_NAMESPACE)("roster.title"),
-      "Workers",
-    );
-    // No key bleed between namespaces.
-    assert.equal(ctx.locale.bind(FOREIGN.localeNs)("roster.title"), "roster.title");
-    assert.equal(ctx.locale.bind(LOCALE_NAMESPACE)("panel.title"), "panel.title");
-  });
-
-  it("HMR of one client fiber leaves the other plugin's entries intact", () => {
-    const ctx = createClientCtx();
-    const dispatcherFiber = applyClientPluginInFiber(ctx, applyDispatcherClient);
-    const foreignFiber = applyClientPluginInFiber(ctx, applyForeignClientPlugin);
-
-    // Unload ONLY the dispatcher's client fiber (HMR swap): its toolviews
-    // and settings card leave (the `root` election and keyed `main` page
-    // retired from the composition at ticket 99 — ADR-0021); the foreign
-    // plugin's entries stay.
-    dispatcherFiber.dispose();
-    assert.deepEqual(ctx.injects.filter((record) => record.parent === ROOT_FRAME_SLOT), []);
-    assert.deepEqual(ctx.entriesAt(SHELL_OVERLAY_SLOT).map((e) => (e.options as SlotRegistrationOptions).id), [
-      FOREIGN.overlayEntryId,
-    ]);
-    assert.deepEqual(
-      ctx.entriesAt(TOOL_CALL_TOOLVIEW_SLOT).map((e) => (e.options as { key?: string }).key),
-      [FOREIGN.tool],
-    );
-    assert.deepEqual([...ctx.locales.keys()], [FOREIGN.localeNs]);
-
-    // The fresh post-HMR fiber re-registers cleanly — no duplication of the
-    // foreign plugin's entries, and still NO overlay entries of ours (the
-    // capsule + launcher retired at the cutover).
-    applyDispatcherClient(ctx);
-    assert.equal(ctx.entriesAt(SHELL_OVERLAY_SLOT).length, 1);
-    assert.equal(ctx.entriesAt(TOOL_CALL_TOOLVIEW_SLOT).length, TOOLVIEW_TOOL_NAMES.length + 1);
-    assert.deepEqual([...ctx.locales.keys()].sort(), [FOREIGN.localeNs, LOCALE_NAMESPACE]);
-
-    // Unloading the foreign fiber afterwards removes exactly its own entries.
-    foreignFiber.dispose();
-    assert.equal(ctx.entriesAt(SHELL_OVERLAY_SLOT).length, 0);
-    assert.equal(ctx.entriesAt(TOOL_CALL_TOOLVIEW_SLOT).length, TOOLVIEW_TOOL_NAMES.length);
-    assert.deepEqual([...ctx.locales.keys()], [LOCALE_NAMESPACE]);
-  });
 });

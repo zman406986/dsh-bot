@@ -368,7 +368,6 @@ export function bindDispatcherLifecycle(
           sessionId,
           label: readPeerLabel(peerAgent.session) ?? spawnTitles.get(sessionId) ?? null,
           busy: multitask.wakeBus.isBusy(sessionId),
-          pendingApproval: multitask.listPendingAccess(sessionId).length > 0,
           queuedWake: multitask.wakeBus.peek(sessionId) !== undefined,
           currentTool: tool?.tool ?? null,
           currentTarget: tool?.target ?? null,

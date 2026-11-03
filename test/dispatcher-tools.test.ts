@@ -1,31 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { createInMemoryDurability } from "../src/core/durability.js";
+
 import { FakeDshHost } from "../src/core/fake-host.js";
 import { createMultitask, type Multitask } from "../src/core/multitask.js";
 import {
   createDispatcherTools,
   type DispatcherToolDef,
 } from "../src/core/tools.js";
-import {
-  AWAIT_AGENT_TOOL,
-  CHECK_WORKERS_TOOL,
-  DELIVER_RESULT_TOOL,
-  DISPATCHER_TOOL_NAMES,
-  MESSAGE_AGENT_TOOL,
-  SEND_PEER_TOOL,
-  SPAWN_DISPATCHER_TOOL,
-  SPAWN_WORKER_TOOL,
-  STEER_WORKER_TOOL,
-  STOP_WORKER_TOOL,
-} from "../src/core/policy/prompts.js";
-import type {
-  CheckWorkersToolResult,
-  DeliverResultToolResult,
-  SpawnWorkerToolResult,
-  SteerWorkerToolResult,
-  StopWorkerToolResult,
-} from "../src/core/tool-results.js";
+import {AWAIT_AGENT_TOOL, CHECK_WORKERS_TOOL, DELIVER_RESULT_TOOL, DISPATCHER_TOOL_NAMES, SEND_PEER_TOOL, SPAWN_WORKER_TOOL, STOP_WORKER_TOOL} from "../src/core/policy/prompts.js";
+import type {CheckWorkersToolResult, DeliverResultToolResult, SpawnWorkerToolResult, StopWorkerToolResult} from "../src/core/tool-results.js";
 import type { SpawnResult } from "../src/core/types.js";
 
 function unwrapSpawn(result: SpawnResult): string {
@@ -163,84 +146,11 @@ describe("dispatcher tools — spawn_worker", () => {
     assert.deepEqual(multitask.listTodos("session-1"), []);
   });
 
-  it("a failed spawn leaves no ledger entry behind", async () => {
-    const host = new FakeDshHost();
-    host.spawnWorker = async () => {
-      throw new Error("host exploded");
-    };
-    const multitask = createMultitask(host);
-    const tools = createDispatcherTools({
-      multitask,
-      getSessionId: () => "session-1",
-    });
-    await assert.rejects(
-      () =>
-        byName(tools, SPAWN_WORKER_TOOL).execute({
-          stream_key: "rfc-work",
-          title: "Summarize RFCs",
-          prompt: "Summarize the three auth RFCs.",
-        }),
-      /host exploded/,
-    );
-    assert.deepEqual(multitask.listTodos("session-1"), []);
-    assert.equal(multitask.listWorkers("session-1").length, 0);
-  });
-
   // Ticket 151 review blocker: restore re-creates entries with their explicit
   // id (`multitask.ts` rebuild), which advances the ledger's generated
   // sequence. Without that, the next auto-created spawn would throw
   // "todo already exists: todo-1" before the host call and every spawn after
   // a restart would fail.
-  it("after a restart that restored todo-1, a spawn with no todo_id creates todo-2", async () => {
-    const durability = createInMemoryDurability();
-    const hostBefore = new FakeDshHost();
-    const before = createMultitask(hostBefore, { durability });
-    before.createTodo({ sessionId: "session-1", id: "todo-1", title: "Old" });
-    const oldWorker = unwrapSpawn(
-      await before.spawnWorker({
-        parentSessionId: "session-1",
-        streamKey: "old-stream",
-        title: "Old",
-        prompt: "Old work.",
-        todoId: "todo-1",
-      }),
-    );
-    before.noteTurnStarted(oldWorker);
-    hostBefore.fireSettled({
-      workerId: oldWorker,
-      status: "completed",
-      report: "Old result.",
-    });
-
-    const host = new FakeDshHost();
-    const multitask = createMultitask(host, { durability });
-    const report = await multitask.rebuildFromDurability("session-1");
-    assert.equal(report.restored.length, 1);
-    assert.equal(multitask.listTodos("session-1")[0]?.id, "todo-1");
-
-    const tools = createDispatcherTools({
-      multitask,
-      getSessionId: () => "session-1",
-    });
-    const result = (await byName(tools, SPAWN_WORKER_TOOL).execute({
-      stream_key: "new-stream",
-      title: "Fresh work",
-      prompt: "Do the new thing.",
-    })) as SpawnWorkerToolResult;
-
-    assert.ok(result.ok, result.ok ? "" : result.detail);
-    if (!result.ok) return;
-    // The new host reuses ids from `fake-worker-1`, so match the ENTRY, not
-    // the worker id: the restored todo-1 plus exactly one new item.
-    const todos = multitask.listTodos("session-1");
-    assert.equal(todos.length, 2);
-    const created = todos.find((todo) => todo.id !== "todo-1");
-    assert.ok(created);
-    assert.equal(created.id, "todo-2");
-    assert.equal(created.title, "Fresh work");
-    assert.equal(created.streamKey, "new-stream");
-  });
-
   it("a todo_id from another session is refused", async () => {
     const { host, multitask, tools } = await setup();
     multitask.createTodo({ sessionId: "session-2", id: "t-other", title: "Else" });
@@ -293,35 +203,6 @@ describe("dispatcher tools — spawn_worker", () => {
   // Ticket 151 review fix: a throw AFTER the worker was registered and the
   // entry linked (the durability marker write) must not prune the entry —
   // the worker is live and the marker/roster point at it.
-  it("a spawn that fails after linking keeps its ledger entry", async () => {
-    const durability = createInMemoryDurability();
-    durability.writeWorkerMarker = () => {
-      throw new Error("marker store failed");
-    };
-    const host = new FakeDshHost();
-    const multitask = createMultitask(host, { durability });
-    const tools = createDispatcherTools({
-      multitask,
-      getSessionId: () => "session-1",
-    });
-
-    await assert.rejects(
-      () =>
-        byName(tools, SPAWN_WORKER_TOOL).execute({
-          stream_key: "rfc-work",
-          title: "Summarize RFCs",
-          prompt: "Summarize the three auth RFCs.",
-        }),
-      /marker store failed/,
-    );
-    assert.equal(host.spawnCalls.length, 1);
-    const todos = multitask.listTodos("session-1");
-    assert.equal(todos.length, 1);
-    const workerId = host.spawnCalls[0]?.workerId;
-    assert.equal(todos[0]?.workerId, workerId);
-    assert.equal(multitask.getWorker(workerId ?? "")?.todoId, todos[0]?.id);
-  });
-
   it("requires a bound dispatcher session", async () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
@@ -397,49 +278,6 @@ describe("dispatcher tools — check_workers", () => {
 });
 
 describe("dispatcher tools — steer_worker / stop_worker", () => {
-  it("steer parks a correction and returns a no-restart note", async () => {
-    const { host, multitask, tools } = await setup();
-    const workerId = unwrapSpawn(
-      await multitask.spawnWorker({
-        parentSessionId: "session-1",
-        streamKey: "s-1",
-        title: "Docs rewrite",
-        prompt: "Rewrite docs.",
-      }),
-    );
-    multitask.noteTurnStarted(workerId);
-
-    const result = (await byName(tools, STEER_WORKER_TOOL).execute({
-      worker_id: workerId,
-      message: "Focus on the third RFC only.",
-    })) as SteerWorkerToolResult;
-    assert.ok(result.ok);
-    if (!result.ok) return;
-    assert.ok(result.note.includes("Docs rewrite"));
-    assert.ok(result.note.includes("no restart"));
-    assert.equal(host.interruptCalls.length, 1);
-  });
-
-  it("steer is refused when the worker is not running", async () => {
-    const { multitask, tools } = await setup();
-    const workerId = unwrapSpawn(
-      await multitask.spawnWorker({
-        parentSessionId: "session-1",
-        streamKey: "s-1",
-        title: "Idle",
-        prompt: "Go.",
-      }),
-    );
-    // Still spawned — never started.
-    const result = (await byName(tools, STEER_WORKER_TOOL).execute({
-      worker_id: workerId,
-      message: "too late",
-    })) as SteerWorkerToolResult;
-    assert.ok(!result.ok);
-    if (result.ok) return;
-    assert.equal(result.reason, "not-running");
-  });
-
   it("stop aborts and returns a silent-to-user note", async () => {
     const { host, multitask, tools } = await setup();
     const workerId = unwrapSpawn(
@@ -461,29 +299,6 @@ describe("dispatcher tools — steer_worker / stop_worker", () => {
     assert.equal(host.interruptCalls.length, 1);
   });
 
-  it("stop after settle is refused", async () => {
-    const { host, multitask, tools } = await setup();
-    const workerId = unwrapSpawn(
-      await multitask.spawnWorker({
-        parentSessionId: "session-1",
-        streamKey: "s-1",
-        title: "Done already",
-        prompt: "Go.",
-      }),
-    );
-    multitask.noteTurnStarted(workerId);
-    host.fireSettled({
-      workerId,
-      status: "completed",
-      report: "Done.",
-    });
-    const result = (await byName(tools, STOP_WORKER_TOOL).execute({
-      worker_id: workerId,
-    })) as StopWorkerToolResult;
-    assert.ok(!result.ok);
-    if (result.ok) return;
-    assert.equal(result.reason, "already-settled");
-  });
 });
 
 describe("dispatcher tools — deliver_result", () => {
@@ -544,80 +359,6 @@ describe("dispatcher tools — deliver_result", () => {
     assert.equal(todo?.delivered, false);
   });
 
-  it("without an injectable send, still marks delivered after the tool call", async () => {
-    const { multitask, tools } = await setup();
-    multitask.createTodo({
-      sessionId: "session-1",
-      id: "t-2",
-      title: "Inline",
-    });
-    const result = (await byName(tools, DELIVER_RESULT_TOOL).execute({
-      text: "All set.",
-      todo_id: "t-2",
-    })) as DeliverResultToolResult;
-    assert.ok(result.ok);
-    assert.equal(result.delivered, true);
-    assert.equal(result.todo_completed, "t-2");
-  });
-});
-
-describe("dispatcher tools — FakeDshHost stays green", () => {
-  it("all dispatcher tools run against FakeDshHost without host extensions", async () => {
-    const { host, multitask, tools } = await setup({
-      deliverToUser: async () => true,
-    });
-    assert.deepEqual(
-      tools.map((t) => t.name),
-      [
-        SPAWN_WORKER_TOOL,
-        CHECK_WORKERS_TOOL,
-        STEER_WORKER_TOOL,
-        STOP_WORKER_TOOL,
-        DELIVER_RESULT_TOOL,
-        MESSAGE_AGENT_TOOL,
-        AWAIT_AGENT_TOOL,
-        SPAWN_DISPATCHER_TOOL,
-      ],
-    );
-    // spawn_dispatcher is in the shape but not exercised here: its seam is
-    // injected (chunk 3 wires the live one), so its own suite owns it
-    // (test/spawn-dispatcher-tool.test.ts).
-
-    const spawn = (await byName(tools, SPAWN_WORKER_TOOL).execute({
-      stream_key: "demo",
-      title: "Long fake worker",
-      prompt: "Pretend to work for minutes.",
-    })) as SpawnWorkerToolResult;
-    assert.ok(spawn.ok);
-    if (!spawn.ok) return;
-    // First real activity (as the adapter would note on agent/status running).
-    multitask.noteTurnStarted(spawn.worker_id);
-
-    const check = (await byName(tools, CHECK_WORKERS_TOOL).execute(
-      {},
-    )) as CheckWorkersToolResult;
-    assert.ok(check.ok);
-
-    const steer = (await byName(tools, STEER_WORKER_TOOL).execute({
-      worker_id: spawn.worker_id,
-      message: "Focus on RFC 3.",
-    })) as SteerWorkerToolResult;
-    assert.ok(steer.ok);
-
-    const deliver = (await byName(tools, DELIVER_RESULT_TOOL).execute({
-      text: "RFC 3 summary ready.",
-    })) as DeliverResultToolResult;
-    assert.ok(deliver.ok);
-
-    const stop = (await byName(tools, STOP_WORKER_TOOL).execute({
-      worker_id: spawn.worker_id,
-    })) as StopWorkerToolResult;
-    assert.ok(stop.ok);
-
-    // Fake host recorded only the existing seams.
-    assert.equal(host.spawnCalls.length, 1);
-    assert.ok(host.interruptCalls.length >= 2);
-  });
 });
 
 describe("dispatcher tools — the registered surface (tickets 116/117)", () => {

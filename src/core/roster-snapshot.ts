@@ -1,6 +1,5 @@
 import type { WorkerStatus, WorkerSummary } from "./types.js";
 import { isTerminalStatus } from "./types.js";
-import { ACCESS_CLASSES, type AccessClass, type AccessTicket } from "./access-types.js";
 import type { TodoItem } from "./todo-reconciler.js";
 import { RECENT_RESULT_EXCERPT_CHARS, clampRecentResultExcerpt } from "./report-clamp.js";
 
@@ -12,10 +11,9 @@ import { RECENT_RESULT_EXCERPT_CHARS, clampRecentResultExcerpt } from "./report-
  * host projects core state into a snapshot, and the browser bundle parses the
  * mirrored value it receives through the settings-watch channel. It is a
  * projection of core state — never a second source of truth (PRD persistence
- * rule; design-17 §5 conflict 8). Runtime imports are limited to the access
- * class vocabulary (a pure contract list shared with the relay) and the pure
- * report-clamp helpers (the shared excerpt bound + clamp, ticket 41);
- * everything else crosses as types only.
+ * rule; design-17 §5 conflict 8). Runtime imports are limited to the pure
+ * report-clamp helpers (the shared excerpt bound + clamp, ticket 41) and the
+ * status guard; everything else crosses as types only.
  *
  * The channel itself is the documented honest gap (design-16 §4.2): the
  * settings namespace is a config channel doing telemetry duty. Every read
@@ -27,18 +25,17 @@ import { RECENT_RESULT_EXCERPT_CHARS, clampRecentResultExcerpt } from "./report-
 /**
  * Wire schema version. A mismatch fails parse → panel shows unavailable.
  * v2 (ticket 27) adds the presence fields: `kind`, `startedAtMs`,
- * `toolCallCount`, `delivered`, and structured `blocked`. v3 (ticket 41)
- * adds the bounded envelope field `recentResult` — the deliverables line's
- * most-recent settled-undelivered excerpt. v4 (ticket 69, L1 offline half)
- * adds the envelope field `pendingAsks` — the FULL pending access-ask truth
- * (requestId, reason, credential NAME, parent session, created clock) the
- * wrapper's approval-cards store projects its cards from; the per-row
- * `blocked` marker stays names-only for the roster. v1 AND v2 AND v3
- * payloads fail parse cleanly — the panel never renders a half-roster
- * (design-17 §6; the fail-closed rule design-17 §4.1 accepted for v1→v2
- * applies unchanged to every later bump).
+ * `toolCallCount`, and `delivered`. v3 (ticket 41) adds the bounded envelope
+ * field `recentResult` — the deliverables line's most-recent
+ * settled-undelivered excerpt. v5 (ticket 174 / ADR-0033) removes the v4
+ * envelope field `pendingAsks` and the per-row `blocked` marker with the
+ * worker access-ask feature; the version is bumped rather than reused so a
+ * stale v4 payload fails parse. Every earlier AND later mismatch fails parse
+ * cleanly — the panel never renders a half-roster (design-17 §6; the
+ * fail-closed rule design-17 §4.1 accepted for v1→v2 applies unchanged to
+ * every later bump).
  */
-export const ROSTER_SNAPSHOT_SCHEMA_VERSION = 4;
+export const ROSTER_SNAPSHOT_SCHEMA_VERSION = 5;
 
 /**
  * A snapshot older than this (host clock vs client clock at render time)
@@ -64,39 +61,9 @@ export const ROSTER_STATUS_KEYS: readonly WorkerStatus[] = [
 ];
 
 const STATUS_SET: ReadonlySet<string> = new Set(ROSTER_STATUS_KEYS);
-const ACCESS_CLASS_SET: ReadonlySet<string> = new Set(ACCESS_CLASSES);
 
 /** Key under the plugin's settings-namespace document that carries the snapshot. */
 export const ROSTER_SETTINGS_KEY = "roster";
-
-/** Structured blocked reason. Names only — never a secret value, never a
- * pre-rendered phrase (the panel localizes it; design-17 §4.1). */
-export interface RosterSnapshotBlocked {
-  readonly class: AccessClass;
-  readonly target: string;
-}
-
-/**
- * The FULL pending access ask on the wire (ticket 69, L1 offline half —
- * schema v4). Everything the wrapper's approval-cards projection needs to
- * render an answerable card: identity (`requestId`/`workerId`),
- * clamped-detail input (`reason`), the secret NAME (never a value —
- * access-types hard rule), session attribution (`parentSessionId`, the
- * resolve command's target chat), and the ask's clock. One ask per worker
- * (the relay parks at most one); keyed by `workerId` so the client joins it
- * to the roster row exactly like `blocked` does.
- */
-export interface RosterSnapshotPendingAsk {
-  readonly requestId: string;
-  readonly workerId: string;
-  readonly class: AccessClass;
-  readonly target: string;
-  readonly reason: string;
-  /** Credential NAME only, `""` when the ask is not a credential ask. */
-  readonly credentialName: string;
-  readonly parentSessionId: string;
-  readonly createdAtMs: number;
-}
 
 /**
  * The deliverables line's excerpt (ticket 41, schema v3): the most recent
@@ -135,8 +102,6 @@ export interface RosterSnapshotWorker {
    * projects `true` — it can never sit landed-undelivered.
    */
   readonly delivered: boolean;
-  /** Pending access ask joined by workerId, names only; `null` = not blocked. */
-  readonly blocked: RosterSnapshotBlocked | null;
 }
 
 /** The full snapshot envelope written into the settings namespace. */
@@ -154,13 +119,6 @@ export interface RosterSnapshot {
    * Cleared by projection the moment every owed row is delivered.
    */
   readonly recentResult: RosterSnapshotRecentResult | null;
-  /**
-   * Ticket 69 (v4): every pending access ask of the session, full truth —
-   * the wrapper's approval-cards feed projects its answerable cards from
-   * this and nothing else. Empty when nothing waits. The per-row `blocked`
-   * marker stays the roster's names-only view of the same asks.
-   */
-  readonly pendingAsks: readonly RosterSnapshotPendingAsk[];
 }
 
 /**
@@ -178,13 +136,11 @@ export interface RosterRecentResultSource {
 
 /**
  * Core state the host hands to the projection (ticket 27). All optional so
- * a caller without the seam projects honest defaults (not blocked, nothing
- * owed, no excerpt). Every input is existing core truth read at publish
- * time — the projection never stores them.
+ * a caller without the seam projects honest defaults (nothing owed, no
+ * excerpt). Every input is existing core truth read at publish time — the
+ * projection never stores them.
  */
 export interface RosterProjectionSources {
-  /** Pending access tickets for the session (`Multitask.listPendingAccess`). */
-  readonly pendingAccess?: readonly AccessTicket[];
   /** Ledger items for the session (`Multitask.listTodos`). */
   readonly todos?: readonly TodoItem[];
   /**
@@ -226,23 +182,6 @@ function pickRecentResult(
 }
 
 /**
- * Project one pending `AccessTicket` into the v4 wire ask (ticket 69): a
- * pure field copy — names only, the credential NAME never a value.
- */
-function projectPendingAsk(ticket: AccessTicket): RosterSnapshotPendingAsk {
-  return {
-    requestId: ticket.requestId,
-    workerId: ticket.workerId,
-    class: ticket.body.class,
-    target: ticket.body.target,
-    reason: ticket.body.reason,
-    credentialName: ticket.body.credentialName ?? "",
-    parentSessionId: ticket.parentSessionId,
-    createdAtMs: ticket.createdAtMs,
-  };
-}
-
-/**
  * Project the activated dispatcher's roster into a snapshot. Pure: reads
  * only the summaries, sources, and injected clock it is handed — the
  * snapshot is derived data, never stored back anywhere.
@@ -253,105 +192,40 @@ export function projectRosterSnapshot(
   publishedAtMs: number,
   sources: RosterProjectionSources = {},
 ): RosterSnapshot {
-  const pendingAccess = sources.pendingAccess ?? [];
   const todos = sources.todos ?? [];
-  const pendingAsks = pendingAccess.map(projectPendingAsk);
   const projected: RosterSnapshotWorker[] = roster.map((worker) => {
-      // First pending ask wins: the relay parks at most one per worker.
-      const ask = pendingAccess.find((ticket) => ticket.workerId === worker.workerId);
-      const linkedTodo =
-        worker.todoId !== null
-          ? todos.find((todo) => todo.id === worker.todoId)
-          : undefined;
-      return {
-        kind: "worker",
-        workerId: worker.workerId,
-        title: worker.title,
-        status: worker.status,
-        todoId: worker.todoId,
-        startedAtMs: worker.startedAtMs,
-        toolCallCount: worker.toolCallCount,
-        // No ledger link → no delivery obligation → nothing to mark landed.
-        delivered: linkedTodo !== undefined ? linkedTodo.delivered : true,
-        blocked:
-          ask === undefined
-            ? null
-            : // Names only: class + target. Never `reason`, never a
-              // credential value (access-types hard rule).
-              { class: ask.body.class, target: ask.body.target },
-      };
-    });
+    const linkedTodo =
+      worker.todoId !== null
+        ? todos.find((todo) => todo.id === worker.todoId)
+        : undefined;
     return {
-      schemaVersion: ROSTER_SNAPSHOT_SCHEMA_VERSION,
-      dispatcherSessionId,
-      publishedAtMs,
-      workers: projected,
-      recentResult: pickRecentResult(projected, sources.recentResultOf),
-      pendingAsks,
+      kind: "worker",
+      workerId: worker.workerId,
+      title: worker.title,
+      status: worker.status,
+      todoId: worker.todoId,
+      startedAtMs: worker.startedAtMs,
+      toolCallCount: worker.toolCallCount,
+      // No ledger link → no delivery obligation → nothing to mark landed.
+      delivered: linkedTodo !== undefined ? linkedTodo.delivered : true,
     };
-  }
-
-/**
- * Validate the v4 `pendingAsks` wire value (ticket 69). `undefined` means
- * malformed — a missing key or non-array fails the WHOLE snapshot
- * (fail-closed; the projection always writes the field, so absence is
- * version skew). Each entry must carry non-empty `requestId` / `workerId` /
- * `parentSessionId`, a class from the shared vocabulary, string
- * `target` / `reason` / `credentialName`, and a finite non-negative clock.
- * Two asks for one worker cannot happen (the relay parks at most one per
- * worker) — a duplicate `workerId` is corruption and fails the snapshot.
- */
-function parsePendingAsks(
-  value: unknown,
-): readonly RosterSnapshotPendingAsk[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const asks: RosterSnapshotPendingAsk[] = [];
-  const seenWorkers = new Set<string>();
-  for (const entry of value) {
-    if (typeof entry !== "object" || entry === null) return undefined;
-    const record = entry as Record<string, unknown>;
-    if (
-      typeof record.requestId !== "string" ||
-      record.requestId.length === 0 ||
-      typeof record.workerId !== "string" ||
-      record.workerId.length === 0 ||
-      typeof record.class !== "string" ||
-      !ACCESS_CLASS_SET.has(record.class) ||
-      typeof record.target !== "string" ||
-      typeof record.reason !== "string" ||
-      typeof record.credentialName !== "string" ||
-      typeof record.parentSessionId !== "string" ||
-      record.parentSessionId.length === 0 ||
-      typeof record.createdAtMs !== "number" ||
-      !Number.isFinite(record.createdAtMs) ||
-      record.createdAtMs < 0
-    ) {
-      return undefined;
-    }
-    if (seenWorkers.has(record.workerId)) return undefined;
-    seenWorkers.add(record.workerId);
-    asks.push({
-      requestId: record.requestId,
-      workerId: record.workerId,
-      class: record.class as AccessClass,
-      target: record.target,
-      reason: record.reason,
-      credentialName: record.credentialName,
-      parentSessionId: record.parentSessionId,
-      createdAtMs: record.createdAtMs,
-    });
-  }
-  return asks;
+  });
+  return {
+    schemaVersion: ROSTER_SNAPSHOT_SCHEMA_VERSION,
+    dispatcherSessionId,
+    publishedAtMs,
+    workers: projected,
+    recentResult: pickRecentResult(projected, sources.recentResultOf),
+  };
 }
 
 /**
  * Defensive parse of a value received over the settings channel. Returns
- * `null` for anything that is not exactly a v4 snapshot: wrong shape, v1/v2
- * /v3 payloads or other version skew, a non-finite clock, an unknown status
- * or producer kind, a malformed `blocked` reason, a missing or malformed
- * `recentResult`, a missing or malformed `pendingAsks`, or an unbounded
- * excerpt — the honest answer is "unavailable", not a partially hidden
- * roster.
+ * `null` for anything that is not exactly a v5 snapshot: wrong shape, an
+ * older or newer `schemaVersion` (v4 and every other value), a non-finite
+ * clock, an unknown status or producer kind, a missing or malformed
+ * `recentResult`, or an unbounded excerpt — the honest answer is
+ * "unavailable", not a partially hidden roster.
  */
 export function parseRosterSnapshot(value: unknown): RosterSnapshot | null {
   if (typeof value !== "object" || value === null) return null;
@@ -392,8 +266,6 @@ export function parseRosterSnapshot(value: unknown): RosterSnapshot | null {
       return null;
     }
     if (typeof row.delivered !== "boolean") return null;
-    const blocked = parseBlocked(row.blocked);
-    if (blocked === undefined) return null;
     workers.push({
       kind: "worker",
       workerId: row.workerId,
@@ -403,20 +275,16 @@ export function parseRosterSnapshot(value: unknown): RosterSnapshot | null {
       startedAtMs: row.startedAtMs,
       toolCallCount: row.toolCallCount,
       delivered: row.delivered,
-      blocked,
     });
   }
   const recentResult = parseRecentResult(record.recentResult);
   if (recentResult === undefined) return null;
-  const pendingAsks = parsePendingAsks(record.pendingAsks);
-  if (pendingAsks === undefined) return null;
   return {
     schemaVersion: ROSTER_SNAPSHOT_SCHEMA_VERSION,
     dispatcherSessionId: record.dispatcherSessionId,
     publishedAtMs: record.publishedAtMs,
     workers,
     recentResult,
-    pendingAsks,
   };
 }
 
@@ -446,26 +314,6 @@ function parseRecentResult(
   }
   if (record.text.length > RECENT_RESULT_EXCERPT_CHARS) return undefined;
   return { workerId: record.workerId, title: record.title, text: record.text };
-}
-
-/**
- * Validate one `blocked` wire value. `undefined` means malformed (the whole
- * snapshot fails); `null` is a valid "not blocked". The class must be in the
- * shared access vocabulary — an unknown class is version skew, and unknown
- * vocabulary fails closed like an unknown status.
- */
-function parseBlocked(value: unknown): RosterSnapshotBlocked | null | undefined {
-  if (value === null) return null;
-  if (typeof value !== "object") return undefined;
-  const record = value as Record<string, unknown>;
-  if (
-    typeof record.class !== "string" ||
-    !ACCESS_CLASS_SET.has(record.class) ||
-    typeof record.target !== "string"
-  ) {
-    return undefined;
-  }
-  return { class: record.class as AccessClass, target: record.target };
 }
 
 /**

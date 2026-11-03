@@ -118,14 +118,6 @@ export const localeDictionary: LocaleDictionary = {
     "roster.empty": "No workers yet. Ask the dispatcher to start some.",
     "roster.unavailable": "Worker status is unavailable right now.",
     "roster.loading": "Loading worker status…",
-    "roster.blocked.tool": 'Waiting for your approval: use the tool "{target}"',
-    "roster.blocked.credential":
-      'Waiting for your approval: use the credential "{target}"',
-    "roster.blocked.network":
-      'Waiting for your approval: network access to "{target}"',
-    "roster.blocked.filesystem":
-      'Waiting for your approval: file access to "{target}"',
-    "roster.blocked.other": "Waiting for your approval: {target}",
     "roster.landed": "Result ready — not delivered yet",
     "roster.activity.toolcalls": "{count} tool calls",
     "roster.section.active": "Active",
@@ -190,10 +182,6 @@ export const localeDictionary: LocaleDictionary = {
     "settings.card.field.enabled.label": "Enable the dispatcher",
     "settings.card.field.enabled.hint":
       "Saved as the dispatcher's setting: it applies to new chats. The chat you are in keeps the flag it started with.",
-    "settings.card.field.accessRequestTimeoutMs.label":
-      "Access-request timeout (ms)",
-    "settings.card.field.accessRequestTimeoutMs.hint":
-      "How long an unanswered permission request waits before it is denied. Leave empty to use the default.",
     "settings.card.field.wakeCoalesceWindowMs.label":
       "Wake coalescing window (ms)",
     "settings.card.field.wakeCoalesceWindowMs.hint":
@@ -327,7 +315,10 @@ export const localeDictionary: LocaleDictionary = {
     // dispatcher mark is composed (the sidebar cell ADR-0024's rider licenses;
     // see src/client/session-kind.tsx); the worker label stays with it as
     // retained machinery for the declined header seat.
+    // Ticket 177: the owner split the dispatcher kind in two, so each class
+    // gets its own accessible name.
     "indicator.dispatcher": "Dispatcher session",
+    "indicator.team-leader": "Summoned dispatcher session",
     "indicator.worker": "Worker session",
   },
   zh: {
@@ -335,11 +326,6 @@ export const localeDictionary: LocaleDictionary = {
     "roster.empty": "还没有工作者。让调度器启动一些吧。",
     "roster.unavailable": "工作者状态暂时不可用。",
     "roster.loading": "正在加载工作者状态…",
-    "roster.blocked.tool": "等待你的批准：使用工具“{target}”",
-    "roster.blocked.credential": "等待你的批准：使用凭据“{target}”",
-    "roster.blocked.network": "等待你的批准：访问网络“{target}”",
-    "roster.blocked.filesystem": "等待你的批准：访问文件“{target}”",
-    "roster.blocked.other": "等待你的批准：{target}",
     "roster.landed": "结果已就绪，尚未送达",
     "roster.activity.toolcalls": "{count} 次工具调用",
     "roster.section.active": "进行中",
@@ -390,9 +376,6 @@ export const localeDictionary: LocaleDictionary = {
     "settings.card.field.enabled.label": "启用调度器",
     "settings.card.field.enabled.hint":
       "保存为调度器的设置：对新会话生效。当前所在会话仍沿用启动时的开关值。",
-    "settings.card.field.accessRequestTimeoutMs.label": "访问请求超时（毫秒）",
-    "settings.card.field.accessRequestTimeoutMs.hint":
-      "权限请求未获答复时可等待的时长，超时后按拒绝处理。留空以使用默认值。",
     "settings.card.field.wakeCoalesceWindowMs.label": "唤醒合并窗口（毫秒）",
     "settings.card.field.wakeCoalesceWindowMs.hint":
       "调度器空闲时，把窗口内先后到达的多个后台完成合并为一次唤醒；你的消息始终优先。0 表示立即唤醒（默认）。",
@@ -501,7 +484,9 @@ export const localeDictionary: LocaleDictionary = {
     "shell.approval.submitted": "答复已提交——待调度器确认后此卡片会更新。",
     "shell.dispatch.gating": "审批门",
     // Ticket 123：会话类别图标文案（仅作无障碍名称/悬停提示，不是可见段落）。
+    // Ticket 177：调度器分成两类，各自有自己的无障碍名称。
     "indicator.dispatcher": "调度会话",
+    "indicator.team-leader": "被召唤的调度会话",
     "indicator.worker": "工作者会话",
   },
 };

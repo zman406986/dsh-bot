@@ -25,8 +25,8 @@
  * three sections so "what is happening / what needs me / what finished" is
  * glanceable:
  * - **Active** — `spawned`/`running`/`steering` with nothing owed;
- * - **Needs you** — blocked (a pending ask) or terminal-and-undelivered
- *   (landed: the result is ready but not yet delivered to the user);
+ * - **Needs you** — terminal-and-undelivered (landed: the result is ready
+ *   but not yet delivered to the user);
  * - **Finished** — terminal and delivered, collapsed to a muted count line.
  *
  * **Needs you is our addition, and it is the honest pull-only stand-in for
@@ -34,12 +34,10 @@
  * push-like roster markers; no push seam exists here and no surface may
  * promise or simulate one (design-17 §4.8). So the panel cannot interrupt:
  * when the user *looks*, it must say at a glance which rows are waiting on
- * them. Precedence follows the design-17 §4.1 marker rule — blocked outranks
- * landed — so a row that is both renders in Needs-you as blocked, never as
- * "result ready".
+ * them.
  *
  * Nothing new is stored for any of this: the partition is a pure view-model
- * read of existing snapshot v2 fields (`status`, `blocked`, `delivered`);
+ * read of existing snapshot fields (`status`, `delivered`);
  * sections are derived data, never a second source of truth (design-17 §5
  * conflict 8 — no new core state, no new seams).
  *
@@ -55,11 +53,9 @@ import {
   isRosterSnapshotStale,
   parseRosterSnapshot,
   type RosterSnapshot,
-  type RosterSnapshotBlocked,
   type RosterSnapshotWorker,
 } from "../core/roster-snapshot.js";
 import { isTerminalStatus, type WorkerStatus } from "../core/types.js";
-import type { AccessClass } from "../core/access-types.js";
 
 /** How often the mounted panel re-evaluates staleness without a push. */
 export const ROSTER_STALE_RECHECK_MS = 10_000;
@@ -195,16 +191,12 @@ export interface RosterRowView {
   readonly visual: RosterStatusVisual;
   /** Ledger linkage metadata — muted, never a task board (design-17 §4.9). */
   readonly todoId: string | null;
-  /** Structured blocked reason from the snapshot (names only). */
-  readonly blocked: RosterSnapshotBlocked | null;
   /**
-   * Highest-precedence attention marker: blocked outranks landed, landed
-   * outranks finished (design-17 §4.1). `null` = nothing needs attention.
+   * Attention marker: landed outranks finished (design-17 §4.1). `null` =
+   * nothing needs attention. The `blocked` variant went with the worker
+   * access-ask feature (ticket 174 / ADR-0033).
    */
-  readonly marker:
-    | { readonly kind: "blocked"; readonly blocked: RosterSnapshotBlocked }
-    | { readonly kind: "landed" }
-    | null;
+  readonly marker: { readonly kind: "landed" } | null;
   /** Terminal row: rendered muted (precedence bottom). */
   readonly finished: boolean;
   /**
@@ -377,24 +369,20 @@ export function formatRosterStartTime(ms: number): string {
 }
 
 /**
- * Section assignment (ticket 28, design-17 §4.2) — a pure read of the two
- * existing snapshot fields, with the design's marker precedence:
+ * Section assignment (ticket 28, design-17 §4.2) — a pure read of two
+ * existing snapshot fields:
  *
- * 1. **blocked** (a pending ask) → Needs you, whatever the status;
- * 2. else **terminal and undelivered** (landed) → Needs you;
- * 3. else **terminal and delivered** → Finished (collapsed by default);
- * 4. else (`spawned` / `running` / `steering`) → Active.
+ * 1. **terminal and undelivered** (landed) → Needs you;
+ * 2. else **terminal and delivered** → Finished (collapsed by default);
+ * 3. else (`spawned` / `running` / `steering`) → Active.
  *
- * Blocked outranking landed is the whole point of step 1: a row that is both
- * renders as blocked, never as "result ready". Terminal statuses come from
- * the core FSM (`isTerminalStatus`), not a second list kept here.
+ * Terminal statuses come from the core FSM (`isTerminalStatus`), not a second
+ * list kept here.
  */
 export function rosterSectionFor(
   status: WorkerStatus,
-  blocked: RosterSnapshotBlocked | null,
   delivered: boolean,
 ): RosterSectionId {
-  if (blocked !== null) return "needs-you";
   if (isTerminalStatus(status)) return delivered ? "finished" : "needs-you";
   return "active";
 }
@@ -421,11 +409,7 @@ export function describeRosterPanel(
   const rows = state.snapshot.workers.map((worker): RosterRowView => {
     const finished = isTerminalStatus(worker.status);
     const landed = finished && !worker.delivered;
-    const section = rosterSectionFor(
-      worker.status,
-      worker.blocked,
-      worker.delivered,
-    );
+    const section = rosterSectionFor(worker.status, worker.delivered);
     return {
       workerId: worker.workerId,
       title:
@@ -436,13 +420,7 @@ export function describeRosterPanel(
       statusLabel: rosterStatusLabel(worker.status),
       visual: rosterStatusVisual(worker.status),
       todoId: worker.todoId,
-      blocked: worker.blocked,
-      marker:
-        worker.blocked !== null
-          ? { kind: "blocked", blocked: worker.blocked }
-          : landed
-            ? { kind: "landed" }
-            : null,
+      marker: landed ? { kind: "landed" } : null,
       finished,
       section,
       // Only delivered terminal rows collapse; landed rows must stay visible
@@ -466,13 +444,4 @@ export function describeRosterPanel(
       };
     }),
   };
-}
-
-/**
- * Localize the blocked waiting phrase for an access class. Unknown classes
- * fall back to the generic `other` phrase (the parser admits only known
- * classes, so this guards copy drift, not wire corruption).
- */
-export function rosterBlockedKey(accessClass: AccessClass): string {
-  return `roster.blocked.${accessClass}`;
 }

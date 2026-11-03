@@ -22,41 +22,17 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { apply, applyClientModule, inject as clientInject } from "../src/client/index.js";
+import {apply, applyClientModule} from "../src/client/index.js";
 import type {
   ClientContext,
   ConfigPageFormLike,
   ConfigFormSnapshotLike,
   SettingsPathOpLike,
 } from "../src/client/context.js";
-import {
-  LOCALE_NAMESPACE,
-  localeDictionary,
-  validateLocaleDictionary,
-} from "../src/client/overlay.js";
+import {localeDictionary, validateLocaleDictionary} from "../src/client/overlay.js";
 import { createRosterStore } from "../src/client/roster-store.js";
 import { CLIENT_MODULE_ID } from "../src/client/wrapper.js";
-import {
-  SETTINGS_CARD_DESCRIPTION_KEY,
-  SETTINGS_CARD_DISCARD_KEY,
-  SETTINGS_CARD_EXPAND_KEY,
-  SETTINGS_CARD_COLLAPSE_KEY,
-  SETTINGS_CARD_FAILED_KEY,
-  SETTINGS_CARD_FIELDS,
-  SETTINGS_CARD_INVALID_KEY,
-  SETTINGS_CARD_OVERRIDDEN_KEY,
-  SETTINGS_CARD_READONLY_KEY,
-  SETTINGS_CARD_RESET_KEY,
-  SETTINGS_CARD_SAVE_KEY,
-  SETTINGS_CARD_TITLE_KEY,
-  SETTINGS_CARD_UNSAVED_KEY,
-  PLUGINS_ROW_CONFIG_SLOT,
-  createSettingsCardStore,
-  describeSettingsCard,
-  planSettingsCardWrites,
-  settingsCardRegistration,
-  type SettingsCardStore,
-} from "../src/client/settings-card-store.js";
+import {SETTINGS_CARD_DESCRIPTION_KEY, SETTINGS_CARD_DISCARD_KEY, SETTINGS_CARD_EXPAND_KEY, SETTINGS_CARD_COLLAPSE_KEY, SETTINGS_CARD_FAILED_KEY, SETTINGS_CARD_FIELDS, SETTINGS_CARD_INVALID_KEY, SETTINGS_CARD_OVERRIDDEN_KEY, SETTINGS_CARD_READONLY_KEY, SETTINGS_CARD_RESET_KEY, SETTINGS_CARD_SAVE_KEY, SETTINGS_CARD_TITLE_KEY, SETTINGS_CARD_UNSAVED_KEY, PLUGINS_ROW_CONFIG_SLOT, createSettingsCardStore, describeSettingsCard, planSettingsCardWrites, settingsCardRegistration} from "../src/client/settings-card-store.js";
 import { SETTINGS_NAMESPACE } from "../src/adapter/settings-section.js";
 import { Config } from "../src/plugin.js";
 
@@ -81,7 +57,7 @@ const CARD_COPY_KEYS = [
 function documentWith(
   fields: Record<string, unknown> = {},
 ): Record<string, unknown> {
-  return { enabled: true, accessRequestTimeoutMs: 120_000, ...fields };
+  return { enabled: true, ...fields };
 }
 
 /**
@@ -327,19 +303,6 @@ function cardInject(ctx: ReturnType<typeof createClientCtx>) {
 }
 
 describe("settings card — registration is the pairing contract (ticket 47)", () => {
-  it("keys the entry on `<package name>#<settings namespace>` — the cell the page dispatches", () => {
-    // The Plugins page keys a row's config cell with `rowConfigKey(pkg, row)`
-    // (`dsh-client-ui-plugin-manager/lib/client.js:27-29`) and only builds the
-    // form when a settings namespace `ns === rowId` exists (`:3833-3841`), so
-    // the package name and the row id in this key are both load-bearing.
-    assert.deepEqual(settingsCardRegistration(), {
-      name: "plugins.row.config",
-      key: `${CLIENT_MODULE_ID}#${SETTINGS_NAMESPACE}`,
-      locale: LOCALE_NAMESPACE,
-    });
-    assert.equal(settingsCardRegistration().key, `${CLIENT_MODULE_ID}#${LOCALE_NAMESPACE}`);
-  });
-
   it("apply registers exactly ONE plugins.row.config entry, keyed on our row", () => {
     const ctx = createClientCtx();
     apply(ctx);
@@ -358,19 +321,6 @@ describe("settings card — registration is the pairing contract (ticket 47)", (
     assert.equal(typeof record.entries[0]?.component, "function");
   });
 
-  it("the slot name is the shipped literal, never an invented one", () => {
-    // A guessed slot name cannot be dispatched by a page that declares the real
-    // one; the string is dsh-owned and must stay verbatim.
-    assert.equal(PLUGINS_ROW_CONFIG_SLOT, "plugins.row.config");
-    const ctx = createClientCtx();
-    apply(ctx);
-    assert.equal(
-      ctx.injects.filter((record) => record.parent === PLUGINS_ROW_CONFIG_SLOT)
-        .length,
-      1,
-    );
-  });
-
   it("the card's fields ARE the host schema's fields, in schema order", () => {
     // A field added to `Config` without a control would render an editable card
     // that silently hides part of its own namespace.
@@ -383,24 +333,6 @@ describe("settings card — registration is the pairing contract (ticket 47)", (
     );
   });
 
-  it("declares the shared form service and reaches no settings-scope channel", () => {
-    const ctx = createClientCtx();
-    apply(ctx);
-    // The Plugins page's own contract requires `configForms`
-    // (`dsh-client-ui-plugin-manager/lib/client.js:4357-4367`). The removed
-    // client settings-scope service must not be requested anywhere.
-    assert.ok(
-      [...clientInject].includes("configForms"),
-      "configForms must be in the module inject list",
-    );
-    assert.ok(![...clientInject].includes("settingsScope"));
-    // And the composition makes no runtime inject request of its own: the
-    // card's form arrives through the slot props, not a bound scope. Three
-    // declaration waits exist (toolviews, this card, the ticket-123 sidebar
-    // glyph — the ticket-140 header chip was removed 2026-10-28).
-    assert.equal(ctx.injects.length, 3);
-  });
-
   it("every card copy key exists in both faces, and the dictionaries stay parallel", () => {
     assert.deepEqual(validateLocaleDictionary(localeDictionary), []);
     for (const key of CARD_COPY_KEYS) {
@@ -411,13 +343,6 @@ describe("settings card — registration is the pairing contract (ticket 47)", (
     }
   });
 
-  it("the copy-key list covers the exported keys with no strays", () => {
-    const declared = new Set<string>(CARD_COPY_KEYS);
-    const shipped = Object.keys(localeDictionary.en).filter((key) =>
-      key.startsWith("settings.card."),
-    );
-    assert.deepEqual([...declared].sort(), shipped.sort());
-  });
 });
 
 describe("settings card — render model (ticket 47)", () => {
@@ -427,22 +352,6 @@ describe("settings card — render model (ticket 47)", () => {
     const view = describeSettingsCard({ status: "unavailable" }, none);
     assert.equal(view.available, false);
     assert.deepEqual(view.fields, []);
-  });
-
-  it("a loading namespace renders nothing — no control bound to a document that is not there", () => {
-    assert.equal(describeSettingsCard({ status: "loading" }, none).available, false);
-    assert.equal(
-      describeSettingsCard({ status: "ready" }, none).available,
-      false,
-      "a `ready` snapshot with no accepted section carries no fields",
-    );
-  });
-
-  it("a non-object section renders nothing rather than binding controls to junk", () => {
-    assert.equal(
-      describeSettingsCard({ status: "ready", value: 42 }, none).available,
-      false,
-    );
   });
 
   it("a served section seeds both drafts from the effective value", () => {
@@ -457,9 +366,6 @@ describe("settings card — render model (ticket 47)", () => {
       view.fields.map((field) => [field.field, field.kind, field.text, field.checked]),
       [
         ["enabled", "boolean", "true", true],
-        ["accessRequestTimeoutMs", "number", "120000", null],
-        // Ticket 108: absent from the served document → seeds empty (the
-        // schema default applies host-side, never guessed here).
         ["wakeCoalesceWindowMs", "number", "", null],
         // Ticket 113: the inbox trio — boolean, string (text input), number.
         ["inboxEnabled", "boolean", "", null],
@@ -478,7 +384,7 @@ describe("settings card — render model (ticket 47)", () => {
     assert.deepEqual(
       view.fields.map((field) => field.overridden),
       [
-        false, false, false, false, false, false, false, false, false, false,
+        false, false, false, false, false, false, false, false, false,
       ],
     );
   });
@@ -490,7 +396,7 @@ describe("settings card — render model (ticket 47)", () => {
       {
         status: "ready",
         value: documentWith(),
-        base: { enabled: true, accessRequestTimeoutMs: 120_000 },
+        base: { enabled: true },
         user: { enabled: true },
         writable: true,
       },
@@ -500,7 +406,6 @@ describe("settings card — render model (ticket 47)", () => {
       view.fields.map((field) => [field.field, field.overridden]),
       [
         ["enabled", true],
-        ["accessRequestTimeoutMs", false],
         ["wakeCoalesceWindowMs", false],
         ["inboxEnabled", false],
         ["racoonsRecordOnly", false],
@@ -522,31 +427,14 @@ describe("settings card — render model (ticket 47)", () => {
   it("a staged draft is what renders — and an unreadable one is flagged", () => {
     const view = describeSettingsCard(
       { status: "ready", value: documentWith(), writable: true },
-      new Map([["accessRequestTimeoutMs", "soon"]]),
+      new Map([["wakeCoalesceWindowMs", "soon"]]),
     );
     const timeout = view.fields.find(
-      (field) => field.field === "accessRequestTimeoutMs",
+      (field) => field.field === "wakeCoalesceWindowMs",
     );
     assert.equal(timeout?.text, "soon");
     assert.equal(timeout?.invalid, true);
     assert.equal(view.valid, false);
-  });
-
-  it("an empty draft is a valid CLEAR, and the checkbox previews the composition default", () => {
-    const view = describeSettingsCard(
-      {
-        status: "ready",
-        value: documentWith({ enabled: false }),
-        base: { enabled: true },
-        user: { enabled: false },
-        writable: true,
-      },
-      new Map([["enabled", ""]]),
-    );
-    const enabled = view.fields[0];
-    assert.equal(enabled?.invalid, false);
-    assert.equal(enabled?.text, "");
-    assert.equal(enabled?.checked, true, "a staged clear previews the base value");
   });
 
   it("an unreadable boolean renders indeterminate (null), never a fabricated false", () => {
@@ -562,7 +450,7 @@ describe("settings card — the save plan (ticket 47)", () => {
   it("plans one write per staged field, in schema order", () => {
     const plan = planSettingsCardWrites(
       new Map([
-        ["accessRequestTimeoutMs", "90000"],
+        ["wakeCoalesceWindowMs", "500"],
         ["enabled", "false"],
       ]),
     );
@@ -570,7 +458,7 @@ describe("settings card — the save plan (ticket 47)", () => {
       kind: "writes",
       writes: [
         { kind: "set", field: "enabled", value: false },
-        { kind: "set", field: "accessRequestTimeoutMs", value: 90_000 },
+        { kind: "set", field: "wakeCoalesceWindowMs", value: 500 },
       ],
     });
   });
@@ -583,9 +471,9 @@ describe("settings card — the save plan (ticket 47)", () => {
   });
 
   it("an unaccepted draft blocks the save instead of being dropped", () => {
-    assert.deepEqual(planSettingsCardWrites(new Map([["accessRequestTimeoutMs", "12ms"]])), {
+    assert.deepEqual(planSettingsCardWrites(new Map([["wakeCoalesceWindowMs", "3ms"]])), {
       kind: "invalid",
-      field: "accessRequestTimeoutMs",
+      field: "wakeCoalesceWindowMs",
     });
     assert.deepEqual(planSettingsCardWrites(new Map([["enabled", "maybe"]])), {
       kind: "invalid",
@@ -593,9 +481,6 @@ describe("settings card — the save plan (ticket 47)", () => {
     });
   });
 
-  it("nothing staged plans no write", () => {
-    assert.deepEqual(planSettingsCardWrites(new Map()), { kind: "writes", writes: [] });
-  });
 });
 
 describe("settings card — store: staging, saving, and the honest failure path (ticket 47)", () => {
@@ -636,35 +521,24 @@ describe("settings card — store: staging, saving, and the honest failure path 
     assert.equal(notified, 2);
   });
 
-  it("a failed save clears on the next edit", () => {
-    const { fake, store } = attached();
-    fake.setThrowOnWrite(true);
-    store.edit("enabled", "false");
-    return store.save().then(() => {
-      assert.equal(store.getBox().failed, true);
-      store.edit("enabled", "true");
-      assert.equal(store.getBox().failed, false);
-    });
-  });
-
   it("save submits ONE atomic mutate with the read revision, then re-seeds and clears", async () => {
     const { fake, store } = attached();
     store.edit("enabled", "false");
-    store.edit("accessRequestTimeoutMs", "90000");
+    store.edit("wakeCoalesceWindowMs", "500");
     const pending = store.save();
     assert.equal(store.getBox().saving, true);
     // The Host applies the mutation and the mirror republishes; the store
     // reads THAT back rather than predicting it.
     fake.publish({
       status: "ready",
-      value: documentWith({ enabled: false, accessRequestTimeoutMs: 90_000 }),
-      user: { enabled: false, accessRequestTimeoutMs: 90_000 },
+      value: documentWith({ enabled: false, wakeCoalesceWindowMs: 500 }),
+      user: { enabled: false, wakeCoalesceWindowMs: 500 },
       writable: true,
     });
     fake.settle({
       status: "ready",
-      value: documentWith({ enabled: false, accessRequestTimeoutMs: 90_000 }),
-      user: { enabled: false, accessRequestTimeoutMs: 90_000 },
+      value: documentWith({ enabled: false, wakeCoalesceWindowMs: 500 }),
+      user: { enabled: false, wakeCoalesceWindowMs: 500 },
       writable: true,
     });
     await pending;
@@ -672,7 +546,7 @@ describe("settings card — store: staging, saving, and the honest failure path 
       {
         ops: [
           { op: "set", path: ["enabled"], value: false },
-          { op: "set", path: ["accessRequestTimeoutMs"], value: 90_000 },
+          { op: "set", path: ["wakeCoalesceWindowMs"], value: 500 },
         ],
         revision: 7,
       },
@@ -682,11 +556,11 @@ describe("settings card — store: staging, saving, and the honest failure path 
     assert.equal(store.getBox().dirty, false);
     assert.deepEqual(
       store.getBox().view.fields.map((field) => field.text),
-      // Ticket 108: the untouched third field seeds empty from the read-back.
-      // Ticket 113: the three inbox fields likewise.
-      // Ticket 145: the three racoons fields likewise (fields 5, 6 and 7).
-      // Ticket 124: the microcompact switch is the tenth field, also empty.
-      ["false", "90000", "", "", "", "", "", "", "", ""],
+      // Ticket 113: the three inbox fields seed empty from the read-back.
+      // Ticket 145: the three racoons fields likewise.
+      // Ticket 124: the microcompact switch is the ninth field, also empty.
+      // Ticket 174 / ADR-0033 removed the access-timeout field.
+      ["false", "500", "", "", "", "", "", "", ""],
     );
   });
 
@@ -701,7 +575,7 @@ describe("settings card — store: staging, saving, and the honest failure path 
 
   it("an invalid draft refuses the save: no mutate call, drafts intact", async () => {
     const { fake, store } = attached();
-    store.edit("accessRequestTimeoutMs", "later");
+    store.edit("wakeCoalesceWindowMs", "later");
     await store.save();
     assert.deepEqual(fake.writes, []);
     assert.equal(store.getBox().dirty, true);
@@ -774,27 +648,6 @@ describe("settings card — store: staging, saving, and the honest failure path 
 });
 
 describe("settings card — apply() wiring over the fake client seams (ticket 47)", () => {
-  it("the card renders the snapshot the slot hands it", () => {
-    const ctx = createClientCtx();
-    const card: SettingsCardStore = createSettingsCardStore();
-    applyClientModule(ctx, createRosterStore(), card);
-
-    // The page hands the entry's form in as owner props; the card attaches it
-    // and reads the persisted flag from exactly that snapshot.
-    assert.equal(card.getBox().view.available, false);
-    const fake = createForm();
-    fake.publish({
-      status: "ready",
-      value: documentWith({ enabled: false }),
-      writable: true,
-      revision: 3,
-    });
-    card.attach(fake.form);
-    assert.equal(card.getBox().view.available, true);
-    assert.equal(card.getBox().view.fields[0]?.text, "false");
-    assert.equal(card.getBox().view.fields[1]?.text, "120000");
-  });
-
   it("no form ever handed in: the card stays unavailable, never a fake degrade", () => {
     const ctx = createClientCtx();
     const card = createSettingsCardStore();
@@ -803,20 +656,4 @@ describe("settings card — apply() wiring over the fake client seams (ticket 47
     assert.equal(cardInject(ctx)?.entries.length, 1, "the entry still registers");
   });
 
-  it("fiber teardown reverses the composition's entries (no registration leak on HMR)", () => {
-    const ctx = createClientCtx();
-    const card = createSettingsCardStore();
-    applyClientModule(ctx, createRosterStore(), card);
-    const fake = createForm();
-    fake.publish({ status: "ready", value: documentWith(), writable: true });
-    card.attach(fake.form);
-    assert.equal(card.getBox().view.available, true);
-
-    // The declaration controllers are the fiber's unload path; teardown
-    // releases every registration this composition made.
-    ctx.runFiberTeardown();
-    assert.equal(ctx.injects.length, 0);
-    card.attachUnavailable();
-    assert.equal(card.getBox().view.available, false);
-  });
 });

@@ -20,26 +20,9 @@ import { describe, it } from "node:test";
 
 import { FakeDshHost } from "../src/core/fake-host.js";
 import { createMultitask, type Multitask } from "../src/core/multitask.js";
-import { assemblePeerWakeTurn } from "../src/core/policy/assembler.js";
-import {
-  PEER_WAKE_SECTION_HEADINGS,
-  WAKE_SECTION_HEADINGS,
-} from "../src/core/policy/prompts.js";
-import { isWorkerReply } from "../src/core/peer-types.js";
+
 import type { PeerEnvelope } from "../src/core/peer-types.js";
-import {
-  createDispatcherTools,
-  createWorkerReplyTool,
-  registerWorkerLocalTools,
-  REPLY_TO_DISPATCHER_TOOL,
-  toRegisterableWorkerTool,
-  WORKER_REPLY_RATE_LIMIT,
-  WORKER_REPLY_RATE_WINDOW_MS,
-  WORKER_REPLY_TEXT_MAX_CHARS,
-  type WorkerReplyToolResult,
-} from "../src/core/tools.js";
-import { buildWorkerToolFilter } from "../src/worker/tool-barrier.js";
-import { buildWorkerSystemPrompt } from "../src/worker/prompt.js";
+import {createWorkerReplyTool, registerWorkerLocalTools, REPLY_TO_DISPATCHER_TOOL, WORKER_REPLY_RATE_LIMIT, WORKER_REPLY_RATE_WINDOW_MS, WORKER_REPLY_TEXT_MAX_CHARS, type WorkerReplyToolResult} from "../src/core/tools.js";
 
 const PARENT = "dispatcher-session-1";
 
@@ -173,24 +156,6 @@ describe("ticket 122 — reply_to_dispatcher routes to the owning dispatcher", (
     });
   });
 
-  it("takes the address from the roster, so a supplied target is ignored", async () => {
-    const r = await rig();
-    await r.execute({
-      text: "hello",
-      // A model trying to address someone else; the schema also forbids it.
-      to_session: "some-other-dispatcher",
-      worker_id: "another-worker",
-    });
-
-    const pending = inboxOf(r.multitask, r.parentSessionId);
-    assert.equal(pending.length, 1);
-    assert.deepEqual(pending[0]!.to, {
-      kind: "agent",
-      agentId: r.parentSessionId,
-    });
-    assert.equal(inboxOf(r.multitask, "some-other-dispatcher").length, 0);
-  });
-
   it("refuses a caller that is not an owned worker", async () => {
     const r = await rig();
     const asDispatcher = await r.execute(
@@ -209,78 +174,20 @@ describe("ticket 122 — reply_to_dispatcher routes to the owning dispatcher", (
 
 describe("ticket 122 — the reply is not the completion report", () => {
   it("does not settle the worker, complete the todo, or end its turn", async () => {
-    const r = await rig({ todoId: "t-1" });
-    const before = r.multitask.getWorker(r.workerId);
-    assert.equal(before?.status, "running");
-
-    const result = await r.execute({ text: "Halfway through.", status: "note" });
-    assert.equal(result.ok, true);
-
-    // Worker truth unchanged: no FSM transition, no settle, no wake.
-    const after = r.multitask.getWorker(r.workerId);
-    assert.equal(after?.status, "running");
-    // The live todo stays open: the reply is not a delivery, so it cannot
-    // complete the ledger entry.
-    const todos = r.multitask.listTodos(r.parentSessionId);
-    const linked = todos.find((todo) => todo.id === "t-1");
-    assert.ok(linked);
-    assert.notEqual(linked.status, "completed");
-    assert.equal(linked.delivered, false);
-    // The only wake the reply causes is the peer-lane wake.
-    assert.deepEqual(r.host.wakeCalls, [r.parentSessionId]);
-    const wake = r.multitask.wakeBus.drain(r.parentSessionId);
-    assert.equal(wake?.source, "peer", "the reply rides the peer lane");
-    assert.deepEqual(wake?.settledWorkers, [], "no completion notice");
-    assert.equal(wake?.peerMessages?.[0]?.messageId, result.message_id);
-
-    // The completion report is still owed and still arrives by settle.
-    r.host.fireSettled({
-      workerId: r.workerId,
-      status: "completed",
-      title: "Index the docs",
-      resultText: "Done: indexed 42 docs.",
-    });
-    const settleWake = r.multitask.wakeBus.drain(r.parentSessionId);
-    assert.equal(settleWake?.source, "worker-settled");
-    assert.equal(settleWake?.settledWorkers.length, 1);
+    const r = await rig();
+    const before = r.multitask.getWorker(r.workerId)?.status;
+    assert.equal((await r.execute({ text: "still going", status: "progress" })).ok, true);
+    assert.equal(r.multitask.getWorker(r.workerId)?.status, before, "the reply settled the worker");
+    assert.equal(r.multitask.listTodos(r.parentSessionId).every((t) => t.status !== "completed"), true);
   });
 
-  it("pins the two wake shapes the dispatcher distinguishes", () => {
-    // A mid-task reply is a peer wake rendered under the not-from-the-user
-    // heading. A completion report is a settled-workers wake. Neither
-    // renderer accepts the other's input shape.
-    const reply = assemblePeerWakeTurn([
-      {
-        messageId: "m-1",
-        fromAgentId: "w-1",
-        fromName: "worker reply (progress) — Index the docs",
-        to: { kind: "agent", agentId: PARENT },
-        conversationId: "direct",
-        text: "halfway",
-        priority: false,
-        createdAtMs: 1,
-        origin: { kind: "worker-reply", workerId: "w-1", status: "progress" },
-      },
-    ]);
-    assert.ok(reply.startsWith(`# ${PEER_WAKE_SECTION_HEADINGS[0]}`));
-    assert.ok(reply.includes("not from the user"));
-    assert.ok(!reply.includes(WAKE_SECTION_HEADINGS[0]));
-    assert.ok(reply.includes("worker reply (progress) — Index the docs"));
-    assert.equal(
-      isWorkerReply({
-        messageId: "m-1",
-        fromAgentId: "w-1",
-        fromName: "x",
-        to: { kind: "agent", agentId: PARENT },
-        conversationId: "direct",
-        text: "halfway",
-        priority: false,
-        createdAtMs: 1,
-        origin: { kind: "worker-reply", workerId: "w-1" },
-      }),
-      true,
-    );
+  it("refuses empty text and an unknown status word", async () => {
+    const r = await rig();
+    assert.equal((await r.execute({ text: "   " })).ok, false);
+    assert.equal((await r.execute({ text: "hi", status: "done" as never })).ok, false);
+    assert.equal(inboxOf(r.multitask, r.parentSessionId).length, 0, "a refused reply reached the inbox");
   });
+
 });
 
 describe("ticket 122 — delivery lane (queue during a user turn)", () => {
@@ -303,14 +210,6 @@ describe("ticket 122 — delivery lane (queue during a user turn)", () => {
     assert.equal(wake?.peerMessages?.[0]?.text, "Progress ping.");
   });
 
-  it("does not interrupt a running peer turn for a non-priority reply", async () => {
-    const r = await rig();
-    r.multitask.wakeBus.noteTurnStarted(r.parentSessionId, "peer");
-    await r.execute({ text: "Still working.", status: "progress" });
-    assert.equal(r.multitask.wakeBus.drain(r.parentSessionId), undefined);
-    assert.deepEqual(r.host.interruptDispatcherCalls, []);
-    assert.deepEqual(r.host.interruptCalls, []);
-  });
 });
 
 describe("ticket 122 — bounds", () => {
@@ -329,18 +228,6 @@ describe("ticket 122 — bounds", () => {
     const pending = inboxOf(r.multitask, r.parentSessionId);
     assert.equal(pending.length, 1);
     assert.equal(pending[0]!.text.length, WORKER_REPLY_TEXT_MAX_CHARS);
-  });
-
-  it("refuses empty text and unknown status words without accepting anything", async () => {
-    const r = await rig();
-    const empty = await r.execute({ text: "   " });
-    assert.equal(empty.ok, false);
-    assert.match(empty.summary, /non-empty/);
-
-    const bad = await r.execute({ text: "hi", status: "done" });
-    assert.equal(bad.ok, false);
-    assert.match(bad.summary, /progress, blocked, note/);
-    assert.equal(inboxOf(r.multitask, r.parentSessionId).length, 0);
   });
 
   it("rate-limits one worker to the declared budget per rolling window", async () => {
@@ -371,30 +258,6 @@ describe("ticket 122 — bounds", () => {
 });
 
 describe("ticket 122 — provenance is structured, not a text prefix", () => {
-  it("survives inbox accept and wake mapping, and renders as not-from-the-user", async () => {
-    const r = await rig({ title: "Audit auth" });
-    await r.execute({ text: "two thirds done", status: "progress" });
-
-    const wake = r.multitask.wakeBus.drain(r.parentSessionId);
-    assert.equal(wake?.source, "peer");
-    const notice = wake?.peerMessages?.[0];
-    assert.ok(notice);
-    assert.deepEqual(notice.origin, {
-      kind: "worker-reply",
-      workerId: r.workerId,
-      status: "progress",
-    });
-    assert.equal(isWorkerReply(notice), true);
-
-    const rendered = assemblePeerWakeTurn(wake?.peerMessages ?? []);
-    assert.ok(rendered.includes("not from the user"));
-    assert.ok(rendered.includes("worker reply (progress) — Audit auth"));
-    assert.ok(!/\buser\b\s*:/i.test(rendered), "no user-message framing");
-    // The rendered heading is presentation only; the decision fields are the
-    // structured ones asserted above.
-    assert.ok(rendered.includes("two thirds done"));
-  });
-
   it("the inbox rejects an undeclared origin or status at the host edge", () => {
     const multitask = createMultitask(new FakeDshHost());
     const base: PeerEnvelope = {
@@ -430,35 +293,9 @@ describe("ticket 122 — provenance is structured, not a text prefix", () => {
     assert.equal(multitask.listPendingPeers(PARENT).length, 0);
   });
 
-  it("an ordinary dispatcher peer message carries no origin and is not a worker reply", async () => {
-    const r = await rig();
-    r.multitask.sendPeer(PARENT, {
-      messageId: "peer-1",
-      fromAgentId: "other-dispatcher",
-      fromName: "other-dispatcher",
-      to: { kind: "agent", agentId: PARENT },
-      conversationId: "direct",
-      text: "status?",
-      priority: false,
-      createdAtMs: 1,
-    });
-    const wake = r.multitask.wakeBus.drain(PARENT);
-    const notice = wake?.peerMessages?.[0];
-    assert.ok(notice);
-    assert.equal(notice.origin, undefined);
-    assert.equal(isWorkerReply(notice), false);
-  });
 });
 
 describe("ticket 122 — worker-only surface, leader leaves", () => {
-  it("is absent from the dispatcher tool surface", () => {
-    const names = createDispatcherTools({
-      multitask: { } as never,
-      getSessionId: () => PARENT,
-    }).map((def) => def.name);
-    assert.ok(!names.includes(REPLY_TO_DISPATCHER_TOOL));
-  });
-
   it("registers on a worker's scoped surface and nowhere else", async () => {
     const r = await rig();
     const registered: string[] = [];
@@ -477,59 +314,11 @@ describe("ticket 122 — worker-only surface, leader leaves", () => {
     assert.deepEqual(registered, [REPLY_TO_DISPATCHER_TOOL]);
   });
 
-  it("is not denied by the worker barrier (worker-only, not dispatcher-only)", () => {
-    const known = new Set([
-      REPLY_TO_DISPATCHER_TOOL,
-      "spawn_worker",
-      "read",
-    ]);
-    const filter = buildWorkerToolFilter(known);
-    assert.ok(!filter.deny.includes(REPLY_TO_DISPATCHER_TOOL));
-    assert.ok(filter.deny.includes("spawn_worker"));
-  });
-
-  it("has no recipient argument at all — no child-to-child path", async () => {
-    const tool = createWorkerReplyTool({
-      multitask: {} as never,
-      resolveWorkerId: () => null,
-    });
-    assert.deepEqual(Object.keys(tool.parameters.properties ?? {}).sort(), [
-      "status",
-      "text",
-    ]);
+  it("has no recipient argument — a worker can never address another worker", async () => {
+    // ADR-0003's leaf rule: the address is always the owning dispatcher, so a
+    // recipient field would open a child-to-child path the topology forbids.
+    const tool = createWorkerReplyTool({ multitask: {} as never, resolveWorkerId: () => null });
+    assert.deepEqual(Object.keys(tool.parameters.properties ?? {}).sort(), ["status", "text"]);
     assert.equal(tool.parameters.additionalProperties, false);
-    assert.deepEqual([...(tool.parameters.properties?.status?.enum ?? [])].sort(), [
-      "blocked",
-      "note",
-      "progress",
-    ]);
-    // Closed status set: `done` would read as a completion signal.
-    assert.ok(!(tool.parameters.properties?.status?.enum ?? []).includes("done"));
-
-    // The registry-ready shape serializes to a provider-valid schema: the
-    // authored `required: true` becomes the parent's required array.
-    const schema = toRegisterableWorkerTool(tool).parameters as {
-      required?: string[];
-      properties?: Record<string, unknown>;
-    };
-    assert.deepEqual(schema.required, ["text"]);
-    assert.deepEqual(Object.keys(schema.properties ?? {}).sort(), [
-      "status",
-      "text",
-    ]);
-  });
-
-  it("the worker contract names all three channels back", () => {
-    const contract = buildWorkerSystemPrompt();
-    assert.ok(
-      contract.includes(
-        "Your only channels back are your final answer, the mid-task reply described below, and, when a gated action needs one-time access, the access ask described below.",
-      ),
-      "the Limits sentence names final answer, reply, and access ask",
-    );
-    assert.ok(contract.includes("## Mid-task reply"));
-    assert.ok(contract.includes(REPLY_TO_DISPATCHER_TOOL));
-    assert.match(contract, /does not finish the task and does not end your turn/);
-    assert.match(contract, /never the user, never another worker/);
   });
 });

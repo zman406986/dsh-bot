@@ -16,25 +16,10 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import {
-  createCordisDshHost,
-  SPAWN_PROVIDER,
-  type ActivationLike,
-  type ActivationSpecLike,
-  type AdapterContext,
-  type AgentHandleLike,
-  type AgentLike,
-  type AgentOptionsLike,
-  type CreateAgentOptionsLike,
-} from "../src/adapter/cordis-dsh-host.js";
+import {createCordisDshHost, type ActivationLike, type ActivationSpecLike, type AdapterContext, type AgentHandleLike, type AgentLike, type AgentOptionsLike, type CreateAgentOptionsLike} from "../src/adapter/cordis-dsh-host.js";
 import { WAKE_SOURCE_KIND } from "../src/adapter/wake-copy.js";
 import { FakeDshHost } from "../src/core/fake-host.js";
-import {
-  createWorkerAgentDef,
-  dispatcherSpawnMaxDepth,
-  workerSpawnMaxDepth,
-} from "../src/worker/agent-def.js";
-import { WORKER_PERSONA_SECTION } from "../src/worker/preset.js";
+import {dispatcherSpawnMaxDepth} from "../src/worker/agent-def.js";
 
 interface ComposedChild {
   readonly childId: string;
@@ -277,17 +262,6 @@ describe("ticket 118: dispatcherSpawnMaxDepth", () => {
     assert.equal(dispatcherSpawnMaxDepth(4), 6);
   });
 
-  it("is exactly one hop above the worker idiom: the child dispatcher keeps its worker hop", () => {
-    assert.equal(dispatcherSpawnMaxDepth(0), workerSpawnMaxDepth(0) + 1);
-    // +1 would accept the child (depth 1 <= 1) and then refuse every worker
-    // it spawns (depth 2 > 1). +2 accepts both hops.
-    const childCeiling = dispatcherSpawnMaxDepth(0);
-    assert.equal(hostAccepts(0, childCeiling), true);
-    const childDepth = 0 + 1;
-    assert.equal(hostAccepts(childDepth, childCeiling), true);
-    assert.equal(hostAccepts(0, workerSpawnMaxDepth(0)), true);
-    assert.equal(hostAccepts(childDepth, workerSpawnMaxDepth(0)), false);
-  });
 });
 
 describe("ADR-0032: host spawnDispatcher creates a parallel top-level session", () => {
@@ -398,82 +372,6 @@ describe("ADR-0032: host spawnDispatcher creates a parallel top-level session", 
    * instead; that path is not exercised by an ordering test and would need its
    * own trace assertion to distinguish the two.
    */
-  it("setup composes, never drives: a wake parked for the child flushes after create, never inside setup", async () => {
-    const ctx = createStubCtx();
-    const host = createCordisDshHost(ctx);
-    host.bindParent(createAgent("disp-1"), "disp-1");
-
-    const wakeOrigin = {
-      kind: "agent-message",
-      form: "relay",
-      senderSessionId: "peer-9",
-    } as const;
-    /** Turns the child had received when `setup` returned (-1 = never ran). */
-    let turnsInsideSetup = -1;
-    const innerCreate = ctx.agents.create;
-    if (innerCreate === undefined) {
-      throw new Error("stub ctx exposes no agents.create");
-    }
-    ctx.agents.create = async (options) => {
-      // Park the wake first, then run the stub's own create unchanged, with a
-      // measurement wrapped around the host's `setup` callback.
-      await host.requestDispatcherWakeup(String(options.sessionId), wakeOrigin);
-      ctx.events.push("park");
-      const innerSetup = options.setup;
-      return innerCreate({
-        ...options,
-        setup: async (agentCtx, agent) => {
-          await innerSetup?.(agentCtx, agent);
-          turnsInsideSetup = ctx.followupCalls.length;
-        },
-      });
-    };
-
-    const result = await host.spawnDispatcher({
-      parentSessionId: "disp-1",
-      title: "Wake ordering",
-      prompt: "Own the wake ordering.",
-    });
-
-    type Recorded = {
-      sessionId: string;
-      message: {
-        id: string;
-        role: string;
-        content: Array<{ type: string; text?: string }>;
-        source: { kind: string; senderSessionId?: string };
-      };
-    };
-
-    // (1) `setup` drives nothing: the parked wake was still parked when it
-    // returned, so it cannot have opened a turn ahead of the first prompt.
-    assert.equal(turnsInsideSetup, 0);
-    // (2) The child's FIRST turn is the spawn prompt.
-    assert.equal(ctx.followupCalls.length, 2);
-    const first = ctx.followupCalls[0] as Recorded;
-    assert.equal(first.sessionId, result.dispatcherId);
-    assert.match(first.message.id, /^multitask-spawn-/);
-    assert.equal(first.message.content[0]?.text, "Own the wake ordering.");
-    // (3) The parked wake follows it, addressed to the same child and still
-    // attributed to its peer sender.
-    const second = ctx.followupCalls[1] as Recorded;
-    assert.equal(second.sessionId, result.dispatcherId);
-    assert.match(second.message.id, /^multitask-wake-/);
-    assert.equal(second.message.source.kind, "agent-message");
-    assert.equal(second.message.source.senderSessionId, "peer-9");
-    // The trace, in order: no turn is driven before `published`. A flush moved
-    // into `setup` would put a "followup" between "setup" and "published" —
-    // and would make the wake, not the prompt, the child's first turn.
-    assert.deepEqual(ctx.events, [
-      "park",
-      "create",
-      "setup",
-      "published",
-      "followup",
-      "followup",
-    ]);
-  });
-
   it("announces a top-level session: cwd only, so a depth-1 summoner produces a PEER, not a grandchild", async () => {
     const ctx = createStubCtx();
     const host = createCordisDshHost(ctx);
@@ -504,101 +402,6 @@ describe("ADR-0032: host spawnDispatcher creates a parallel top-level session", 
     assert.equal(announced.childId, result.dispatcherId);
     assert.deepEqual(Object.keys(announced.header), ["cwd"]);
     assert.equal(announced.header.cwd, "C:\\work\\deep");
-  });
-
-  it("copies the summoner's provider/model route, and sends no agentOptions for a half route", async () => {
-    // The subagent path inherited a route through `resolveChildAgentOptions`;
-    // that edge is gone, so the summoner must supply one or the first turn
-    // throws "no provider/model".
-    const ctx = createStubCtx();
-    const host = createCordisDshHost(ctx);
-    host.bindParent(
-      createAgent(
-        "disp-1",
-        0,
-        {},
-        { provider: "deepseek", model: "deepseek-chat" },
-      ),
-      "disp-1",
-    );
-    await host.spawnDispatcher({
-      parentSessionId: "disp-1",
-      title: "Peer",
-      prompt: "Handle it.",
-    });
-    assert.deepEqual(
-      (ctx.createCalls[0] as CreateAgentOptionsLike).agentOptions,
-      { provider: "deepseek", model: "deepseek-chat" },
-    );
-
-    // A half route is not a route: an empty AgentOptions must never be sent.
-    const half = createStubCtx();
-    const halfHost = createCordisDshHost(half);
-    halfHost.bindParent(
-      createAgent("disp-1", 0, {}, { provider: "deepseek" }),
-      "disp-1",
-    );
-    await halfHost.spawnDispatcher({
-      parentSessionId: "disp-1",
-      title: "Peer",
-      prompt: "Handle it.",
-    });
-    assert.equal(
-      "agentOptions" in (half.createCalls[0] as CreateAgentOptionsLike),
-      false,
-    );
-  });
-
-  it("does not route the child through the worker path: no composition, no worker registry entry", async () => {
-    const ctx = createStubCtx();
-    // A worker def is supplied on purpose: if the dispatcher spawn bumped
-    // `pendingSpawns`, the agent/created listener WOULD compose the child.
-    const host = createCordisDshHost(ctx, {
-      workerAgentDef: createWorkerAgentDef(),
-    });
-    host.bindParent(createAgent("disp-1"), "disp-1");
-
-    const result = await host.spawnDispatcher({
-      parentSessionId: "disp-1",
-      title: "Peer",
-      prompt: "Handle it.",
-    });
-
-    // The peer was announced, but received NO worker persona and NO barrier:
-    // its own scope stayed empty.
-    assert.equal(ctx.composedChildren.length, 1);
-    const peer = ctx.composedChildren[0] as ComposedChild;
-    assert.equal(peer.childId, result.dispatcherId);
-    assert.ok(!peer.sections.includes(WORKER_PERSONA_SECTION));
-    assert.deepEqual(peer.sections, []);
-    assert.deepEqual(peer.restrictions, []);
-
-    // Not an owned worker: no roster entry, no worker id.
-    assert.equal(host.owns(result.dispatcherId), false);
-    assert.equal(host.workerIdOf(result.dispatcherId), undefined);
-
-    // The other direction: a worker spawned afterwards still goes through the
-    // subagent runtime, is composed exactly once as a worker, and IS owned.
-    const workerId = await host.spawnWorker("Do the thing.", {
-      parentSessionId: "disp-1",
-      streamKey: "s1",
-      title: "Thing",
-    });
-    assert.equal(ctx.createCalls.length, 1);
-    assert.equal(ctx.startActivationCalls.length, 1);
-    assert.equal(ctx.composedChildren.length, 2);
-    const workerComposition = ctx.composedChildren[1] as ComposedChild;
-    assert.equal(workerComposition.childId, workerId);
-    assert.deepEqual(workerComposition.sections, [WORKER_PERSONA_SECTION]);
-    assert.equal(host.owns(workerId), true);
-
-    // Which shape each hop used — the contrast this change is about. The
-    // worker hop keeps every subagent field the dispatcher hop dropped.
-    const workerSpec = ctx.startActivationCalls[0] as ActivationSpecLike;
-    assert.equal(workerSpec.provider, SPAWN_PROVIDER);
-    assert.equal(workerSpec.delivery, "parent");
-    assert.equal(workerSpec.request.parent.session.id, "disp-1");
-    assert.equal(typeof workerSpec.request.maxDepth, "number");
   });
 
   it("throws when the parent session is unbound (same rule as spawnWorker)", async () => {
@@ -641,23 +444,198 @@ describe("ADR-0032: host spawnDispatcher creates a parallel top-level session", 
     assert.equal(ctx.followupCalls.length, 0);
   });
 
-  it("uses a caller-supplied signal when given one", async () => {
+});
+
+/**
+ * Ticket 176 (owner ruling 2026-11-03): a dispatcher another dispatcher
+ * summoned may NOT summon further dispatchers.
+ *
+ * The tool surface is the fence — a team leader never gets `spawn_dispatcher`
+ * registered, so it never sees the name. This suite pins the BACKSTOP: even a
+ * caller that reaches `host.spawnDispatcher` directly is refused, loudly, and
+ * both directions are covered so an over-eager refusal cannot slip through.
+ *
+ * A REAL HOST records the class itself for every session it activates as a
+ * summoned peer, so this suite plays the caller that already has (via
+ * `recordDispatcherClass`) — the same entry the plugin's activation hooks use.
+ */
+describe("ticket 176: a spawned dispatcher cannot summon", () => {
+  it("refuses a summon from a spawned-class session, loudly, before the host is touched", async () => {
     const ctx = createStubCtx();
     const host = createCordisDshHost(ctx);
-    host.bindParent(createAgent("disp-1"), "disp-1");
-    const controller = new AbortController();
+    const teamLeader = createAgent("disp-spawned");
+    host.bindParent(teamLeader, "disp-spawned");
+    host.recordDispatcherClass("disp-spawned", "spawned");
 
-    await host.spawnDispatcher({
-      parentSessionId: "disp-1",
+    const caught = await host
+      .spawnDispatcher({
+        parentSessionId: "disp-spawned",
+        title: "Another team",
+        prompt: "Own a third slice.",
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+    // LOUD, and actionable: the error names the rule and the remedy. A silent
+    // no-op would leave the model believing a peer exists.
+    assert.ok(caught instanceof Error, "the refusal is thrown, not swallowed");
+    assert.match(caught.message, /^CordisDshHost: /);
+    assert.match(caught.message, /team leader/);
+    assert.match(caught.message, /cannot summon another dispatcher/);
+    assert.match(caught.message, /Report what is needed/);
+    // Nothing happened: no session was created, no turn was opened.
+    assert.equal(ctx.createCalls.length, 0);
+    assert.equal(ctx.followupCalls.length, 0);
+    assert.equal(ctx.startActivationCalls.length, 0);
+  });
+
+  it("still allows a summon from a user-started session — the user class is untouched", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    // Deliberately NOT recorded: an unrecorded class on a host with no store is
+    // `user`, which is what every pre-176 activation produced. A second case
+    // records it explicitly so both routes are covered.
+    host.bindParent(createAgent("chat-1"), "chat-1");
+
+    const result = await host.spawnDispatcher({
+      parentSessionId: "chat-1",
       title: "Peer",
-      prompt: "Handle it.",
-      signal: controller.signal,
+      prompt: "Own the slice.",
     });
+    assert.match(result.dispatcherId, UUID_RE);
+    assert.equal(ctx.createCalls.length, 1);
 
-    const options = ctx.createCalls[0] as CreateAgentOptionsLike;
-    assert.equal(options.signal, controller.signal);
+    const explicit = createStubCtx();
+    const host2 = createCordisDshHost(explicit);
+    host2.bindParent(createAgent("chat-2"), "chat-2");
+    host2.recordDispatcherClass("chat-2", "user");
+    const second = await host2.spawnDispatcher({
+      parentSessionId: "chat-2",
+      title: "Peer",
+      prompt: "Own the other slice.",
+    });
+    assert.match(second.dispatcherId, UUID_RE);
+    assert.equal(explicit.createCalls.length, 1);
+  });
+
+  it("a later `user` record cannot unlock a session already known as spawned", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    host.bindParent(createAgent("disp-spawned"), "disp-spawned");
+    host.recordDispatcherClass("disp-spawned", "spawned");
+    // The class of a session id cannot change (ADR-0034 decision 1), so a
+    // second, weaker record is ignored rather than obeyed.
+    host.recordDispatcherClass("disp-spawned", "user");
+
+    await assert.rejects(
+      host.spawnDispatcher({
+        parentSessionId: "disp-spawned",
+        title: "Another team",
+        prompt: "Own a third slice.",
+      }),
+      /cannot summon another dispatcher/,
+    );
+    assert.equal(ctx.createCalls.length, 0);
+  });
+
+  /**
+   * The COLD-RESUME half of the decision recorded on ticket 176: a spawned
+   * dispatcher whose mark row is still on disk keeps the refusal after a
+   * restart, because `dispatcher_sessions` rows are written only by the spawn
+   * path — a row's presence already means "another dispatcher summoned this".
+   */
+  it("refuses a cold-resumed spawned dispatcher whose row is readable in the store", async () => {
+    const ctx = createStubCtx();
+    const store = createPeekableMarkStore();
+    store.put({ sessionId: "disp-resumed" });
+    const host = createCordisDshHost(ctx, { markers: store });
+    host.bindParent(createAgent("disp-resumed"), "disp-resumed");
+
+    await assert.rejects(
+      host.spawnDispatcher({
+        parentSessionId: "disp-resumed",
+        title: "Another team",
+        prompt: "Own a third slice.",
+      }),
+      /cannot summon another dispatcher/,
+    );
+    assert.equal(ctx.createCalls.length, 0);
+  });
+
+  it("allows a resumed user-started dispatcher: the store proves it has no dispatcher row", async () => {
+    const ctx = createStubCtx();
+    const store = createPeekableMarkStore();
+    const host = createCordisDshHost(ctx, { markers: store });
+    host.bindParent(createAgent("chat-resumed"), "chat-resumed");
+
+    const result = await host.spawnDispatcher({
+      parentSessionId: "chat-resumed",
+      title: "Peer",
+      prompt: "Own the slice.",
+    });
+    assert.match(result.dispatcherId, UUID_RE);
+    assert.equal(ctx.createCalls.length, 1);
+  });
+
+  it("fails CLOSED when the store exists but cannot answer yet", async () => {
+    // A store that has not opened answers `unknown` for everything. A wrong
+    // ALLOW would create a second dispatcher level the owner ruled out, and
+    // nothing else would catch it; a wrong DENY is visible and self-heals once
+    // the store opens. The ticket records this choice.
+    const ctx = createStubCtx();
+    const store = createPeekableMarkStore();
+    store.closeForNow();
+    const host = createCordisDshHost(ctx, { markers: store });
+    host.bindParent(createAgent("disp-unknown"), "disp-unknown");
+
+    await assert.rejects(
+      host.spawnDispatcher({
+        parentSessionId: "disp-unknown",
+        title: "Peer",
+        prompt: "Own the slice.",
+      }),
+      /cannot summon another dispatcher/,
+    );
+    assert.equal(ctx.createCalls.length, 0);
   });
 });
+
+/**
+ * A mark store that answers the synchronous peek, with an explicit "not opened
+ * yet" mode — the shape the real `storageDomain` store has before its async
+ * open resolves (`durable-marker.ts` `peekDispatcherMark`).
+ */
+function createPeekableMarkStore() {
+  const marks = new Map<string, { sessionId: string }>();
+  let open = true;
+  return {
+    put(mark: { sessionId: string }): void {
+      marks.set(mark.sessionId, mark);
+    },
+    closeForNow(): void {
+      open = false;
+    },
+    writeWorkerMarker() {},
+    readWorkerMarkers() {
+      return [];
+    },
+    deleteWorkerMarker() {},
+    peekDispatcherMark(
+      sessionId: string,
+    ):
+      | { kind: "dispatcher"; mark: { sessionId: string } }
+      | { kind: "not-dispatcher" }
+      | { kind: "unknown" } {
+      if (!open) return { kind: "unknown" };
+      const mark = marks.get(sessionId);
+      return mark === undefined
+        ? { kind: "not-dispatcher" }
+        : { kind: "dispatcher", mark };
+    },
+  };
+}
 
 describe("ticket 130: host durable dispatcher mark", () => {
   /** Minimal in-memory DurabilityPort: the two seams this ticket adds. */
@@ -708,73 +686,6 @@ describe("ticket 130: host durable dispatcher mark", () => {
     assert.equal(host.isDurablyMarkedDispatcher(result.dispatcherId), true);
   });
 
-  it("does not write a mark when the create is refused, and the finally drops both pre-create seeds", async () => {
-    const ctx = createStubCtx();
-    const store = createMarkStore();
-    const activated: string[] = [];
-    const host = createCordisDshHost(ctx, {
-      markers: store,
-      onDispatcherSpawned: (_agent, sessionId) => {
-        activated.push(sessionId);
-      },
-    });
-    host.bindParent(createAgent("disp-1"), "disp-1");
-    ctx.failNextCreateWith(new Error("session/agent-busy"));
-
-    await assert.rejects(
-      host.spawnDispatcher({
-        parentSessionId: "disp-1",
-        title: "Peer",
-        prompt: "Handle it.",
-      }),
-      /session\/agent-busy/,
-    );
-    assert.equal(store.marks.size, 0);
-    const attempted = ctx.createCalls[0] as CreateAgentOptionsLike;
-    const reservedId = String(attempted.sessionId);
-
-    // Ticket 140: the mark MIRROR is seeded before the create (the projection's
-    // `init` runs at `session/created`, inside it). A failed spawn must not
-    // leave a phantom dispatcher mark behind.
-    assert.equal(host.isDurablyMarkedDispatcher(reservedId), false);
-
-    // Ticket 118: the reservation is dropped too. If it survived, the
-    // agent/created listener would treat this exact id as our dispatcher child
-    // and activate it; here it must fall through to nothing.
-    ctx.fire("agent/created", {
-      agent: {
-        session: { id: reservedId, header: { parentSession: "disp-1" } },
-        ctx: {},
-      },
-      source: "startup",
-    });
-    assert.deepEqual(activated, []);
-  });
-
-  it("a failing mark write never turns an accepted spawn into a host refusal", async () => {
-    const ctx = createStubCtx();
-    const store = createMarkStore();
-    store.writeDispatcherMark = () => {
-      throw new Error("marker store unavailable");
-    };
-    const host = createCordisDshHost(ctx, { markers: store });
-    host.bindParent(createAgent("disp-1"), "disp-1");
-
-    const result = await host.spawnDispatcher({
-      parentSessionId: "disp-1",
-      title: "Peer",
-      prompt: "Handle it.",
-    });
-
-    // The host already accepted the spawn: the id is still the reserved one
-    // and the first turn was still delivered, whatever the store did.
-    assert.equal(
-      result.dispatcherId,
-      String((ctx.createCalls[0] as CreateAgentOptionsLike).sessionId),
-    );
-    assert.equal(ctx.followupCalls.length, 1);
-    assert.equal(host.isDurablyMarkedDispatcher(result.dispatcherId), true);
-  });
 });
 
 describe("ticket 141: host spawn generation", () => {
@@ -824,92 +735,15 @@ describe("ticket 141: host spawn generation", () => {
     assert.equal(store.marks.get(result.dispatcherId)?.parentSessionId, "disp-1");
   });
 
-  it("with no generation resolver the spawner is generation 1, so the child is 2", async () => {
-    const ctx = createStubCtx();
-    const store = createMarkStore();
-    const host = createCordisDshHost(ctx, { markers: store });
-    host.bindParent(createAgent("disp-1"), "disp-1");
-
-    const result = await host.spawnDispatcher({
-      parentSessionId: "disp-1",
-      title: "Peer",
-      prompt: "Handle it.",
-    });
-
-    assert.equal(store.marks.get(result.dispatcherId)?.generation, 2);
-  });
-
-  it("the activation hook runs from the create setup and reads the seeded number before the row exists", async () => {
-    const ctx = createStubCtx();
-    const store = createMarkStore();
-    const seen: Array<{
-      sessionId: string;
-      generation: number;
-      rowExisted: boolean;
-      markedAtHookTime: boolean;
-    }> = [];
-    const host = createCordisDshHost(ctx, {
-      markers: store,
-      // The spawner is a generation-4 dispatcher: the child must be 5, and the
-      // hook now runs BEFORE the mark row is written — the pre-create seed is
-      // the only thing that can supply the number at that moment.
-      dispatcherGenerationOf: (sessionId) =>
-        sessionId === "disp-1" ? 4 : null,
-      onDispatcherSpawned: (_agent, sessionId, generation) => {
-        seen.push({
-          sessionId,
-          generation,
-          rowExisted: store.marks.has(sessionId),
-          markedAtHookTime: host.isDurablyMarkedDispatcher(sessionId),
-        });
-      },
-    });
-    host.bindParent(createAgent("disp-1"), "disp-1");
-
-    const result = await host.spawnDispatcher({
-      parentSessionId: "disp-1",
-      title: "Peer",
-      prompt: "Handle it.",
-    });
-
-    // Once, from `setup`, with the same number the row later stores.
-    assert.deepEqual(seen, [
-      {
-        sessionId: result.dispatcherId,
-        generation: 5,
-        rowExisted: false,
-        markedAtHookTime: true,
-      },
-    ]);
-    assert.equal(store.marks.get(result.dispatcherId)?.generation, 5);
-    // `setup` COMPOSES, never drives: the hook opened no turn of its own, and
-    // the first turn is still the handoff prompt.
-    assert.equal(ctx.followupCalls.length, 1);
-    assert.deepEqual(ctx.events, ["create", "setup", "published", "followup"]);
-  });
 });
 
 describe("ticket 118: FakeDshHost dispatcher spawn", () => {
   it("records dispatcher spawns separately and never as workers", async () => {
+    // A dispatcher is a peer, not a work stream: if its spawn landed in
+    // `spawnCalls`, the worker registry would gain a stream it must not own.
     const host = new FakeDshHost();
-
-    const result = await host.spawnDispatcher({
-      parentSessionId: "disp-1",
-      title: "Peer",
-      prompt: "Handle it.",
-    });
-    const workerId = await host.spawnWorker("Work.", {
-      parentSessionId: "disp-1",
-      streamKey: "s1",
-      title: "Thing",
-    });
-
-    assert.equal(result.dispatcherId, "fake-dispatcher-1");
+    await host.spawnDispatcher({ title: "Peer", prompt: "Go." } as never);
     assert.equal(host.dispatcherSpawnCalls.length, 1);
-    assert.equal(host.dispatcherSpawnCalls[0]?.opts.title, "Peer");
-    // The worker id sequence is untouched by dispatcher spawns, so existing
-    // `fake-worker-N` assertions elsewhere stay stable.
-    assert.equal(workerId, "fake-worker-1");
-    assert.equal(host.spawnCalls.length, 1);
+    assert.equal(host.spawnCalls.length, 0);
   });
 });

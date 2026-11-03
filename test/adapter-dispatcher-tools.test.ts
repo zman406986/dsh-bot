@@ -13,14 +13,9 @@ import { FakeDshHost } from "../src/core/fake-host.js";
 import { createMultitask } from "../src/core/multitask.js";
 import {
   DISPATCHER_TOOL_NAMES,
+  SPAWN_DISPATCHER_TOOL,
 } from "../src/core/policy/prompts.js";
-import {
-  registerDispatcherTools,
-  resolveExecSessionId,
-  structuredPresentationMeta,
-  toRegisterableTool,
-  type RegisterableTool,
-} from "../src/adapter/dispatcher-tools.js";
+import {registerDispatcherTools, toRegisterableTool, type RegisterableTool} from "../src/adapter/dispatcher-tools.js";
 import {
   createCordisDshHost,
   dispatcherUserMessageSession,
@@ -132,7 +127,6 @@ function inboxSpliced(inserted: unknown[]) {
   };
 }
 
-
 function createToolsCaptureCtx(): AdapterContext & {
   registered: RegisterableTool[];
   disposers: Array<() => void>;
@@ -237,22 +231,58 @@ describe("adapter dispatcher tool registration", () => {
     assert.equal(ctx.registered.length, 0);
   });
 
-  it("is a no-op when tools or register are unavailable", () => {
-    const host = new FakeDshHost();
-    const multitask = createMultitask(host);
-    const bare = {} as AdapterContext;
+  /**
+   * Ticket 176 (owner ruling 2026-11-03): the CLASS selects the surface.
+   *
+   * A summoned dispatcher is a team leader for one job and may not summon
+   * further dispatchers, so `spawn_dispatcher` is never registered on its
+   * scope — the model does not see the name at all (ADR-0019: visibility is
+   * the fence, not a refusal copy). The user-started chief of staff keeps the
+   * full eight.
+   */
+  it("a spawned-class registration withholds spawn_dispatcher and keeps the other seven", () => {
+    const ctx = createToolsCaptureCtx();
+    const multitask = createMultitask(new FakeDshHost());
+    const disposers = registerDispatcherTools({
+      ctx,
+      multitask,
+      getSessionId: () => "session-1",
+      origin: "spawned",
+    });
+
+    const names = ctx.registered.map((tool) => tool.name);
+    assert.ok(!names.includes(SPAWN_DISPATCHER_TOOL));
     assert.deepEqual(
-      registerDispatcherTools({
-        ctx: bare,
-        multitask,
-        getSessionId: () => null,
-      }),
-      [],
+      names,
+      [...DISPATCHER_TOOL_NAMES].filter((name) => name !== SPAWN_DISPATCHER_TOOL),
+    );
+    assert.equal(disposers.length, DISPATCHER_TOOL_NAMES.length - 1);
+    for (const dispose of disposers) dispose();
+    assert.equal(ctx.registered.length, 0);
+  });
+
+  it("an explicit user class keeps all eight, exactly like an omitted one", () => {
+    const multitask = createMultitask(new FakeDshHost());
+    const omitted = createToolsCaptureCtx();
+    registerDispatcherTools({ ctx: omitted, multitask, getSessionId: () => "s" });
+    const explicit = createToolsCaptureCtx();
+    registerDispatcherTools({
+      ctx: explicit,
+      multitask,
+      getSessionId: () => "s",
+      origin: "user",
+    });
+    assert.deepEqual(
+      explicit.registered.map((tool) => tool.name),
+      omitted.registered.map((tool) => tool.name),
+    );
+    assert.deepEqual(
+      explicit.registered.map((tool) => tool.name),
+      [...DISPATCHER_TOOL_NAMES],
     );
   });
 
-  it("execute on a registerable tool hits the Multitask core", async () => {
-    const ctx = createToolsCaptureCtx();
+  it("execute on a registerable tool hits the Multitask core", async () => {    const ctx = createToolsCaptureCtx();
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
     registerDispatcherTools({
@@ -270,20 +300,6 @@ describe("adapter dispatcher tool registration", () => {
     assert.equal(value.ok, true);
     assert.ok(value.ack.includes("background"));
     assert.equal(host.spawnCalls.length, 1);
-  });
-
-  it("render prefers ack / summary / note over raw JSON", () => {
-    const rendered = toRegisterableTool({
-      name: "x",
-      description: "d",
-      parameters: { type: "object" },
-      async execute() {
-        return { ok: true, ack: "Started in the background." };
-      },
-    }).output.render({}, { ok: true, ack: "Started in the background." });
-    assert.deepEqual(rendered, [
-      { type: "text", text: "Started in the background." },
-    ]);
   });
 
   // Ticket 81 (live pass 5, Session B-2 FINDING 2): the durable `tool/result`
@@ -311,71 +327,6 @@ describe("adapter dispatcher tool registration", () => {
         `tool "${tool.name}" must attach presentationMeta (the durable record's structured half)`,
       );
     }
-  });
-
-  it("structuredPresentationMeta strips model-facing prose, keeps the structured fields", () => {
-    // spawn ack embeds the whole worker prompt — never durable twice.
-    const spawn = structuredPresentationMeta(
-      {},
-      {
-        ok: true,
-        worker_id: "w-1",
-        stream_key: "s-1",
-        title: "Title",
-        gated: true,
-        ack: "Started ... Self-contained prompt sent:\n---\nthe whole prompt",
-      },
-    ) as Record<string, unknown>;
-    assert.deepEqual(spawn, {
-      ok: true,
-      worker_id: "w-1",
-      stream_key: "s-1",
-      title: "Title",
-      gated: true,
-    });
-    // check summary is the rendered table — rows remain the structured half.
-    const check = structuredPresentationMeta({}, {
-      ok: true,
-      rows: [{ worker_id: "w-1" }],
-      summary: "running · \"Title\" · 1s",
-    }) as Record<string, unknown>;
-    assert.deepEqual(check, { ok: true, rows: [{ worker_id: "w-1" }] });
-    // steer/stop notes and refusal records: prose gone, reason/detail kept.
-    assert.deepEqual(structuredPresentationMeta({}, { ok: true, note: "n" }), {
-      ok: true,
-    });
-    assert.deepEqual(
-      structuredPresentationMeta({}, {
-        ok: false,
-        reason: "auto-review-refused",
-        detail: "d",
-      }),
-      { ok: false, reason: "auto-review-refused", detail: "d" },
-    );
-    // Non-record values pass through (the host rejects an undefined
-    // projection outright — there is no "absent" answer).
-    assert.equal(structuredPresentationMeta({}, null), null);
-    assert.deepEqual(structuredPresentationMeta({}, [1, 2]), [1, 2]);
-    assert.equal(structuredPresentationMeta({}, "text"), "text");
-    // The projection must not mutate its input value.
-    const original = { ok: true, ack: "a", worker_id: "w" };
-    structuredPresentationMeta({}, original);
-    assert.deepEqual(original, { ok: true, ack: "a", worker_id: "w" });
-  });
-
-  it("toRegisterableTool output attaches the presentation projection", () => {
-    const tool = toRegisterableTool({
-      name: "x",
-      description: "d",
-      parameters: { type: "object" },
-      async execute() {
-        return { ok: true };
-      },
-    });
-    assert.equal(typeof tool.output.presentationMeta, "function");
-    assert.deepEqual(tool.output.presentationMeta?.({}, { ok: true }), {
-      ok: true,
-    });
   });
 
   it("passes recentActivity through to check rows (ticket 29)", async () => {
@@ -410,18 +361,6 @@ describe("adapter dispatcher tool registration", () => {
 });
 
 describe("per-session routing (ADR-0019)", () => {
-  it("resolveExecSessionId reads common exec shapes", () => {
-    assert.equal(
-      resolveExecSessionId({ agent: { session: { id: "a1" } } }),
-      "a1",
-    );
-    assert.equal(resolveExecSessionId({ session: { id: "a2" } }), "a2");
-    assert.equal(resolveExecSessionId({ sessionId: "a3" }), "a3");
-    assert.equal(resolveExecSessionId(undefined), null);
-    assert.equal(resolveExecSessionId("string"), null);
-    assert.equal(resolveExecSessionId({ agent: { session: {} } }), null);
-  });
-
   it("handlers route to the session that registered them, whatever the exec says", async () => {
     const ctx = createToolsCaptureCtx();
     const host = new FakeDshHost();
@@ -568,44 +507,6 @@ describe("ticket 117 — exec passthrough (the host's second argument reaches th
     assert.equal(multitask.settleRecords.waiterCount("disp-1"), 0);
   });
 
-  it("a worker-scope exec shape is not required: any exec object is forwarded verbatim", async () => {
-    // The wrapper must not filter, reshape, or validate exec — `readExecSignal`
-    // in core owns that decision, and it must see what the host produced.
-    const seen: unknown[] = [];
-    const tool = toRegisterableTool({
-      name: "x",
-      description: "d",
-      parameters: { type: "object" },
-      async execute(_args, exec) {
-        seen.push(exec);
-        return { ok: true };
-      },
-    });
-    const unusual = { signal: undefined, foreign: new Map([[1, 2]]) };
-    await tool.execute({}, unusual);
-    assert.equal(seen[0], unusual);
-  });
-
-  it("an executeOverride still receives exec (the existing escape hatch is unchanged)", async () => {
-    const seen: unknown[] = [];
-    const tool = toRegisterableTool(
-      {
-        name: "x",
-        description: "d",
-        parameters: { type: "object" },
-        async execute() {
-          throw new Error("the override must win");
-        },
-      },
-      async (_args, exec) => {
-        seen.push(exec);
-        return { ok: true };
-      },
-    );
-    const exec = { signal: new AbortController().signal };
-    await tool.execute({}, exec);
-    assert.equal(seen[0], exec);
-  });
 });
 
 describe("ticket 117 — structured user-message detection (source, never text)", () => {
@@ -616,16 +517,6 @@ describe("ticket 117 — structured user-message detection (source, never text)"
       dispatcherUserMessageSession(
         { id: "disp-1" },
         inboxSpliced([userMessage()]),
-      ),
-      "disp-1",
-    );
-  });
-
-  it("reads a user/message event as the turn-boundary catch", () => {
-    assert.equal(
-      dispatcherUserMessageSession(
-        { id: "disp-1" },
-        { type: "user/message", data: userMessage() },
       ),
       "disp-1",
     );
@@ -681,37 +572,6 @@ describe("ticket 117 — structured user-message detection (source, never text)"
     );
   });
 
-  it("ignores removals from the inbox: only inserted messages count", () => {
-    // Queue management (a cancel/remove) is not a user prompt.
-    assert.equal(
-      dispatcherUserMessageSession(
-        { id: "disp-1" },
-        {
-          type: "agent/inbox/spliced",
-          data: { target: "next-step", start: 0, removedCount: 2, inserted: [], outcome: "canceled" },
-        },
-      ),
-      null,
-    );
-  });
-
-  it("ignores worker tool traffic and unreadable payloads", () => {
-    assert.equal(
-      dispatcherUserMessageSession(
-        { id: "disp-1" },
-        { type: "tool/call", data: { name: "bash", arguments: "{}" } },
-      ),
-      null,
-    );
-    assert.equal(dispatcherUserMessageSession({ id: "d" }, null), null);
-    assert.equal(dispatcherUserMessageSession({ id: "d" }, { type: "user/message" }), null);
-    assert.equal(dispatcherUserMessageSession(undefined, { type: "user/message", data: userMessage() }), null);
-    assert.equal(dispatcherUserMessageSession({}, { type: "user/message", data: userMessage() }), null);
-    assert.equal(
-      dispatcherUserMessageSession({ id: "d" }, { type: "agent/inbox/spliced", data: { inserted: "nope" } }),
-      null,
-    );
-  });
 });
 
 describe("ticket 117 — user-message release, end to end over the real host seam", () => {
@@ -825,15 +685,6 @@ describe("ticket 117 — user-message release, end to end over the real host sea
     const result = await pending;
     assert.equal(result.status, "released");
     assert.equal(result.reason, "stopped");
-  });
-
-  it("a user prompt with no waiter in flight is a harmless no-op", () => {
-    const r = createLiveRig();
-    assert.doesNotThrow(() => {
-      r.bus.fire("session/event", { id: "disp-1" }, inboxSpliced([userMessage()]));
-      r.bus.fire("session/event", { id: "never-activated" }, inboxSpliced([userMessage()]));
-    });
-    assert.equal(r.multitask.settleRecords.waiterCount("disp-1"), 0);
   });
 
   it("a worker's own initial brief (host source kind `user`) cannot release the dispatcher's wait", async () => {

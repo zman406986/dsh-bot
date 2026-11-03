@@ -5,20 +5,17 @@
  * Tests assert structure/order, not prose quality.
  */
 
-import type { AccessNotice, AccessRequestNotice } from "../access-types.js";
-import { peerTargetLabel, type PeerNotice } from "../peer-types.js";
+import { isWorkerReply, peerTargetLabel, type PeerNotice } from "../peer-types.js";
 import { clampActivity, formatWakeReportBody, TOOL_RESULT_SUMMARY_MAX_ROWS } from "../report-clamp.js";
 import type { TodoItem } from "../todo-reconciler.js";
 import type { TerminalWorkerStatus } from "../types.js";
 import type { SettledWorkerNotice } from "../wake-bus.js";
 import {
-  ACCESS_SECTION_HEADING,
-  ACCESS_SECTION_HEADING_ZH,
-  buildAccessPolicyBlock,
   buildDispatcherPolicySection,
   buildPeerWakeInstructionsBlock,
   buildStandingRulesBlock,
   buildWakeInstructionsBlock,
+  buildWorkerReplyWakeInstructionsBlock,
   EMPTY_LEDGER_LINE,
   PEER_ROSTER_INTRO,
   PEER_ROSTER_INTRO_ZH,
@@ -142,10 +139,12 @@ const PEER_LIVENESS_SET: ReadonlySet<string> = new Set(PEER_LIVENESS_STATES);
  *
  * - `busy` — that peer's dispatcher turn is running (`wakeBus.isBusy`, fed
  *   by `agent/status` for every activated dispatcher on this host).
- * - `pendingApproval` — an access ask is parked for that session
- *   (`multitask.listPendingAccess(parentSessionId)`).
  * - `queuedWake` — a wake is READY for it and not yet drained
  *   (`wakeBus.peek(sessionId) !== undefined`).
+ *
+ * Ticket 174 / ADR-0033: the `pendingApproval` fact went with the worker
+ * access-ask feature. The `approval` liveness label stays in the vocabulary
+ * (ADR-0027 decision 3) but no shipped producer can raise it any more.
  *
  * The host exposes no per-peer "waiting on the model" signal, so `waiting`
  * here means exactly "a wake is ready and no turn is running" — the row
@@ -153,17 +152,16 @@ const PEER_LIVENESS_SET: ReadonlySet<string> = new Set(PEER_LIVENESS_STATES);
  */
 export interface PeerLivenessFacts {
   readonly busy: boolean;
-  readonly pendingApproval: boolean;
   readonly queuedWake: boolean;
 }
 
 /**
- * Derive the liveness label from observable facts. Precedence: a parked
- * approval outranks everything (that is the state a human must act on), a
- * running turn outranks a queued wake, and no fact at all is `idle`.
+ * Derive the liveness label from observable facts. Precedence: a running turn
+ * outranks a queued wake, and no fact at all is `idle`. The `approval` label
+ * stays in the vocabulary (ADR-0027 decision 3) but ticket 174 / ADR-0033
+ * removed its only producer, so this function can no longer return it.
  */
 export function derivePeerLiveness(facts: PeerLivenessFacts): PeerLiveness {
-  if (facts.pendingApproval) return "approval";
   if (facts.busy) return "working";
   if (facts.queuedWake) return "waiting";
   return "idle";
@@ -257,7 +255,6 @@ export interface PeerRosterCandidate {
   readonly label?: string | null;
   readonly title?: string | null;
   readonly busy?: boolean;
-  readonly pendingApproval?: boolean;
   readonly queuedWake?: boolean;
   readonly activity?: string | null;
   readonly currentTool?: string | null;
@@ -286,7 +283,6 @@ export function buildPeerRosterSnapshot(
     title: candidate.title ?? null,
     liveness: derivePeerLiveness({
       busy: candidate.busy === true,
-      pendingApproval: candidate.pendingApproval === true,
       queuedWake: candidate.queuedWake === true,
     }),
     activity: candidate.activity ?? null,
@@ -400,13 +396,8 @@ export function noticeFromSettled(
 /**
  * Wake-turn instructions for worker-settled hidden turns.
  * Silence is a valid outcome (stale / duplicate / irrelevant).
- */
-export function assembleWakeTurn(
+ */export function assembleWakeTurn(
   notices: readonly WakeNotice[],
-  access?: {
-    readonly requests?: readonly AccessRequestNotice[];
-    readonly resolved?: readonly AccessNotice[];
-  },
   language: PolicyLanguage = "en",
 ): string {
   const zh = language === "zh";
@@ -440,100 +431,9 @@ export function assembleWakeTurn(
     }
   }
 
-  const accessText = assembleAccessSection(
-    access?.requests ?? [],
-    access?.resolved ?? [],
-    language,
-  );
-  if (accessText.length > 0) {
-    sections.push("");
-    sections.push(accessText);
-  }
-
   sections.push("");
   sections.push(buildWakeInstructionsBlock(language));
   return sections.join("\n");
-}
-
-/**
- * Access section for a wake: pending asks + honest denial notices.
- * Empty when there is nothing access-related. New copy only.
- */
-export function assembleAccessSection(
-  requests: readonly AccessRequestNotice[],
-  resolved: readonly AccessNotice[],
-  language: PolicyLanguage = "en",
-): string {
-  if (requests.length === 0 && resolved.length === 0) return "";
-  const zh = language === "zh";
-  const lines: string[] = [
-    zh ? ACCESS_SECTION_HEADING_ZH : ACCESS_SECTION_HEADING,
-    "",
-  ];
-  if (requests.length > 0) {
-    lines.push(zh ? "### 待处理的请求" : "### Pending asks");
-    for (const req of requests) {
-      lines.push("");
-      lines.push(
-        zh
-          ? `- 工作者：${req.workerId} · ${req.title}`
-          : `- Worker: ${req.workerId} · ${req.title}`,
-      );
-      lines.push(
-        zh
-          ? `  类别：${req.body.class} · 目标：${req.body.target}`
-          : `  Class: ${req.body.class} · Target: ${req.body.target}`,
-      );
-      if (req.body.credentialName !== undefined) {
-        lines.push(
-          zh
-            ? `  凭据名称：${req.body.credentialName}`
-            : `  Credential name: ${req.body.credentialName}`,
-        );
-      }
-      lines.push(zh ? `  原因：${req.body.reason}` : `  Reason: ${req.body.reason}`);
-      lines.push(
-        zh
-          ? `  请求 id：${req.requestId}`
-          : `  Request id: ${req.requestId}`,
-      );
-    }
-  }
-  if (resolved.length > 0) {
-    if (requests.length > 0) lines.push("");
-    lines.push(zh ? "### 已处理" : "### Resolved");
-    for (const notice of resolved) {
-      lines.push("");
-      const decision = notice.decision;
-      const label =
-        decision.kind === "allow"
-          ? zh
-            ? "已允许"
-            : "allowed"
-          : zh
-            ? `已拒绝（${decision.reason}）`
-            : `denied (${decision.reason})`;
-      lines.push(
-        `- ${notice.title}: ${notice.body.class} "${notice.body.target}" ${label}`,
-      );
-      if (decision.kind === "deny" && decision.detail.length > 0) {
-        lines.push(`  ${decision.detail}`);
-      }
-      // Ticket 30: an allow notice may carry a user-facing reassurance
-      // (credential asks: "stored securely, never shown"). Deny copy rides
-      // `detail` above; allow copy rides `note` — both rendered verbatim.
-      if (
-        decision.kind === "allow" &&
-        decision.note !== undefined &&
-        decision.note.length > 0
-      ) {
-        lines.push(`  ${decision.note}`);
-      }
-    }
-  }
-  lines.push("");
-  lines.push(buildAccessPolicyBlock(language));
-  return lines.join("\n");
 }
 
 /**
@@ -587,6 +487,14 @@ export function assemblePeerWakeTurn(
   sections.push("");
   sections.push(headings[2]);
   sections.push("");
-  sections.push(buildPeerWakeInstructionsBlock(language));
+  // A wake carrying only worker replies is not peer traffic: its senders are
+  // this dispatcher's own workers, and the peer block's silence rule would
+  // bury a `blocked` dead-end report — the one message that needs a decision.
+  // Mixed wakes keep the peer block, whose rules cover both senders.
+  sections.push(
+    notices.length > 0 && notices.every(isWorkerReply)
+      ? buildWorkerReplyWakeInstructionsBlock(language)
+      : buildPeerWakeInstructionsBlock(language),
+  );
   return sections.join("\n");
 }

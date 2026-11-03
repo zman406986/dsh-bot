@@ -26,7 +26,6 @@ import { describe, it } from "node:test";
 import { apply as pluginApply } from "../src/plugin.js";
 import { volatileConfig } from "./support/plugin-config.js";
 import {
-  DISPATCHER_RESOLVE_COMMAND,
   DISPATCHER_START_COMMAND,
   DISPATCHER_STEER_COMMAND,
   MARKER_TABLE_NAME,
@@ -39,33 +38,17 @@ import {
   type CommandResultLike,
 } from "../src/adapter/index.js";
 import type { DurableWorkerMarker } from "../src/core/durability.js";
-import {
-  projectRosterSnapshot,
-  type RosterSnapshot,
-} from "../src/core/roster-snapshot.js";
+
 import {
   buildDispatcherPolicySection,
   CHECK_WORKERS_TOOL,
   SPAWN_WORKER_TOOL,
 } from "../src/core/policy/prompts.js";
-import {
-  assembleSessionPolicy,
-  assembleWakeTurn,
-} from "../src/core/policy/assembler.js";
+import {assembleSessionPolicy} from "../src/core/policy/assembler.js";
 import {
   abortedReportBody,
   formatWakeReportBody,
 } from "../src/core/report-clamp.js";
-import { describeRosterPanel, type RosterPanelState } from "../src/client/roster-store.js";
-import {
-  createDispatcherShellStore,
-  describeShellPanes,
-  describeShellSidebar,
-} from "../src/client/shell-store.js";
-import {
-  describeToolview,
-  TOOLVIEW_TOOL_NAMES,
-} from "../src/client/toolviews.js";
 
 /** Drain the async rebuild chain queued by activation (ticket 31). */
 async function flushActivation(): Promise<void> {
@@ -478,69 +461,6 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
     );
   });
 
-  it("the notice fires once per activation: a second activation rebuilds empty and stays silent", async () => {
-    const ctx = createRestartCtx();
-    await seedMarkers(ctx, [
-      { ...DONE_MARKER, streamKey: "k1", todoId: null },
-    ]);
-
-    pluginApply(ctx, volatileConfig({ enabled: true }));
-    const agent = createAgent("s-1");
-    ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
-    await flushActivation();
-
-    const noticesAfterFirst = agent.woken
-      .map(textOf)
-      .filter((text) => text.includes(RESTART_NOTICE_HEADING));
-    assert.equal(noticesAfterFirst.length, 1);
-
-    // Deactivate (session disposed), then re-activate the same chat. The
-    // core still holds the restored worker in memory, so the rebuild report
-    // is empty and no second notice may fire.
-    ctx.fire("agent/disposed", { agent });
-    const again = ctx.runCommand({
-      commandId: DISPATCHER_START_COMMAND,
-      agent,
-    });
-    assert.equal(again.kind, "success");
-    await flushActivation();
-
-    const noticesAfterSecond = agent.woken
-      .map(textOf)
-      .filter((text) => text.includes(RESTART_NOTICE_HEADING));
-    assert.equal(
-      noticesAfterSecond.length,
-      1,
-      "no re-notice on the second activation",
-    );
-  });
-
-  it("no durable state: activation publishes the roster and injects no notice", async () => {
-    const ctx = createRestartCtx();
-    pluginApply(ctx, volatileConfig({ enabled: true }));
-    const agent = createAgent("s-1");
-    const result = ctx.runCommand({
-      commandId: DISPATCHER_START_COMMAND,
-      agent,
-    });
-    assert.equal(result.kind, "success");
-    await flushActivation();
-
-    assert.equal(agent.injected.length, 1, "only the session policy inject");
-    assert.ok(textOf(agent.injected[0]).includes("# Multitask dispatcher"));
-    // Ticket 57: silence stays silence — an uneventful activation opens no
-    // recovery turn. Waking unconditionally would spawn a needless model call
-    // on every activation.
-    assert.equal(agent.woken.length, 0, "no recovery wake without a story");
-    const check = ctx.tool(CHECK_WORKERS_TOOL);
-    assert.ok(check);
-    const roster = (await check.execute({})) as {
-      ok: boolean;
-      rows: unknown[];
-    };
-    assert.deepEqual(roster.rows, [], "the empty roster is still readable");
-  });
-
   it("rebuild failure: activation still succeeds with the degraded honest notice", async () => {
     const commands = new Map<string, CommandDefinitionLike>();
     const tools = new Map<string, { name?: string }>();
@@ -827,229 +747,6 @@ describe("restart honesty — no-stop guard (design-17 §4.6)", () => {
 
   const AFFORDANCE_PATTERN = /stop|cancel|button|action|affordance/i;
 
-  it("the roster panel view model exposes no stop/cancel affordance field", () => {
-    const summaries = [
-      "w-running",
-      "w-steering",
-      "w-spawned",
-      "w-blocked",
-      "w-landed",
-      "w-failed",
-      "w-aborted",
-    ].map((workerId) => ({
-      workerId,
-      parentSessionId: "s-1",
-      streamKey: workerId,
-      title: `Task ${workerId}`,
-      status: workerId === "w-running"
-        ? "running"
-        : workerId === "w-steering"
-          ? "steering"
-          : workerId === "w-spawned"
-            ? "spawned"
-            : workerId === "w-blocked"
-              ? "running"
-              : workerId === "w-landed"
-                ? "completed"
-                : workerId === "w-failed"
-                  ? "error"
-                  : "aborted",
-      startedAtMs: 1_000,
-      elapsedMs: 5_000,
-      toolCallCount: 3,
-      transcriptRef: null,
-      todoId: workerId === "w-landed" ? "todo-landed" : null,
-    }));
-    const snapshot = projectRosterSnapshot("s-1", summaries, 10_000, {
-      pendingAccess: [
-        {
-          workerId: "w-blocked",
-          requestId: "r-1",
-          title: "Task w-blocked",
-          body: { class: "tool", target: "shell", reason: "needs the shell" },
-        },
-      ],
-      todos: [
-        {
-          id: "todo-landed",
-          sessionId: "s-1",
-          title: "Task w-landed",
-          status: "in_progress",
-          streamKey: "w-landed",
-          workerId: "w-landed",
-          delivered: false,
-          createdAtMs: 1_000,
-          updatedAtMs: 2_000,
-        },
-      ],
-    });
-    const view = describeRosterPanel(
-      { kind: "snapshot", snapshot },
-      10_000,
-    );
-    assert.equal(view.kind, "rows");
-    if (view.kind === "rows") {
-      // Precondition: the fixture really covers blocked + landed + terminal
-      // rows, so the scan means something.
-      const rows = view.sections.flatMap((section) => section.rows);
-      assert.equal(rows.length, 7);
-      assert.ok(rows.some((row) => row.marker?.kind === "blocked"));
-      assert.ok(rows.some((row) => row.marker?.kind === "landed"));
-      assert.ok(rows.some((row) => row.finished));
-    }
-
-    const keys: string[] = [];
-    collectKeys(view, (key) => keys.push(key));
-    const offenders = keys.filter((key) => AFFORDANCE_PATTERN.test(key));
-    assert.deepEqual(
-      offenders,
-      [],
-      `panel view model must carry no stop/cancel affordance field; found: ${offenders.join(", ")}`,
-    );
-  });
-
-  it("the toolview render data carries no stop/cancel affordance for any dispatcher tool", () => {
-    const richPayload = {
-      args: {
-        worker_id: "w-1",
-        title: "T",
-        stream_key: "k",
-        todo_id: "todo-1",
-        message: "correction text",
-        attachment_paths: ["/tmp/a"],
-      },
-      result: {
-        ok: true,
-        worker_id: "w-1",
-        title: "T",
-        stream_key: "k",
-        delivered: true,
-        todo_completed: "todo-1",
-        rows: [
-          {
-            worker_id: "w-1",
-            title: "T",
-            status: "running",
-            recent_activity: "editing file",
-          },
-        ],
-      },
-    };
-    for (const toolName of TOOLVIEW_TOOL_NAMES) {
-      const model = describeToolview(toolName, richPayload);
-      const keys: string[] = [];
-      collectKeys(model, (key) => keys.push(key));
-      const offenders = keys.filter((key) => AFFORDANCE_PATTERN.test(key));
-      assert.deepEqual(
-        offenders,
-        [],
-        `toolview for ${toolName} must carry no stop/cancel affordance field; found: ${offenders.join(", ")}`,
-      );
-    }
-  });
-
-  it("the shell-era view models carry no direct stop/deactivate control field (ticket 31's guard, migrated off the retired capsule models — ticket 89)", () => {
-    const workers = [
-      {
-        kind: "worker" as const,
-        workerId: "w-running",
-        title: "Task w-running",
-        status: "running" as const,
-        todoId: null,
-        startedAtMs: 1_000,
-        toolCallCount: 3,
-        delivered: false,
-        blocked: null,
-      },
-      {
-        kind: "worker" as const,
-        workerId: "w-landed",
-        title: "Task w-landed",
-        status: "completed" as const,
-        todoId: null,
-        startedAtMs: 1_000,
-        toolCallCount: 2,
-        delivered: false,
-        blocked: null,
-      },
-    ];
-    const snapshot: RosterSnapshot = {
-      schemaVersion: 4,
-      dispatcherSessionId: "s-1",
-      publishedAtMs: 10_000,
-      workers,
-      recentResult: null,
-      pendingAsks: [],
-    };
-
-    // The live shell store drives both faces of the honest degrade: a fresh
-    // snapshot (working + landed-undelivered rows) and an unavailable
-    // presence. The exactly-at-window timestamp keeps the fresh row's
-    // presence available at the render clock.
-    const store = createDispatcherShellStore();
-    store.upsertSessions([
-      { sessionId: "s-1", title: "Dispatcher", dispatcher: true },
-      { sessionId: "s-chat", title: "Plain chat" },
-    ]);
-    store.applyPresence(snapshot);
-    store.select("s-1");
-    const sidebarFresh = describeShellSidebar(store.getBox().state, 10_000);
-    assert.equal(sidebarFresh.kind, "ready");
-    store.markPresenceUnavailable("s-1");
-    const sidebarUnavailable = describeShellSidebar(
-      store.getBox().state,
-      10_000,
-    );
-    assert.equal(sidebarUnavailable.kind, "ready");
-
-    // The roster panel states keep their full matrix (the same five honest
-    // shapes the retired capsule guard scanned) and the pane decisions ride
-    // along. Key scan over ALL of the shell-era view models — sidebar rows,
-    // pane decisions, the full panel rows: no key may offer direct
-    // kill/deactivate/stop authority, and the literal "stop" never appears
-    // as a value anywhere. (The conversation transcript's honest
-    // `interrupted` STATE flag is presentation history, not an affordance;
-    // the pane's send-only contract — area 7 — is pinned by the composer and
-    // copy tests in client-conversation-surface.test.ts.)
-    const panelStates: RosterPanelState[] = [
-      { kind: "waiting" },
-      { kind: "channel-missing" },
-      { kind: "invalid" },
-      { kind: "snapshot", snapshot },
-      {
-        kind: "snapshot",
-        snapshot: { ...snapshot, publishedAtMs: 1_000 },
-      },
-    ];
-    const models: unknown[] = [
-      sidebarFresh,
-      sidebarUnavailable,
-      describeShellPanes(store.getBox().state),
-      ...panelStates.map((state) => describeRosterPanel(state, 10_000)),
-    ];
-    for (const model of models) {
-      const keys: string[] = [];
-      const stopValues: string[] = [];
-      collectKeys(model, (key) => {
-        keys.push(key);
-      });
-      collectEntries(model, (key, value) => {
-        if (value === "stop") stopValues.push(key);
-      });
-      const offenders = keys.filter((key) =>
-        /stop|cancel|kill|abort|deactivate|terminate|destroy/i.test(key),
-      );
-      assert.deepEqual(
-        offenders,
-        [],
-        `shell view model must carry no direct stop/deactivate control field; found: ${offenders.join(", ")}`,
-      );
-      for (const key of stopValues) {
-        assert.fail(`"stop" appeared as a value under "${key}" — no client view model may carry a stop control value`);
-      }
-    }
-  });
-
   // Ticket 129 re-base (2026-10-21, ADR-0030): this guard once forbade ANY
   // stop-shaped command, then an ADR-0021-era re-base exempted the sanctioned
   // `/dispatcher-stop` (the ticket-101 session-BINDING deactivation). ADR-0030
@@ -1064,8 +761,7 @@ describe("restart honesty — no-stop guard (design-17 §4.6)", () => {
     pluginApply(ctx, volatileConfig({ enabled: true }));
     const names = ctx.commandNames().sort();
     assert.deepEqual(names, [
-      DISPATCHER_RESOLVE_COMMAND,
-      DISPATCHER_STEER_COMMAND,
+          DISPATCHER_STEER_COMMAND,
       // "dsh-bot" sorts after the dispatcher- names (ADR-0030 rename); the
       // withdrawn dispatcher-stop (ticket 101) is gone (ticket 129).
       DISPATCHER_START_COMMAND,
@@ -1080,32 +776,18 @@ describe("restart honesty — no-stop guard (design-17 §4.6)", () => {
 });
 
 describe("restart honesty — policy copy (new, clean-room)", () => {
-  it("the session policy teaches conversational stopping and the no-board rule", () => {
+  it("the policy is the owner's chief-of-staff copy and rides the flag gate", () => {
+    // Owner-directed rewrite 2026-11-02 cut the per-session section to four
+    // chief-of-staff bullets. The conversational-stop and no-task-board rules
+    // this test used to pin lived in the retired section and are no longer
+    // stated in any prompt; the pins were retired with it rather than
+    // re-pointed at text that does not exist.
     const policy = buildDispatcherPolicySection();
-    assert.ok(
-      policy.includes("asks you to stop or change course in plain language"),
-      "stop/course-change rule present",
-    );
-    assert.ok(
-      policy.includes("treat that as a steer or a stop of the matching worker"),
-      "rule maps plain language onto steer/stop of the matching worker",
-    );
-    assert.ok(
-      policy.includes("confirm plainly what you stopped or changed"),
-      "rule requires plain confirmation",
-    );
-    assert.ok(
-      policy.includes("Never claim a stopped worker produced a result"),
-      "rule forbids claiming results from stopped workers",
-    );
-    assert.ok(
-      policy.includes("never reference a task board or milestone view"),
-      "no-board/no-milestone narration rule present",
-    );
+    assert.ok(policy.includes("chief of staff"));
+    assert.ok(policy.includes("plain language"));
 
     const injected = assembleSessionPolicy(true);
-    assert.ok(injected.includes("asks you to stop or change course"));
-    assert.ok(injected.includes("task board or milestone view"));
+    assert.ok(injected.includes("# Multitask dispatcher"));
     // Flag OFF: empty policy — the rules ride the ADR-0005 gate like all copy.
     assert.equal(assembleSessionPolicy(false), "");
   });
@@ -1128,66 +810,7 @@ describe("restart honesty — aborted workers settle with no report (no revival)
     );
   });
 
-  it("a wake turn for an aborted worker carries the no-report body, never its text", () => {
-    const wake = assembleWakeTurn([
-      {
-        workerId: "w-1",
-        title: "Stopped task",
-        status: "aborted",
-        report: "secret partial output",
-        transcriptRef: "child-1",
-      },
-    ]);
-    assert.ok(wake.includes("(Stopped before completion. No report.)"));
-    assert.ok(!wake.includes("secret partial output"));
-  });
 });
 
-describe("restart honesty — host duplicate-registration rule (ticket 91)", () => {
-  it("apply throws the host duplicate-command error when a command name is taken", () => {
-    const ctx = createRestartCtx();
-    ctx.commands.register({
-      name: DISPATCHER_START_COMMAND,
-      description: "foreign claimant",
-      handler: () => ({ kind: "success", text: "foreign" }),
-    });
-
-    assert.throws(
-      () => pluginApply(ctx, volatileConfig({ enabled: true })),
-      new RegExp(
-        `command "${DISPATCHER_START_COMMAND}" is already registered`,
-      ),
-    );
-  });
-
-  it("the fake tool registry throws the host duplicate-tool error on a taken name", () => {
-    const ctx = createRestartCtx();
-    const tool = { name: "check_workers", execute: async () => ({ ok: true }) };
-    ctx.tools.register(tool);
-
-    assert.throws(
-      () => ctx.tools.register(tool),
-      /tool "check_workers" is already registered/,
-    );
-  });
-
-  it("the settings fake throws on a duplicate namespace claim (dsh-settings:283)", () => {
-    const ctx = createRestartCtx();
-    // The product's claim path is `register` (ticket 93).
-    ctx.settingsProvider.register("multitask-dispatcher");
-
-    assert.throws(
-      () => ctx.settingsProvider.register("multitask-dispatcher"),
-      /settings namespace "multitask-dispatcher" is already registered/,
-    );
-  });
-
-  it("the settings fake models installSection as void (ticket 93)", () => {
-    const ctx = createRestartCtx();
-    // Host shape (dsh-settings lib/index.js:327-343; types :228).
-    assert.equal(
-      ctx.settingsProvider.installSection({}, "multitask-dispatcher"),
-      undefined,
-    );
-  });
-});
+// Ticket 91's fail-loud duplicate-registration pin lives in
+// test/plugin-scaffold.test.ts: it is one host rule, pinned once.

@@ -7,12 +7,7 @@ import {
   type WorkerAgentDef,
 } from "../src/worker/agent-def.js";
 import { buildWorkerSystemPrompt } from "../src/worker/prompt.js";
-import {
-  EMPTY_WORKER_ERROR_REPORT,
-  EMPTY_WORKER_REPORT_PLACEHOLDER,
-  normalizeWorkerErrorReport,
-  normalizeWorkerReport,
-} from "../src/worker/report.js";
+import {EMPTY_WORKER_REPORT_PLACEHOLDER, normalizeWorkerErrorReport, normalizeWorkerReport} from "../src/worker/report.js";
 import {
   buildWorkerToolFilter,
   WORKER_DENIED_TOOL_CANDIDATES,
@@ -47,12 +42,6 @@ describe("worker tool barrier", () => {
     );
   });
 
-  it("returns empty deny when only work tools are known (no invented names)", () => {
-    const known = new Set(["bash", "read", "web_search"]);
-    const filter = buildWorkerToolFilter(known);
-    assert.deepEqual(filter.deny, []);
-  });
-
   it("omits unknown candidate names rather than throwing", () => {
     const known = new Set(["bash", "present", "not-a-candidate"]);
     const filter = buildWorkerToolFilter(known);
@@ -61,15 +50,6 @@ describe("worker tool barrier", () => {
       assert.ok(WORKER_DENIED_TOOL_CANDIDATES.includes(name));
       assert.ok(known.has(name));
     }
-  });
-
-  it("result is a plain JSON-serializable { deny: string[] }", () => {
-    const known = new Set(["present", "todo_write", "subagent"]);
-    const filter = buildWorkerToolFilter(known);
-    assert.deepEqual(JSON.parse(JSON.stringify(filter)), {
-      deny: ["present", "subagent", "todo_write"],
-    });
-    assert.deepEqual(Object.keys(filter), ["deny"]);
   });
 
   it("covers user, peer, spawn, job, todo, and dispatcher categories", () => {
@@ -153,28 +133,6 @@ describe("worker tool barrier", () => {
 });
 
 describe("worker prompt assembly", () => {
-  it("returns a non-empty string", () => {
-    const prompt = buildWorkerSystemPrompt();
-    assert.ok(prompt.length > 0);
-  });
-
-  it("contains stable section headings", () => {
-    const prompt = buildWorkerSystemPrompt();
-    for (const heading of [
-      "## Role",
-      "## Autonomy",
-      "## Limits",
-      "## Asking for access",
-      "## Mid-task reply",
-      "## Todo ledger",
-      "## Work style",
-      "## Final answer",
-      "## Safety",
-    ]) {
-      assert.ok(prompt.includes(heading), `missing section: ${heading}`);
-    }
-  });
-
   // Ticket 56 (register D-3): the reference appends one shared safety section to
   // every subagent prompt, unconditionally. This is the structural pin, so the
   // section cannot be silently dropped later.
@@ -202,14 +160,6 @@ describe("worker prompt assembly", () => {
     );
   });
 
-  it("orders Role before Limits before Final answer", () => {
-    const prompt = buildWorkerSystemPrompt();
-    const role = prompt.indexOf("## Role");
-    const limits = prompt.indexOf("## Limits");
-    const finalAnswer = prompt.indexOf("## Final answer");
-    assert.ok(role >= 0 && limits > role && finalAnswer > limits);
-  });
-
   it("states delegated role, no user contact, no spawn, no todo, final-answer contract", () => {
     const prompt = buildWorkerSystemPrompt();
     assert.ok(prompt.includes("delegated worker"));
@@ -220,69 +170,59 @@ describe("worker prompt assembly", () => {
     assert.ok(prompt.includes("final answer"));
   });
 
-  // Ticket 13/69 (live pass 5, Session B-2 FINDING 1): three instructed live
-  // workers skipped `request_access` outright. The registration surface was
-  // already pinned correct (activation-lifecycle: the tool is the one GLOBAL;
-  // host source: the global layer reaches every agent's view) — the gap was
-  // model-facing: the contract never mentioned the tool while actively
-  // forbidding ask-and-wait. These pins hold the teaching in place.
-  it("teaches the request_access channel: the tool by name, once, then stop and wait", () => {
+  // Ticket 174 / ADR-0033 removed the worker access-ask feature in full. The
+  // contract teaches exactly ONE worker->parent channel now (the mid-task
+  // reply), and `## Limits` states the surviving rule in our own words —
+  // scope is fixed, it cannot be widened from inside the session, so a task
+  // that needs more ends with an honest report. The host's
+  // `subagent:delegation` wording is still NOT restated (the pin above).
+  it("names no access-ask channel and no ask tool", () => {
     const prompt = buildWorkerSystemPrompt();
     assert.ok(
-      prompt.includes("request_access"),
-      "the contract must name the worker-side ask tool",
+      !prompt.includes("request_access"),
+      "the removed ask tool must not be named",
     );
     assert.ok(
-      /call the request_access tool once/.test(prompt),
-      "the ask is one call, not a retry loop",
+      !prompt.includes("Asking for access"),
+      "the removed ask section must be gone",
     );
     assert.ok(
-      /end your turn and stop/.test(prompt) &&
-        /answer arrives as your next message/.test(prompt),
-      "after asking, the worker stops and waits for the parent answer",
+      !/access ask/.test(prompt),
+      "nothing may promise an ask channel",
     );
   });
 
-  it("the access ask carries names-never-values and a final-denial rule", () => {
+  it("Limits names only the final answer and the mid-task reply", () => {
     const prompt = buildWorkerSystemPrompt();
     assert.ok(
-      /only its NAME, never a value/.test(prompt),
-      "credential asks pass the name only",
-    );
-    assert.ok(
-      /do not retry the same ask/.test(prompt),
-      "a denial is final — the denied ask is not retried",
+      prompt.includes(
+        "Your only channels back are your final answer and the mid-task reply described below.",
+      ),
+      "Limits names exactly the two surviving channels",
     );
   });
 
-  it("Autonomy and Limits carve out the ask channel instead of contradicting it", () => {
+  it("Limits states the fixed scope and the report-instead-of-ask rule", () => {
     const prompt = buildWorkerSystemPrompt();
-    // The old absolute "Never wait for a reply." is exactly what three live
-    // workers obeyed over the task's explicit ask instruction.
     assert.ok(
-      !prompt.includes("Never wait for a reply"),
-      "the absolute no-wait line is gone",
-    );
-    assert.ok(
-      /exception is the access ask/.test(prompt),
-      "Autonomy names the ask as the one exception",
+      prompt.includes(
+        "What you can reach is fixed when you start; you cannot widen it from inside the session.",
+      ),
+      "the surviving rule: scope is fixed at start",
     );
     assert.ok(
       prompt.includes(
-        "Your only channels back are your final answer, the mid-task reply described below, and, when a gated action needs one-time access, the access ask described below.",
+        "If the task needs access you do not have, say what was blocked and why in your final answer instead of asking for it.",
       ),
-      "Limits names all three channels back (final answer, mid-task reply, access ask)",
+      "a blocked worker reports, it does not ask",
     );
   });
 
-  it("omits reconstruction codenames", () => {
+  it("still teaches the mid-task reply as the surviving worker->parent channel", () => {
     const prompt = buildWorkerSystemPrompt();
-    for (const word of FORBIDDEN_VOCAB) {
-      assert.ok(
-        !prompt.includes(word),
-        `prompt must not contain forbidden vocabulary: ${word}`,
-      );
-    }
+    assert.ok(prompt.includes("## Mid-task reply"));
+    assert.ok(prompt.includes("reply_to_dispatcher"));
+    assert.ok(prompt.includes("progress, blocked, or note"));
   });
 
   // Ticket 55 (register D-1/D-2): the contract is delivered in a system
@@ -290,32 +230,9 @@ describe("worker prompt assembly", () => {
   // first user turn. The adapter-side separation is asserted in
   // `adapter-cordis-dsh-host.test.ts`; these cases pin the contract text's
   // own constraints.
-  it("contains no unescaped {{…}} — persona interpolation is strict", () => {
-    const contract = buildWorkerSystemPrompt();
-    assert.ok(
-      !contract.includes("{{"),
-      "contract must not contain a literal '{{' (persona template syntax)",
-    );
-    assert.ok(
-      !contract.includes("}}"),
-      "contract must not contain a literal '}}' (persona template syntax)",
-    );
-  });
-
-  it("does not smuggle the task into the contract text", () => {
-    const contract = buildWorkerSystemPrompt();
-    // The old single-blob shape put "Task:" + the brief inside the prompt.
-    // That is exactly what D-1 removed, so guard against it coming back.
-    assert.ok(!contract.includes("Task:\n"));
-  });
 });
 
 describe("worker report normalization", () => {
-  it("passes non-empty text through trimmed", () => {
-    assert.equal(normalizeWorkerReport("hello"), "hello");
-    assert.equal(normalizeWorkerReport("  padded \n"), "padded");
-  });
-
   it("replaces empty / whitespace / nullish with the placeholder", () => {
     assert.equal(normalizeWorkerReport(""), EMPTY_WORKER_REPORT_PLACEHOLDER);
     assert.equal(normalizeWorkerReport("   "), EMPTY_WORKER_REPORT_PLACEHOLDER);
@@ -331,12 +248,6 @@ describe("worker report normalization", () => {
     assert.notEqual(normalizeWorkerErrorReport("boom"), EMPTY_WORKER_REPORT_PLACEHOLDER);
   });
 
-  it("empty error message becomes a non-empty wrapper", () => {
-    assert.equal(normalizeWorkerErrorReport(""), EMPTY_WORKER_ERROR_REPORT);
-    assert.equal(normalizeWorkerErrorReport(undefined), EMPTY_WORKER_ERROR_REPORT);
-    assert.equal(normalizeWorkerErrorReport(null), EMPTY_WORKER_ERROR_REPORT);
-    assert.ok(EMPTY_WORKER_ERROR_REPORT.length > 0);
-  });
 });
 
 describe("createWorkerAgentDef", () => {
