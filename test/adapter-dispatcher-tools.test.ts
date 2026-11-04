@@ -16,6 +16,7 @@ import {
   SPAWN_DISPATCHER_TOOL,
 } from "../src/core/policy/prompts.js";
 import {registerDispatcherTools, toRegisterableTool, type RegisterableTool} from "../src/adapter/dispatcher-tools.js";
+import { withholdHostSpawnTools } from "../src/core/tools.js";
 import {
   createCordisDshHost,
   dispatcherUserMessageSession,
@@ -280,6 +281,87 @@ describe("adapter dispatcher tool registration", () => {
       explicit.registered.map((tool) => tool.name),
       [...DISPATCHER_TOOL_NAMES],
     );
+  });
+
+  /**
+   * Ticket 179: the composition `src/plugin.ts` performs on a real host —
+   * withhold the inherited host verbs, then register our tools on the same
+   * scoped surface. The restriction filters the INHERITED layer only
+   * (`dsh-tools/lib/index.js:3040-3072`), so the eight stay while the preset's
+   * spawn verbs and their route-discovery companion disappear.
+   */
+  it("withholding the host spawn verbs leaves our eight tools untouched", () => {
+    const inherited = new Map<string, RegisterableTool>();
+    const restrictions: Array<{ deny?: readonly string[] }> = [];
+    for (const name of [
+      "subagent",
+      "subagent_fork",
+      "list_subagent_models",
+      "read",
+      "bash",
+    ]) {
+      inherited.set(name, { name } as RegisterableTool);
+    }
+    // A surface that behaves like the host's: `schemas(scope)` answers the
+    // visible set (inherit minus restrictions, plus own), `register` lands in
+    // the own layer, `restrict` filters inherited names only.
+    const own = new Map<string, RegisterableTool>();
+    const ctx = {
+      tools: {
+        schemas: () => [
+          ...[...inherited.keys()]
+            .filter((name) => !restrictions.some((r) => r.deny?.includes(name)))
+            .map((name) => ({ name })),
+          ...[...own.keys()].map((name) => ({ name })),
+        ],
+        register(definition: unknown) {
+          const tool = definition as RegisterableTool;
+          own.set(tool.name, tool);
+          return () => {
+            own.delete(tool.name);
+          };
+        },
+        restrict(filter: { deny?: readonly string[] }) {
+          const entry = { ...filter };
+          restrictions.push(entry);
+          return () => {
+            const at = restrictions.indexOf(entry);
+            if (at >= 0) restrictions.splice(at, 1);
+          };
+        },
+      },
+    };
+    const surface = ctx.tools;
+
+    const withholdDisposer = withholdHostSpawnTools(surface, {});
+    const disposers = registerDispatcherTools({
+      ctx,
+      multitask: createMultitask(new FakeDshHost()),
+      getSessionId: () => "session-1",
+    });
+
+    assert.deepEqual(restrictions, [
+      { deny: ["subagent", "subagent_fork", "list_subagent_models"] },
+    ]);
+    const visible = surface.schemas().map((schema) => schema.name);
+    assert.deepEqual(
+      [...own.keys()],
+      [...DISPATCHER_TOOL_NAMES],
+    );
+    assert.deepEqual(
+      visible.sort(),
+      [...DISPATCHER_TOOL_NAMES, "bash", "read"].sort(),
+    );
+    assert.ok(!visible.includes("subagent"));
+    assert.ok(!visible.includes("subagent_fork"));
+    assert.ok(!visible.includes("list_subagent_models"));
+
+    // The restriction is owned by the activation, like every registered tool.
+    assert.ok(withholdDisposer);
+    if (withholdDisposer !== null) disposers.push(withholdDisposer);
+    for (const dispose of disposers) dispose();
+    assert.deepEqual(restrictions, []);
+    assert.deepEqual([...own.keys()], []);
   });
 
   it("execute on a registerable tool hits the Multitask core", async () => {    const ctx = createToolsCaptureCtx();

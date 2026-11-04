@@ -37,3 +37,9 @@ lib/
 *.tsbuildinfo
 # Client bundle build output (npm run build:client)
 /client/
+
+# Stray worktrees / scratch clones a lane leaves behind while testing a fix.
+# Each carries its own .git and would otherwise be committed as an embedded repo.
+/cur/
+/fixA/
+/regress/

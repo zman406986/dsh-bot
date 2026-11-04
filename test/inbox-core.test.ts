@@ -19,7 +19,7 @@ import {
   type InboxJobResolution,
   type Multitask,
 } from "../src/core/multitask.js";
-import { createWakeBus } from "../src/core/wake-bus.js";
+import { createWakeBus, type WakeBus } from "../src/core/wake-bus.js";
 import type { SpawnResult } from "../src/core/types.js";
 
 function unwrapSpawn(result: SpawnResult): string {

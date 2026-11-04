@@ -52,7 +52,6 @@ function rig(durability = createInMemoryDurability()): Rig {
     // Ticket 70 §2's peer fence, wired the way the plugin wires it (the
     // activation registry answers; nothing is a live dispatcher here).
     isLiveDispatcherSession: () => false,
-    access: { timeoutMs: 50, schedule: () => () => {} },
   });
   const tools = createDispatcherTools({
     multitask,

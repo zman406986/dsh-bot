@@ -670,6 +670,100 @@ export function registerWorkerLocalTools(
 }
 
 /**
+ * Ticket 179: the host's own spawn verbs, withheld from every dispatcher's
+ * surface so `spawn_worker` is the only way a dispatcher can create a child.
+ *
+ * They are not ours — the shipped `standard`, `cordis` and `ptc` agent presets
+ * mount them on the agent plane (`tool-subagent` with `provider: spawn` /
+ * `toolName: subagent`, and `provider: fork` / `toolName: subagent_fork`), and
+ * our dispatcher surface is composed ON TOP of that inherited layer. A child
+ * created through them is invisible to this plugin: no roster entry, no stream
+ * key, no todo link, no settle record, no wake, no tool barrier. Ticket 178
+ * keeps `spawn_worker` for exactly the bookkeeping the raw verbs skip.
+ *
+ * `list_subagent_models` rides along because it is the route-discovery
+ * companion of those two verbs: its description tells the model to use the
+ * returned ids with "a delegation tool's `provider`, `model` and
+ * `reasoning_effort` fields", which this surface no longer has.
+ */
+export const HOST_SPAWN_TOOL_CANDIDATES: readonly string[] = [
+  "subagent",
+  "subagent_fork",
+  "list_subagent_models",
+];
+
+/**
+ * The one method this module needs from a dispatcher's scoped tool surface
+ * (the host's `agent.ctx.tools`). Structural, like {@link WorkerToolSurface}.
+ */
+export interface DispatcherScopedToolSurface {
+  /** Live tool names as this scope sees them (host: `tools.schemas(scope)`). */
+  schemas(scope?: unknown): ReadonlyArray<{ readonly name: string }>;
+  /**
+   * Restrict inherited tools for this scope; returns the disposer that lifts
+   * the restriction. Absent on stub contexts.
+   */
+  restrict?(filter: {
+    readonly allow?: readonly string[];
+    readonly deny?: readonly string[];
+  }): () => void;
+}
+
+/**
+ * The tickets-179 deny list: candidates that are ACTUALLY on this surface.
+ *
+ * Same rule as the worker barrier (`src/worker/tool-barrier.ts:1-7`): the host
+ * throws on a restriction naming a tool it does not know, so never hand it a
+ * hard-coded list. A preset-free session (`minimal`) carries none of these and
+ * the answer is empty.
+ */
+export function withheldHostSpawnTools(
+  knownToolNames: ReadonlySet<string>,
+): string[] {
+  return HOST_SPAWN_TOOL_CANDIDATES.filter((name) =>
+    knownToolNames.has(name),
+  );
+}
+
+/**
+ * Ticket 179: take the host's raw spawn verbs off ONE dispatcher's surface.
+ *
+ * Why a restriction and not "build fewer definitions" (ticket 176's mechanism
+ * for `spawn_dispatcher`): these verbs are registered by a preset ANCESTOR
+ * layer, not by us, so not registering them is not an option. `restrict`
+ * filters what a scope inherits and never what it registers itself
+ * (`dsh-tools/lib/index.js:3040-3072`), which is exactly the split needed —
+ * the preset's verbs disappear, our eight stay.
+ *
+ * Two host behaviours follow for free, which is why no copy moves:
+ * `tools.get(name, scope)` resolves through the restriction, so
+ * `dsh-tool-subagent`'s own prompt section and depth reminder hide themselves
+ * (`if (visible[0] !== toolName) return ""`), and the model is never told
+ * about a verb it cannot call.
+ *
+ * Returns the exact disposer, or `null` when nothing was applied: no
+ * `restrict` on the surface (stub hosts), no `schemas` answer, or an empty
+ * intersection — the host rejects an empty filter outright.
+ */
+export function withholdHostSpawnTools(
+  surface: DispatcherScopedToolSurface,
+  scope?: unknown,
+): (() => void) | null {
+  if (typeof surface.restrict !== "function") return null;
+  let known: ReadonlySet<string>;
+  try {
+    known = new Set(surface.schemas(scope).map((schema) => schema.name));
+  } catch {
+    // A surface that cannot be read is not proof a verb is there; refuse to
+    // guess a deny list, exactly like `globalToolNames`.
+    return null;
+  }
+  const deny = withheldHostSpawnTools(known);
+  if (deny.length === 0) return null;
+  return surface.restrict({ deny });
+}
+
+/**
  * Create the dispatcher tool definitions bound to a Multitask core — the
  * eight-tool shape (ticket 116 retired `send_peer` for `message_agent`;
  * ticket 117 added `await_agent`; ticket 118 added `spawn_dispatcher`).
@@ -1403,10 +1497,13 @@ export function createDispatcherTools(
    * Refusals are limited to what is real (ADR-0025 forbids any cap of ours):
    * - `invalid-args` — an empty/whitespace-only title or prompt. Nothing was
    *   attempted and no host call happened.
-   * - `host-refused` — the host's own spawn error (`ACTIVATION_LIMIT_REACHED`
-   *   from the live-child pool, the `maxDepth` depth refusal, or an unbound
-   *   parent). Its message is passed through verbatim in `detail`; nothing is
-   *   reclassified, re-worded, or capped here.
+   * - `host-refused` — the host's own spawn error, passed through verbatim in
+   *   `detail`; nothing is reclassified, re-worded, or capped here. ADR-0032
+   *   makes the summon a top-level `ctx.agents.create` session, so the
+   *   subagent runtime's `ACTIVATION_LIMIT_REACHED` live-child pool and its
+   *   `maxDepth` refusal cannot arise on this path. What the host can still
+   *   refuse is its own state: no bound parent for the summoning session, and
+   *   ticket 176's one-level rule (a dispatched team leader cannot summon).
    */
   const spawnDispatcher: DispatcherToolDef = {
     name: SPAWN_DISPATCHER_TOOL,

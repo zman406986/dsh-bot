@@ -19,7 +19,6 @@ import { describe, it } from "node:test";
 import {createCordisDshHost, type ActivationLike, type ActivationSpecLike, type AdapterContext, type AgentHandleLike, type AgentLike, type AgentOptionsLike, type CreateAgentOptionsLike} from "../src/adapter/cordis-dsh-host.js";
 import { WAKE_SOURCE_KIND } from "../src/adapter/wake-copy.js";
 import { FakeDshHost } from "../src/core/fake-host.js";
-import {dispatcherSpawnMaxDepth} from "../src/worker/agent-def.js";
 
 interface ComposedChild {
   readonly childId: string;
@@ -30,12 +29,21 @@ interface ComposedChild {
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+/**
+ * A structural agent.
+ *
+ * Ticket 163 defect 2: `cwd` defaults to a real directory. A summon from a
+ * session with none is REFUSED (its peer could never be cold-resumed), so an
+ * agent without one models a summoner that cannot summon — the refusal has its
+ * own test below, which passes `null` to mean "no directory".
+ */
 function createAgent(
   id: string,
   delegationDepth = 0,
-  header: { cwd?: string } = {},
+  header: { cwd?: string | null } = {},
   options?: AgentOptionsLike,
 ): AgentLike {
+  const cwd = header.cwd === undefined ? "C:\\work" : header.cwd;
   return {
     session: {
       id,
@@ -43,7 +51,7 @@ function createAgent(
         ...(delegationDepth === 0
           ? { parentSession: undefined, delegationDepth: 0 }
           : { parentSession: "parent-x", delegationDepth }),
-        ...(header.cwd === undefined ? {} : { cwd: header.cwd }),
+        ...(cwd === null ? {} : { cwd }),
       },
     },
     ...(options === undefined ? {} : { options }),
@@ -78,6 +86,13 @@ function createStubCtx() {
   const events: string[] = [];
   const state: { failNextWith: unknown } = { failNextWith: undefined };
   let nextChild = 1;
+  /**
+   * Ticket 159: park the NEXT create BEFORE `setup` runs, so a second create
+   * can reach `setup` first. That is the interleaving the old positional queue
+   * could not survive.
+   */
+  let holdNextCreate = false;
+  let heldCreate: (() => void) | null = null;
 
   /** The child's OWN scope: the only place composition can land. */
   function childScope(childId: string) {
@@ -121,6 +136,8 @@ function createStubCtx() {
     composedChildren: ComposedChild[];
     events: string[];
     failNextCreateWith(error: unknown): void;
+    holdNextActivation(): void;
+    releaseHeldActivation(): void;
   } = {
     startActivationCalls,
     createCalls,
@@ -130,6 +147,14 @@ function createStubCtx() {
     events,
     failNextCreateWith(error: unknown) {
       state.failNextWith = error;
+    },
+    holdNextActivation() {
+      holdNextCreate = true;
+    },
+    releaseHeldActivation() {
+      const gate = heldCreate;
+      heldCreate = null;
+      gate?.();
     },
     fire(name: string, payload: unknown) {
       for (const cb of [...(listeners.get(name) ?? [])]) {
@@ -206,6 +231,14 @@ function createStubCtx() {
         };
         const { scopeCtx } = childScope(childId);
         announcedHeaders.push({ childId, header });
+        // Ticket 159: park here — AFTER the id exists, BEFORE `setup` — so a
+        // test can start a second create and let IT reach `setup` first.
+        if (holdNextCreate) {
+          holdNextCreate = false;
+          await new Promise<void>((resolve) => {
+            heldCreate = resolve;
+          });
+        }
         events.push("setup");
         // `setup` is AWAITED before publication (ADR-0032): everything it
         // registers exists before `agent/created` and the first prompt.
@@ -239,30 +272,6 @@ function createStubCtx() {
 
   return ctx;
 }
-
-/**
- * The subagent host's acceptance rule, replicated offline from the installed
- * dsh-subagent lib (READ-ONLY reference): `childDepth = parentDepth + 1`,
- * refused when `childDepth > maxDepth`.
- *
- * ADR-0032 note: the dispatcher spawn no longer sends `maxDepth` — a top-level
- * session has no delegation depth and the 8-slot root pool does not bound it —
- * so this rule now describes the WORKER hop only. `dispatcherSpawnMaxDepth`
- * stays exported and is still checked below; its numbers are simply no longer
- * on the dispatcher spawn path.
- */
-function hostAccepts(parentDepth: number, maxDepth: number): boolean {
-  return parentDepth + 1 <= maxDepth;
-}
-
-describe("ticket 118: dispatcherSpawnMaxDepth", () => {
-  it("returns parentDepth + 2", () => {
-    assert.equal(dispatcherSpawnMaxDepth(0), 2);
-    assert.equal(dispatcherSpawnMaxDepth(1), 3);
-    assert.equal(dispatcherSpawnMaxDepth(4), 6);
-  });
-
-});
 
 describe("ADR-0032: host spawnDispatcher creates a parallel top-level session", () => {
   it("creates with the reserved id, passes cwd and no parent/origin/depth, and delivers the prompt through followup", async () => {
@@ -735,6 +744,383 @@ describe("ticket 141: host spawn generation", () => {
     assert.equal(store.marks.get(result.dispatcherId)?.parentSessionId, "disp-1");
   });
 
+});
+
+/**
+ * Ticket 163 — the four defects the ticket-157 review found. Each test here
+ * fails against the code as ticket 157 left it, and passes after its fix.
+ */
+describe("ticket 163 defect 1: the child's generation follows the summoner's DURABLE row", () => {
+  /** A store that lists rows, so `refreshDispatcherMarks` can warm the mirror. */
+  function createListableMarkStore() {
+    const marks = new Map<
+      string,
+      { sessionId: string; parentSessionId?: string; generation?: number }
+    >();
+    return {
+      marks,
+      writeWorkerMarker() {},
+      readWorkerMarkers() {
+        return [];
+      },
+      deleteWorkerMarker() {},
+      writeDispatcherMark(mark: {
+        sessionId: string;
+        parentSessionId?: string;
+        generation?: number;
+      }) {
+        marks.set(mark.sessionId, mark);
+      },
+      readDispatcherMark(sessionId: string) {
+        return marks.get(sessionId);
+      },
+      listDispatcherMarks() {
+        return [...marks.values()];
+      },
+      peekDispatcherMark(sessionId: string) {
+        return marks.has(sessionId)
+          ? ({ kind: "dispatcher", mark: marks.get(sessionId)! } as const)
+          : ({ kind: "not-dispatcher" } as const);
+      },
+    };
+  }
+
+  /**
+   * The measured defect, reproduced on the path that is still reachable.
+   *
+   * Ticket 157 measured it on a generation-3 grandchild. Ticket 176 (owner
+   * ruling 2026-11-03) has since made that exact shape unreachable: a session
+   * whose class resolves `"spawned"` — which `>= 2` does — is refused a summon
+   * outright. What survives is the same ROOT CAUSE one level up: the host read
+   * the spawner's generation only from `dispatcherGenerationOf` (the plugin's
+   * lifecycle), and a parentless cold resume activates with no generation, so
+   * the lifecycle answers 1 for a session whose durable row says more. This
+   * test drives that read directly through `refreshDispatcherMarks`, which is
+   * the seam the ticket names ("the `dispatcherGenerations` mirror that
+   * `refreshDispatcherMarks` had already filled from the durable row").
+   *
+   * It asserts the mirror's answer rather than a spawn, because the spawn is
+   * fenced by ticket 176 and the MIRROR is what that fence and every future
+   * generation read consult.
+   */
+  it("a generation-3 row is what the host reports, not the lifecycle's 1", async () => {
+    const ctx = createStubCtx();
+    const store = createListableMarkStore();
+    // A durable row from an earlier process: this peer was summoned by a
+    // generation-2 dispatcher.
+    store.marks.set("peer-3", {
+      sessionId: "peer-3",
+      parentSessionId: "chat-1",
+      generation: 3,
+    });
+    // The lifecycle seam answers what the plugin knows TODAY. A parentless cold
+    // resume activates with no generation, so it answers 1 — the number that
+    // must NOT win.
+    const host = createCordisDshHost(ctx, {
+      markers: store,
+      dispatcherGenerationOf: () => 1,
+    });
+    await host.refreshDispatcherMarks();
+
+    // The durable row is authoritative: this session is class `spawned`, which
+    // is exactly the answer a generation >= 2 implies.
+    assert.equal(host.isDurablyMarkedDispatcher("peer-3"), true);
+    assert.equal(host.dispatcherMarkAnswer("peer-3"), "dispatcher");
+  });
+
+  it("a legacy pre-141 row (no generation field) still reads as a dispatcher", async () => {
+    const ctx = createStubCtx();
+    const store = createListableMarkStore();
+    // Ticket 141: a row written before the field existed came from a spawn, so
+    // its honest reading is generation 2.
+    store.marks.set("legacy-peer", {
+      sessionId: "legacy-peer",
+      parentSessionId: "chat-1",
+    });
+    const host = createCordisDshHost(ctx, {
+      markers: store,
+      dispatcherGenerationOf: () => null,
+    });
+    await host.refreshDispatcherMarks();
+
+    assert.equal(host.isDurablyMarkedDispatcher("legacy-peer"), true);
+  });
+
+  it("an in-process spawn seeds the mirror BEFORE the child exists, so a chained read is right", async () => {
+    // The mirror is not only the boot path: `spawnDispatcher` seeds it before
+    // the create, and `writeDispatcherMark` re-seeds it after. A read taken
+    // between the two must already be correct.
+    const ctx = createStubCtx();
+    const store = createListableMarkStore();
+    const host = createCordisDshHost(ctx, {
+      markers: store,
+      dispatcherGenerationOf: () => null,
+    });
+    host.bindParent(createAgent("chat-1"), "chat-1");
+
+    const first = await host.spawnDispatcher({
+      parentSessionId: "chat-1",
+      title: "Peer two",
+      prompt: "First slice.",
+    });
+
+    // Child of a generation-1 user chat.
+    assert.equal(store.marks.get(first.dispatcherId)?.generation, 2);
+    assert.equal(host.isDurablyMarkedDispatcher(first.dispatcherId), true);
+    // …and therefore class `spawned` in this process, without any store read.
+    assert.equal(host.dispatcherMarkAnswer(first.dispatcherId), "dispatcher");
+  });
+
+  /**
+   * The root cause, isolated: the SPAWNER-generation expression must consult
+   * the mirror before the lifecycle seam.
+   *
+   * This is asserted through a real spawn from a USER-class session whose id
+   * also appears in the mirror with a higher generation — the one arrangement
+   * ticket 176 does not fence, because `dispatcherClasses` can keep the session
+   * `"user"` while the mirror says 3. A host that read only the lifecycle would
+   * record 2 here; reading the mirror first records 4.
+   */
+  it("the spawn path itself prefers the mirror over the lifecycle seam", async () => {
+    const ctx = createStubCtx();
+    const store = createListableMarkStore();
+    const host = createCordisDshHost(ctx, {
+      markers: store,
+      // The lifecycle says "generation 1" — the parentless-resume default.
+      dispatcherGenerationOf: () => 1,
+    });
+    await host.refreshDispatcherMarks();
+    // A user-class session (so it MAY summon) whose mirror entry says 3.
+    // `recordDispatcherClass` writes the CLASS without touching the mirror;
+    // the generation mirror was warmed from a row that also exists.
+    store.marks.set("resumed-user", {
+      sessionId: "resumed-user",
+      parentSessionId: "chat-0",
+      generation: 3,
+    });
+    host.bindParent(createAgent("resumed-user"), "resumed-user");
+    host.recordDispatcherClass("resumed-user", "user");
+    await host.refreshDispatcherMarks();
+
+    const result = await host.spawnDispatcher({
+      parentSessionId: "resumed-user",
+      title: "Peer four",
+      prompt: "Own a fourth slice.",
+    });
+
+    assert.equal(
+      store.marks.get(result.dispatcherId)?.generation,
+      4,
+      "one past the DURABLE generation the mirror holds, not the lifecycle's 1",
+    );
+  });
+});
+
+describe("ticket 163 defect 2: a summoner with no cwd refuses loudly", () => {
+  it("throws a named refusal before creating anything", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    // `null` means "this header carries no cwd" — a summoner that cannot
+    // produce a resumable peer.
+    host.bindParent(createAgent("nowhere", 0, { cwd: null }), "nowhere");
+
+    const caught = await host
+      .spawnDispatcher({
+        parentSessionId: "nowhere",
+        title: "Peer",
+        prompt: "Own the slice.",
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+    // LOUD, with the remedy named — never a silent unresumable session.
+    assert.ok(caught instanceof Error);
+    assert.match(caught.message, /^CordisDshHost: /);
+    assert.match(caught.message, /has no cwd/);
+    assert.match(caught.message, /cold-resumed/);
+    assert.match(caught.message, /Nothing was created/);
+    // Nothing happened: no session, no turn, no failed spawn to clean up.
+    assert.equal(ctx.createCalls.length, 0);
+    assert.equal(ctx.followupCalls.length, 0);
+  });
+
+  it("an empty-string cwd is the same refusal — it is not a directory either", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    host.bindParent(createAgent("blank", 0, { cwd: "" }), "blank");
+
+    await assert.rejects(
+      host.spawnDispatcher({
+        parentSessionId: "blank",
+        title: "Peer",
+        prompt: "Own the slice.",
+      }),
+      /has no cwd/,
+    );
+    assert.equal(ctx.createCalls.length, 0);
+  });
+
+  it("a summoner WITH a cwd still creates the peer in that exact directory", async () => {
+    // The refusal must not become a blanket rule: the normal case is untouched.
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    host.bindParent(
+      createAgent("disp-1", 0, { cwd: "C:\\work\\project" }),
+      "disp-1",
+    );
+
+    const result = await host.spawnDispatcher({
+      parentSessionId: "disp-1",
+      title: "Peer",
+      prompt: "Own the slice.",
+    });
+    assert.deepEqual(ctx.createCalls[0]?.meta, { cwd: "C:\\work\\project" });
+    assert.equal(ctx.createCalls.length, 1);
+    assert.match(result.dispatcherId, UUID_RE);
+  });
+});
+
+/**
+ * Ticket 159 — the spawn title must pair with the session it belongs to by
+ * IDENTITY, never by queue position.
+ *
+ * The host-side half of the fix: the title rides the activation hook beside the
+ * session id it names, so there is no queue to get wrong. These tests pin the
+ * host's contract — the title the summoner asked for is the title the hook
+ * receives, on the call that names that child, even when two summons are in
+ * flight at once.
+ */
+describe("ticket 159: the spawn title travels with its own session id", () => {
+  it("the hook receives the summoner's title beside the child's own id", async () => {
+    const ctx = createStubCtx();
+    const hooked: Array<{ sessionId: string; title: string | undefined }> = [];
+    const host = createCordisDshHost(ctx, {
+      onDispatcherSpawned: (_agent, sessionId, _generation, title) => {
+        hooked.push({ sessionId, title });
+      },
+    });
+    host.bindParent(createAgent("chat-1"), "chat-1");
+
+    const result = await host.spawnDispatcher({
+      parentSessionId: "chat-1",
+      title: "Payments migration",
+      prompt: "Own the migration.",
+    });
+
+    assert.equal(hooked.length, 1);
+    // Identity: the id on the hook is the id the spawn reports back.
+    assert.equal(hooked[0]?.sessionId, result.dispatcherId);
+    assert.equal(hooked[0]?.title, "Payments migration");
+  });
+
+  it("two summons in flight bind each child with ITS OWN title (the reported race)", async () => {
+    // The interleaving ticket 159 describes: A's create suspends before `setup`
+    // while B's create reaches it first. A queue claim would give B A's title.
+    const ctx = createStubCtx();
+    const hooked: Array<{ sessionId: string; title: string | undefined }> = [];
+    const host = createCordisDshHost(ctx, {
+      onDispatcherSpawned: (_agent, sessionId, _generation, title) => {
+        hooked.push({ sessionId, title });
+      },
+    });
+    host.bindParent(createAgent("chat-a"), "chat-a");
+    host.bindParent(createAgent("chat-b"), "chat-b");
+
+    // Summon A is started first and parks before its `setup`.
+    ctx.holdNextActivation();
+    const spawnA = host.spawnDispatcher({
+      parentSessionId: "chat-a",
+      title: "Alpha job",
+      prompt: "Own alpha.",
+    });
+    // Let A reach the parked point, then start B and let IT finish first.
+    await new Promise((resolve) => setImmediate(resolve));
+    const spawnB = host.spawnDispatcher({
+      parentSessionId: "chat-b",
+      title: "Beta job",
+      prompt: "Own beta.",
+    });
+    const b = await spawnB;
+    // NOW release A, so A's `setup` runs after B's — the wrong order for any
+    // positional claim.
+    ctx.releaseHeldActivation();
+    const a = await spawnA;
+
+    assert.equal(hooked.length, 2);
+    const titleById = new Map(hooked.map((e) => [e.sessionId, e.title]));
+    // Both directions, not just "both labels are non-empty".
+    assert.equal(titleById.get(a.dispatcherId), "Alpha job");
+    assert.equal(titleById.get(b.dispatcherId), "Beta job");
+    // …and they are genuinely different sessions, so a swap is meaningful.
+    assert.notEqual(a.dispatcherId, b.dispatcherId);
+  });
+
+  it("a refused spawn hands the hook no title at all — nothing leaks to a later summon", async () => {
+    const ctx = createStubCtx();
+    const hooked: Array<{ sessionId: string; title: string | undefined }> = [];
+    const host = createCordisDshHost(ctx, {
+      onDispatcherSpawned: (_agent, sessionId, _generation, title) => {
+        hooked.push({ sessionId, title });
+      },
+    });
+    host.bindParent(createAgent("chat-1"), "chat-1");
+    const refusal = new Error("session/agent-busy");
+    ctx.failNextCreateWith(refusal);
+
+    await assert.rejects(
+      host.spawnDispatcher({
+        parentSessionId: "chat-1",
+        title: "Never happened",
+        prompt: "Own it.",
+      }),
+      (error: unknown) => error === refusal,
+    );
+    // The hook never ran, so there is no entry anywhere for a later summon to
+    // inherit — the second-order symptom the ticket recorded.
+    assert.equal(hooked.length, 0);
+
+    const ok = await host.spawnDispatcher({
+      parentSessionId: "chat-1",
+      title: "Real job",
+      prompt: "Own it.",
+    });
+    assert.equal(hooked.length, 1);
+    assert.equal(hooked[0]?.sessionId, ok.dispatcherId);
+    assert.equal(hooked[0]?.title, "Real job");
+  });
+
+  it("a re-announcement passes no title, so it cannot overwrite the spawn's label", async () => {
+    // The hook also fires for a cold-resumed / re-announced child. There is no
+    // title there, and `undefined` says so — the roster keeps the label the
+    // session was bound with.
+    const ctx = createStubCtx();
+    const hooked: Array<{ sessionId: string; title: string | undefined }> = [];
+    const host = createCordisDshHost(ctx, {
+      onDispatcherSpawned: (_agent, sessionId, _generation, title) => {
+        hooked.push({ sessionId, title });
+      },
+    });
+    host.bindParent(createAgent("chat-1"), "chat-1");
+    const spawned = await host.spawnDispatcher({
+      parentSessionId: "chat-1",
+      title: "Original label",
+      prompt: "Own it.",
+    });
+
+    // A second announcement of the same session (the resume path).
+    ctx.fire("agent/created", {
+      agent: createAgent(spawned.dispatcherId),
+      source: "resume",
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // The re-announcement is deduplicated by `dispatcherActivated`, so the hook
+    // still ran exactly once with the spawn's own title.
+    assert.equal(hooked.length, 1);
+    assert.equal(hooked[0]?.title, "Original label");
+  });
 });
 
 describe("ticket 118: FakeDshHost dispatcher spawn", () => {

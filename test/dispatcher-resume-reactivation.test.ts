@@ -44,6 +44,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { apply } from "../src/plugin.js";
+import { createCordisDshHost } from "../src/adapter/cordis-dsh-host.js";
 import { volatileConfig } from "./support/plugin-config.js";
 import {DISPATCHER_START_COMMAND, SESSION_KIND_PROJECTION_KEY, RESTART_DEGRADED_NOTICE, type AgentLike, type CommandDefinitionLike, type CommandResultLike, type SessionProjectionDefinitionLike, type SessionKindProjectionState, type ToolsLike} from "../src/adapter/index.js";
 
@@ -273,6 +274,9 @@ function createCtx(options?: {
     // The guarded READ route (cordis `ctx.get`).
     get(name: string) {
       if (name === "sessionProjections") return projections ?? undefined;
+      // Ticket 163 defect 4: `sessionController` is deliberately NOT answered
+      // here. On a live cordis context it is a service property, and reading
+      // it is what `readSessionController` must survive.
       return undefined;
     },
     on(name: string, cb: (payload: never) => void) {
@@ -492,4 +496,199 @@ describe("ticket 147 — a user-started dispatcher re-activates after restart", 
     assert.equal(resumed.injected.length, 0);
   });
 
+});
+
+/**
+ * Ticket 163 defect 3 — `resumedUserDispatchers` must not outlive the
+ * activation it stands for.
+ *
+ * The guard deduplicates repeat ANNOUNCEMENTS of one live session. Kept past
+ * disposal it did two wrong things: a same-process re-announcement skipped
+ * re-activation entirely (leaving the session with no scoped tools and no
+ * policy), and the set grew for the whole process.
+ */
+describe("ticket 163 defect 3 — a disposed dispatcher re-activates on re-announcement", () => {
+  it("regains its scoped tools and policy after dispose + re-announce", async () => {
+    const ctx = createCtx();
+    apply(ctx, volatileConfig({ enabled: true }));
+    const session = createSession("chat-1", TOP_LEVEL_HEADER);
+    appendDispatcherStart(session, "cmd-1");
+
+    // First announcement: the resumed dispatcher activates. The SAME object is
+    // announced and later disposed — the lifecycle matches disposals by object
+    // identity, so a copy would deactivate nothing.
+    const first = createAgent("chat-1", TOP_LEVEL_HEADER);
+    const firstAnnounced = {
+      ...first,
+      session: { ...first.session, ...session },
+    };
+    ctx.fire("agent/created", {
+      agent: firstAnnounced,
+      source: "resume",
+    });
+    await drain();
+    assert.deepEqual(first.scopedTools.names().sort(), DISPATCHER_SCOPED_TOOLS);
+    assert.equal(first.injected.length, 1);
+
+    // The session is disposed — the UI delete affordance, or the host
+    // re-creating the session. Its activation (and its surface) is gone.
+    ctx.fire("agent/disposed", { agent: firstAnnounced });
+    await drain();
+    assert.deepEqual(first.scopedTools.names(), []);
+
+    // …and re-announced in the SAME process. This is the case the never-cleared
+    // guard silently swallowed: it still held "chat-1", so the host returned
+    // before re-activating and the session came back with nothing.
+    const second = createAgent("chat-1", TOP_LEVEL_HEADER);
+    const secondAnnounced = {
+      ...second,
+      session: { ...second.session, ...session },
+    };
+    ctx.fire("agent/created", {
+      agent: secondAnnounced,
+      source: "resume",
+    });
+    await drain();
+
+    assert.deepEqual(
+      second.scopedTools.names().sort(),
+      DISPATCHER_SCOPED_TOOLS,
+      "the re-announced session got its scoped tools back",
+    );
+    assert.equal(second.injected.length, 1, "and exactly one policy inject");
+    assert.ok(textOf(second.injected[0]).includes("# Multitask dispatcher"));
+  });
+
+  it("a repeat announcement WITHOUT disposure is still deduplicated", async () => {
+    // The guard's real job must survive the fix: the same live session
+    // announced twice activates once, so no duplicate tool registration throws
+    // and no second policy is injected.
+    const ctx = createCtx();
+    apply(ctx, volatileConfig({ enabled: true }));
+    const session = createSession("chat-1", TOP_LEVEL_HEADER);
+    appendDispatcherStart(session, "cmd-1");
+
+    const agent = createAgent("chat-1", TOP_LEVEL_HEADER);
+    const payload = {
+      agent: { ...agent, session: { ...agent.session, ...session } },
+      source: "resume",
+    };
+    ctx.fire("agent/created", payload);
+    await drain();
+    ctx.fire("agent/created", payload);
+    await drain();
+
+    assert.deepEqual(agent.scopedTools.names().sort(), DISPATCHER_SCOPED_TOOLS);
+    assert.equal(agent.injected.length, 1, "one activation, one policy");
+  });
+});
+
+/**
+ * Ticket 163 defect 4 — `ctx.sessionController` is read through ONE guarded
+ * accessor, and a deployment without the service degrades to the parent route
+ * instead of throwing.
+ *
+ * The reviewed code did `return ctx.sessionController;` AFTER a guarded
+ * `ctx.get`, outside any `try`. On a live cordis context that property read
+ * throws for a service the context never injected, so `sendMessage` — the
+ * caller the ticket names — propagated the cordis error instead of reaching
+ * the pre-ADR-0032 parent→child fallback. These tests build the host directly
+ * and make the property read throw, which is the only way to tell the two
+ * behaviours apart.
+ */
+describe("ticket 163 defect 4 — sessionController is read through one guarded accessor", () => {
+  /** A minimal structural ctx whose `sessionController` READ throws. */
+  function createFacadelessCtx() {
+    const ctx = {
+      get(name: string): unknown {
+        void name;
+        // Nothing answers `get`, so the accessor falls through to the property.
+        return undefined;
+      },
+      on() {
+        return () => {};
+      },
+      subagents: {
+        async startActivation() {
+          throw new Error("not used");
+        },
+        interrupt() {},
+        async sendMessage() {
+          return "msg-stub";
+        },
+      },
+      agents: { get: () => undefined },
+      jobs: { list: () => [] },
+      storageDomain: {
+        async open() {
+          return {
+            table: () => ({
+              get: () => undefined,
+              entries: () => new Map().entries(),
+              async put() {},
+              async delete() {
+                return false;
+              },
+            }),
+            async close() {},
+          };
+        },
+      },
+    };
+    // The hazard, modelled exactly: cordis throws at property ACCESS.
+    Object.defineProperty(ctx, "sessionController", {
+      configurable: true,
+      get(): never {
+        throw new Error(
+          "sessionController is not injected into this context (simulated cordis throw)",
+        );
+      },
+    });
+    return ctx;
+  }
+
+  it("sendMessage degrades to the parent route instead of throwing the cordis error", async () => {
+    const host = createCordisDshHost(createFacadelessCtx() as never);
+
+    // No facade, no recorded worker, so the parent route cannot resolve a
+    // sender either. THAT refusal is the correct outcome — it proves control
+    // reached the fallback instead of dying on the property read.
+    const caught = await host.sendMessage("some-worker", "hello").then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    assert.ok(caught instanceof Error);
+    assert.match(caught.message, /^CordisDshHost: /);
+    assert.match(caught.message, /no parent agent bound/);
+    assert.ok(
+      !/sessionController is not injected/.test(caught.message),
+      "the simulated cordis throw must never escape the accessor",
+    );
+  });
+
+  it("a facade reached through ctx.get is still preferred, unchanged", async () => {
+    // The guard must not break the working path: when the service IS there,
+    // it is used and `resolveAgent` is called.
+    const resolved: string[] = [];
+    const followed: unknown[] = [];
+    const ctx = createFacadelessCtx() as Record<string, unknown>;
+    ctx["get"] = (name: string) =>
+      name === "sessionController"
+        ? {
+            async resolveAgent(sessionId: string) {
+              resolved.push(sessionId);
+              return {
+                agent: { session: { id: sessionId }, followup: (m: unknown) => followed.push(m) },
+              };
+            },
+          }
+        : undefined;
+    const host = createCordisDshHost(ctx as never);
+
+    await host.sendMessage("peer-1", "carry on");
+
+    assert.deepEqual(resolved, ["peer-1"]);
+    assert.equal(followed.length, 1);
+  });
 });

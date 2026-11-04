@@ -152,11 +152,17 @@ function createScopedAgent(id: string, opts?: ScopedAgentOptions): ScopedAgent {
   const scopedTools = createScopedTools();
   // A real session header carries its own id (`sessionIdOfHeader` reads it, and
   // the ticket-147 resume check goes through the projection unit's `init`).
+  //
+  // Ticket 163 defect 2: every agent carries a `cwd` by default. A summon from
+  // a session with none is now REFUSED (the peer it would create could never
+  // be cold-resumed), so a stub without one models a summoner that cannot
+  // summon at all. That refusal has its own test in
+  // `spawn-dispatcher-host.test.ts`, whose stub leaves `cwd` off.
   const header = {
     id,
     parentSession: topLevel ? null : (opts?.parentSessionId ?? "parent-x"),
     delegationDepth: depth,
-    ...(opts?.cwd !== undefined ? { cwd: opts.cwd } : {}),
+    cwd: opts?.cwd ?? "C:\\work",
     ...(opts?.agentPreset !== undefined
       ? { agentPreset: opts.agentPreset }
       : {}),
@@ -737,7 +743,14 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     assert.equal(call.sessionId, dispatcherId);
     // Parentless by construction — `meta` admits only `cwd`. Every field the
     // host's ownership guard treats as "subagent-owned" is absent.
-    assert.deepEqual(Object.keys(call.meta), []);
+    //
+    // Ticket 163 defect 2 REWROTE this assertion. It used to read
+    // `assert.deepEqual(Object.keys(call.meta), [])` — i.e. it pinned the bug:
+    // an empty `meta` is a session the host can never cold-resume. `cwd` is
+    // now required, so the key set is exactly `["cwd"]` and its value is the
+    // summoner's own directory.
+    assert.deepEqual(Object.keys(call.meta), ["cwd"]);
+    assert.equal(call.meta["cwd"], "C:\\work");
     for (const forbidden of [
       "parentSession",
       "parentAgent",

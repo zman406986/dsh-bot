@@ -263,6 +263,10 @@ function createCompositionCtx() {
     readonly asks: unknown[];
     commandNames(): string[];
     toolNames(): string[];
+    /** Global-registry lookup used by the roster assertions below. */
+    tool(name: string):
+      | { execute: (args: unknown, exec?: unknown) => Promise<unknown> }
+      | undefined;
     listenerCount(): number;
     runCommand(invocation: {
       commandId: string;
@@ -382,12 +386,14 @@ describe("composition polish — dormant registration matrix (design-17 §3.2/§
       agent.injected.filter((m) => textOf(m).includes("## Restart")).length,
       0,
     );
-    // Listener baseline: the passive plumbing is exactly nine listeners —
-    // 2 lifecycle + 3 host (`subagent/end`, `session/event`, `agent/created`,
+    // Listener baseline: the passive plumbing is exactly ten listeners —
+    // 2 lifecycle + 4 host (`subagent/end`, `session/event`, `agent/created`,
     // the last being the worker-composition seam, passive while no spawn is in
-    // flight) + the ticket-145 racoons mount's four (`session/event`,
-    // `llm/stream`, `agent/pre-step`, `agent/turn-stopping`).
-    assert.equal(ctx.listenerCount(), 9);
+    // flight, and `agent/disposed`, which releases a resumed-user-dispatcher
+    // record when its session goes away — ticket 163 defect 3) + the
+    // ticket-145 racoons mount's four (`session/event`, `llm/stream`,
+    // `agent/pre-step`, `agent/turn-stopping`).
+    assert.equal(ctx.listenerCount(), 10);
   });
 
   it("activation is what raises the surface: tools appear, nothing is mirrored", async () => {

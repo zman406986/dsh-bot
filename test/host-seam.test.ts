@@ -161,14 +161,14 @@ describe("multitask core ↔ DshHost seam", () => {
     const host = new FakeDshHost();
     const durability = createInMemoryDurability();
     // Simulate a previous life: worker "w-build" was live at crash time in
-    // session-a only.
+    // session-a only. `status: "running"` is the snapshot `rebuildFromDurability`
+    // turns into unknown-state; there is no separate last-known field.
     durability.markers.set("w-build", {
       workerId: "w-build",
       parentSessionId: "session-a",
       streamKey: "build",
       title: "Crashed live",
       status: "running",
-      lastKnownStatus: "running",
       transcriptRef: null,
       todoId: null,
       startedAtMs: 1_000,

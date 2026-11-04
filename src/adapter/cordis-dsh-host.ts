@@ -366,26 +366,46 @@ export interface CordisDshHostOptions {
   /**
    * Ticket 118 (ADR-0025 mitosis): activate a freshly spawned DISPATCHER
    * child — bind it as a parent, register its own scoped tool surface, inject
-   * the dispatcher policy, add it to the lifecycle registry without the
-   * top-level gate, and start its durability rebuild.
+   * the dispatcher policy, register it in the lifecycle registry, and start
+   * its durability rebuild.
    *
-   * Called EXACTLY ONCE per successful `spawnDispatcher`, and — when the host
-   * announces the child — from the `agent/created` serial listener, i.e. the
-   * last moment its own scope can take registrations before its first turn
-   * (the same seam the worker composition uses). A host or stub that fires no
-   * `agent/created` gets the call right after `startActivation` resolves
-   * instead; in that case the child's first turn may already be open, so a
-   * tool surface registered here may miss it (recorded limit, not hidden).
+   * ADR-0032 changed what "activate" means here: the summoned dispatcher is a
+   * TOP-LEVEL session created through `ctx.agents.create`, so it goes through
+   * the ORDINARY activation gate rather than around it. This hook runs from
+   * that create call's `setup`, i.e. the last moment its own scope can take
+   * registrations before its first turn (the same seam the worker composition
+   * uses). A host or stub with no `agents.create` path reaches it from the
+   * `agent/created` listener instead; in that case the child's first turn may
+   * already be open, so a tool surface registered here may miss it (recorded
+   * limit, not hidden).
    *
    * The adapter passes the exact live child Agent and its session id, plus the
    * child's spawn generation (ticket 141: the spawner's generation + 1, 1 for
    * a user-started dispatcher). It never inspects the outcome — activation
    * failure must not turn a successful spawn into a host error.
+   *
+   * Ticket 159 — the fourth argument, the spawn's human label, is delivered
+   * WITH the session id it belongs to. The hook used to carry no title at all,
+   * so the plugin kept the label in a plugin-wide array and claimed it by
+   * queue position: only exact while one summon is in flight. Two dispatchers
+   * summoning at the same instant pushed two entries and popped them in
+   * whatever order the host's creates reached `setup`, so each child could be
+   * bound with the other's label. Passing the title on the same call as the
+   * session id removes the queue from the problem — there is nothing
+   * positional left to get wrong.
+   *
+   * It is present only on the spawn path, which is the only place a title
+   * exists. A re-announcement or cold resume of the same session passes
+   * `undefined`, and the plugin then keeps the label that session was bound
+   * with — the roster read in `parent-agent.ts` already falls back to the
+   * session id, and the title is not persisted (recorded limit on ticket 159,
+   * deliberately not folded into this fix).
    */
   onDispatcherSpawned?: (
     agent: AgentLike,
     sessionId: string,
     generation: number,
+    title?: string,
   ) => void;
   /**
    * Ticket 141: the spawn generation of a session this host knows, or null.
@@ -982,6 +1002,15 @@ type SessionControllerLike = {
  *
  * Returns `undefined` when neither exists, which is the pre-existing behaviour:
  * the caller falls back to the parent→child route and says so once.
+ *
+ * Ticket 163 defect 4: BOTH reads are guarded, including the declared seam.
+ * `ctx.sessionController` is a bare cordis service property read, and this
+ * repo records that such a read THROWS on a live context that never injected
+ * the service (the same reason `session-kind-projection.ts` wraps its read).
+ * An unguarded final read made the whole "degrade to the parent route"
+ * promise false: a deployment without the service threw out of `sendMessage`
+ * instead of falling back. Every caller already resolves the facade through
+ * this one accessor, so guarding here covers all of them.
  */
 function readSessionController(
   ctx: AdapterContext,
@@ -1000,7 +1029,14 @@ function readSessionController(
       // Absent (or not yet active): fall through to the declared seam.
     }
   }
-  return ctx.sessionController;
+  try {
+    return ctx.sessionController;
+  } catch {
+    // A live cordis context throws at property ACCESS for a service it never
+    // injected. That is the same "no facade" answer as an absent one, so the
+    // caller degrades to the parent route instead of propagating a throw.
+    return undefined;
+  }
 }
 
 /**
@@ -1145,7 +1181,7 @@ export function createCordisDshHost(
    * CALLER before doing anything else.
    *
    * Written by the two activation entry points that know the answer —
-   * `activateSpawnedDispatcher` (always `"spawned"`) and
+   * `activateSummonedDispatcher` (always `"spawned"`) and
    * `resumeUserStartedDispatcher` (the class the durable projection reported,
    * `"user"` by default). Never removed, for the same reason `dispatcherMarks`
    * is never removed: the classification of a session id cannot change, and a
@@ -1180,9 +1216,16 @@ export function createCordisDshHost(
    * from the durable `sessionKind` projection. A host that announces the same
    * resumed session twice must not run the activation path twice — the
    * plugin's path is idempotent, but the projection read is the only authority
-   * here and one answered yes is enough. Never cleared for the process
-   * lifetime: the set is tiny (one entry per resumed top-level dispatcher) and
-   * a later re-announcement is the same session.
+   * here and one answered yes is enough.
+   *
+   * Ticket 163 defect 3: the entry is dropped when the session is DISPOSED,
+   * not kept for the process lifetime. The guard exists to deduplicate
+   * concurrent/repeat ANNOUNCEMENTS of one live session; it must not outlive
+   * the activation it stands for. Keeping it was a real defect in two ways:
+   * a re-announcement after disposal skipped re-activation entirely, leaving
+   * the session without its scoped tools or policy; and the set grew for the
+   * whole process. `agent/disposed` is the event that ends an activation, so
+   * it is the event that ends this record.
    */
   const resumedUserDispatchers = new Set<string>();
   /**
@@ -1637,12 +1680,21 @@ export function createCordisDshHost(
    * caller after creation resolves. `setup` COMPOSES, never drives
    * (`dsh-agent/lib/types/index.d.ts:99-101`), and `flushPendingWakeTurn`
    * drives — it opens a `followup` turn.
+   *
+   * `title` (ticket 159) is the spawn's human label and is passed straight
+   * through to the hook, so the plugin never has to pair a label to a session
+   * by queue position. Present only on the spawn path; a re-announcement
+   * passes `undefined`.
+   *
+   * Named for the SUMMON, not the old subagent spawn: since ADR-0032 this runs
+   * for a summoned top-level session that went through the ordinary gate.
    */
-  function activateSpawnedDispatcher(
+  function activateSummonedDispatcher(
     childAgent: AgentLike,
     sessionId: string,
     generation: number = dispatcherGenerations.get(sessionId) ?? 2,
     flushWake = true,
+    title?: string,
   ): void {
     // Ticket 176: every session THIS function activates is spawned-class by
     // definition — it is called only for a child a dispatcher summoned (the
@@ -1665,7 +1717,7 @@ export function createCordisDshHost(
     }
     dispatcherActivated.add(sessionId);
     try {
-      onDispatcherSpawned(childAgent, sessionId, generation);
+      onDispatcherSpawned(childAgent, sessionId, generation, title);
     } catch (error) {
       try {
         console.warn(
@@ -1797,7 +1849,7 @@ export function createCordisDshHost(
         // user-started dispatcher).
         const generation = mark.generation ?? 2;
         dispatcherGenerations.set(sessionId, generation);
-        activateSpawnedDispatcher(childAgent, sessionId, generation);
+        activateSummonedDispatcher(childAgent, sessionId, generation);
       })
       .catch((error) => {
         // A marker-store failure must not break the host's create path; the
@@ -2043,7 +2095,7 @@ export function createCordisDshHost(
     }
     // ADR-0032: a summoned dispatcher is a TOP-LEVEL session, so its cold
     // resume lands in the parentless branch and never reaches
-    // `activateSpawnedDispatcher`. Without this the wake a send parked
+    // `activateSummonedDispatcher`. Without this the wake a send parked
     // (`openWakeTurn` → `pendingWakeTurns`) would be dropped forever. Same
     // order as the parented sites (ticket 138): the flush is LAST, after the
     // hook above mounted the tool surface and applied the policy, so the
@@ -2122,7 +2174,7 @@ export function createCordisDshHost(
     ) {
       // Ticket 118: the child of our `spawnDispatcher` call — a dispatcher
       // peer, never a worker. No composition, no barrier, no registry entry.
-      activateSpawnedDispatcher(child as AgentLike, childSessionId);
+      activateSummonedDispatcher(child as AgentLike, childSessionId);
       return;
     }
     // Ticket 142: a WORKER this plugin spawned. A live in-process spawn is
@@ -2153,6 +2205,30 @@ export function createCordisDshHost(
       // scope, so the dispatcher's surface never lists it.
       buildWorkerLocalTools(child.session?.id),
     );
+  });
+
+  /**
+   * Ticket 163 defect 3: an activation ends when its agent is disposed, so the
+   * "already re-activated this session" record must end with it.
+   *
+   * The guard exists to deduplicate repeat ANNOUNCEMENTS of one live session.
+   * Kept past disposal it silently suppressed a legitimate re-activation: the
+   * session was re-announced in the same process, `resumeUserStartedDispatcher`
+   * saw its id still in the set, and the early return left the session with no
+   * scoped tools and no policy. It also grew for the process lifetime.
+   *
+   * `pendingWakeTurns` is deliberately NOT cleared here: a wake parked for this
+   * id is a delivery obligation to the session, and the next announcement
+   * discharges it (that is what `flushPendingWakeTurn` is for). Only the
+   * deduplication record is per-activation.
+   */
+  const offAgentDisposed = ctx.on("agent/disposed", (payload: never) => {
+    const record = payload as {
+      agent?: { session?: { id?: unknown } };
+    } | null;
+    const sessionId = record?.agent?.session?.id;
+    if (sessionId === undefined || sessionId === null) return;
+    resumedUserDispatchers.delete(String(sessionId));
   });
 
   const host: CordisDshHost = {
@@ -2596,10 +2672,10 @@ export function createCordisDshHost(
       const controller = new AbortController();
       const signal = opts.signal ?? controller.signal;
       // ADR-0032: the summoned dispatcher is a TOP-LEVEL session parallel to
-      // this one, so it inherits no delegation depth — `maxDepth`,
-      // `dispatcherSpawnMaxDepth` and the host's 8-slot root pool are
-      // subagent-runtime bounds and do not apply to it (no cap of ours, per
-      // the 2026-10-28 owner decision). The summoner still supplies:
+      // this one, so it inherits no delegation depth — `maxDepth` and the
+      // host's 8-slot root pool are subagent-runtime bounds and do not apply
+      // to it (no cap of ours, per the 2026-10-28 owner decision). The
+      // summoner still supplies:
       // - `cwd`, because the host's cross-session route refuses a session
       //   whose header has none (`dsh-api-session-controller/lib/index.js:393`),
       //   which would leave the peer unreachable after a restart;
@@ -2608,6 +2684,19 @@ export function createCordisDshHost(
       //   (`dsh-agent-loop/lib/index.js:1197`). The subagent path inherited
       //   both through `resolveChildAgentOptions`; that edge is gone.
       const summonerCwd = parent.session.header?.cwd;
+      // Ticket 163 defect 2: a summoned session with NO `cwd` can never be
+      // cold-resumed (`resolveAgent` refuses a header that carries none, see
+      // `dsh-api-session-controller/lib/index.js:393`), so creating it anyway
+      // is a silent trap: the peer exists, answers, and is gone for good at
+      // the next restart. There is no correct value to invent here — a
+      // borrowed or guessed path would create the session in the WRONG
+      // directory, which is worse than refusing — so this refuses loudly, with
+      // the remedy named, before any session is created.
+      if (typeof summonerCwd !== "string" || summonerCwd === "") {
+        throw new Error(
+          `CordisDshHost: session ${opts.parentSessionId} has no cwd, so a dispatcher summoned from it could never be cold-resumed (the host's cross-session route refuses a session without one). Nothing was created. Start the summoning chat in a directory and summon again.`,
+        );
+      }
       const route = parent.options;
       const agentOptions: AgentOptionsLike | undefined =
         typeof route?.provider === "string" &&
@@ -2642,8 +2731,22 @@ export function createCordisDshHost(
         // BEFORE the create: `agent/created` fires inside that call, and the
         // mark row — the other source of this number — is only written after
         // it resolves.
+        //
+        // Ticket 163 defect 1: the DURABLE MIRROR is consulted FIRST. The
+        // ticket-141 seam (`dispatcherGenerationOf`) reads the PLUGIN's
+        // lifecycle, and a summoned dispatcher that comes back through a
+        // parentless cold resume is activated there without a generation —
+        // `lifecycle.activate(agent, { origin })` defaults it to 1. Reading
+        // only the lifecycle therefore recorded generation 2 for a summon made
+        // by a generation-3 peer, where the durable row says 4. The mirror is
+        // filled from that same row by `refreshDispatcherMarks`, and every
+        // spawn in THIS process seeds it before its child exists, so it is at
+        // least as authoritative as the lifecycle in both directions. The
+        // seam stays as the fallback for a session the mirror does not know.
         const spawnerGeneration =
-          dispatcherGenerationOf?.(opts.parentSessionId) ?? 1;
+          dispatcherGenerations.get(opts.parentSessionId) ??
+          dispatcherGenerationOf?.(opts.parentSessionId) ??
+          1;
         const childGeneration = spawnerGeneration + 1;
         dispatcherGenerations.set(reservedChildId, childGeneration);
         // ADR-0032 — the whole fix. Create a real top-level session, the same
@@ -2667,7 +2770,7 @@ export function createCordisDshHost(
         }
         const handle = await create.call(ctx.agents, {
           sessionId: reservedChildId,
-          meta: summonerCwd === undefined ? {} : { cwd: String(summonerCwd) },
+          meta: { cwd: summonerCwd },
           ...(agentOptions === undefined ? {} : { agentOptions }),
           setup: (agentCtx, agent) => {
             // ADR-0019: the child's own scope takes its scoped tools and
@@ -2681,11 +2784,17 @@ export function createCordisDshHost(
             // single deduplicated helper. `setup` COMPOSES, never drives, so
             // the parked-wake discharge is deferred to the caller below and
             // the first turn is opened after creation resolves.
-            activateSpawnedDispatcher(
+            //
+            // Ticket 159: `opts.title` rides THIS call. The child's id is
+            // already fixed (it is the reservation passed as the session id),
+            // so the label and the session it belongs to travel together and
+            // no queue can pair them wrongly.
+            activateSummonedDispatcher(
               agent,
               reservedChildId,
               childGeneration,
               false,
+              opts.title,
             );
           },
           ...(signal === undefined ? {} : { signal }),
@@ -2829,12 +2938,14 @@ export function createCordisDshHost(
       offSubagentEnd();
       offSessionEvent();
       offAgentCreated();
+      offAgentDisposed();
       pendingSpawns.clear();
       reservedDispatcherIds.clear();
       dispatcherActivated.clear();
       dispatcherMarks.clear();
       dispatcherGenerations.clear();
       resumeRequested.clear();
+      resumedUserDispatchers.clear();
       pendingWakeTurns.clear();
       workerSessions.clear();
       parkedWorkerWakes.clear();

@@ -145,7 +145,9 @@ export interface BindDispatcherLifecycleResult {
    * alike. A summoned dispatcher is now a top-level session parallel to its
    * summoner, so the top-level gate admits it for the same reason it admits a
    * user chat — hence no second, gate-free path exists (the pre-2026-10-28
-   * `activateSpawnedDispatcher` existed only to dodge that gate). What the
+   * spawn-time activation hook, then called `activateSpawnedDispatcher`,
+   * existed only to dodge that gate; it is `activateSummonedDispatcher` now
+   * and goes through the gate). What the
    * caller must still tell it is what the gate cannot see: `options.origin`,
    * `options.generation` and `options.title`. Omit `options` entirely for a
    * user chat and the behaviour is byte-identical to before.

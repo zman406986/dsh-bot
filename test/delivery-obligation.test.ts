@@ -30,8 +30,6 @@ function emptyWake(sessionId = SESSION): WakeEvent {
     sessionId,
     source: "timer",
     settledWorkers: [],
-    accessRequests: [],
-    accessNotices: [],
   };
 }
 

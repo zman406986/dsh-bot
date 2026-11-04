@@ -268,12 +268,13 @@ describe("activation lifecycle — flag matrix (design-16 §3.7)", () => {
       DISPATCHER_START_COMMAND,
     ]);
     assert.deepEqual(ctx.toolNames(), []);
-    // Two lifecycle listeners (agent/disposed, agent/status) + three host
+    // Two lifecycle listeners (agent/disposed, agent/status) + four host
     // listeners (subagent/end, session/event, agent/created — the worker
-    // composition seam, passive until a spawn is in flight) + the ticket-145
-    // racoons mount (session/event, llm/stream, agent/pre-step and
+    // composition seam, passive until a spawn is in flight — and agent/disposed,
+    // the resumed-user-dispatcher release from ticket 163 defect 3) + the
+    // ticket-145 racoons mount (session/event, llm/stream, agent/pre-step and
     // agent/turn-stopping), which is always on inside the enabled path.
-    assert.equal(ctx.listenerCount(), 9);
+    assert.equal(ctx.listenerCount(), 10);
     // No dispatcher tool claims a dormant key: a stock caller sees stock.
     for (const name of [
       "spawn_worker",

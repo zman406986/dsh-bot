@@ -31,9 +31,8 @@ export interface DshHost {
    * worker composition, enters no worker roster, carries no stream key.
    * ADR-0032: it is a TOP-LEVEL session (the adapter creates it through
    * `ctx.agents.create` with no `parentAgent`), so the subagent runtime's
-   * `maxDepth` ceiling and its live-child pool do not bound it;
-   * `dispatcherSpawnMaxDepth` no longer feeds this path and we set no cap of
-   * our own. Host errors surface as-is, unchanged.
+   * `maxDepth` ceiling and its live-child pool do not bound it, and we set no
+   * cap of our own. Host errors surface as-is, unchanged.
    */
   spawnDispatcher(opts: DispatcherSpawnOptions): Promise<DispatcherSpawnResult>;
   /** Interrupt a running worker. Fire-and-return once the host accepted the stop. */

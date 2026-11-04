@@ -61,8 +61,6 @@ async function rig(options?: {
     ...(options?.isWorkerMarked !== undefined
       ? { findDurableWorker: options.isWorkerMarked }
       : {}),
-    // The access relay's default 120 s timer must never outlive a test.
-    access: { timeoutMs: 50, schedule: () => () => {} },
   });
   const clock = { now: 1_000_000 };
   const tools = createDispatcherTools({

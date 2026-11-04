@@ -4,10 +4,9 @@
  *
  * Offline only (S8): fake AdapterContext seams — a per-agent SCOPED tool
  * surface on every test agent (shaped after the live host's `agent.ctx`,
- * docs/research/dsh-tool-scoping-seam.md), a fake `ctx.userQuestions` seam,
- * a settings-capturing scope, and a listener bus — driving the real plugin
- * apply(), the real CordisDshHost, and the real Multitask core. No network,
- * no LLM, no running dsh.
+ * docs/research/dsh-tool-scoping-seam.md), a settings-capturing scope, and a
+ * listener bus — driving the real plugin apply(), the real CordisDshHost, and
+ * the real Multitask core. No network, no LLM, no running dsh.
  *
  * Fake-vs-host (ticket 93): the settings-provider fake models the shipped
  * scope contract — `register(ns, schema, options?)` returns the owner scope
@@ -34,14 +33,11 @@ import { describe, it } from "node:test";
 import { apply } from "../src/plugin.js";
 import {
   DISPATCHER_START_COMMAND,
-  type AccessPromptAnswerLike,
-  type AccessPromptRequestLike,
   type AdapterContext,
   type AgentLike,
   type CommandDefinitionLike,
   type CommandResultLike,
   type ToolsLike,
-  type UserQuestionsLike,
 } from "../src/adapter/index.js";
 import { ROSTER_SETTINGS_KEY } from "../src/core/roster-snapshot.js";
 import { volatileConfig } from "./support/plugin-config.js";
@@ -50,50 +46,21 @@ function tick(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-interface CapturedAsk {
-  readonly request: AccessPromptRequestLike;
-  readonly agentSessionId: string;
-  /** Whether the pump abandoned this prompt (deactivation aborts it). */
-  aborted: boolean;
-  resolve(answer: AccessPromptAnswerLike): void;
+async function drain(): Promise<void> {
+  for (let i = 0; i < 10; i += 1) await tick();
 }
 
-/** Fake user-questions seam recording which agent each ask was scoped to. */
-function createFakeUserQuestions(): UserQuestionsLike & {
-  asks: CapturedAsk[];
-} {
-  const asks: CapturedAsk[] = [];
-  return {
-    asks,
-    ask(request: AccessPromptRequestLike): Promise<AccessPromptAnswerLike> {
-      return new Promise<AccessPromptAnswerLike>((resolve, reject) => {
-        const agentSessionId =
-          request.agent !== undefined &&
-          typeof request.agent === "object" &&
-          request.agent !== null &&
-          "session" in request.agent
-            ? String(
-                (request.agent as { session?: { id?: unknown } }).session?.id,
-              )
-            : "";
-        const captured: CapturedAsk = {
-          request,
-          agentSessionId,
-          aborted: false,
-          resolve,
-        };
-        asks.push(captured);
-        request.signal?.addEventListener("abort", () => {
-          captured.aborted = true;
-          reject(new Error("prompt aborted"));
-        });
-      });
-    },
-  };
+/** Text of an injected plugin context message (policy / turn reminder). */
+function textOf(message: unknown): string {
+  const content = (message as { content?: Array<{ text?: string }> }).content;
+  if (!Array.isArray(content)) return "";
+  return content.map((block) => block.text ?? "").join("");
 }
 
 /** Top-level agent with its OWN scoped tool surface (live-host shape). */
 interface ScopedAgent extends AgentLike {
+  /** Messages `inject` received (ticket 159: the per-turn peer roster). */
+  readonly injected: unknown[];
   readonly scopedToolNames(): string[];
   readonly scopedTool: (
     name: string,
@@ -102,11 +69,12 @@ interface ScopedAgent extends AgentLike {
     | undefined;
 }
 
-function createScopedAgent(id: string): ScopedAgent {
+function createScopedAgent(id: string, cwd = "C:\\work"): ScopedAgent {
   const scoped = new Map<
     string,
     { execute: (args: unknown, exec?: unknown) => Promise<unknown> }
   >();
+  const injected: unknown[] = [];
   const tools: ToolsLike = {
     schemas: () => [...scoped.keys()].map((name) => ({ name })),
     register(definition: {
@@ -131,17 +99,20 @@ function createScopedAgent(id: string): ScopedAgent {
     },
   };
   const agent: ScopedAgent = {
-    session: { id, header: { parentSession: null, delegationDepth: 0 } },
+    session: { id, header: { parentSession: null, delegationDepth: 0, cwd } },
     followup() {},
-    inject() {},
+    inject(message: unknown) {
+      injected.push(message);
+    },
     ctx: { tools },
+    injected,
     scopedToolNames: () => [...scoped.keys()],
     scopedTool: (name) => scoped.get(name),
   };
   return agent;
 }
 
-function createMultiCtx(seam?: UserQuestionsLike) {
+function createMultiCtx() {
   const listeners = new Map<string, Array<(payload: never) => void>>();
   const commands = new Map<string, CommandDefinitionLike>();
   const tools = new Map<
@@ -182,6 +153,11 @@ function createMultiCtx(seam?: UserQuestionsLike) {
     },
   };
   let nextChild = 1;
+  const createCalls: Array<{ sessionId: string; cwd: unknown }> = [];
+  const childrenById = new Map<string, ScopedAgent>();
+  const heldGates = new Map<string, () => void>();
+  /** Ticket 159: park every create before its `setup`, until released. */
+  let holdAllCreates = false;
 
   const fire = (name: string, payload: unknown) => {
     for (const cb of [...(listeners.get(name) ?? [])]) {
@@ -291,6 +267,42 @@ function createMultiCtx(seam?: UserQuestionsLike) {
     },
     agents: {
       get: (id: unknown) => agentsById.get(String(id)),
+      /**
+       * ADR-0032 / ticket 159: the summon path. The real host creates a
+       * TOP-LEVEL session here and awaits `setup` BEFORE publication.
+       *
+       * `holdCreates()` parks every create before its `setup` runs.
+       * `releaseCreate(id)` then lets ONE parked create through, chosen by the
+       * session id it was reserved under — so a test can make the SECOND
+       * summon's `setup` reach the activation hook first. That is the exact
+       * interleaving two simultaneous summons produce, and a pairing that
+       * relies on queue order has no order to trust there.
+       */
+      async create(createOptions: {
+        sessionId: string;
+        meta?: Record<string, unknown>;
+        setup?: (agentCtx: unknown, agent: AgentLike) => void | Promise<void>;
+      }) {
+        createCalls.push({
+          sessionId: createOptions.sessionId,
+          cwd: createOptions.meta?.["cwd"],
+        });
+        const child = createScopedAgent(
+          createOptions.sessionId,
+          typeof createOptions.meta?.["cwd"] === "string"
+            ? String(createOptions.meta["cwd"])
+            : "C:\\work",
+        );
+        childrenById.set(createOptions.sessionId, child);
+        agentsById.set(createOptions.sessionId, child);
+        if (holdAllCreates) {
+          await new Promise<void>((resolve) => {
+            heldGates.set(createOptions.sessionId, resolve);
+          });
+        }
+        await createOptions.setup?.(child.ctx, child);
+        return { agent: child, dispose: async () => {} };
+      },
     },
     jobs: { list: () => [] },
     storageDomain: {
@@ -314,7 +326,6 @@ function createMultiCtx(seam?: UserQuestionsLike) {
         };
       },
     },
-    ...(seam !== undefined ? { userQuestions: seam } : {}),
     // Test surface
     fire,
     updates,
@@ -326,6 +337,18 @@ function createMultiCtx(seam?: UserQuestionsLike) {
     globalTool: (name: string) => tools.get(name),
     sentMessages,
     spawnedParents,
+    createCalls,
+    childrenById,
+    /** Park every `agents.create` before its `setup` runs, until released. */
+    holdCreates() {
+      holdAllCreates = true;
+    },
+    /** Release ONE parked create, chosen by the id it was reserved under. */
+    releaseCreate(sessionId: string) {
+      const gate = heldGates.get(sessionId);
+      heldGates.delete(sessionId);
+      gate?.();
+    },
     runCommand(invocation: {
       commandId: string;
       agent?: AgentLike;
@@ -505,3 +528,149 @@ describe("multi-dispatcher — scoped surfaces (ADR-0019)", () => {
 
 // Ticket 91's fail-loud duplicate-registration pin lives in
 // test/plugin-scaffold.test.ts: it is one host rule, pinned once.
+
+/**
+ * Ticket 159 — the spawn title pairs with its session by IDENTITY, not by
+ * queue position.
+ *
+ * The defect: `src/plugin.ts` kept a plugin-wide `spawnTitlesInFlight` array,
+ * pushed the summon's title into it before calling the host, and let the
+ * activation hook claim the OLDEST entry with `shift()`. Two dispatcher
+ * sessions summoning at the same instant therefore swapped labels whenever the
+ * host ran the second child's `setup` first: both spawns succeed, both ids are
+ * right, and each peer-roster row shows the other's name.
+ *
+ * The fix: the title rides the hook call itself (the host passes `opts.title`
+ * beside the reserved child id), so nothing is claimed by position.
+ *
+ * The interleaving below is the ticket's exact one — both creates are in
+ * flight and parked BEFORE either `setup` runs, then the SECOND summon is
+ * released first. A FIFO claim binds the second child with the first title.
+ * The assertions are two-directional: each roster row carries its own title
+ * AND not the other's, so a non-empty-label check cannot pass by accident.
+ */
+describe("ticket 159 — two simultaneous summons keep their own titles", () => {
+  async function spawnDispatcherVia(
+    agent: ScopedAgent,
+    title: string,
+  ): Promise<Record<string, unknown>> {
+    const spawn = agent.scopedTool("spawn_dispatcher");
+    assert.ok(spawn, `no scoped spawn_dispatcher on ${String(agent.session.id)}`);
+    return (await spawn.execute(
+      { title, prompt: `${title}: own this half.` },
+      undefined,
+    )) as Record<string, unknown>;
+  }
+
+  it("a summon released out of order binds each child with ITS OWN title", async () => {
+    const multi = createMultiCtx();
+    apply(multi.ctx, volatileConfig({ enabled: true }));
+    const a = createScopedAgent("s-a");
+    const b = createScopedAgent("s-b");
+    await activate(multi, a);
+    await activate(multi, b);
+
+    // Both creates park before `setup`, so neither child has been activated
+    // when the other spawn is already in flight — the queue has no order.
+    multi.ctx.holdCreates();
+    const firstSpawn = spawnDispatcherVia(a, "Alpha job");
+    const secondSpawn = spawnDispatcherVia(b, "Beta job");
+    for (let i = 0; i < 50 && multi.ctx.createCalls.length < 2; i += 1) {
+      await tick();
+    }
+    assert.equal(
+      multi.ctx.createCalls.length,
+      2,
+      "both summons are in flight at the same instant",
+    );
+    const alphaId = multi.ctx.createCalls[0]?.sessionId;
+    const betaId = multi.ctx.createCalls[1]?.sessionId;
+    assert.ok(alphaId !== undefined && betaId !== undefined);
+    assert.notEqual(alphaId, betaId);
+
+    // Release the SECOND summon first: its `setup` reaches the activation hook
+    // before the first summon's does. A positional claim hands it Alpha's
+    // title, which is exactly the swap.
+    multi.ctx.releaseCreate(betaId);
+    await drain();
+    multi.ctx.releaseCreate(alphaId);
+    const [alphaResult, betaResult] = await Promise.all([
+      firstSpawn,
+      secondSpawn,
+    ]);
+    assert.equal(alphaResult.ok, true, JSON.stringify(alphaResult));
+    assert.equal(betaResult.ok, true, JSON.stringify(betaResult));
+    // The ack echoes the caller's own title under either implementation; the
+    // roster is where the swap was observable.
+    assert.equal(alphaResult.dispatcher_id, alphaId);
+    assert.equal(betaResult.dispatcher_id, betaId);
+
+    // The peer roster is rendered from the activation's own record, so a
+    // swapped label shows up here first.
+    const rosterOf = (agent: ScopedAgent): string => {
+      const before = agent.injected.length;
+      multi.ctx.fire("agent/status", { agent, status: "running" });
+      assert.ok(
+        agent.injected.length > before,
+        `no turn reminder was injected for ${String(agent.session.id)}`,
+      );
+      return textOf(agent.injected.at(-1));
+    };
+
+    // Direction 1: A's roster row for B carries Beta's title.
+    const rosterA = rosterOf(a);
+    assert.ok(
+      rosterA.includes(`- Beta job (${String(betaId)})`),
+      `A's roster must label B with Beta's title:\n${rosterA}`,
+    );
+    assert.ok(
+      !rosterA.includes(`Alpha job (${String(betaId)})`),
+      `A's roster labelled B with A's own title (the swap):\n${rosterA}`,
+    );
+
+    // Direction 2: B's roster row for A carries Alpha's title.
+    const rosterB = rosterOf(b);
+    assert.ok(
+      rosterB.includes(`- Alpha job (${String(alphaId)})`),
+      `B's roster must label A with Alpha's title:\n${rosterB}`,
+    );
+    assert.ok(
+      !rosterB.includes(`Beta job (${String(alphaId)})`),
+      `B's roster labelled A with B's own title (the swap):\n${rosterB}`,
+    );
+  });
+
+  it("a refused summon records no title, so a later summon cannot inherit it", async () => {
+    const multi = createMultiCtx();
+    apply(multi.ctx, volatileConfig({ enabled: true }));
+    const a = createScopedAgent("s-a");
+    const b = createScopedAgent("s-b");
+    await activate(multi, a);
+    await activate(multi, b);
+
+    // A summoner with no cwd is REFUSED by the host before any session is
+    // created (ticket 163 defect 2). Its title must not survive anywhere.
+    const homeless = createScopedAgent("s-homeless", "");
+    await activate(multi, homeless);
+    const refused = await spawnDispatcherVia(homeless, "Never happened");
+    assert.equal(refused.ok, false);
+    assert.equal(multi.ctx.createCalls.length, 0, "nothing was created");
+
+    // A real summon from a different session afterwards keeps its own title —
+    // there is no leftover entry for it to inherit, and none to displace.
+    const real = await spawnDispatcherVia(b, "Real job");
+    assert.equal(real.ok, true, JSON.stringify(real));
+    const realId = String(real.dispatcher_id);
+
+    multi.ctx.fire("agent/status", { agent: a, status: "running" });
+    const rosterA = textOf(a.injected.at(-1));
+    assert.ok(
+      rosterA.includes(`- Real job (${realId})`),
+      `the later summon keeps its own title:\n${rosterA}`,
+    );
+    assert.ok(
+      !rosterA.includes("Never happened"),
+      `a refused summon's title leaked into the roster:\n${rosterA}`,
+    );
+  });
+});

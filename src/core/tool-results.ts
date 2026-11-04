@@ -110,8 +110,10 @@ export type DeliverResultToolResult = {
  * prompt — nothing was attempted) and `host-refused` (the host's own spawn
  * error, its text passed through verbatim in `detail`). There is deliberately
  * no `recursion-limit`, no `dispatcher-cap`, no generation counter and no
- * spawn budget: ADR-0025 settles that the host's `maxDepth` ceiling and live
- * child pool are the only bounds.
+ * spawn budget. ADR-0032 makes a summoned dispatcher a TOP-LEVEL session, so
+ * only the bounds that govern a top-level session apply: the subagent
+ * runtime's `maxDepth` ceiling and its live-child pool do not reach this path
+ * at all.
  */
 export type SpawnDispatcherToolResult =
   | {

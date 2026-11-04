@@ -21,8 +21,10 @@ import {
   type AdapterContext,
   type AgentLike,
   type CommandDefinitionLike,
-  type CreateAgentOptionsLike,
 } from "../src/adapter/index.js";
+// `CreateAgentOptionsLike` is exported by the host module but not re-exported
+// through the adapter barrel, so the test reaches the declaring module directly.
+import type { CreateAgentOptionsLike } from "../src/adapter/cordis-dsh-host.js";
 
 // ── fake host ─────────────────────────────────────────────────────────────
 

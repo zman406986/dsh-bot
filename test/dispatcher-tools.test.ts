@@ -5,6 +5,9 @@ import { FakeDshHost } from "../src/core/fake-host.js";
 import { createMultitask, type Multitask } from "../src/core/multitask.js";
 import {
   createDispatcherTools,
+  HOST_SPAWN_TOOL_CANDIDATES,
+  withheldHostSpawnTools,
+  withholdHostSpawnTools,
   type DispatcherToolDef,
 } from "../src/core/tools.js";
 import {AWAIT_AGENT_TOOL, CHECK_WORKERS_TOOL, DELIVER_RESULT_TOOL, DISPATCHER_TOOL_NAMES, SEND_PEER_TOOL, SPAWN_WORKER_TOOL, STOP_WORKER_TOOL} from "../src/core/policy/prompts.js";
@@ -370,5 +373,121 @@ describe("dispatcher tools — the registered surface (tickets 116/117)", () => 
     );
     assert.ok(!tools.some((tool) => tool.name === SEND_PEER_TOOL));
     assert.ok(tools.some((tool) => tool.name === AWAIT_AGENT_TOOL));
+  });
+});
+
+describe("ticket 179 — the host's raw spawn verbs are withheld per surface", () => {
+  it("candidate list is the two spawn verbs plus their route-discovery companion", () => {
+    assert.deepEqual([...HOST_SPAWN_TOOL_CANDIDATES], [
+      "subagent",
+      "subagent_fork",
+      "list_subagent_models",
+    ]);
+  });
+
+  it("intersects the candidates with the names actually live on the surface", () => {
+    // A preset-mounted surface (`standard` / `cordis` / `ptc`).
+    assert.deepEqual(
+      withheldHostSpawnTools(
+        new Set(["subagent", "subagent_fork", "list_subagent_models", "read"]),
+      ),
+      ["subagent", "subagent_fork", "list_subagent_models"],
+    );
+    // Partial: only the fork verb was mounted.
+    assert.deepEqual(withheldHostSpawnTools(new Set(["subagent_fork"])), [
+      "subagent_fork",
+    ]);
+    // `minimal` mounts neither: the answer is empty, never a guessed deny.
+    assert.deepEqual(withheldHostSpawnTools(new Set(["read", "bash"])), []);
+    assert.deepEqual(withheldHostSpawnTools(new Set()), []);
+  });
+
+  it("restricts the surface with exactly the live candidates and returns the disposer", () => {
+    const filters: Array<{ allow?: readonly string[]; deny?: readonly string[] }> =
+      [];
+    const lifted: string[] = [];
+    const surface = {
+      schemas: () => [
+        { name: "subagent" },
+        { name: "subagent_fork" },
+        { name: "list_subagent_models" },
+        { name: "read" },
+      ],
+      restrict(filter: { allow?: readonly string[]; deny?: readonly string[] }) {
+        filters.push(filter);
+        return () => {
+          lifted.push("restriction");
+        };
+      },
+    };
+    const dispose = withholdHostSpawnTools(surface);
+    assert.ok(dispose);
+    assert.deepEqual(filters, [
+      { deny: ["subagent", "subagent_fork", "list_subagent_models"] },
+    ]);
+    dispose();
+    assert.deepEqual(lifted, ["restriction"]);
+  });
+
+  it("never names a tool the host does not know (restrict throws on unknown names)", () => {
+    const seen: string[][] = [];
+    withholdHostSpawnTools({
+      // Only the spawn verb is mounted, like a preset with the fork row off.
+      schemas: () => [{ name: "subagent" }],
+      restrict(filter) {
+        seen.push([...(filter.deny ?? [])]);
+        return () => {};
+      },
+    });
+    assert.deepEqual(seen, [["subagent"]]);
+  });
+
+  it("is a no-op on a surface without restrict (stub hosts), an empty intersection, or an unreadable surface", () => {
+    // No restrict: the fallback registration shape, nothing to subtract from.
+    assert.equal(withholdHostSpawnTools({ schemas: () => [] }), null);
+    // Nothing live: the host rejects an empty filter outright.
+    const calls: unknown[] = [];
+    assert.equal(
+      withholdHostSpawnTools({
+        schemas: () => [{ name: "read" }],
+        restrict(filter) {
+          calls.push(filter);
+          return () => {};
+        },
+      }),
+      null,
+    );
+    // Unreadable surface: never guess a deny list.
+    assert.equal(
+      withholdHostSpawnTools({
+        schemas: () => {
+          throw new Error("no scope");
+        },
+        restrict(filter) {
+          calls.push(filter);
+          return () => {};
+        },
+      }),
+      null,
+    );
+    assert.deepEqual(calls, []);
+  });
+
+  it("passes the scope through to schemas (a preset's tools live on the agent plane)", () => {
+    const scopes: unknown[] = [];
+    const agent = { session: { id: "s-1" } };
+    withholdHostSpawnTools(
+      {
+        schemas(scope) {
+          scopes.push(scope);
+          return [{ name: "subagent" }];
+        },
+        restrict() {
+          return () => {};
+        },
+      },
+      agent,
+    );
+    assert.deepEqual(scopes, [agent]);
   });
 });

@@ -59,7 +59,6 @@ export {
   buildWorkerSystemPrompt,
   buildWorkerToolFilter,
   createWorkerAgentDef,
-  dispatcherSpawnMaxDepth,
   EMPTY_WORKER_ERROR_REPORT,
   EMPTY_WORKER_REPORT_PLACEHOLDER,
   normalizeWorkerErrorReport,

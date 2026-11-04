@@ -85,27 +85,6 @@ export function workerSpawnMaxDepth(
   return parentDelegationDepth + 1 + budget;
 }
 
-/**
- * Ticket 118 (ADR-0025 §Starting bounds): the ABSOLUTE delegation-depth
- * ceiling to send in the spawn request's `maxDepth` slot for the
- * dispatcher→dispatcher hop. Same idiom as `workerSpawnMaxDepth`: the host
- * reads the slot as the CHILD'S ceiling and accepts the spawn iff
- * `parentDepth + 1 <= maxDepth`.
- *
- * Why +2 and not +1: the child dispatcher lands at `parentDepth + 1` and is
- * itself expected to spawn workers one hop below that. A child admitted with
- * `parentDepth + 1` would pass the host's check but then have every worker it
- * tries to create at `parentDepth + 2` refused by the same check. The budget
- * is therefore two hops: one for the child dispatcher, one for the workers it
- * will spawn.
- *
- * This is a derivation of the host's ceiling, not a cap of ours: no recursion
- * limit, no dispatcher count, no spawn budget (ADR-0025, settled bounds).
- */
-export function dispatcherSpawnMaxDepth(parentDelegationDepth: number): number {
-  return parentDelegationDepth + 2;
-}
-
 /** Create the default worker agent definition. */
 export function createWorkerAgentDef(
   language: WorkerPromptLanguage = "en",

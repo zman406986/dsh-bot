@@ -56,7 +56,7 @@ import {
   type RacoonsMountHandle,
 } from "./adapter/racoons-mount.js";
 import { clampActivity, clampReport } from "./core/report-clamp.js";
-import { createWorkerLocalToolDefs } from "./core/tools.js";
+import { createWorkerLocalToolDefs, withholdHostSpawnTools } from "./core/tools.js";
 import { createWorkerAgentDef } from "./worker/agent-def.js";
 import { resolveHostPolicyLanguage } from "./adapter/locale-preference.js";
 
@@ -614,26 +614,6 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
    */
   let racoonsMount: RacoonsMountHandle | null = null;
   /**
-   * Ticket 155/ADR-0032: spawn titles waiting for the host's activation hook.
-   *
-   * The hook carries only `(agent, sessionId, generation)` — no title — and it
-   * fires from the child's create `setup`, i.e. INSIDE `host.spawnDispatcher`.
-   * So the title exists on exactly one seam this plugin can read: the
-   * `spawnDispatcher` wrapper below. That wrapper pushes the title before
-   * calling the host and the hook shifts it back off, which is how a summoned
-   * dispatcher reaches `lifecycle.activate` with its human label — the same
-   * `options.title` that `parent-agent.ts` keeps as the peer roster label. No
-   * second label source is invented.
-   *
-   * Entries are shorter-lived than a spawn: claimed by the hook inside the
-   * call, or dropped in the wrapper's `finally` when the spawn is refused.
-   * Claim is FIFO, so the single-spawn case (the normal one) is exact; two
-   * dispatchers summoning at the same instant could swap labels — accepted,
-   * and visible in the roster rather than silent, since the child id and the
-   * title both stay correct.
-   */
-  const spawnTitlesInFlight: Array<{ readonly title: string }> = [];
-  /**
    * Ticket 176 (owner ruling 2026-11-03): the CLASS of every session this
    * plugin activates, so `activateToolSurface` knows whether to register
    * `spawn_dispatcher`.
@@ -712,11 +692,14 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     // below; this closure only runs once a spawn happens, never during apply
     // (same rule as `pumpFor`).
     //
-    // Ticket 155: `title` is the spawn's human label. The hook carries only
-    // (agent, sessionId, generation) and fires INSIDE `host.spawnDispatcher`,
-    // so the one place this plugin can read the label is the seam below.
-    onDispatcherSpawned: (agent, sessionId, generation) => {
-      const pending = spawnTitlesInFlight.shift();
+    // Ticket 155: `title` is the spawn's human label, and ticket 159 makes it
+    // arrive HERE. The host passes the summon's `opts.title` on the same call
+    // that already names the child, so the label and the session id it belongs
+    // to travel together — there is no queue to claim by position, and two
+    // simultaneous summons cannot swap labels. A re-announcement or cold
+    // resume passes `undefined`; that session keeps the label it was bound
+    // with (the title is not persisted — ticket 159's recorded limit).
+    onDispatcherSpawned: (agent, sessionId, generation, title) => {
       // Owner-directed 2026-11-02: a dispatcher another dispatcher summoned is
       // a different CLASS — a team leader for one massive job — so the spawn
       // path must say so. Until this line, the origin defaulted to `user` and
@@ -730,7 +713,7 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       lifecycle.activate(agent, {
         generation,
         origin: "spawned",
-        ...(pending === undefined ? {} : { title: pending.title }),
+        ...(title === undefined ? {} : { title }),
       });
     },
     // Ticket 141: a spawn from a CHILD must read that child's generation, not
@@ -899,20 +882,11 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       // Agent only for the summoner's cwd and provider/model route — the
       // child is created as a top-level session, so no depth ceiling applies.
       //
-      // Ticket 155: the title is pushed for the activation hook — it fires
-      // inside this call (the child's create `setup`) and has no other way to
-      // learn the label. Removed again when the spawn refuses, so a failed
-      // summon cannot leak its title onto a later one.
-      spawnDispatcher: async (opts: DispatcherSpawnOptions) => {
-        const pendingTitle = { title: opts.title };
-        spawnTitlesInFlight.push(pendingTitle);
-        try {
-          return await host.spawnDispatcher(opts);
-        } finally {
-          const index = spawnTitlesInFlight.indexOf(pendingTitle);
-          if (index >= 0) spawnTitlesInFlight.splice(index, 1);
-        }
-      },
+      // Ticket 155/159: the title needs no side channel any more. The host
+      // carries `opts.title` into `onDispatcherSpawned` itself, so this stays
+      // a straight pass-through and a refused spawn records no title at all.
+      spawnDispatcher: (opts: DispatcherSpawnOptions) =>
+        host.spawnDispatcher(opts),
       // Ticket 153: the tool descriptions follow the same language.
       language,
       // Ticket 176 (owner ruling 2026-11-03): the CLASS decides whether this
@@ -929,10 +903,33 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     // registration — the shipped single-dispatcher shape, without the
     // per-agent visibility fence.
     const scopedTools = agent?.ctx?.tools;
-    const disposers =
+    const scopedSurface =
       scopedTools !== undefined && typeof scopedTools.register === "function"
-        ? registerDispatcherTools({ ctx: { tools: scopedTools }, ...toolDeps })
+        ? scopedTools
+        : undefined;
+    // Ticket 179: ONE spawn verb per dispatcher surface.
+    //
+    // The shipped `standard`/`cordis`/`ptc` presets mount the host's raw
+    // `subagent` and `subagent_fork` on the agent plane, and a dispatcher
+    // activated in such a session inherits them — children this plugin can
+    // never see, steer, stop, or settle. They are not ours, so the fix is a
+    // restriction on our own layer, which the host applies to the INHERITED
+    // surface only (`dsh-tools/lib/index.js:3040-3072`): the preset's verbs
+    // go, our eight tools (registered on the same layer) stay.
+    //
+    // Only on the scoped path — the plugin-level fallback has no scope, and
+    // the host's `restrict()` throws without one by design. A stub surface
+    // with no `restrict`, or carrying none of the candidates, returns null and
+    // nothing is recorded (the host rejects an empty filter).
+    const withholdDisposer =
+      scopedSurface !== undefined
+        ? withholdHostSpawnTools(scopedSurface, agent)
+        : null;
+    const disposers =
+      scopedSurface !== undefined
+        ? registerDispatcherTools({ ctx: { tools: scopedSurface }, ...toolDeps })
         : registerDispatcherTools({ ctx, ...toolDeps });
+    if (withholdDisposer !== null) disposers.push(withholdDisposer);
     // Ticket 145 step 4: the dispatcher session's OWN recall tool. Registered
     // on the same surface as the dispatcher tools (the activated agent's
     // scoped `ctx.tools`, or the plugin-level fallback), so the model only
@@ -940,12 +937,7 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     // handler reads THIS session's ledger via the mount's host-owned factory.
     if (racoonsMount !== null) {
       disposers.push(
-        racoonsMount.recallTools(
-          scopedTools !== undefined && typeof scopedTools.register === "function"
-            ? scopedTools
-            : ctx.tools,
-          sessionId,
-        ),
+        racoonsMount.recallTools(scopedSurface ?? ctx.tools, sessionId),
       );
     }
     sessionToolDisposers.set(sessionId, disposers);

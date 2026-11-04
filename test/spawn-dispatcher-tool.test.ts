@@ -3,8 +3,8 @@
  * no live dsh, no LLM, no real timers.
  *
  * Chunk 1 (host seam, `test/spawn-dispatcher-host.test.ts`) owns the spawn
- * request shape and the depth derivation. Chunk 3 (activation path) owns
- * `activateSpawnedDispatcher`, scoped registration, policy injection and
+ * request shape. Chunk 3 (activation path) owns
+ * `activateSummonedDispatcher`, scoped registration, policy injection and
  * lifecycle insertion. What is pinned here is exactly the tool:
  *
  *  - it is on the dispatcher surface and DENIED for workers;
@@ -15,9 +15,10 @@
  *  - it touches NO worker path: no stream key, no roster entry, no todo, no
  *    durability marker;
  *  - refusals are only what is real: `invalid-args` for an empty title or
- *    prompt, `host-refused` carrying the host's own text for everything the
- *    host throws (`ACTIVATION_LIMIT_REACHED`, the depth ceiling, an unbound
- *    parent). No recursion limit, no dispatcher cap, no generation counter.
+ *    prompt, `host-refused` carrying the host's own text for anything the
+ *    host's `agents.create` raises. No recursion limit, no dispatcher cap, no
+ *    generation counter. ADR-0032 made this a top-level session, so the
+ *    subagent runtime's pool limit and `maxDepth` refusal are not on this path.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
