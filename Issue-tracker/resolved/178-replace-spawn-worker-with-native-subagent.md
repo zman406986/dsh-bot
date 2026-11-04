@@ -1,6 +1,6 @@
 # 178 — Can `spawn_worker` be replaced by the host's `subagent` tool?
 
-**Status:** open
+**Status:** resolved
 **Type:** research / decision
 **Labels:** needs-owner-decision
 **Blocked by:** nothing.
@@ -124,3 +124,8 @@ The worker *contract* could in principle move into an Agent Preset — but that 
 Withhold `subagent` and `subagent_fork` from the dispatcher's tool surface so there is exactly one spawn verb, and one that the ledger can see. Barrier denial alone is not enough: it protects children, not the dispatcher's own choices.
 
 ## Comments
+
+### 2026-11-04 — PM closure
+
+Implemented and pushed. Belt-and-braces verification at closure: full suite 802 tests, 0 fail;
+all three typecheck configs clean; `npm run lint:docs` clean.

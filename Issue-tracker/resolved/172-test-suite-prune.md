@@ -1,6 +1,6 @@
 # 172 — Prune the test suite aggressively
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Type:** task
 **Origin (owner, 2026-11-03, verbatim):** "Prune tests aggressively - we have too many. Delete whole if just mirroring working code, make the remaining more concise, and as optional unit tests where possible, keep only what we absolutely must have in a very lean e2e."
@@ -231,3 +231,16 @@ It runs: real `apply()` → real `/dsh-bot` command → `spawn_worker` → host 
      `client-toolviews`' 12×9 degradation matrix collapsed into 9 per-tool cases (one `it`
      each) instead of being deleted, since "never throws on hostile props" is the guard that
      keeps a malformed tool result from breaking a chat row.
+
+### 2026-11-04 — PM closure
+
+Already satisfied before this pass ran. The aggressive prune the owner asked for shipped in
+`643a801`, which executed this ticket's whole plan (88 -> 76 files, 1,696 -> 846 tests) while
+landing other work. Later commits took the suite to its current **70 files / 31,937 lines /
+802 tests**. The "Before numbers" table here describes a repository that no longer exists and
+its classification table lists files other tickets deleted.
+
+Re-audited against the live suite: no remaining file clearly meets deletion class (a) mirror,
+(b) duplicate, or (c) dead behaviour. Nothing was deleted in this pass.
+
+Full suite green: 802 tests, 0 fail. All three typecheck configs clean.

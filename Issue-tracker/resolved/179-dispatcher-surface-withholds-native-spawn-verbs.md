@@ -1,6 +1,6 @@
 # 179 — A dispatcher's tool surface withholds the host's own spawn verbs
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Blocked by:** nothing.
 **Origin:** follow-up recorded in ticket 178 §"A real finding, next to the question: two spawn verbs on one surface" (2026-11-04): *"Withhold `subagent` and `subagent_fork` from the dispatcher's tool surface so there is exactly one spawn verb, and one that the ledger can see. Barrier denial alone is not enough: it protects children, not the dispatcher's own choices."*
@@ -77,3 +77,8 @@ The restriction is owned by the activation's effect, so `deactivateToolSurface` 
 - Existing doubles are inert: `test/spawn-dispatcher-activation.test.ts`'s `createScopedTools` and `test/plugin-scaffold.test.ts`'s `ctx.tools` expose no `restrict`, so the withhold is a no-op there and no other lane's assertions move. Verified by running both: 18/18 and 16/16 green, unedited.
 - Owned suites, run together: `dispatcher-tools` + `adapter-dispatcher-tools` + `tool-schema-shape` → **45 tests, 45 pass, 0 fail**. Adjacent surface suites also re-run green and untouched: `multi-dispatcher` + `dispatcher-resume-reactivation` + `adapter-racoons-mount` → 15/15.
 - `npx tsc -p tsconfig.json --noEmit` exit 0; `tsc -p tsconfig.client.json --noEmit` exit 0; `node tools/doc-lint.mjs` clean (0 findings, 6 rules); `node tools/issue-index.mjs --check` fresh (12 rows).
+
+### 2026-11-04 — PM closure
+
+Implemented and pushed. Belt-and-braces verification at closure: full suite 802 tests, 0 fail;
+all three typecheck configs clean; `npm run lint:docs` clean.

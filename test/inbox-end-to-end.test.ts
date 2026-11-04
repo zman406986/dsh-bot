@@ -30,6 +30,12 @@
  *    terminal outcome (disk truth wins) instead of re-presenting;
  * 9. N4: delivery finishes an inbox job even after intake was disabled —
  *    the reply writer rides the todo's own origin, not current config.
+ *
+ * Isolation note (ticket 162): the watcher creates its root inside a
+ * fire-and-forget async block that `apply` never awaits, so no test here may
+ * assume the directory exists merely because `flushActivation()` returned —
+ * the writeQueue helper creates it, and the cleanup helper retries, which is
+ * why this file no longer loses a race with its own watcher under load.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -391,8 +397,31 @@ function readCheckpoints(
   return out;
 }
 
+/**
+ * Write a queue file, creating the inbox root first.
+ *
+ * Ticket 162: the watcher creates its root inside a fire-and-forget async
+ * IIFE, and `apply` never awaits it, so the root may not exist yet when a
+ * test writes after `flushActivation()` — under full-suite load that loses
+ * the race and the write dies with ENOENT. Creating the root here makes the
+ * test own the directory instead of depending on the watcher's timing
+ * (the watcher's own `mkdir` is recursive and tolerates an existing dir).
+ */
 async function writeQueue(root: string, lines: readonly string[]): Promise<void> {
+  await mkdir(root, { recursive: true });
   await writeFile(join(root, "queue.jsonl"), lines.join("\n") + "\n", "utf8");
+}
+
+/**
+ * Remove a per-test temp parent, retrying briefly.
+ *
+ * Ticket 162 (same cause as {@link writeQueue}): a watcher start or scan that
+ * was already in flight when the test disposed can land its `mkdir`/write
+ * while this `rm` runs, which Windows reports as ENOTEMPTY/EPERM rather than
+ * succeeding.
+ */
+async function removeTempRoot(parent: string): Promise<void> {
+  await rm(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
 }
 
 interface InboxStatusFile {
@@ -475,7 +504,7 @@ describe("inbox end to end — the off switch (ticket 113, ADR-0023)", () => {
       );
       assert.equal(inboxWakeCount(emptyAgent), 0);
     } finally {
-      await rm(parent, { recursive: true, force: true });
+      await removeTempRoot(parent);
     }
   });
 });
@@ -550,7 +579,7 @@ describe("inbox end to end — the full pipeline (ticket 113, ADR-0023)", () => 
       assert.ok(terminal?.endedAtMs !== null, "the checkpoint is closed");
     } finally {
       ctx.dispose();
-      await rm(parent, { recursive: true, force: true });
+      await removeTempRoot(parent);
     }
   });
 
@@ -631,7 +660,7 @@ describe("inbox end to end — the full pipeline (ticket 113, ADR-0023)", () => 
         assert.equal(checkpoint?.sessionId, "s-1");
       } finally {
         ctx.dispose();
-        await rm(parent, { recursive: true, force: true });
+        await removeTempRoot(parent);
       }
     }
   });
@@ -717,7 +746,7 @@ describe("inbox end to end — no dispatcher at claim (ticket 113 N1a)", () => {
       assert.equal(afterStatus.claimedAt, heldStatus.claimedAt);
     } finally {
       ctx.dispose();
-      await rm(parent, { recursive: true, force: true });
+      await removeTempRoot(parent);
     }
   });
 });
@@ -818,7 +847,7 @@ describe("inbox end to end — boot rescan adopts disk truth (ticket 113 N2)", (
       );
     } finally {
       ctx.dispose();
-      await rm(parent, { recursive: true, force: true });
+      await removeTempRoot(parent);
     }
   });
 });
