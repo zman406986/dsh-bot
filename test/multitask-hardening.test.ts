@@ -428,6 +428,55 @@ describe("core hardening — step-boundary steer delivery", () => {
     assert.equal(multitask.getWorker(workerId)?.status, "running");
   });
 
+  it("a newer steer whose only boundary arrives during the older send is still delivered", async () => {
+    const host = new GatedHost();
+    const multitask = createMultitask(host);
+    const workerId = await spawnRunning(multitask);
+    assert.deepEqual(await multitask.steerWorker(workerId, "FIRST"), {
+      ok: true,
+    });
+    assert.equal(multitask.getWorker(workerId)?.status, "steering");
+
+    // FIRST's send is in flight. The worker observes "running" again while
+    // it is held: in the FSM that is a no-op out of "steering".
+    const gate = deferred();
+    host.sendGate = gate;
+    const firstBoundary = host.fireStepBoundary(workerId);
+    multitask.noteTurnStarted(workerId);
+    assert.deepEqual(await multitask.steerWorker(workerId, "SECOND"), {
+      ok: true,
+    });
+    assert.deepEqual(
+      host.interruptCalls,
+      [workerId],
+      "already steering: the newer correction does not re-interrupt",
+    );
+
+    // SECOND's only step boundary arrives inside FIRST's send window. The
+    // in-flight guard skips it; no later boundary is emitted by this test.
+    await host.fireStepBoundary(workerId);
+    assert.equal(
+      host.sendMessageCalls.length,
+      1,
+      "the skipped boundary sends nothing",
+    );
+
+    // FIRST succeeds. The successful send must still give the newer
+    // correction its delivery opportunity.
+    host.sendGate = null;
+    gate.resolve();
+    await firstBoundary;
+    await settleMicrotasks();
+
+    assert.equal(host.sendMessageCalls.length, 2, "SECOND is delivered");
+    assert.ok(host.sendMessageCalls[1]?.message.includes("SECOND"));
+    assert.equal(
+      multitask.getWorker(workerId)?.status,
+      "running",
+      "no correction remains, so the worker is running again",
+    );
+  });
+
   it("two boundaries inside one send window deliver the correction exactly once", async () => {
     const host = new GatedHost();
     const multitask = createMultitask(host);

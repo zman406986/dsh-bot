@@ -630,6 +630,13 @@ export function createMultitask(
    * correction again.
    */
   const steerSendInFlight = new Set<string>();
+  /**
+   * Ticket 195: worker ids where a step boundary arrived while a steer send
+   * was in flight. That boundary is the only delivery opportunity a newer
+   * correction parked during the send would otherwise get, so the successful
+   * send drains the newer slot instead of waiting for an unrelated boundary.
+   */
+  const steerBoundaryDeferred = new Set<string>();
   /** Armed bounded retry for a failed steer send, keyed by worker id. */
   const steerRetryTimers = new Map<string, () => void>();
   /** Retries already spent in the current failure burst. */
@@ -984,6 +991,7 @@ export function createMultitask(
     // a retry timer for it must not fire against a terminal record.
     steerQueue.clear(event.workerId);
     clearSteerRetry(event.workerId);
+    steerBoundaryDeferred.delete(event.workerId);
     // Aborted via settle: close the todo here; the wake still informs the dispatcher.
     // The marker obligation is closed too — nothing to reconstruct or deliver.
     if (event.status === "aborted") {
@@ -1127,11 +1135,13 @@ export function createMultitask(
    * resolves, so a rejected send never leaves the worker stuck in `steering`
    * with the accepted correction gone. On success only OUR message is popped —
    * a newer steer that replaced the slot mid-send stays parked and the worker
-   * stays `steering` for the next boundary.
+   * stays `steering`. It is delivered by the next boundary, or immediately
+   * when its own boundary already arrived during this send (ticket 195).
    *
    * Re-entrant boundaries are skipped while a send is in flight: two
    * boundaries inside one send window are one delivery point, and sending
-   * twice would deliver the same correction twice.
+   * twice would deliver the same correction twice. A skipped boundary is
+   * remembered so a newer correction parked during the window is not stranded.
    */
   function attemptSteerSend(
     workerId: string,
@@ -1141,15 +1151,24 @@ export function createMultitask(
     if (record === undefined || record.status !== "steering") {
       clearSteerRetry(workerId);
       steerSendInFlight.delete(workerId);
+      steerBoundaryDeferred.delete(workerId);
       return undefined;
     }
     const pending = steerQueue.peek(workerId);
     if (pending === undefined) {
       clearSteerRetry(workerId);
       steerSendInFlight.delete(workerId);
+      steerBoundaryDeferred.delete(workerId);
       return undefined;
     }
-    if (steerSendInFlight.has(workerId)) return undefined;
+    if (steerSendInFlight.has(workerId)) {
+      // Ticket 195: remember that this boundary was consumed inside the send
+      // window. If a newer correction replaced the slot meanwhile, the
+      // success continuation below must deliver it — no later boundary is
+      // guaranteed to arrive.
+      steerBoundaryDeferred.add(workerId);
+      return undefined;
+    }
     // A real boundary supersedes an armed retry and starts a fresh burst; a
     // timer-driven retry keeps the burst counter so the bound is finite.
     if (fromRetry) {
@@ -1160,6 +1179,9 @@ export function createMultitask(
     steerSendInFlight.add(workerId);
     const onFailure = (error: unknown): void => {
       steerSendInFlight.delete(workerId);
+      // The failed send keeps its parked correction, and the retry (or the
+      // next boundary) is its delivery path; a deferred boundary is spent.
+      steerBoundaryDeferred.delete(workerId);
       // The correction was never delivered, so it remains parked (or was
       // already replaced by a newer one — last-wins). The worker stays
       // `steering`; the retry below (and the next boundary) try again. Never
@@ -1184,10 +1206,16 @@ export function createMultitask(
         clearSteerRetry(workerId);
         const replaced = steerQueue.peek(workerId) !== pending;
         if (!replaced) steerQueue.pop(workerId);
-        // A newer correction arrived while this send was in flight: stay in
-        // `steering` and let the next step boundary deliver it.
+        // A newer correction arrived while this send was in flight. Its step
+        // boundary may already have arrived and been skipped: if so, this is
+        // its delivery opportunity, so drain it now rather than stranding it
+        // until an unrelated later boundary. With no newer correction the
+        // worker is back to `running`.
         if (steerQueue.peek(workerId) === undefined) {
+          steerBoundaryDeferred.delete(workerId);
           transition(workerId, { type: "steer-injected" });
+        } else if (steerBoundaryDeferred.delete(workerId)) {
+          void attemptSteerSend(workerId);
         }
       },
       onFailure,
@@ -1530,6 +1558,7 @@ export function createMultitask(
       // Drop any parked steer — nothing is kept for a later revival.
       steerQueue.clear(workerId);
       clearSteerRetry(workerId);
+      steerBoundaryDeferred.delete(workerId);
       // Aborted → cancelled on the ledger (and pruned; dsh has no cancelled).
       cancelLinkedTodo(record);
       // Marker obligation closed: nothing to deliver after a restart.
@@ -1621,6 +1650,7 @@ export function createMultitask(
         if (current !== undefined && isTerminalStatus(current.status)) {
           steerQueue.clear(workerId);
           clearSteerRetry(workerId);
+          steerBoundaryDeferred.delete(workerId);
         }
       }
       // Already steering: a delivery is pending; it will pick up this message.
@@ -2126,6 +2156,7 @@ export function createMultitask(
       for (const workerId of [...steerRetryTimers.keys()]) {
         clearSteerRetry(workerId);
       }
+      steerBoundaryDeferred.clear();
     },
     todos: todoLedger,
     sendPeer(sessionId: string, envelope: PeerEnvelope): PeerSendAck {
