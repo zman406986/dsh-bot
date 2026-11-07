@@ -99,3 +99,10 @@ is off by default and gated by `racoonsEnabled`, with the RACOONS launcher and
 `dev\cordis.racoons.patch.yml` as the manual switch (ADR-0033/ticket 174).
 The DoD row and Related line are updated; the dated comments above record the
 state at the time they were written. The human launch check remains open.
+
+2026-11-07: Consolidation (owner request). Only one launcher remains. The
+tracked source of truth is `dev/windows/dsh-bot.bat`; the Desktop
+`dsh-bot.bat` is a small forwarder to it, so the two can no longer drift.
+The separate `dsh-bot-RACOONS.bat` was deleted; its feature switch is the
+`racoons` route on the single launcher. DoD rows about the second launcher
+are retired with it. The human launch check is now one file, not two.
