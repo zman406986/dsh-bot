@@ -21,6 +21,7 @@ import {
 } from "../src/core/tools.js";
 import {AWAIT_AGENT_TOOL, CHECK_WORKERS_TOOL, DELIVER_RESULT_TOOL, DISPATCHER_TOOL_NAMES, SEND_PEER_TOOL, SPAWN_WORKER_TOOL, STEER_WORKER_TOOL, STOP_WORKER_TOOL} from "../src/core/policy/prompts.js";
 import { toRegisterableTool } from "../src/adapter/dispatcher-tools.js";
+import { MODEL_OPTION_VALUE_MAX_CHARS } from "../src/adapter/model-option.js";
 import type {CheckWorkersToolResult, DeliverResultToolResult, SpawnWorkerToolResult, SteerWorkerToolResult, StopWorkerToolResult} from "../src/core/tool-results.js";
 import type {
   ModelOptionPurpose,
@@ -128,7 +129,10 @@ describe("dispatcher tools — spawn_worker", () => {
     const parameters = byName(tools, SPAWN_WORKER_TOOL).parameters as {
       type: string;
       additionalProperties: boolean;
-      properties: Record<string, { type: string; required?: boolean }>;
+      properties: Record<
+        string,
+        { type: string; required?: boolean; description?: string }
+      >;
     };
     assert.equal(parameters.type, "object");
     assert.equal(parameters.additionalProperties, false);
@@ -141,6 +145,14 @@ describe("dispatcher tools — spawn_worker", () => {
     ]);
     assert.equal(parameters.properties.model?.type, "string");
     assert.notEqual(parameters.properties.model?.required, true);
+    // Finding 10: a bare id is not limited to unique ids — the spawning
+    // session's provider breaks a shared-id tie.
+    assert.ok(
+      parameters.properties.model?.description?.includes(
+        "or when it is shared but owned by your provider",
+      ),
+      parameters.properties.model?.description,
+    );
     // A worker cannot set the leader's worker default.
     assert.equal("worker_model" in parameters.properties, false);
   });
@@ -210,10 +222,97 @@ describe("dispatcher tools — spawn_worker", () => {
     ]);
     assert.ok(
       result.ack.includes(
-        'Model "nope" was not used (not in the model catalog); this worker uses the inherited route.',
+        'Model "nope" was not used (not in the model catalog); this worker uses your worker default if one is set, otherwise your route.',
       ),
       result.ack,
     );
+  });
+
+  it("a rejected resolver still spawns and reports a catalog-error fallback", async () => {
+    const { host, spawnRequests, tools } = await setup({
+      resolveModel: async () => {
+        throw new Error("resolver exploded");
+      },
+    });
+    const result = (await byName(tools, SPAWN_WORKER_TOOL).execute({
+      stream_key: "model-stream",
+      title: "Model work",
+      prompt: "Do it.",
+      model: "pD/mD",
+    })) as SpawnWorkerToolResult;
+
+    assert.ok(result.ok, "a rejected resolver never refuses the spawn");
+    if (!result.ok) return;
+    assert.equal(host.spawnCalls.length, 1);
+    assert.equal("model" in (spawnRequests[0] ?? {}), false);
+    assert.deepEqual(result.model_fallbacks, [
+      {
+        option: "model",
+        requested: "pD/mD",
+        reason: "catalog-error",
+      },
+    ]);
+    assert.ok(
+      result.ack.includes(
+        'Model "pD/mD" was not used (the model catalog could not be read)',
+      ),
+      result.ack,
+    );
+  });
+
+  it("an unexpected absent result for a non-empty model still spawns and reports", async () => {
+    const { host, multitask, spawnRequests, tools } = await setup({
+      resolveModel: async () => ({ kind: "absent" }),
+    });
+    const result = (await byName(tools, SPAWN_WORKER_TOOL).execute({
+      stream_key: "model-stream",
+      title: "Model work",
+      prompt: "Do it.",
+      model: "pD/mD",
+    })) as SpawnWorkerToolResult;
+
+    assert.ok(result.ok, "an absent result is never a silent omission");
+    if (!result.ok) return;
+    assert.equal(host.spawnCalls.length, 1);
+    assert.equal("model" in (spawnRequests[0] ?? {}), false);
+    assert.deepEqual(result.model_fallbacks, [
+      {
+        option: "model",
+        requested: "pD/mD",
+        reason: "catalog-error",
+      },
+    ]);
+    assert.equal(multitask.listTodos("session-1").length, 1);
+  });
+
+  it("sanitizes and truncates the requested value in the notice and the ack", async () => {
+    const raw = "x".repeat(100) + "\n" + "y".repeat(99);
+    const display = "x".repeat(100) + " " + "y".repeat(19);
+    const { tools } = await setup({
+      resolveModel: async () => ({
+        kind: "fallback",
+        requested: raw,
+        reason: "unknown-model",
+      }),
+    });
+    const result = (await byName(tools, SPAWN_WORKER_TOOL).execute({
+      stream_key: "model-stream",
+      title: "Model work",
+      prompt: "Do it.",
+      model: raw,
+    })) as SpawnWorkerToolResult;
+
+    assert.ok(result.ok);
+    if (!result.ok) return;
+    const requested = result.model_fallbacks?.[0]?.requested ?? "";
+    assert.equal(requested, display);
+    assert.equal(Array.from(requested).length, MODEL_OPTION_VALUE_MAX_CHARS);
+    assert.ok(!requested.includes("\n"));
+    assert.ok(
+      result.ack.includes(`Model "${display}" was not used`),
+      result.ack,
+    );
+    assert.ok(!result.ack.includes("y".repeat(99)), result.ack);
   });
 
   it("with no model option: no resolver call, no model key, no fallback fields", async () => {

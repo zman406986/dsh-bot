@@ -16,7 +16,7 @@
  * Syntax (plan §0.2):
  *
  *     provider/model-id    preferred, unambiguous
- *     model-id             accepted only when it resolves to exactly one model
+ *     model-id             unique, or shared but owned by the caller's provider
  *
  * Lookup order (plan §3.2):
  *
@@ -30,9 +30,9 @@
  *    `preferredProvider` owns exactly one of them; otherwise it is
  *    `ambiguous-model`.
  *
- * The module is deliberately dependency-free (core types only): no live
- * cordis context, no dsh package import, and no logging side effect of its
- * own. The caller supplies both the catalog and the warning sink, which keeps
+ * The module is deliberately dependency-free (core types and one pure
+ * display helper): no live cordis context, no dsh package import, and no
+ * logging side effect of its own. The caller supplies both the catalog and the warning sink, which keeps
  * this unit-testable offline. The host wrapper adds the required
  * `[multitask-dispatcher]` prefix to the warning text.
  */
@@ -43,6 +43,9 @@ import type {
   ModelResolutionFailure,
   ModelRoute,
 } from "../core/types.js";
+import { sanitizeModelOptionValue } from "../core/model-option-value.js";
+
+export { MODEL_OPTION_VALUE_MAX_CHARS } from "../core/model-option-value.js";
 
 /** Structural view of the live model catalog (`ctx.llm`); no host import. */
 export interface ModelCatalogLike {
@@ -55,12 +58,6 @@ interface CatalogEntry {
   readonly id: string;
   readonly name?: string;
 }
-
-/** Longest log-safe slice of the model-authored value (plan §3.4). */
-export const MODEL_OPTION_VALUE_MAX_CHARS = 120;
-
-/** Control characters, including line separators, become spaces in a log. */
-const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
 
 /** Human-readable reason phrases used inside the warning parentheses. */
 const REASON_TEXT: Readonly<Record<ModelResolutionFailure, string>> = {
@@ -80,13 +77,9 @@ export interface ModelOptionWarningInput {
   readonly purpose: ModelOptionPurpose;
   readonly sessionId: string;
   readonly reason: ModelResolutionFailure;
+  /** Optional display detail for the reason (a partial catalog read). */
+  readonly detail?: string;
   readonly fallbackDescription: string;
-}
-
-/** Replace control characters with spaces and truncate the log-safe value. */
-function sanitizeValue(raw: string): string {
-  const replaced = raw.replace(CONTROL_CHARS, " ");
-  return Array.from(replaced).slice(0, MODEL_OPTION_VALUE_MAX_CHARS).join("");
 }
 
 /**
@@ -99,9 +92,13 @@ export function formatModelOptionWarning(
 ): string {
   const option =
     input.purpose === "worker-default" ? "worker_model option" : "model option";
+  const reason =
+    input.detail === undefined
+      ? REASON_TEXT[input.reason]
+      : `${REASON_TEXT[input.reason]}: ${input.detail}`;
   return (
-    `${option} "${sanitizeValue(input.raw)}" from session ${input.sessionId} ` +
-    `was ignored (${REASON_TEXT[input.reason]}); ` +
+    `${option} "${sanitizeModelOptionValue(input.raw)}" from session ${input.sessionId} ` +
+    `was ignored (${reason}); ` +
     `using ${input.fallbackDescription}.`
   );
 }
@@ -128,6 +125,53 @@ function findModel(
   return models.find((model) => model.id.toLowerCase() === lowered);
 }
 
+/** One tuple from the catalog: a plain object with a string id. */
+function isCatalogEntry(value: unknown): value is CatalogEntry {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { id?: unknown }).id === "string"
+  );
+}
+
+/**
+ * Guard the declared provider-list shape. A host/catalog contract violation
+ * (a non-array, or an entry without a string id) must become a fallback, not
+ * a thrown TypeError from the later spread or the id sort.
+ */
+function readProviders(catalog: ModelCatalogLike): readonly CatalogEntry[] {
+  const providers: unknown = catalog.listProviders();
+  if (!Array.isArray(providers)) {
+    throw new TypeError("the model catalog returned a non-array provider list");
+  }
+  for (const provider of providers as readonly unknown[]) {
+    if (!isCatalogEntry(provider)) {
+      throw new TypeError("the model catalog returned a malformed provider");
+    }
+  }
+  return providers as readonly CatalogEntry[];
+}
+
+/**
+ * Guard the declared model-list shape. Undefined means this provider's
+ * catalog is unusable (threw or returned the wrong shape); the caller decides
+ * whether that is fatal (explicit route) or just one unreadable provider
+ * (bare-id pass).
+ */
+function readModels(models: unknown): readonly CatalogEntry[] | undefined {
+  if (!Array.isArray(models)) return undefined;
+  for (const model of models as readonly unknown[]) {
+    if (!isCatalogEntry(model)) return undefined;
+  }
+  return models as readonly CatalogEntry[];
+}
+
+/** One rejection inside a resolver pass: warn once, describe the fallback. */
+type RejectModelOption = (
+  reason: ModelResolutionFailure,
+  detail?: string,
+) => ModelOptionResolution;
+
 /**
  * Explicit `provider/model` pass. Returns undefined when no registered
  * provider prefix matched (the caller then tries the bare-id pass) and a
@@ -138,7 +182,7 @@ async function resolveExplicitRoute(
   catalog: ModelCatalogLike,
   providers: readonly CatalogEntry[],
   value: string,
-  reject: (reason: ModelResolutionFailure) => ModelOptionResolution,
+  reject: RejectModelOption,
 ): Promise<ModelOptionResolution | undefined> {
   const loweredValue = value.toLowerCase();
   const longestFirst = [...providers].sort(
@@ -152,10 +196,13 @@ async function resolveExplicitRoute(
     const remainder = value.slice(provider.id.length + 1);
     if (remainder === "") continue;
 
-    let models: readonly CatalogEntry[];
+    let models: readonly CatalogEntry[] | undefined;
     try {
-      models = await catalog.listModels(provider.id);
+      models = readModels(await catalog.listModels(provider.id));
     } catch {
+      models = undefined;
+    }
+    if (models === undefined) {
       // The caller named this provider explicitly. Do not reinterpret the
       // whole string as a bare model id behind its back.
       return reject("catalog-error");
@@ -176,26 +223,32 @@ async function resolveExplicitRoute(
 /**
  * Bare-id pass. Throwing provider catalogs are skipped, so one broken
  * provider cannot hide a model that another provider resolves. Every
- * provider throwing is `catalog-unavailable`; no match at all is
- * `unknown-model`.
+ * provider throwing is `catalog-unavailable`; a partial read with no match
+ * is `catalog-error` (the model may exist in an unreadable provider); only a
+ * fully readable catalog with no match is `unknown-model`.
  */
 async function resolveBareId(
   input: ResolveModelOptionInput,
   catalog: ModelCatalogLike,
   providers: readonly CatalogEntry[],
   value: string,
-  reject: (reason: ModelResolutionFailure) => ModelOptionResolution,
+  reject: RejectModelOption,
 ): Promise<ModelOptionResolution> {
   const matches: ModelRoute[] = [];
   const seen = new Set<string>();
   let failedProviders = 0;
+  let malformedProviders = 0;
 
   for (const provider of providers) {
-    let models: readonly CatalogEntry[];
+    let models: readonly CatalogEntry[] | undefined;
     try {
-      models = await catalog.listModels(provider.id);
+      models = readModels(await catalog.listModels(provider.id));
     } catch {
       failedProviders += 1;
+      continue;
+    }
+    if (models === undefined) {
+      malformedProviders += 1;
       continue;
     }
 
@@ -229,7 +282,59 @@ async function resolveBareId(
   if (providers.length > 0 && failedProviders === providers.length) {
     return reject("catalog-unavailable");
   }
+  const unreadable = failedProviders + malformedProviders;
+  if (unreadable > 0) {
+    // A partial read is not proof that the model does not exist. The warning
+    // carries the count so the fallback does not read as a confident
+    // unknown-model.
+    return reject(
+      "catalog-error",
+      `${unreadable} of ${providers.length} providers failed`,
+    );
+  }
   return reject("unknown-model");
+}
+
+/**
+ * Answer to "is this STORED route still in the live catalog?" — the restore
+ * re-check for a route that was resolved when an earlier process summoned the
+ * leader, so the catalog has had time to change underneath it.
+ */
+export type StoredModelRouteCatalogAnswer = "resolved" | "absent" | "unknown";
+
+/**
+ * Re-check one route that was already resolved against the catalog — the
+ * leader's durable `worker_model` on the restore path.
+ *
+ * Three answers, because "cannot see it" is not "it is gone":
+ *
+ * - `resolved` — a readable catalog lists both the provider and the model;
+ * - `absent` — the catalog was readable and lists neither, so the route is
+ *   genuinely stale and may be dropped;
+ * - `unknown` — no catalog is mounted, or one throws / violates the declared
+ *   shape, so a transient failure must not erase a default that may still be
+ *   valid.
+ */
+export async function checkModelRouteInCatalog(
+  catalog: ModelCatalogLike | undefined,
+  route: ModelRoute,
+): Promise<StoredModelRouteCatalogAnswer> {
+  if (catalog === undefined) return "unknown";
+  try {
+    const providers = catalog.listProviders();
+    const provider =
+      providers.find((entry) => entry.id === route.provider) ??
+      providers.find(
+        (entry) => entry.id.toLowerCase() === route.provider.toLowerCase(),
+      );
+    if (provider === undefined) return "absent";
+    const models = await catalog.listModels(provider.id);
+    return findModel(models, route.model) === undefined ? "absent" : "resolved";
+  } catch {
+    // A throwing provider, or a catalog whose shape breaks the declared
+    // interface, proves nothing about the stored route.
+    return "unknown";
+  }
 }
 
 /**
@@ -243,7 +348,7 @@ export async function resolveModelOption(
   const value = input.raw.trim();
   if (value === "") return { kind: "absent" };
 
-  const reject = (reason: ModelResolutionFailure): ModelOptionResolution => {
+  const reject: RejectModelOption = (reason, detail) => {
     input.warn(
       formatModelOptionWarning({
         raw: input.raw,
@@ -251,9 +356,15 @@ export async function resolveModelOption(
         sessionId: input.sessionId,
         reason,
         fallbackDescription: input.fallbackDescription,
+        ...(detail === undefined ? {} : { detail }),
       }),
     );
-    return { kind: "fallback", requested: value, reason };
+    return {
+      kind: "fallback",
+      requested: value,
+      reason,
+      ...(detail === undefined ? {} : { detail }),
+    };
   };
 
   const catalog = input.catalog;
@@ -261,13 +372,23 @@ export async function resolveModelOption(
 
   let providers: readonly CatalogEntry[];
   try {
-    providers = catalog.listProviders();
+    providers = readProviders(catalog);
   } catch {
     return reject("catalog-error");
   }
 
-  const explicit = await resolveExplicitRoute(catalog, providers, value, reject);
-  if (explicit !== undefined) return explicit;
-
-  return resolveBareId(input, catalog, providers, value, reject);
+  try {
+    const explicit = await resolveExplicitRoute(catalog, providers, value, reject);
+    if (explicit !== undefined) return explicit;
+    return await resolveBareId(input, catalog, providers, value, reject);
+  } catch {
+    // The resolver contract says it never throws for a bad value. Any
+    // remaining contract violation (a catalog that fails in a way the shape
+    // guards cannot see) still becomes one catalog-error fallback, never a
+    // refused spawn.
+    return reject(
+      "catalog-error",
+      "the model catalog returned an unexpected shape",
+    );
+  }
 }

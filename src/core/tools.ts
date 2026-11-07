@@ -36,6 +36,7 @@ import {
   type PolicyLanguage,
 } from "./policy/prompts.js";
 import { AWAIT_INVALID_TIMEOUT_DETAIL } from "./settle-records.js";
+import { sanitizeModelOptionValue } from "./model-option-value.js";
 import {
   isWorkerReplyStatus,
   workerReplySenderLabel,
@@ -205,8 +206,10 @@ export interface DispatcherToolDeps {
    * catalog. The tool layer trims the value and treats an empty string as
    * omitted; this seam resolves the rest. A `fallback` result means the
    * spawn still runs on the inherited route and the calling model gets a
-   * note — never a refusal. Absent is fine while no option is given; absent
-   * WITH a non-empty value is a wiring bug and the handler throws.
+   * note — never a refusal. A missing resolver for a non-empty value is a
+   * wiring bug and the handler throws before any ledger work. A resolver
+   * that rejects or returns `absent` for a non-empty value is a
+   * catalog-error fallback, not a silent drop.
    */
   readonly resolveModel?: (
     raw: string,
@@ -326,7 +329,8 @@ const SPAWN_WORKER_MODEL_PARAM: ToolParameterNode = {
   description:
     "Optional model for this worker. Use provider/model-id (for example " +
     '"deepseek/deepseek-reasoner"). A bare model id is accepted when it is ' +
-    "unique. Omit to inherit your default worker route.",
+    "unique, or when it is shared but owned by your provider; otherwise it " +
+    "is ambiguous and falls back. Omit to inherit your default worker route.",
 };
 
 const SPAWN_DISPATCHER_MODEL_PARAM: ToolParameterNode = {
@@ -334,8 +338,9 @@ const SPAWN_DISPATCHER_MODEL_PARAM: ToolParameterNode = {
   required: false,
   description:
     "Optional model for the summoned team leader. Use provider/model-id. A " +
-    "bare model id is accepted when it is unique. Omit to inherit your " +
-    "current route.",
+    "bare model id is accepted when it is unique, or when it is shared but " +
+    "owned by your provider; otherwise it is ambiguous and falls back. Omit " +
+    "to inherit your current route.",
 };
 
 const SPAWN_DISPATCHER_WORKER_MODEL_PARAM: ToolParameterNode = {
@@ -883,6 +888,12 @@ export function createDispatcherTools(
    * throws: reporting a fallback would claim a validation that never ran.
    * The worker handler calls this before any ledger work, so a wiring error
    * cannot leave an orphan todo behind.
+   *
+   * The seam is total in the other direction: a resolver that rejects, or
+   * one that breaks its contract by answering `absent` for a non-empty
+   * value, becomes a catalog-error fallback. The spawn proceeds and the
+   * caller gets a model_fallbacks note — a model choice is never silently
+   * dropped.
    */
   async function resolveModelArg(
     value: string | undefined,
@@ -901,18 +912,34 @@ export function createDispatcherTools(
         "a model option was provided but no model resolver is wired (host wiring bug)",
       );
     }
-    const result = await resolve(trimmed, purpose);
-    if (result.kind === "resolved") return { route: result.route };
-    if (result.kind === "fallback") {
+    let result: ModelOptionResolution | undefined;
+    try {
+      result = await resolve(trimmed, purpose);
+    } catch {
+      result = undefined;
+    }
+    if (result?.kind === "resolved") return { route: result.route };
+    if (result?.kind === "fallback") {
+      const requested =
+        typeof result.requested === "string" ? result.requested : trimmed;
       return {
         fallback: {
           option,
-          requested: trimmed,
+          requested: sanitizeModelOptionValue(requested),
           reason: result.reason,
         },
       };
     }
-    return {};
+    // A wired resolver answering absent (or any other unexpected arm) for a
+    // non-empty value is a contract violation, not "not provided". Never drop
+    // the choice silently.
+    return {
+      fallback: {
+        option,
+        requested: sanitizeModelOptionValue(trimmed),
+        reason: "catalog-error",
+      },
+    };
   }
 
   const spawnWorker: DispatcherToolDef = {
@@ -942,8 +969,8 @@ export function createDispatcherTools(
       const prompt = requireString(args, "prompt");
       const todoId = optionalString(args, "todo_id");
       // Ticket 285: resolve BEFORE the todo existence checks and before
-      // any todo creation. A wiring error (or a thrown resolver) must not
-      // leave an orphan ledger entry behind.
+      // any todo creation. A wiring error must not leave an orphan ledger
+      // entry behind (a rejected resolver is a fallback, not a throw).
       const resolvedModel = await resolveModelArg(
         optionalString(args, "model"),
         "model",

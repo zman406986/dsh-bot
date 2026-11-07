@@ -34,6 +34,8 @@ import { applyWorkerComposition } from "../worker/preset.js";
 import { blocksToText, textBlocks, type ContentBlock } from "./content-blocks.js";
 import type { StorageDomainLike } from "./durable-marker.js";
 import {
+  checkModelRouteInCatalog,
+  formatModelOptionWarning,
   resolveModelOption as resolveModelOptionInCatalog,
   type ModelCatalogLike,
 } from "./model-option.js";
@@ -2966,6 +2968,11 @@ export function createCordisDshHost(
     const defaultWorkerModel = usableRoute(workerModel);
     if (defaultWorkerModel !== undefined) {
       workerModelDefaults.set(sessionId, defaultWorkerModel);
+    } else {
+      // Critic finding 6: a mark written WITHOUT a default is the whole truth
+      // for this id. Keeping an earlier in-process value would let a reused
+      // id inherit a route the durable row no longer records.
+      workerModelDefaults.delete(sessionId);
     }
     const store = markers;
     if (store === undefined || store.writeDispatcherMark === undefined) return;
@@ -2993,6 +3000,63 @@ export function createCordisDshHost(
         );
       } catch {
         // A broken console must not break the spawn either.
+      }
+    }
+  }
+
+  /**
+   * Ticket 285 critic finding 1: a worker default restored from the durable
+   * row was validated when the leader was summoned — possibly by an earlier
+   * process — and the catalog can remove or rename a model in between.
+   * Re-check it ONCE, at the restore (not on every worker spawn):
+   *
+   * - still listed: mirror it for this activation;
+   * - readable catalog without the route: drop it from the map AND, best
+   *   effort, from the durable row, say the `worker_model` fallback line once,
+   *   and let the leader's workers inherit its own route;
+   * - unreadable catalog: keep the default and say nothing extra. A throwing
+   *   provider is "cannot tell", never proof that the route is dead.
+   */
+  async function revalidateRestoredWorkerModel(
+    mark: DurableDispatcherMark,
+    route: ModelRoute,
+  ): Promise<void> {
+    const answer = await checkModelRouteInCatalog(readLlmCatalog(ctx), route);
+    if (answer !== "absent") {
+      workerModelDefaults.set(mark.sessionId, route);
+      return;
+    }
+    workerModelDefaults.delete(mark.sessionId);
+    try {
+      console.warn(
+        "[multitask-dispatcher] " +
+          formatModelOptionWarning({
+            raw: `${route.provider}/${route.model}`,
+            purpose: "worker-default",
+            sessionId: mark.sessionId,
+            reason: "unknown-model",
+            fallbackDescription: "the leader's own route",
+          }),
+      );
+    } catch {
+      // A broken console must not break the restore either.
+    }
+    const store = markers;
+    if (store === undefined || store.writeDispatcherMark === undefined) return;
+    const { workerModel: _dropped, ...row } = mark;
+    try {
+      // Best effort: the row is rewritten WITHOUT the field, so the next
+      // activation neither restores nor re-warns about it. The leader's
+      // identity, parent and generation ride along untouched.
+      await store.writeDispatcherMark(row);
+    } catch (error) {
+      try {
+        console.warn(
+          `[multitask-dispatcher] stale worker_model for ${mark.sessionId} could not be removed from its dispatcher mark:`,
+          error,
+        );
+      } catch {
+        // A broken console must not break the restore either.
       }
     }
   }
@@ -3563,6 +3627,11 @@ export function createCordisDshHost(
     // policy).
     dispatcherActivations.delete(id);
     resumedUserDispatchers.delete(id);
+    // Critic finding 6: the worker default belongs to this activation's
+    // leader. Clearing the mirror on disposal is what makes the durable row
+    // the only legitimate source — a later session reusing the id starts
+    // without the old leader's route unless its own mark carries one.
+    workerModelDefaults.delete(id);
     // Defect fix (a resume stranded forever): a cold resume that never reached
     // an activation (kind projection unresolved, activation early-return) left
     // this flag set for the process lifetime. The session is gone now, so the
@@ -3696,10 +3765,16 @@ export function createCordisDshHost(
           // in-process value (a spawn in THIS process) is authoritative, so
           // the store only fills the gap. A pre-285 row fills nothing, and
           // its workers inherit the leader's own route (plan §4.4).
+          //
+          // Critic finding 1: a restored value is re-checked against the live
+          // catalog before it is trusted. The durable row may name a model
+          // this process's catalog no longer has; applying it blindly would
+          // start every later worker on a dead route. The check happens once
+          // here (activation), never per worker spawn.
           if (!workerModelDefaults.has(mark.sessionId)) {
             const restoredDefault = usableRoute(mark.workerModel);
             if (restoredDefault !== undefined) {
-              workerModelDefaults.set(mark.sessionId, restoredDefault);
+              await revalidateRestoredWorkerModel(mark, restoredDefault);
             }
           }
         }
@@ -4161,7 +4236,7 @@ export function createCordisDshHost(
         purpose === "leader"
           ? "the summoner's current route"
           : purpose === "worker"
-            ? "the team leader's default worker route or its own route"
+            ? "your default worker route or your own route"
             : "the team leader's own route";
       return resolveModelOptionInCatalog({
         raw,

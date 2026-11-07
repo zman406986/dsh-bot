@@ -12,6 +12,7 @@ import {
   type ModelCatalogLike,
   type ResolveModelOptionInput,
 } from "../src/adapter/model-option.js";
+import { sanitizeModelOptionValue } from "../src/core/model-option-value.js";
 
 /**
  * Contract and behaviour tests for the optional spawn model
@@ -425,6 +426,120 @@ describe("resolveModelOption", () => {
       });
       assert.equal(warnings.length, 1);
     });
+
+    it("falls back with catalog-error when listProviders returns a non-array", async () => {
+      const catalog = {
+        listProviders: () => 42 as unknown as readonly CatalogModel[],
+        listModels: async () => [],
+      };
+
+      const { result, warnings } = await resolve("alpha/alpha-only", {
+        catalog,
+      });
+      assert.deepEqual(result, {
+        kind: "fallback",
+        requested: "alpha/alpha-only",
+        reason: "catalog-error",
+      });
+      assert.equal(warnings.length, 1);
+    });
+
+    it("falls back with catalog-error when a provider id is not a string", async () => {
+      const catalog: ModelCatalogLike = {
+        listProviders: () => [{ id: 7 as unknown as string }],
+        listModels: async () => [],
+      };
+
+      const { result, warnings } = await resolve("alpha/alpha-only", {
+        catalog,
+      });
+      assert.deepEqual(result, {
+        kind: "fallback",
+        requested: "alpha/alpha-only",
+        reason: "catalog-error",
+      });
+      assert.equal(warnings.length, 1);
+    });
+
+    it("falls back with catalog-error when an explicitly named provider's listModels returns a non-array", async () => {
+      const catalog: ModelCatalogLike = {
+        listProviders: () => [{ id: "alpha" }],
+        listModels: async () =>
+          ({ nope: true }) as unknown as readonly CatalogModel[],
+      };
+
+      const { result, warnings } = await resolve("alpha/alpha-only", {
+        catalog,
+      });
+      assert.deepEqual(result, {
+        kind: "fallback",
+        requested: "alpha/alpha-only",
+        reason: "catalog-error",
+      });
+      assert.equal(warnings.length, 1);
+    });
+
+    it("falls back with catalog-error when an explicitly named provider returns a non-string model id", async () => {
+      const catalog = standardCatalog(async () => [
+        { id: 9 as unknown as string },
+      ]);
+
+      const { result, warnings } = await resolve("alpha/alpha-only", {
+        catalog,
+      });
+      assert.deepEqual(result, {
+        kind: "fallback",
+        requested: "alpha/alpha-only",
+        reason: "catalog-error",
+      });
+      assert.equal(warnings.length, 1);
+    });
+
+    it("skips a provider whose model list has the wrong shape when another provider resolves", async () => {
+      const catalog: ModelCatalogLike = {
+        listProviders: () => [{ id: "alpha" }, { id: "beta" }],
+        listModels: async (provider) =>
+          provider === "alpha"
+            ? ([{ id: 9 as unknown as string }] as readonly CatalogModel[])
+            : BETA_MODELS,
+      };
+
+      const { result, warnings } = await resolve("beta-only", { catalog });
+      assert.deepEqual(result, {
+        kind: "resolved",
+        route: { provider: "beta", model: "beta-only" },
+      });
+      assert.equal(warnings.length, 0);
+    });
+
+    it("reports catalog-error with the failed provider count when part of the catalog was unreadable", async () => {
+      const catalog = standardCatalog(async (provider) => {
+        if (provider === "alpha") throw new Error("alpha down");
+        return BETA_MODELS;
+      });
+
+      const { result, warnings } = await resolve("alpha-only", { catalog });
+      assert.deepEqual(result, {
+        kind: "fallback",
+        requested: "alpha-only",
+        reason: "catalog-error",
+        detail: "1 of 2 providers failed",
+      });
+      assert.equal(warnings.length, 1);
+      assert.match(firstWarning(warnings), /1 of 2 providers failed/);
+    });
+
+    it("keeps unknown-model when every provider was readable", async () => {
+      const { result, warnings } = await resolve("missing", {
+        catalog: standardCatalog(),
+      });
+      assert.deepEqual(result, {
+        kind: "fallback",
+        requested: "missing",
+        reason: "unknown-model",
+      });
+      assert.equal(warnings.length, 1);
+    });
   });
 
   describe("warning text", () => {
@@ -502,6 +617,19 @@ describe("resolveModelOption", () => {
       });
       assert.equal(result.kind, "resolved");
       assert.deepEqual(warnings, []);
+    });
+  });
+
+  describe("shared display value", () => {
+    it("sanitizes control characters and truncates to the display bound", () => {
+      const raw = "x".repeat(100) + "\n" + "y".repeat(99);
+      const display = sanitizeModelOptionValue(raw);
+      assert.equal(display, "x".repeat(100) + " " + "y".repeat(19));
+      assert.equal(
+        Array.from(display).length,
+        MODEL_OPTION_VALUE_MAX_CHARS,
+      );
+      assert.ok(!display.includes("\n"));
     });
   });
 });

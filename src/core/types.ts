@@ -119,6 +119,7 @@ export type ModelOptionResolution =
       kind: "fallback";
       requested: string;
       reason: ModelResolutionFailure;
+      /** Optional display detail (for example a partial catalog read). */
       detail?: string;
     };
 

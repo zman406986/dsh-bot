@@ -684,26 +684,6 @@ describe("durable marker store over storageDomain", () => {
         accepted: { sessionId: "child-1" },
       },
       {
-        // Ticket 285: the optional worker default follows the generation
-        // precedent — absent parses fine (the case above), but a PRESENT
-        // value must be a complete route. A half-filled one would restore a
-        // default the host cannot apply.
-        table: DISPATCHER_SESSION_TABLE_NAME,
-        rejected: [
-          { sessionId: "child-1", workerModel: null },
-          { sessionId: "child-1", workerModel: "pC/mC" },
-          { sessionId: "child-1", workerModel: {} },
-          { sessionId: "child-1", workerModel: { provider: "", model: "mC" } },
-          { sessionId: "child-1", workerModel: { provider: "pC", model: "" } },
-          { sessionId: "child-1", workerModel: { provider: "pC", model: 7 } },
-          { sessionId: "child-1", workerModel: { provider: 7, model: "mC" } },
-        ],
-        accepted: {
-          sessionId: "child-1",
-          workerModel: { provider: "pC", model: "mC" },
-        },
-      },
-      {
         table: WORKER_SESSION_TABLE_NAME,
         rejected: [{}, null, { sessionId: "" }],
         accepted: { sessionId: "w-1", parentSessionId: "chat-1" },
@@ -716,6 +696,69 @@ describe("durable marker store over storageDomain", () => {
         assert.throws(() => parse(row), `accepted a malformed ${table} row`);
       }
       assert.doesNotThrow(() => parse(accepted), `rejected a valid ${table} row`);
+    }
+  });
+
+  /**
+   * Critic finding 5: the optional worker default must not be able to erase
+   * the dispatcher mark around it. A malformed field is dropped on its own;
+   * the required identity and the other optional fields survive, the row is
+   * NOT backed up as an invalid record, and the drop is said once per row.
+   */
+  it("keeps a dispatcher mark whose optional workerModel is malformed", async () => {
+    const malformed: readonly unknown[] = [
+      null,
+      "pC/mC",
+      {},
+      { provider: "", model: "mC" },
+      { provider: "pC", model: "" },
+      { provider: "pC", model: 7 },
+      { provider: 7, model: "mC" },
+    ];
+    const sd = createStubStorageDomain();
+    malformed.forEach((workerModel, index) => {
+      sd.dispatchers.set(`leader-${index}`, {
+        sessionId: `leader-${index}`,
+        parentSessionId: "chat-1",
+        generation: 2,
+        workerModel,
+      } as unknown as DurableDispatcherMark);
+    });
+
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args);
+    };
+    let listed: readonly DurableDispatcherMark[];
+    try {
+      const durability = createDurability(sd);
+      listed = await durability.listDispatcherMarks();
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    // The optional field is the only casualty: every row opened as a usable
+    // dispatcher mark and none was moved aside by backup-and-skip.
+    assert.deepEqual(sd.backups, []);
+    assert.equal(listed.length, malformed.length);
+    for (const [index] of malformed.entries()) {
+      const row = listed.find((mark) => mark.sessionId === `leader-${index}`);
+      assert.ok(row, `leader-${index} was discarded with its workerModel`);
+      assert.equal(row.parentSessionId, "chat-1");
+      assert.equal(row.generation, 2);
+      assert.equal("workerModel" in row, false);
+    }
+    assert.equal(
+      warnings.length,
+      malformed.length,
+      "one warning per dropped default",
+    );
+    for (const args of warnings) {
+      assert.match(
+        String(args[0]),
+        /^\[multitask-dispatcher\].*malformed workerModel/,
+      );
     }
   });
 

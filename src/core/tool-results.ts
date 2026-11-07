@@ -10,6 +10,7 @@ import {
   formatWakeReportBody,
   TOOL_RESULT_SUMMARY_MAX_ROWS,
 } from "./report-clamp.js";
+import { sanitizeModelOptionValue } from "./model-option-value.js";
 import type { WorkerLiveness } from "./liveness.js";
 import type { AwaitWorkerOutcome } from "./settle-records.js";
 import type {
@@ -312,10 +313,13 @@ export function formatSpawnDispatcherNote(input: {
   // resolved or omitted value adds nothing, so the pre-285 note is
   // byte-identical.
   for (const notice of input.modelFallbacks ?? []) {
+    // Finding 8: the display value, not the raw model-authored string, so a
+    // long or multi-line value cannot bloat or forge this note.
+    const requested = sanitizeModelOptionValue(notice.requested);
     parts.push(
       notice.option === "model"
-        ? `Leader model "${notice.requested}" was not used (${modelFallbackReasonText(notice.reason)}); the team leader uses the summoner's route.`
-        : `Worker model "${notice.requested}" was not used (${modelFallbackReasonText(notice.reason)}); its workers use the team leader's route.`,
+        ? `Leader model "${requested}" was not used (${modelFallbackReasonText(notice.reason)}); the summoned dispatcher uses your route.`
+        : `Worker model "${requested}" was not used (${modelFallbackReasonText(notice.reason)}); the summoned dispatcher's workers use its route.`,
     );
   }
   return parts.join(" ");
@@ -711,8 +715,11 @@ export function formatSpawnAck(input: {
   if (fallbacks.length > 0) {
     lines.push("");
     for (const notice of fallbacks) {
+      // Finding 8/9: a shared display value, and the route the worker
+      // actually falls back to (the leader's stored worker default first).
+      const requested = sanitizeModelOptionValue(notice.requested);
       lines.push(
-        `Model "${notice.requested}" was not used (${modelFallbackReasonText(notice.reason)}); this worker uses the inherited route.`,
+        `Model "${requested}" was not used (${modelFallbackReasonText(notice.reason)}); this worker uses your worker default if one is set, otherwise your route.`,
       );
     }
   }

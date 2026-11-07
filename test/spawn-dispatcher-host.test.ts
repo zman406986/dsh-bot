@@ -2492,6 +2492,20 @@ describe("Ticket 285: the leader's worker default is stored and restored", () =>
     host.bindParent(createAgent(id, 0, { cwd: "C:\\work" }), id);
   }
 
+  /** Capture console.warn for one test; restore in a finally even on failure. */
+  function captureWarnings() {
+    const warn = mock.method(console, "warn", () => {});
+    return {
+      warn,
+      lines(): string[] {
+        return warn.mock.calls.map((call) => String(call.arguments[0]));
+      },
+      restore(): void {
+        mock.restoreAll();
+      },
+    };
+  }
+
   it("records worker_model on the mark row and applies it to a later worker spawn", async () => {
     const ctx = createStubCtx();
     const store = createListableMarkStore();
@@ -2605,7 +2619,15 @@ describe("Ticket 285: the leader's worker default is stored and restored", () =>
       markers: store,
       dispatcherGenerationOf: () => null,
     });
-    await host.refreshDispatcherMarks();
+    const warnings = captureWarnings();
+    try {
+      await host.refreshDispatcherMarks();
+    } finally {
+      warnings.restore();
+    }
+    // No catalog is mounted, so the restore cannot tell whether pC/mC still
+    // exists. Unknown is not "gone": the default stays and nothing is said.
+    assert.equal(warnings.warn.mock.callCount(), 0);
     bindLeader(host, "leader-1");
 
     await host.spawnWorker("Do the thing.", {
@@ -2619,6 +2641,149 @@ describe("Ticket 285: the leader's worker default is stored and restored", () =>
       provider: "pC",
       model: "mC",
     });
+  });
+
+  it("keeps the restored default when a catalog read throws (transient failure)", async () => {
+    const ctx = createStubCtx(undefined, undefined, undefined, {
+      listProviders: () => [{ id: "pC" }],
+      async listModels() {
+        // The provider is registered; its model list is the read that fails.
+        // That is "cannot tell", not "pC/mC is gone".
+        throw new Error("catalog read failed");
+      },
+    });
+    const store = createListableMarkStore();
+    store.marks.set("leader-1", {
+      sessionId: "leader-1",
+      parentSessionId: "chat-1",
+      generation: 2,
+      workerModel: { provider: "pC", model: "mC" },
+    });
+    const host = createCordisDshHost(ctx, {
+      markers: store,
+      dispatcherGenerationOf: () => null,
+    });
+    const warnings = captureWarnings();
+    try {
+      await host.refreshDispatcherMarks();
+    } finally {
+      warnings.restore();
+    }
+    // A throwing provider is "cannot tell", never "the model is gone": the
+    // durable row is left alone and no fallback line is invented.
+    assert.equal(warnings.warn.mock.callCount(), 0);
+    assert.deepEqual(store.marks.get("leader-1")?.workerModel, {
+      provider: "pC",
+      model: "mC",
+    });
+
+    bindLeader(host, "leader-1");
+    await host.spawnWorker("Do the thing.", {
+      parentSessionId: "leader-1",
+      streamKey: "s1",
+      title: "Thing",
+    });
+
+    const spec = ctx.startActivationCalls[0] as unknown as ActivationSpecLike;
+    assert.deepEqual(spec.request.agentOptions, {
+      provider: "pC",
+      model: "mC",
+    });
+  });
+
+  it("keeps a restored default the live catalog still carries", async () => {
+    const ctx = createStubCtx(undefined, undefined, undefined, {
+      listProviders: () => [{ id: "pC" }],
+      async listModels() {
+        return [{ id: "mC" }];
+      },
+    });
+    const store = createListableMarkStore();
+    store.marks.set("leader-1", {
+      sessionId: "leader-1",
+      parentSessionId: "chat-1",
+      generation: 2,
+      workerModel: { provider: "pC", model: "mC" },
+    });
+    const host = createCordisDshHost(ctx, {
+      markers: store,
+      dispatcherGenerationOf: () => null,
+    });
+    const warnings = captureWarnings();
+    try {
+      await host.refreshDispatcherMarks();
+    } finally {
+      warnings.restore();
+    }
+    // The common case: the catalog still lists the route, so nothing is
+    // dropped, rewritten or warned about.
+    assert.equal(warnings.warn.mock.callCount(), 0);
+    assert.deepEqual(store.marks.get("leader-1")?.workerModel, {
+      provider: "pC",
+      model: "mC",
+    });
+
+    bindLeader(host, "leader-1");
+    await host.spawnWorker("Do the thing.", {
+      parentSessionId: "leader-1",
+      streamKey: "s1",
+      title: "Thing",
+    });
+
+    const spec = ctx.startActivationCalls[0] as unknown as ActivationSpecLike;
+    assert.deepEqual(spec.request.agentOptions, {
+      provider: "pC",
+      model: "mC",
+    });
+  });
+
+  it("drops a restored default the live catalog no longer carries, and workers inherit", async () => {
+    const ctx = createStubCtx(undefined, undefined, undefined, {
+      listProviders: () => [{ id: "pC" }],
+      async listModels() {
+        return [{ id: "mC-renamed" }];
+      },
+    });
+    const store = createListableMarkStore();
+    // The leader was summoned with pC/mC; this process's catalog now lists a
+    // different model under the same provider. The stored route is dead.
+    store.marks.set("leader-1", {
+      sessionId: "leader-1",
+      parentSessionId: "chat-1",
+      generation: 2,
+      workerModel: { provider: "pC", model: "mC" },
+    });
+    const host = createCordisDshHost(ctx, {
+      markers: store,
+      dispatcherGenerationOf: () => null,
+    });
+    const warnings = captureWarnings();
+    try {
+      await host.refreshDispatcherMarks();
+    } finally {
+      warnings.restore();
+    }
+    assert.deepEqual(warnings.lines(), [
+      '[multitask-dispatcher] worker_model option "pC/mC" from session leader-1 was ignored (unknown model); using the leader\'s own route.',
+    ]);
+    // Only the dead default is dropped; the rest of the mark — the leader's
+    // durable identity — survives the rewrite.
+    const row = store.marks.get("leader-1");
+    assert.ok(row);
+    assert.equal("workerModel" in row, false);
+    assert.equal(row.parentSessionId, "chat-1");
+    assert.equal(row.generation, 2);
+
+    // The worker inherits the leader's route: no agentOptions is invented.
+    bindLeader(host, "leader-1");
+    await host.spawnWorker("Do the thing.", {
+      parentSessionId: "leader-1",
+      streamKey: "s1",
+      title: "Thing",
+    });
+
+    const spec = ctx.startActivationCalls[0] as unknown as ActivationSpecLike;
+    assert.equal("agentOptions" in spec.request, false);
   });
 
   it("does not downgrade an in-process default with a different store row", async () => {
@@ -2739,6 +2904,78 @@ describe("Ticket 285: the leader's worker default is stored and restored", () =>
       streamKey: "s1",
       title: "Thing",
     });
+    const spec = ctx.startActivationCalls[0] as unknown as ActivationSpecLike;
+    assert.equal("agentOptions" in spec.request, false);
+  });
+
+  it("forgets the in-memory default when a later mark carries none", async () => {
+    // The durable row is the only legitimate source. A second mark written
+    // for the same id WITHOUT a default must not leave the earlier value in
+    // the process map, or a reused id silently inherits it.
+    const ctx = createStubCtx(undefined, undefined, {
+      createIdOverride: "reused-leader",
+    });
+    const store = createListableMarkStore();
+    const host = createCordisDshHost(ctx, { markers: store });
+    host.bindParent(createAgent("disp-1"), "disp-1");
+
+    await host.spawnDispatcher({
+      parentSessionId: "disp-1",
+      title: "First",
+      prompt: "Own the first slice.",
+      workerModel: { provider: "pC", model: "mC" },
+    });
+    await host.spawnDispatcher({
+      parentSessionId: "disp-1",
+      title: "Second",
+      prompt: "Own the second slice.",
+    });
+
+    const row = store.marks.get("reused-leader");
+    assert.ok(row);
+    assert.equal("workerModel" in row, false);
+    bindLeader(host, "reused-leader");
+    await host.spawnWorker("Do the thing.", {
+      parentSessionId: "reused-leader",
+      streamKey: "s1",
+      title: "Thing",
+    });
+
+    const spec = ctx.startActivationCalls[0] as unknown as ActivationSpecLike;
+    assert.equal("agentOptions" in spec.request, false);
+  });
+
+  it("forgets the in-memory default when the leader is disposed", async () => {
+    const ctx = createStubCtx();
+    const store = createListableMarkStore();
+    const host = createCordisDshHost(ctx, { markers: store });
+    host.bindParent(createAgent("disp-1"), "disp-1");
+
+    const summoned = await host.spawnDispatcher({
+      parentSessionId: "disp-1",
+      title: "Peer",
+      prompt: "Own the slice.",
+      workerModel: { provider: "pC", model: "mC" },
+    });
+    // The durable row keeps the default: it is the legitimate restart source.
+    assert.deepEqual(store.marks.get(summoned.dispatcherId)?.workerModel, {
+      provider: "pC",
+      model: "mC",
+    });
+
+    ctx.fire("agent/disposed", {
+      agent: { session: { id: summoned.dispatcherId } },
+    });
+
+    // A worker spawned under the same id now inherits the leader's own route;
+    // the disposed leader's selection must not leak into it.
+    bindLeader(host, summoned.dispatcherId);
+    await host.spawnWorker("Do the thing.", {
+      parentSessionId: summoned.dispatcherId,
+      streamKey: "s1",
+      title: "Thing",
+    });
+
     const spec = ctx.startActivationCalls[0] as unknown as ActivationSpecLike;
     assert.equal("agentOptions" in spec.request, false);
   });
@@ -2917,7 +3154,7 @@ describe("Ticket 285: host.resolveModelOption validates the spawn model option",
       assert.equal(result.kind, "fallback");
       assert.equal(
         warnings.lines()[0],
-        '[multitask-dispatcher] model option "pZ/mZ" from session leader-1 was ignored (unknown model); using the team leader\'s default worker route or its own route.',
+        '[multitask-dispatcher] model option "pZ/mZ" from session leader-1 was ignored (unknown model); using your default worker route or your own route.',
       );
     } finally {
       warnings.restore();

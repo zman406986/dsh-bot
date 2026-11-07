@@ -388,10 +388,13 @@ const compactionBoundaryValueSchema = {
  * reserved for user-started dispatchers, which never carry a mark.
  *
  * Ticket 285 adds the optional worker default, following the same precedent:
- * a missing field is a pre-285 row and restores no default; a present one must
- * be a complete route (a plain object with non-empty string provider and
- * model). A half-filled route would restore a default the host cannot apply,
- * which is worse than reading the row as "no default" silently.
+ * a missing field is a pre-285 row and restores no default; a present one
+ * should be a complete route (a plain object with non-empty string provider
+ * and model). Critic finding 5: a malformed value is dropped FROM THAT ONE
+ * FIELD, not from the row. The required session id and the optional parent /
+ * generation are the leader's durable identity; rejecting the whole row would
+ * let a bad optional default erase them (backup-and-skip moves the document
+ * aside). The drop is logged once, and the host simply restores no default.
  */
 function parseDispatcherMark(value: unknown): DurableDispatcherMark {
   if (typeof value !== "object" || value === null) {
@@ -422,19 +425,28 @@ function parseDispatcherMark(value: unknown): DurableDispatcherMark {
     const route = m.workerModel;
     // Plain object only: an array or a primitive here is a foreign/torn row,
     // never a route the host could apply.
-    if (typeof route !== "object" || route === null || Array.isArray(route)) {
-      throw new Error("dispatcher mark.workerModel must be an object");
-    }
-    const w = route as Record<string, unknown>;
-    if (typeof w.provider !== "string" || w.provider.length === 0) {
-      throw new Error(
-        "dispatcher mark.workerModel.provider must be a non-empty string",
-      );
-    }
-    if (typeof w.model !== "string" || w.model.length === 0) {
-      throw new Error(
-        "dispatcher mark.workerModel.model must be a non-empty string",
-      );
+    const plainObject =
+      typeof route === "object" && route !== null && !Array.isArray(route);
+    const w = (plainObject ? route : {}) as Record<string, unknown>;
+    const malformed =
+      !plainObject ||
+      typeof w.provider !== "string" ||
+      w.provider.length === 0 ||
+      typeof w.model !== "string" ||
+      w.model.length === 0;
+    if (malformed) {
+      // Critic finding 5: one bad OPTIONAL field must not cost the leader its
+      // durable identity. Drop only the default and say so once; the rest of
+      // the row is returned as-is.
+      try {
+        console.warn(
+          `[multitask-dispatcher] dispatcher mark for ${m.sessionId} carried a malformed workerModel; the default was dropped.`,
+        );
+      } catch {
+        // A broken console must not break the store open either.
+      }
+      const { workerModel: _dropped, ...rest } = m;
+      return rest as unknown as DurableDispatcherMark;
     }
   }
   return value as DurableDispatcherMark;
