@@ -55,7 +55,7 @@ export class Meter {
       cachedInputTokens,
       estimateErrorTokens: inputTokens - observation.estimatedInputTokens,
       cachedInputShare:
-        cachedInputTokens === null || cachedInputTokens === 0 || inputTokens === 0
+        cachedInputTokens === null || inputTokens === 0
           ? null
           : cachedInputTokens / inputTokens,
     });
