@@ -12,12 +12,20 @@ import {
 import { CHECK_ACTIVITY_CHARS, RECENT_RESULT_EXCERPT_CHARS } from "../src/core/report-clamp.js";
 import type { SettledEvent } from "../src/core/types.js";
 import type { DurableWorkerMarker, DurabilityPort } from "../src/core/durability.js";
-import { createWorkerAgentDef } from "../src/worker/agent-def.js";
+import { createWorkerAgentDef, type WorkerAgentDef } from "../src/worker/agent-def.js";
 import { WORKER_PERSONA_SECTION } from "../src/worker/preset.js";
 import { EMPTY_WORKER_REPORT_PLACEHOLDER } from "../src/worker/report.js";
 
 interface RecordedCall {
   [key: string]: unknown;
+}
+
+interface ComposedChild {
+  childId: string;
+  sections: string[];
+  restrictions: Array<{ deny?: readonly string[]; allow?: readonly string[] }>;
+  schemasScopes: unknown[];
+  localTools: unknown[];
 }
 
 function createAgent(id: string, topLevel = true): AgentLike {
@@ -46,13 +54,79 @@ function createStubCtx() {
    * summoned team leader is named.
    */
   const sessionTitleCalls: Array<{ sessionId: unknown; title: string }> = [];
-  const composedChildren: Array<{
-    childId: string;
-    sections: string[];
-    restrictions: Array<{ deny?: readonly string[]; allow?: readonly string[] }>;
-    schemasScopes: unknown[];
-  }> = [];
+  const composedChildren: ComposedChild[] = [];
+  /** Ticket 200: children the adapter cancelled after a refused composition. */
+  const canceledWorkerIds: string[] = [];
+  /**
+   * Ticket 200 fault injection: a composition failure must be exercised on
+   * each pre-restriction route, not only through a throwing resolver. The
+   * child scope builder below consults this object, so a test can arm one
+   * failure without changing the production seam.
+   */
+  const compositionFaults = {
+    section: null as null | (() => void),
+    schemas: null as null | (() => void),
+    restrict: null as null | (() => void),
+    emptySurface: false,
+    omitRestrict: false,
+  };
   let nextChild = 1;
+
+  /**
+   * One child's scoped world. startActivation builds one for the child it
+   * announces; the ticket-200 reattachment tests build the same shape for a
+   * session the host resumes outside a spawn.
+   */
+  function createCompositionCtx(): { ctx: unknown; composed: ComposedChild } {
+    const composed: ComposedChild = {
+      childId: "",
+      sections: [],
+      restrictions: [],
+      schemasScopes: [],
+      localTools: [],
+    };
+    composedChildren.push(composed);
+    return {
+      composed,
+      ctx: {
+        systemPrompt: {
+          section(section: { name: string }) {
+            compositionFaults.section?.();
+            composed.sections.push(section.name);
+            return () => {};
+          },
+          getSectionOrder() {
+            return 0;
+          },
+        },
+        tools: {
+          schemas(scope?: unknown) {
+            if (scope === undefined) return contextGlobalTools;
+            compositionFaults.schemas?.();
+            composed.schemasScopes.push(scope);
+            if (compositionFaults.emptySurface) return [];
+            return [...contextGlobalTools, ...agentPlaneTools];
+          },
+          ...(compositionFaults.omitRestrict
+            ? {}
+            : {
+                restrict(filter: {
+                  deny?: readonly string[];
+                  allow?: readonly string[];
+                }) {
+                  compositionFaults.restrict?.();
+                  composed.restrictions.push(filter);
+                  return () => {};
+                },
+              }),
+          register(definition: unknown) {
+            composed.localTools.push(definition);
+            return () => {};
+          },
+        },
+      },
+    };
+  }
 
   // 0.2.1 host shape: `tools.schemas()` with no scope reports the
   // context-global layer ONLY; the surface an agent inherits (its preset's
@@ -107,12 +181,16 @@ function createStubCtx() {
     sessionTitleCalls: Array<{ sessionId: unknown; title: string }>;
     get(name: string): unknown;
     activationSeams: typeof activationSeams;
-    composedChildren: Array<{
-      childId: string;
-      sections: string[];
-      restrictions: Array<{ deny?: readonly string[]; allow?: readonly string[] }>;
-      schemasScopes: unknown[];
-    }>;
+    composedChildren: ComposedChild[];
+    canceledWorkerIds: string[];
+    compositionFaults: {
+      section: null | (() => void);
+      schemas: null | (() => void);
+      restrict: null | (() => void);
+      emptySurface: boolean;
+      omitRestrict: boolean;
+    };
+    createCompositionCtx(): { ctx: unknown; composed: ComposedChild };
     bindAgent(agent: AgentLike): void;
     setExactAgentIdentity(value: boolean): void;
     listenerCount(): number;
@@ -126,6 +204,9 @@ function createStubCtx() {
     sessionTitleCalls,
     activationSeams,
     composedChildren,
+    canceledWorkerIds,
+    compositionFaults,
+    createCompositionCtx,
     /**
      * Auto-title plan §4.2: the host's optional `sessionTitle` service. It is
      * mounted here so the worker path can be checked for NOT calling it;
@@ -178,43 +259,10 @@ function createStubCtx() {
         const childId =
           spec.childId !== undefined ? String(spec.childId) : `child-${nextChild++}`;
         // The host creates the child inside this call and announces it on
-        // `agent/created` before its first turn; the adapter's composition
+        // agent/created before its first turn; the adapter's composition
         // must land there.
-        const composed = {
-          childId,
-          sections: [] as string[],
-          restrictions: [] as Array<{
-            deny?: readonly string[];
-            allow?: readonly string[];
-          }>,
-          schemasScopes: [] as unknown[],
-        };
-        composedChildren.push(composed);
-        const childCtx = {
-          systemPrompt: {
-            section(section: { name: string }) {
-              composed.sections.push(section.name);
-              return () => {};
-            },
-            getSectionOrder() {
-              return 0;
-            },
-          },
-          tools: {
-            schemas(scope?: unknown) {
-              if (scope === undefined) return contextGlobalTools;
-              composed.schemasScopes.push(scope);
-              return [...contextGlobalTools, ...agentPlaneTools];
-            },
-            restrict(filter: {
-              deny?: readonly string[];
-              allow?: readonly string[];
-            }) {
-              composed.restrictions.push(filter);
-              return () => {};
-            },
-          },
-        };
+        const { ctx: childCtx, composed } = createCompositionCtx();
+        composed.childId = childId;
         ctx.fire("agent/created", {
           agent: {
             session: {
@@ -225,6 +273,11 @@ function createStubCtx() {
               },
             },
             ctx: childCtx,
+            // Ticket 200: the real Agent exposes the host's rollback cancel;
+            // the adapter must use it before refusing a composed child.
+            cancel() {
+              canceledWorkerIds.push(childId);
+            },
           },
           source: "startup",
         });
@@ -471,7 +524,14 @@ describe("CordisDshHost spawn / interrupt / send", () => {
 
   it("spawn with WorkerAgentDef composes the child at agent/created; the contract never rides the task prompt", async () => {
     const ctx = createStubCtx();
-    const host = createCordisDshHost(ctx, { workerAgentDef: createWorkerAgentDef() });
+    const host = createCordisDshHost(ctx, {
+      workerAgentDef: createWorkerAgentDef(),
+      // Ticket 122/200: the worker-local reply channel lands on the child's
+      // scope, while the barrier still subtracts the inherited verbs.
+      workerLocalTools: (workerSessionId) => [
+        { name: "reply_to_dispatcher", workerSessionId },
+      ],
+    });
     const parent = createAgent("disp-1");
     host.bindParent(parent, "disp-1");
 
@@ -534,35 +594,280 @@ describe("CordisDshHost spawn / interrupt / send", () => {
         ],
       },
     ]);
+    // ... while the ordinary work tool surface survives.
+    assert.equal(composed.restrictions[0]?.deny?.includes("read"), false);
+    // The mid-task reply channel is registered on the child's scope only.
+    assert.deepEqual(composed.localTools, [
+      { name: "reply_to_dispatcher", workerSessionId: workerId },
+    ]);
   });
 
-  it("a throwing worker composition does not fail child creation", async () => {
-    const ctx = createStubCtx();
-    const def = createWorkerAgentDef();
-    const throwingDef = {
-      ...def,
-      resolveToolFilter() {
-        throw new Error("tool barrier exploded");
+  /**
+   * Ticket 200: every pre-restriction composition failure must refuse the
+   * worker. A warning plus a live child is the fail-open behaviour this
+   * replaces: the child would keep the inherited preset's forbidden tools.
+   */
+  describe("ticket 200: a failed composition refuses the worker", () => {
+    type Faults = ReturnType<typeof createStubCtx>["compositionFaults"];
+    interface FailureCase {
+      readonly name: string;
+      readonly expected: RegExp;
+      readonly def?: (base: WorkerAgentDef) => WorkerAgentDef;
+      readonly arm: (faults: Faults) => void;
+    }
+    const failures: FailureCase[] = [
+      {
+        name: "prompt registration throws",
+        expected: /prompt registration exploded/,
+        arm: (faults) => {
+          faults.section = () => {
+            throw new Error("prompt registration exploded");
+          };
+        },
       },
-    };
-    const host = createCordisDshHost(ctx, { workerAgentDef: throwingDef });
-    host.bindParent(createAgent("disp-1"), "disp-1");
+      {
+        name: "scoped schema read throws",
+        expected: /tools\.schemas\(\) failed/,
+        arm: (faults) => {
+          faults.schemas = () => {
+            throw new Error("schemas exploded");
+          };
+        },
+      },
+      {
+        name: "scoped surface is empty",
+        expected: /scoped tool set is empty/,
+        arm: (faults) => {
+          faults.emptySurface = true;
+        },
+      },
+      {
+        name: "resolver throws",
+        expected: /tool barrier exploded/,
+        def: (base) => ({
+          ...base,
+          resolveToolFilter() {
+            throw new Error("tool barrier exploded");
+          },
+        }),
+        arm: () => {},
+      },
+      {
+        name: "deny intersection is empty",
+        expected: /no denied verb/,
+        def: (base) => ({
+          ...base,
+          resolveToolFilter() {
+            return { allow: [], deny: [] };
+          },
+        }),
+        arm: () => {},
+      },
+      {
+        name: "restriction seam is missing",
+        expected: /tools\.restrict\(\) is unavailable/,
+        arm: (faults) => {
+          faults.omitRestrict = true;
+        },
+      },
+      {
+        name: "restriction seam throws",
+        expected: /restrict exploded/,
+        arm: (faults) => {
+          faults.restrict = () => {
+            throw new Error("restrict exploded");
+          };
+        },
+      },
+    ];
 
-    const warnings = await captureWarnings(async () => {
-      const workerId = await host.spawnWorker("Do the thing.", {
-        parentSessionId: "disp-1",
-        streamKey: "s1",
-        title: "Thing",
+    for (const failure of failures) {
+      it("fresh spawn rejects and cancels the child: " + failure.name, async () => {
+        const ctx = createStubCtx();
+        failure.arm(ctx.compositionFaults);
+        const def =
+          failure.def?.(createWorkerAgentDef()) ?? createWorkerAgentDef();
+        const host = createCordisDshHost(ctx, { workerAgentDef: def });
+        host.bindParent(createAgent("disp-1"), "disp-1");
+        let ran = false;
+        ctx.activationSeams.duringActivation = () => {
+          ran = true;
+        };
+
+        await captureWarnings(async () => {
+          await assert.rejects(
+            () =>
+              host.spawnWorker("Do the thing.", {
+                parentSessionId: "disp-1",
+                streamKey: "s1",
+                title: "Thing",
+              }),
+            failure.expected,
+          );
+        });
+
+        const reservedId = String(
+          (ctx.startActivationCalls[0] as unknown as ActivationSpecLike)
+            .childId,
+        );
+        assert.equal(
+          host.owns(reservedId),
+          false,
+          "no unrestricted worker is owned",
+        );
+        assert.equal(host.workerIdOf(reservedId), undefined);
+        assert.deepEqual(
+          ctx.canceledWorkerIds,
+          [reservedId],
+          "the partial child was cancelled before host rollback",
+        );
+        assert.equal(ctx.followupCalls.length, 0, "no task turn was opened");
+        assert.equal(ran, false, "no child activation/turn started");
+        assert.equal(
+          ctx.disposedWorkerIds.length,
+          0,
+          "no activation receipt reached the caller",
+        );
       });
-      assert.equal(typeof workerId, "string");
-      assert.equal(host.owns(workerId), true, "the child is still live");
-    });
 
-    assert.ok(
-      warnings.some((line) => line.includes("could not be composed")),
-      "the composition failure is logged, not thrown into the host",
+      it(
+        "reattachment refuses adoption and delivers no wake: " + failure.name,
+        async () => {
+          const ctx = createStubCtx();
+          ctx.setExactAgentIdentity(true);
+          failure.arm(ctx.compositionFaults);
+          const def =
+            failure.def?.(createWorkerAgentDef()) ?? createWorkerAgentDef();
+          const reclaimed: Array<{
+            workerId: string;
+            parentSessionId: string;
+          }> = [];
+          const host = createCordisDshHost(ctx, {
+            workerAgentDef: def,
+            onWorkerReattached: (workerId, parentSessionId) => {
+              reclaimed.push({ workerId, parentSessionId });
+            },
+          });
+          host.bindParent(createAgent("disp-1"), "disp-1");
+          const rememberWake = host.rememberWorkerWake;
+          assert.ok(rememberWake, "the host exposes the wake mirror");
+          rememberWake("w-1", "disp-1");
+          const wakeDormant = host.wakeDormantWorker;
+          assert.ok(wakeDormant, "the host exposes the dormant-wake seam");
+          await wakeDormant("w-1", "tighten it");
+          await new Promise((resolve) => setImmediate(resolve));
+
+          const { ctx: childCtx } = ctx.createCompositionCtx();
+          const child: AgentLike = {
+            session: {
+              id: "w-1",
+              header: { parentSession: "disp-1", delegationDepth: 1 },
+            },
+            ctx: childCtx as NonNullable<AgentLike["ctx"]>,
+            followup() {},
+            cancel() {
+              ctx.canceledWorkerIds.push("w-1");
+            },
+          };
+          ctx.bindAgent(child);
+
+          assert.throws(
+            () => ctx.fire("agent/created", { agent: child, source: "resume" }),
+            failure.expected,
+          );
+          assert.deepEqual(
+            reclaimed,
+            [],
+            "the core never reclaims a refused worker",
+          );
+          assert.equal(host.owns("w-1"), false, "no ownership entry survives");
+          const corrections = ctx.sendMessageCalls
+            .filter((call) => String(call["targetId"]) === "w-1")
+            .map((call) =>
+              (call["content"] as Array<{ text?: string }>)
+                .map((block) => block.text ?? "")
+                .join(""),
+            )
+            .filter((text) => text === "tighten it");
+          assert.deepEqual(
+            corrections,
+            [],
+            "the parked correction was not delivered",
+          );
+          assert.deepEqual(
+            ctx.canceledWorkerIds,
+            ["w-1"],
+            "the resumed child was cancelled",
+          );
+        },
+      );
+    }
+
+    it(
+      "the async durable-row fallback refuses the adoption too",
+      async () => {
+        const ctx = createStubCtx();
+        ctx.setExactAgentIdentity(true);
+        ctx.compositionFaults.section = () => {
+          throw new Error("fallback prompt registration exploded");
+        };
+        const markers = {
+          readWorkerSession: () => ({
+            sessionId: "w-1",
+            parentSessionId: "disp-1",
+          }),
+          readWorkerMarkers: () => [],
+        } as unknown as DurabilityPort;
+        const reclaimed: string[] = [];
+        const host = createCordisDshHost(ctx, {
+          workerAgentDef: createWorkerAgentDef(),
+          markers,
+          onWorkerReattached: (workerId) => {
+            reclaimed.push(workerId);
+          },
+        });
+        host.bindParent(createAgent("disp-1"), "disp-1");
+        const wakeDormant = host.wakeDormantWorker;
+        assert.ok(wakeDormant, "the host exposes the dormant-wake seam");
+        await wakeDormant("w-1", "tighten it");
+
+        const { ctx: childCtx } = ctx.createCompositionCtx();
+        const child: AgentLike = {
+          session: {
+            id: "w-1",
+            header: { parentSession: "disp-1", delegationDepth: 1 },
+          },
+          ctx: childCtx as NonNullable<AgentLike["ctx"]>,
+          followup() {},
+          cancel() {
+            ctx.canceledWorkerIds.push("w-1");
+          },
+        };
+        ctx.bindAgent(child);
+
+        await captureWarnings(async () => {
+          ctx.fire("agent/created", { agent: child, source: "resume" });
+          // The durable-row read is asynchronous: let the store round-trip
+          // and the refused adoption settle.
+          for (let i = 0; i < 8; i += 1) {
+            await new Promise((resolve) => setImmediate(resolve));
+          }
+        });
+
+        assert.deepEqual(reclaimed, [], "the core never reclaims it");
+        assert.equal(host.owns("w-1"), false, "no ownership entry survives");
+        const corrections = ctx.sendMessageCalls
+          .filter((call) => String(call["targetId"]) === "w-1")
+          .map((call) =>
+            (call["content"] as Array<{ text?: string }>)
+              .map((block) => block.text ?? "")
+              .join(""),
+          )
+          .filter((text) => text === "tighten it");
+        assert.deepEqual(corrections, [], "the correction was not delivered");
+        assert.deepEqual(ctx.canceledWorkerIds, ["w-1"]);
+      },
     );
-    assert.equal(ctx.startActivationCalls.length, 1);
   });
 
   it("spawn owns the activation and disposes it on host dispose", async () => {

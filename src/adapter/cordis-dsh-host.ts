@@ -105,6 +105,15 @@ export interface AgentLike {
   /** Queue context without opening a turn (optional; policy inject). */
   inject?(message: unknown): void;
   /**
+   * Ticket 200: stop this agent's queued/active work with the host's own
+   * rollback cause. Optional so structural stubs stay minimal; the live
+   * dsh Agent exposes it (dsh-agent/lib/types/runtime-types.d.ts:184).
+   */
+  cancel?(
+    cause: { readonly kind: "disposed" },
+    options?: { readonly keepInbox?: boolean },
+  ): void;
+  /**
    * ADR-0019: the host's own per-agent scoped context (structural view of
    * `agent.ctx` — every agent loop mints one; `tools.register` addressed
    * through it registers in THIS agent's scope only, so a second dispatcher
@@ -1700,6 +1709,40 @@ export function createCordisDshHost(
   }
 
   /**
+   * Ticket 200: refuse a child whose worker composition threw.
+   *
+   * The helper's contract is fail-closed, so a composition failure must never
+   * publish a live child whose worker composition is unproven. Cancel the
+   * child's queued task/wake with the host's own rollback cause, then rethrow:
+   * the synchronous agent/created listener's throw unwinds the host's creation
+   * and disposes the activation, and spawnWorker reports the failure instead
+   * of returning an id. A stubbed Agent without cancel is still refused by the
+   * throw; cancellation is best effort.
+   */
+  function refuseWorkerComposition(
+    childAgent: AgentLike,
+    workerId: string,
+    error: unknown,
+  ): never {
+    try {
+      childAgent.cancel?.({ kind: "disposed" });
+    } catch {
+      // The throw below is the refusal; a failed cancel must not replace it.
+    }
+    try {
+      console.warn(
+        "[multitask-dispatcher] worker " +
+          workerId +
+          " could not be composed; refusing it rather than publish an incompletely composed worker:",
+        error,
+      );
+    } catch {
+      // A broken console must not hide the refusal.
+    }
+    throw error;
+  }
+
+  /**
    * ADR-0019: live dispatcher parents, keyed by dispatcher session id —
    * a map of sessions, not one slot. Spawn, interrupt, and sendMessage
    * resolve the authority agent from the session they serve (spawn from the
@@ -3078,7 +3121,8 @@ export function createCordisDshHost(
         deliverParkedWorkerWake(workerId);
         return false;
       }
-      workers.set(workerId, { parentSessionId, agentSessionId: workerId });
+      // Ticket 200: compose BEFORE the ownership entry. A failed barrier must
+      // not leave a registered (reclaimable, wakeable) worker behind.
       if (
         workerAgentDef !== undefined &&
         typeof childAgent.ctx === "object" &&
@@ -3093,20 +3137,14 @@ export function createCordisDshHost(
           );
         } catch (error) {
           // A resumed child inherits the parent dispatcher's composition, so a
-          // failed barrier would leave it with tools a worker must not have.
-          // Nothing can roll that back here (the child is already live), so it
-          // is logged loudly rather than hidden — the same failure policy the
-          // dispatcher activation path uses.
-          try {
-            console.warn(
-              `[multitask-dispatcher] resumed worker ${workerId} could not be composed; it keeps its inherited surface:`,
-              error,
-            );
-          } catch {
-            // A broken console must not break the create path either.
-          }
+          // failure here may leave its worker barrier unproven (or only partly
+          // installed). Refuse it: cancel the resumed turn and propagate the
+          // failure to the host's create rollback instead of reclaiming/waking.
+          resumeRequested.delete(workerId);
+          refuseWorkerComposition(childAgent, workerId, error);
         }
       }
+      workers.set(workerId, { parentSessionId, agentSessionId: workerId });
       // Core side: resolve the unknown-state hold into a live roster record,
       // so the worker is visible and stoppable again.
       onWorkerReattached?.(workerId, parentSessionId);
@@ -3160,7 +3198,16 @@ export function createCordisDshHost(
           return;
         }
         workerSessions.set(row.sessionId, row.parentSessionId);
-        adopt(row.parentSessionId);
+        try {
+          adopt(row.parentSessionId);
+        } catch {
+          // Ticket 200: the refusal already cancelled the child and logged the
+          // composition failure. This store-fallback adoption runs after the
+          // host's announcement returned, so there is no rollback to reject
+          // into; never relabel it as a store-read failure, and never reclaim
+          // or wake the refused worker.
+          return;
+        }
       })
       .catch((error) => {
         // A marker-store failure must not break the host's create path.
@@ -3454,11 +3501,12 @@ export function createCordisDshHost(
     if (workerAgentDef === undefined) return;
     if ((pendingSpawns.get(parentSessionId) ?? 0) === 0) return;
     if (typeof child.ctx !== "object" || child.ctx === null) return;
-    // Second-round audit: this listener is SYNCHRONOUS and runs inside the
-    // host's create call. A section/tool registration throw must not reject
-    // child creation (the child already exists), so it is logged exactly like
-    // the resume path's composition failure. The surface stays inherited; the
-    // spawn still succeeds.
+    // Ticket 200: this listener is SYNCHRONOUS and runs inside the host's
+    // create call, so a composition throw rejects the announcement. The host's
+    // creation rollback cancels and disposes the half-created child, and
+    // spawnWorker reports the failure instead of returning an id. Never
+    // swallow this: the inherited surface is exactly what the barrier exists
+    // to remove.
     try {
       applyWorkerComposition(
         child.ctx as Parameters<typeof applyWorkerComposition>[0],
@@ -3469,14 +3517,7 @@ export function createCordisDshHost(
         buildWorkerLocalTools(child.session?.id),
       );
     } catch (error) {
-      try {
-        console.warn(
-          `[multitask-dispatcher] worker ${childSessionId} could not be composed; it keeps its inherited surface:`,
-          error,
-        );
-      } catch {
-        // A broken console must not break the create path either.
-      }
+      refuseWorkerComposition(child as AgentLike, childSessionId, error);
     }
   });
 
