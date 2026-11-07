@@ -212,14 +212,24 @@ export interface ShellHosts {
   readonly copyToClipboard?: (text: string) => void | Promise<void>;
 }
 
+/**
+ * Invoke a clipboard writer and contain both failure shapes it may use: a
+ * synchronous throw (writer unavailable) and a rejected promise (the browser
+ * denying or failing the write). Containment is silent: the id stays readable
+ * on the affordance, and there is no success state to fake because nothing
+ * here proves the write landed.
+ */
+function containCopy(write: () => void | Promise<void>): void {
+  try {
+    void Promise.resolve(write()).catch(() => {});
+  } catch {
+    // Synchronous writer failure: contained at the copy boundary.
+  }
+}
+
 /** Best-effort default clipboard writer (host browser provides the seam). */
 function defaultCopyToClipboard(text: string): void {
-  try {
-    void navigator.clipboard?.writeText(text);
-  } catch {
-    // Clipboard unavailable: contained. The affordance's title still shows
-    // the id verbatim — no fake success, no crash.
-  }
+  containCopy(() => navigator.clipboard?.writeText(text));
 }
 
 /**
@@ -412,8 +422,10 @@ export function createDispatcherShell(
                     hosts.onSelectSession?.(sessionId);
                   }}
                   onCopyId={(sessionId) => {
-                    void (hosts.copyToClipboard ?? defaultCopyToClipboard)(
-                      sessionId,
+                    containCopy(() =>
+                      (hosts.copyToClipboard ?? defaultCopyToClipboard)(
+                        sessionId,
+                      ),
                     );
                   }}
                 />
