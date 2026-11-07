@@ -240,12 +240,38 @@ function createQuotableLookup(total: number, quoteAt: (index: number) => string)
   };
 }
 
-/** The maximal blank run containing `index`, as 0-based first and last. */
-function blankRunAround(blank: readonly boolean[], index: number): { first: number; last: number } {
-  let first = index;
-  while (first > 0 && blank[first - 1] === true) first -= 1;
-  let last = index;
-  while (last < blank.length - 1 && blank[last + 1] === true) last += 1;
+/**
+ * The maximal blank run containing every index, as 0-based first/last arrays.
+ *
+ * ISSUE-221: this is the whole bound. The table is built in ONE pass over the
+ * blank flags (O(N) time, O(N) space) no matter how many candidate positions
+ * `anchorsAt` is given; a candidate never rescans its band. The previous
+ * per-candidate `blankRunAround` walked the same contiguous band once for each
+ * generated position, which was `floor(N / 100) * (N - 1)` loop bodies for a
+ * fully blank body. No fixed cap is added: a cap would silently drop a band
+ * notice, and the single pass already bounds one contiguous band.
+ */
+function blankRuns(blank: readonly boolean[]): {
+  readonly first: readonly number[]; readonly last: readonly number[];
+} {
+  const first = new Array<number>(blank.length);
+  const last = new Array<number>(blank.length);
+  let start = 0;
+  while (start < blank.length) {
+    if (blank[start] !== true) {
+      first[start] = start;
+      last[start] = start;
+      start += 1;
+      continue;
+    }
+    let end = start;
+    while (end + 1 < blank.length && blank[end + 1] === true) end += 1;
+    for (let index = start; index <= end; index += 1) {
+      first[index] = start;
+      last[index] = end;
+    }
+    start = end + 1;
+  }
   return { first, last };
 }
 
@@ -280,6 +306,7 @@ export function anchorsAt(
   const anchors: string[] = [];
   const noticedBands = new Set<string>();
   const blank = lines.map((line) => isBlankLine(line));
+  const runs = blankRuns(blank);
   const quoteAt = createQuoteCache(lines);
   const earlierQuotable = createQuotableLookup(total, quoteAt);
 
@@ -293,7 +320,8 @@ export function anchorsAt(
     if (!Number.isSafeInteger(position) || position < 1 || position > total) continue;
     const index = position - 1;
     if (blank[index] === true) {
-      const band = blankRunAround(blank, index);
+      // One lookup into the precomputed run table, never a band walk.
+      const band = { first: runs.first[index] ?? index, last: runs.last[index] ?? index };
       if (band.last - band.first + 1 >= 2) {
         const key = `${String(band.first)}:${String(band.last)}`;
         if (noticedBands.has(key)) continue;
