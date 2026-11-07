@@ -115,6 +115,7 @@ function createStubCtx() {
     }>;
     bindAgent(agent: AgentLike): void;
     setExactAgentIdentity(value: boolean): void;
+    listenerCount(): number;
   } = {
     startActivationCalls,
     disposedWorkerIds,
@@ -152,6 +153,11 @@ function createStubCtx() {
     },
     setExactAgentIdentity(value: boolean) {
       exactAgentIdentity = value;
+    },
+    listenerCount() {
+      let total = 0;
+      for (const list of listeners.values()) total += list.length;
+      return total;
     },
     on(name: string, cb: (payload: never) => void) {
       const list = listeners.get(name) ?? [];
@@ -573,6 +579,62 @@ describe("CordisDshHost spawn / interrupt / send", () => {
     host.dispose();
     // The reserved id is the activation this host owns and disposes.
     assert.equal(ctx.disposedWorkerIds.length, 1);
+  });
+
+  it("dispose while activation is pending aborts the spawn and releases a late receipt", async () => {
+    // Ticket 196: dispose() runs during the startActivation await. The
+    // controller must already be reachable so teardown can abort the signal,
+    // and a host that nevertheless returns a receipt must not register it.
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    host.bindParent(createAgent("disp-1"), "disp-1");
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered = false;
+    ctx.activationSeams.duringActivation = () => {
+      entered = true;
+      return gate;
+    };
+
+    const spawn = host.spawnWorker("x", {
+      parentSessionId: "disp-1",
+      streamKey: "s-pending-dispose",
+      title: "t",
+    });
+    assert.equal(entered, true, "startActivation is held at the gate");
+    const spec = ctx.startActivationCalls[0] as unknown as ActivationSpecLike;
+    const signal = spec.signal;
+    assert.equal(ctx.listenerCount() > 0, true, "the host is subscribed before dispose");
+
+    host.dispose();
+    const abortedAfterDispose = signal.aborted;
+    const listenersAfterDispose = ctx.listenerCount();
+
+    // Release the late receipt: the host must not keep it.
+    release();
+    const workerId = await spawn;
+
+    assert.equal(
+      abortedAfterDispose,
+      true,
+      "a single disposal aborts the pending startup signal",
+    );
+    assert.equal(listenersAfterDispose, 0, "dispose removed every host subscription");
+    assert.equal(host.owns(workerId), false, "no usable worker in a disposed host");
+    assert.equal(host.workerIdOf(workerId), undefined);
+    assert.deepEqual(
+      ctx.disposedWorkerIds,
+      [workerId],
+      "the late activation receipt is disposed exactly once",
+    );
+
+    // Ordinary unload does not call dispose twice; if something does, it must
+    // not release the same activation again.
+    host.dispose();
+    assert.deepEqual(ctx.disposedWorkerIds, [workerId]);
   });
 
   it("spawn rejects when no parent is bound", async () => {

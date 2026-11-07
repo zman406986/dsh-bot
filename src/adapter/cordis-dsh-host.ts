@@ -1719,6 +1719,20 @@ export function createCordisDshHost(
   const spawnedWorkerIds = new Set<string>();
   const spawnControllers = new Map<string, AbortController>();
   /**
+   * Ticket 196: set by the one host disposal. A worker spawn awaits
+   * `startActivation` between its reservation and its live map registration;
+   * this flag makes the continuation after that await treat the host as gone
+   * (release the receipt, register nothing), and makes that check idempotent
+   * with the teardown itself.
+   */
+  let disposed = false;
+  /** Ticket 196: drop every registration belonging to one spawn id. */
+  function forgetSpawn(id: string): void {
+    workers.delete(id);
+    spawnedWorkerIds.delete(id);
+    spawnControllers.delete(id);
+  }
+  /**
    * Live activations keyed by worker id. `startActivation`'s signal owns
    * pre-publication cancellation only; a published worker is stopped by
    * disposing this exact activation.
@@ -3983,6 +3997,10 @@ export function createCordisDshHost(
         agentSessionId: reservedChildId,
       });
       spawnedWorkerIds.add(reservedChildId);
+      // Ticket 196: the controller must be reachable by dispose DURING the
+      // await below, not only after the activation resolves. Re-key it to
+      // `workerId` on success; delete it on every failure/second-id path.
+      spawnControllers.set(reservedChildId, controller);
       // Mark the in-flight spawn BEFORE it starts: `agent/created` fires
       // inside `startActivation`, and that listener is what composes the child.
       pendingSpawns.set(
@@ -4006,8 +4024,7 @@ export function createCordisDshHost(
       } catch (error) {
         // The spawn was refused or aborted before publication: no child
         // exists, so neither registry may keep the reservation.
-        workers.delete(reservedChildId);
-        spawnedWorkerIds.delete(reservedChildId);
+        forgetSpawn(reservedChildId);
         throw error;
       } finally {
         const remaining = (pendingSpawns.get(opts.parentSessionId) ?? 1) - 1;
@@ -4022,9 +4039,8 @@ export function createCordisDshHost(
       // worker for the life of the process. Release exactly this activation
       // instead (the settle path could not see it yet).
       if (settledWorkerIds.has(workerId)) {
-        workers.delete(reservedChildId);
-        spawnedWorkerIds.delete(reservedChildId);
-        if (workerId !== reservedChildId) spawnedWorkerIds.delete(workerId);
+        forgetSpawn(reservedChildId);
+        if (workerId !== reservedChildId) forgetSpawn(workerId);
         void Promise.resolve(activation.dispose()).catch((error) => {
           try {
             console.warn(
@@ -4037,12 +4053,30 @@ export function createCordisDshHost(
         });
         return workerId;
       }
+      if (disposed) {
+        // Ticket 196: dispose() ran during the startActivation await. A
+        // compliant startup already rejected on the aborted signal; one that
+        // returns a receipt anyway must be released here, never registered
+        // into maps that belong to the disposed host.
+        forgetSpawn(reservedChildId);
+        if (workerId !== reservedChildId) forgetSpawn(workerId);
+        void Promise.resolve(activation.dispose()).catch((error) => {
+          try {
+            console.warn(
+              `[multitask-dispatcher] late activation for worker ${workerId} could not be released:`,
+              error,
+            );
+          } catch {
+            // A broken console must not break the spawn path either.
+          }
+        });
+        return workerId;
+      }
       if (workerId !== reservedChildId) {
         // The host minted its own id despite the reservation. Keep the
         // registry truthful: move the entry, never leave the reservation
         // behind as a phantom worker.
-        workers.delete(reservedChildId);
-        spawnedWorkerIds.delete(reservedChildId);
+        forgetSpawn(reservedChildId);
         spawnedWorkerIds.add(workerId);
         workers.set(workerId, {
           parentSessionId: opts.parentSessionId,
@@ -4741,6 +4775,11 @@ export function createCordisDshHost(
     },
 
     dispose(): void {
+      // Ticket 196: publish the terminal state BEFORE releasing anything, so
+      // a spawn continuation that is already queued sees it. The controller
+      // for a pre-publication spawn is in `spawnControllers` from before its
+      // await, so the loop below aborts its startup signal.
+      disposed = true;
       offSubagentEnd();
       offSessionEvent();
       offAgentCreated();
