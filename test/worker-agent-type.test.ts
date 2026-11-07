@@ -16,7 +16,10 @@ import {
   applyWorkerComposition,
   type WorkerCompositionContext,
 } from "../src/worker/preset.js";
-import { HOST_SPAWN_TOOL_CANDIDATES } from "../src/core/tools.js";
+import {
+  HOST_SPAWN_TOOL_CANDIDATES,
+  withheldHostSpawnTools,
+} from "../src/core/tools.js";
 import {
   AWAIT_AGENT_TOOL,
   CHECK_WORKERS_TOOL,
@@ -80,6 +83,7 @@ describe("worker tool barrier", () => {
       "message_agent",
       "await_agent",
       "spawn_dispatcher",
+      "workflow",
     ]) {
       assert.ok(names.has(required), `missing deny candidate: ${required}`);
     }
@@ -112,6 +116,26 @@ describe("worker tool barrier", () => {
     // visible on a worker surface.
     assert.ok(filter.deny.includes(SEND_PEER_TOOL));
     assert.ok(!filter.deny.includes("bash"));
+  });
+
+  // Ticket 182: the installed standard preset mounts `workflow`
+  // (workflow-ptc); its script-level `agent()` can start descendants outside
+  // this plugin's tracked worker-spawn path, so a worker's scope must deny it.
+  // The dispatcher deliberately keeps it: the fix belongs in the worker deny
+  // candidates only, never in the dispatcher's host-spawn withhold list.
+  it("denies workflow on a worker scope but keeps it on dispatcher scope", () => {
+    const known = new Set(["workflow", "bash"]);
+    const workerDeny = new Set(buildWorkerToolFilter(known).deny);
+    assert.ok(
+      workerDeny.has("workflow"),
+      "worker scope still exposes the workflow orchestration tool",
+    );
+    assert.ok(!workerDeny.has("bash"));
+
+    // Dispatcher scope applies only `withheldHostSpawnTools`; `workflow` must
+    // stay out of it, or the dispatcher loses a capability on purpose kept.
+    assert.deepEqual(withheldHostSpawnTools(known), []);
+    assert.ok(!HOST_SPAWN_TOOL_CANDIDATES.includes("workflow"));
   });
 
   // Ticket 179: the worker barrier shares the dispatcher-side candidate list,

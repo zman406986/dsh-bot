@@ -24,6 +24,8 @@ export const WORKER_DENIED_TOOL_CANDIDATES: readonly string[] = [
   // the same host verbs the dispatcher surface withholds are denied here, so
   // `subagent_fork` cannot slip a worker an unaccounted child either.
   ...HOST_SPAWN_TOOL_CANDIDATES,
+  // Ticket 182: `workflow` can start descendants outside the worker leaf barrier.
+  "workflow",
   // Worker-management / jobs
   "job_list",
   "job_output",
