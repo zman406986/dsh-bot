@@ -79,7 +79,9 @@ function replaceByteArrays(value: unknown, ancestors: Set<object>): unknown {
       throw new TypeError("Canonical values must be plain objects.");
     }
     const source = value as Record<string, unknown>;
-    const output: Record<string, unknown> = {};
+    // A null prototype keeps an own `__proto__` key an own key: on `{}` the
+    // assignment below would hit the inherited setter and drop the member.
+    const output: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
     for (const key of Object.keys(source)) {
       output[key] = replaceByteArrays(source[key], ancestors);
     }
