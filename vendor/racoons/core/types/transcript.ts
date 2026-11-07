@@ -22,6 +22,14 @@ export interface ToolEvidence {
   readonly paths: readonly PathEvidence[];
   readonly source: SourceRef;
   readonly sourceRecallId: RecallId | null;
+  /**
+   * For a `write`: whether the call proved the path changed. `committed` is a
+   * successful write; `no-mutation` is a refusal the producer proved happened
+   * before any filesystem mutation; `unknown` (or absent) is a failed write
+   * that may have partially mutated the path, so invalidation stays
+   * conservative. Absent on non-writes and on snapshots that predate the fact.
+   */
+  readonly writeOutcome?: "committed" | "no-mutation" | "unknown";
 }
 
 export interface PathEvidence {

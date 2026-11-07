@@ -11,8 +11,10 @@ import type { SessionSnapshot, ToolResultNode } from "../types/transcript.js";
  * `units/invalidation.ts` decides which earlier units the fact invalidates.
  *
  * A write's path outcome is always `unknown` (E0: a write proves a path changed,
- * never a hit or a miss), so no outcome filter applies to a write's own paths.
- * Only a read's *hit* paths are a copy of the file, and that filter lives in
+ * never a hit or a miss), so no path-outcome filter applies to a write's own
+ * paths. The one write-side filter is `writeOutcome`: a refusal the producer
+ * proved happened before mutation is not a write fact. Only a read's *hit*
+ * paths are a copy of the file, and that filter lives in
  * `units/invalidation.ts` where the read side is read.
  *
  * Transcript order is the clock, so a write names its node index as well as the
@@ -52,11 +54,19 @@ export function writePathSpellings(node: ToolResultNode): readonly string[] {
   return spellings;
 }
 
-/** The snapshot's writes, one row per path spelling, in transcript order. */
+/**
+ * The snapshot's writes, one row per path spelling, in transcript order.
+ *
+ * A write whose producer proved it was refused before any filesystem mutation
+ * (`writeOutcome: "no-mutation"`) is not a write fact: the path did not
+ * change, so it contributes no row. A `committed` write, an `unknown` failure,
+ * and an older snapshot with no outcome all stay conservative.
+ */
 export function pathWrites(snapshot: SessionSnapshot): readonly PathWrite[] {
   const writes: PathWrite[] = [];
   for (const [atIndex, node] of snapshot.nodes.entries()) {
     if (node.kind !== "tool-result" || node.evidence.kind !== "write") continue;
+    if (node.evidence.writeOutcome === "no-mutation") continue;
     for (const pathKey of writePathSpellings(node)) {
       writes.push({ pathKey, atIndex, atStep: node.stepOrdinal, nodeId: node.id });
     }

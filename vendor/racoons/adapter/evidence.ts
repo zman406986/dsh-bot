@@ -75,6 +75,33 @@ function count(value: number | null | undefined): number | null {
 }
 
 /**
+ * True when a failed edit's own arguments prove the installed tool refused it
+ * before it could touch the filesystem: `dsh-tool-fs` parses `file_path`,
+ * `old_string` and `new_string` first and throws when the two literal strings
+ * are equal, before policy resolution, path resolution or `editText`. Only
+ * that known preflight refusal is a no-mutation proof. Every other failed write
+ * may have partially mutated its path and keeps conservative invalidation.
+ */
+function isProvenNoMutationEdit(item: DshEvidenceInput): boolean {
+  if (item.result?.failed !== true || item.toolName.toLowerCase() !== 'edit') return false;
+  const before = item.input?.['old_string'];
+  const after = item.input?.['new_string'];
+  return typeof before === 'string' && typeof after === 'string' && before === after;
+}
+
+/** The write fact's outcome: committed, proven no-mutation, or unknown. */
+function writeOutcomeOf(
+  item: DshEvidenceInput, kind: DshToolKind,
+): ToolEvidence['writeOutcome'] {
+  if (kind !== 'write') return undefined;
+  // No result facts is not proof of success: keep it unknown (and therefore
+  // conservative for invalidation) rather than claiming a committed write.
+  if (item.result === undefined) return 'unknown';
+  if (item.result.failed !== true) return 'committed';
+  return isProvenNoMutationEdit(item) ? 'no-mutation' : 'unknown';
+}
+
+/**
  * Unknown output is never proof of a miss. A read proves a hit through its own
  * host meta — the lines it returned, which arrive as `lineCount` — never through
  * a count (ISSUE-051). A read with no such span stays `unknown`.
@@ -129,6 +156,10 @@ export function deriveToolEvidence(
       title: path.title ?? null, lineCount: count(path.lineCount),
       byteLength: count(path.byteLength), outcome };
   });
+  const writeOutcome = writeOutcomeOf(item, kind);
   // The union admits `write` (V0), so the derived kind travels typed, no cast.
-  return { kind, target, paths, source: { ...source }, sourceRecallId };
+  return {
+    kind, target, paths, source: { ...source }, sourceRecallId,
+    ...(writeOutcome === undefined ? {} : { writeOutcome }),
+  };
 }
