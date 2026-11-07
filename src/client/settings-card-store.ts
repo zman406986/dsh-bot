@@ -471,11 +471,17 @@ export interface SettingsCardStore {
   /**
    * Bind the form handed in by the slot owner. The snapshot is read at once:
    * a page opened after the first accepted section already stands at `ready`.
+   * A new form OBJECT is a same-entry refresh (the shipped page wraps its
+   * cached entry controller in a fresh plain wrapper each render), so it keeps
+   * the staged drafts, any in-flight save's outcome, and any deferred
+   * verification. Only an unbind — `detach`, `attachUnavailable`, or
+   * `attach(undefined)` — is the logical-entry switch signal; the owner props
+   * carry no entry key.
    */
   attach(form: ConfigPageFormLike | undefined): void;
-  /** No form was handed in: no card, no error surface. */
+  /** No form was handed in: no card, no error surface (a logical-entry switch). */
   attachUnavailable(): void;
-  /** Stop reading and forget the staged drafts. */
+  /** Stop reading and forget the staged drafts (the logical-entry switch signal). */
   detach(): void;
   /** Stage draft text for one field (no wire write). */
   edit(field: string, text: string): void;
@@ -595,12 +601,17 @@ export function createSettingsCardStore(): SettingsCardStore {
   let failed = false;
   let pending: PendingVerification | null = null;
   /**
-   * Bumped by every bind/unbind. A save captures the value it started under;
-   * a continuation from an older generation never touches the current form's
-   * drafts or failure flag, and may only release the `saving` flag it owns.
+   * The bind epoch: bumped ONLY by `unbind` (detach, an unavailable gap, or
+   * `attach(undefined)`), never by a page re-render. The shipped Plugins page
+   * builds a NEW plain wrapper around the SAME cached entry controller on
+   * every render, and the owner props carry no entry key — so wrapper identity
+   * cannot tell a same-entry refresh from a switch, and must not invalidate
+   * an in-flight save. A save captures the epoch it started under; a
+   * continuation from an older epoch never touches the current form's drafts
+   * or failure flag, and may only release the `saving` flag it owns.
    */
-  let generation = 0;
-  /** The generation whose save currently owns `saving` (null when idle). */
+  let bindEpoch = 0;
+  /** The bind epoch whose save currently owns `saving` (null when idle). */
   let savingOwner: number | null = null;
   let version = 0;
   let box: SettingsCardBox = {
@@ -663,7 +674,7 @@ export function createSettingsCardStore(): SettingsCardStore {
    * document and must not inherit a draft it never showed.
    */
   function unbind(): void {
-    generation += 1;
+    bindEpoch += 1;
     form = null;
     pending = null;
     staged.clear();
@@ -689,15 +700,11 @@ export function createSettingsCardStore(): SettingsCardStore {
         unbind();
         return;
       }
-      // A page refresh hands the SAME form object with a newer `state`. That
-      // is still the save's own document, so its continuation stays valid; a
-      // different form (or a detach/unavailable gap) is a rebind and bumps the
-      // generation. Drafts survive a refresh either way.
-      if (form === next) {
-        read();
-        return;
-      }
-      generation += 1;
+      // The shipped page hands a NEW plain wrapper around the SAME cached
+      // entry controller on every render, so a new form object is a refresh,
+      // not a rebind. `unbind` is the ONLY logical-entry switch signal (the
+      // owner props carry no entry key): a save in flight keeps its outcome,
+      // and any deferred verification stays parked for reconciliation.
       form = next;
       read();
     },
@@ -742,7 +749,7 @@ export function createSettingsCardStore(): SettingsCardStore {
           ? { op: "set", path: [write.field], value: write.value }
           : { op: "unset", path: [write.field] },
       );
-      const token = generation;
+      const token = bindEpoch;
 
       saving = true;
       savingOwner = token;
@@ -754,9 +761,11 @@ export function createSettingsCardStore(): SettingsCardStore {
           // One atomic mutation: every staged field shares one revision fence
           // and one Host validation, so a partial document cannot land.
           const accepted = await bound.mutate(ops, revision);
-          // The form this save belongs to has been unbound or replaced: the
+          // The logical entry this save belongs to has been unbound: the
           // current drafts/failure belong to someone else. Never verdict them.
-          if (token !== generation || form !== bound) return;
+          // A same-entry refresh only replaced the wrapper, so its continuation
+          // still owns the outcome and reads the CURRENT snapshot.
+          if (token !== bindEpoch) return;
           if (!accepted) {
             failed = true;
             return;
@@ -769,7 +778,9 @@ export function createSettingsCardStore(): SettingsCardStore {
           // the drafts clear and verification defers to the next `attach`;
           // claiming failure there was the live "Not saved" defect.
           failed = false;
-          const readBack = readFormState(bound);
+          // Read the FORM CURRENTLY bound: a refresh during the await handed a
+          // fresh wrapper carrying the new snapshot, which is the read-back.
+          const readBack = readFormState(form ?? bound);
           const fresh = isFreshReadBack(readBack, before);
           if (!fresh) {
             staged.clear();
@@ -784,15 +795,15 @@ export function createSettingsCardStore(): SettingsCardStore {
           }
           staged.clear();
         } catch {
-          if (token === generation && form === bound) failed = true;
+          if (token === bindEpoch) failed = true;
         } finally {
-          if (token === generation) {
+          if (token === bindEpoch) {
             saving = false;
             savingOwner = null;
             read();
           } else if (savingOwner === token) {
-            // Detached/replaced underneath us: release only our own flag;
-            // the current form's drafts and failure line stay untouched.
+            // Unbound underneath us: release only our own flag; the current
+            // form's drafts and failure line stay untouched.
             saving = false;
             savingOwner = null;
             publish();

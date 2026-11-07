@@ -822,6 +822,51 @@ describe("settings card — store: staging, saving, and the honest failure path 
     assert.equal(store.getBox().dirty, true);
   });
 
+  it("a fresh-wrapper page refresh during a save keeps its outcome (shipped contract)", async () => {
+    // The shipped page hands a NEW plain wrapper around the SAME cached entry
+    // controller on every render (`dsh-client-ui-settings` client.js:1165-1170,
+    // :1209-1231), so a refresh during an await replaces the wrapper object,
+    // not the logical entry. Wrapper identity must not be read as a rebind.
+    let state: ConfigFormSnapshotLike = {
+      status: "ready",
+      value: documentWith(),
+      writable: true,
+      revision: 7,
+    };
+    let finishMutate: ((accepted: boolean) => void) | undefined;
+    const wrapper = (snapshot: ConfigFormSnapshotLike): ConfigPageFormLike => ({
+      state: snapshot,
+      mutate: () =>
+        new Promise<boolean>((resolve) => {
+          finishMutate = resolve;
+        }),
+    });
+    const store = createSettingsCardStore();
+    store.attach(wrapper(state));
+    store.edit("enabled", "false");
+    const pending = store.save();
+
+    // The refresh's attach effect runs before the mutation settles: a new
+    // wrapper carrying the republished document (the write was dropped).
+    state = {
+      status: "ready",
+      value: documentWith(),
+      writable: true,
+      revision: 8,
+    };
+    store.attach(wrapper(state));
+    finishMutate?.(true);
+    await pending;
+
+    // The outcome belongs to this save's logical entry: the dropped write
+    // fails loudly, the submitted draft stays for correction, and Apply is
+    // available again.
+    assert.equal(store.getBox().failed, true);
+    assert.equal(store.getBox().dirty, true);
+    assert.equal(store.getBox().view.fields[0]?.text, "false");
+    assert.equal(store.getBox().saving, false);
+  });
+
   it("a save continuation from before detach never touches the reattached form", async () => {
     let finishMutate: ((accepted: boolean) => void) | undefined;
     const firstForm: ConfigPageFormLike = {
