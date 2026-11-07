@@ -46,8 +46,8 @@ export function summarize(
     if (!('kind' in reading)) {
       latestUsage = reading;
     } else if (!losses.has(reading.nativeEventId)) {
-      if (losses.size === 0 && latestUsage !== null) {
-        tokensAtFirstForcedLoss = reading.inputTokensBefore ?? latestUsage.inputTokens;
+      if (losses.size === 0) {
+        tokensAtFirstForcedLoss = reading.inputTokensBefore ?? latestUsage?.inputTokens ?? null;
       }
       losses.add(reading.nativeEventId);
     }
