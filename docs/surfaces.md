@@ -283,21 +283,21 @@ slots carry our content.
 | Session-kind header chip (a spawned dispatcher's own conversation) | removed — `src/client/session-kind.tsx` + the registration in `src/client/index.ts` | **Withdrawn (2026-10-28)** — the `conversation.session.header.actions` entry (order 30) was removed from the client; the seat it occupied is no longer composed. It existed under the ticket-140 ruling of the same day, which assumed a spawned dispatcher is a subagent child with no sidebar row. ADR-0032 makes a summoned dispatcher a top-level session, so it now has a real sidebar row and the glyph on that row is the one mark, replacing the chip. The WORKER marker in this slot stays **declined** (ticket 123, 2026-10-22) — no seat composes it |
 | Settings card (the Plugins page row) | `src/client/settings-card.tsx` + `src/client/settings-card-store.ts` | **Live** — keyed `plugins.row.config`, the one configuration surface we register |
 | Nine tool call views | `src/client/toolviews.ts` + `src/client/toolview-panel.tsx` + `src/client/toolview-styles.ts` | **Live** — nine keyed `tool.call.toolview` entries: all eight dispatcher tools plus the retained historical `send_peer` key. Each row is one primary sentence, at most two ` · `-separated facts, and a nested Details area with full ids; `check_workers` adds one readable line per worker (title, one human status word, facts, activity, short ref). Raw statuses stay in `data-status`; client copy ships EN + ZH through `src/client/status-format.ts` |
-| Locale dictionary (en + zh, identical key sets) | `src/client/overlay.ts` | **Live** — namespace registration, not layout. Since ticket 153 the same `locale.preference` also selects the model-facing copy: dispatcher policy, standing rules, wake/access/peer blocks, the eight tool descriptions, the worker contract, the wake cues and the access-prompt labels all ship an EN and a ZH face (`src/core/policy/prompts.ts`, `src/worker/prompt.ts`, `src/adapter/wake-copy.ts`, `src/adapter/access-prompt.ts`); an absent or unknown preference composes EN |
+| Locale dictionary (en + zh, identical key sets) | `src/client/overlay.ts` | **Live** — namespace registration, not layout. Since ticket 153 the same `locale.preference` also selects the model-facing copy: dispatcher policy, standing rules, wake/peer blocks, the eight tool descriptions, the worker contract, and the wake cues all ship an EN and a ZH face (`src/core/policy/prompts.ts`, `src/worker/prompt.ts`, `src/adapter/wake-copy.ts`); an absent or unknown preference composes EN |
 | Roster wire contract (snapshot v4) | `src/core/roster-snapshot.ts` | **Retained** — the parse/projection contract stays; no live channel feeds it on 0.2.1 (the settings-document mirror is gone) |
 | Activation command + presence hint | `src/adapter/activation-command.ts` | **Live** — `/dsh-bot` in the stock chat |
 | Stop command | removed (`src/adapter/stop-command.ts` deleted) | **Withdrawn** — ADR-0030 (2026-10-21, ticket 129) removed the command and the file; deactivation is implicit via host disposal or plugin unload |
 | Steer command | `src/adapter/steer-command.ts` | **Live** — `/dispatcher-steer` in the stock chat |
-| Resolve command | `src/adapter/resolve-command.ts` | **Live** — `/dispatcher-resolve`, the transport approval cards answer through |
-| Access prompts (Allow / Always allow this session / Deny) | `src/adapter/access-prompt.ts` | **Live** — host `userQuestions.ask` prompts |
+| Resolve command | removed (`src/adapter/resolve-command.ts` deleted) | **Withdrawn** — ADR-0033 (2026-11-03, ticket 174) withdrew `/dispatcher-resolve` with the worker ask channel; a blocked worker reports and stops |
+| Access prompts (Allow / Always allow this session / Deny) | removed (`src/adapter/access-prompt.ts` deleted) | **Withdrawn** — ADR-0033 (2026-11-03, ticket 174) removed the worker ask channel, its relay and these host `userQuestions.ask` prompts |
 | Restart notice | `src/adapter/restart-notice.ts` | **Live** — in-chat text |
 | Workers panel | `src/client/panel.tsx`, sections from `src/client/roster-store.ts` | Retained, unmounted |
 | Dispatcher shell (roster panel, conversation pane) | `src/client/shell.tsx`, `src/client/shell-store.ts` | Retained, unmounted |
 | Shell page mount + `main`/`root` contracts | `src/client/shell-mount.ts` | Retained, unmounted |
 | Floating window / launcher / capsule | deleted — `src/client/floating-window.tsx`, `src/client/floating-window-store.ts`, the launcher registration in `src/client/overlay.ts` | **Withdrawn and deleted** — ticket 114 removed the files; ADR-0024 withdrew the surfaces |
 
-Dormant boot registers the three host commands — `/dsh-bot`, `/dispatcher-steer`,
-`/dispatcher-resolve` — plus the passive host plumbing, and nothing else: the prompts
+Dormant boot registers the two host commands — `/dsh-bot`, `/dispatcher-steer` —
+plus the passive host plumbing, and nothing else: the prompts
 and the tool surface exist only after an explicit `/dsh-bot` (ADR-0009). The roster
 snapshot has no live producer at all on 0.2.1, so nothing of it reaches a surface.
 Client-side, the default composition registers the locale namespace, the keyed

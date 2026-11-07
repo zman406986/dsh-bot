@@ -274,7 +274,7 @@ export const localeDictionary: LocaleDictionary = {
     // flag it started with) so the control is never read as a live toggle.
     "settings.card.title": "Multitask Dispatcher",
     "settings.card.description":
-      "The dispatcher's feature flag and how long an unanswered permission request waits.",
+      "The dispatcher's feature flag and its wake coalescing, inbox, RACOONS, and microcompaction settings.",
     "settings.card.expand": "Expand",
     "settings.card.collapse": "Collapse",
     "settings.card.unsaved": "Unsaved",
@@ -585,7 +585,7 @@ export const localeDictionary: LocaleDictionary = {
     // 以免这个控件被读成实时开关。
     "settings.card.title": "Multitask Dispatcher",
     "settings.card.description":
-      "调度器的功能开关，以及未获答复的权限请求可等待的时长。",
+      "调度器的功能开关，以及唤醒合并、收件箱、RACOONS 与微压缩设置。",
     "settings.card.expand": "展开",
     "settings.card.collapse": "收起",
     "settings.card.unsaved": "未保存",

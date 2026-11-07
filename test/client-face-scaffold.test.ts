@@ -577,6 +577,30 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
       }).length > 0,
     );
   });
+
+  it("the settings-card description advertises no removed permission-request timeout", () => {
+    // Ticket 193 / ADR-0033: `accessRequestTimeoutMs` and its card row are
+    // gone, so the shared description — rendered by the Plugins row summary
+    // and the available-configuration page header — must not promise a wait
+    // on an unanswered permission request in either face.
+    const descriptions = {
+      en: localeDictionary.en["settings.card.description"] ?? "",
+      zh: localeDictionary.zh["settings.card.description"] ?? "",
+    };
+    for (const [face, text] of Object.entries(descriptions)) {
+      assert.ok(text.length > 0, `${face} description is empty`);
+      assert.doesNotMatch(
+        text,
+        /permission|timeout|unanswered/i,
+        `${face} description still advertises the removed permission-request timeout`,
+      );
+      assert.doesNotMatch(
+        text,
+        /权限|超时|未获答复/,
+        `${face} description still advertises the removed permission-request timeout`,
+      );
+    }
+  });
 });
 
 describe("client face scaffold — apply over fake client seams", () => {
