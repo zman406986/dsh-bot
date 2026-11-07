@@ -194,6 +194,13 @@ export function bindConversationFeed(
       return;
     }
     attachedSource = source;
+    /**
+     * The generation this attachment belongs to. The initial apply below can
+     * notify conversation subscribers synchronously, and one of them may move
+     * the shell selection: the nested `follow` then attaches another session
+     * and owns the shared unsubscribe slot before this call resumes.
+     */
+    const token = generation;
     const sync = (): void => {
       let snapshot: ReturnType<ConversationSourceLike["getSnapshot"]>;
       try {
@@ -229,10 +236,24 @@ export function bindConversationFeed(
     } catch {
       unsubscribe = undefined;
     }
-    unsubscribeWindow =
+    const nextUnsubscribe =
       typeof unsubscribe === "function"
         ? (unsubscribe as () => void)
         : undefined;
+    if (token !== generation || current !== sessionId) {
+      // The synchronous initial apply re-entered `follow`: a nested
+      // attachment (or a deselect) now owns the shared unsubscribe slot. Drop
+      // this obsolete subscription instead of overwriting the current handle.
+      if (nextUnsubscribe !== undefined) {
+        try {
+          nextUnsubscribe();
+        } catch {
+          // Same containment as `closeWindow`: a broken disposer degrades.
+        }
+      }
+      return;
+    }
+    unsubscribeWindow = nextUnsubscribe;
   };
 
   const follow = (): void => {

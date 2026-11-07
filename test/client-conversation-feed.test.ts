@@ -517,6 +517,126 @@ describe("conversation feed — 0.2.x retain/reference/binding shape", () => {
     );
     binding.dispose();
   });
+
+  it("a selection reentry during the initial apply keeps the nested unsubscribe", () => {
+    const windowA = createSource({ entries: [assistantEvent(1, "from A")] });
+    const windowB = createSource({ entries: [assistantEvent(2, "from B")] });
+    const released: string[] = [];
+    const sessions: ClientSessionsLike = {
+      list: { getSnapshot: () => ({ ids: [], byId: {} }) },
+      scope: () => undefined,
+      retain(target) {
+        return {
+          sessionId: target,
+          binding: {
+            eventSource: target === "s-a" ? windowA.source : windowB.source,
+          },
+          release() {
+            released.push(target);
+          },
+        };
+      },
+    };
+    const conversation = createConversationStore();
+    const shell = createDispatcherShellStore();
+    shell.upsertSessions([
+      { sessionId: "s-a", title: "A" },
+      { sessionId: "s-b", title: "B" },
+    ]);
+    const binding = bindConversationFeed(conversation, sessions, shell);
+
+    // A's initial apply notifies synchronously; the one-shot subscriber moves
+    // selection to B inside the outer A attachment, so B attaches and
+    // subscribes before the outer attach resumes.
+    let armed = true;
+    conversation.subscribe(() => {
+      if (!armed) return;
+      armed = false;
+      shell.select("s-b");
+    });
+
+    shell.select("s-a");
+
+    assert.equal(
+      windowA.listenerCount(),
+      0,
+      "the obsolete outer A subscription is dropped",
+    );
+    assert.equal(
+      windowB.listenerCount(),
+      1,
+      "the nested B attachment keeps its subscription",
+    );
+    assert.equal(conversation.stateFor("s-b").kind, "ready");
+
+    binding.dispose();
+    assert.equal(windowB.listenerCount(), 0, "dispose drops B's subscription");
+    const beforeLatePublishA = conversation.stateFor("s-a");
+    const beforeLatePublishB = conversation.stateFor("s-b");
+    windowA.publish({ entries: [assistantEvent(3, "late A")] });
+    windowB.publish({ entries: [assistantEvent(4, "late B")] });
+    assert.deepEqual(
+      conversation.stateFor("s-a"),
+      beforeLatePublishA,
+      "no borrowed source can feed the store after dispose",
+    );
+    assert.deepEqual(
+      conversation.stateFor("s-b"),
+      beforeLatePublishB,
+      "no borrowed source can feed the store after dispose",
+    );
+    assert.deepEqual(released, ["s-a", "s-b"]);
+  });
+
+  it("a reentry that returns to the same session still drops the outer subscription", () => {
+    const windowA = createSource({ entries: [assistantEvent(1, "from A")] });
+    const windowB = createSource({ entries: [assistantEvent(2, "from B")] });
+    const released: string[] = [];
+    const sessions: ClientSessionsLike = {
+      list: { getSnapshot: () => ({ ids: [], byId: {} }) },
+      scope: () => undefined,
+      retain(target) {
+        return {
+          sessionId: target,
+          binding: {
+            eventSource: target === "s-a" ? windowA.source : windowB.source,
+          },
+          release() {
+            released.push(target);
+          },
+        };
+      },
+    };
+    const conversation = createConversationStore();
+    const shell = createDispatcherShellStore();
+    shell.upsertSessions([
+      { sessionId: "s-a", title: "A" },
+      { sessionId: "s-b", title: "B" },
+    ]);
+    const binding = bindConversationFeed(conversation, sessions, shell);
+
+    // B then back to A inside A's initial apply: the outermost attachment's
+    // generation moved on even though the current session ended up A again.
+    let armed = true;
+    conversation.subscribe(() => {
+      if (!armed) return;
+      armed = false;
+      shell.select("s-b");
+      shell.select("s-a");
+    });
+
+    shell.select("s-a");
+
+    assert.equal(
+      windowA.listenerCount(),
+      1,
+      "only the nested A attachment remains subscribed",
+    );
+    assert.equal(windowB.listenerCount(), 0);
+    binding.dispose();
+    assert.equal(windowA.listenerCount(), 0);
+    assert.deepEqual(released, ["s-a", "s-b", "s-a"]);
+  });
 });
 
 describe("shell store — applyPresence refuses unparsed values", () => {
