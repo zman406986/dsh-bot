@@ -21,6 +21,8 @@ import type { Multitask } from "../core/multitask.js";
 import type {
   DispatcherSpawnOptions,
   DispatcherSpawnResult,
+  ModelOptionPurpose,
+  ModelOptionResolution,
 } from "../core/types.js";
 import { formatDeliverResultRecorded } from "../core/tool-results.js";
 import {
@@ -424,6 +426,22 @@ export interface RegisterDispatcherToolsOptions {
     opts: DispatcherSpawnOptions,
   ) => Promise<DispatcherSpawnResult>;
   /**
+   * Ticket 285 (PLAN §5, Task 6): the host's model-option resolver, forwarded
+   * verbatim into `createDispatcherTools` for `spawn_dispatcher`'s optional
+   * `model` / `worker_model` arguments. The LIVE call site (`src/plugin.ts`)
+   * binds it to the activated session, so the resolver sees the spawning
+   * dispatcher's catalog preference and session id.
+   *
+   * Optional here for the same reason `spawnDispatcher` is: a registration
+   * without it is still valid while no model option is passed. A non-empty
+   * value with no resolver is a wiring bug, and the core handler throws —
+   * silently spawning on the default would hide which side dropped it.
+   */
+  readonly resolveModel?: (
+    raw: string,
+    purpose: ModelOptionPurpose,
+  ) => Promise<ModelOptionResolution>;
+  /**
    * Ticket 153: model-facing copy language. Omitted means EN, so every
    * pre-153 caller keeps byte-identical descriptions.
    */
@@ -462,6 +480,9 @@ export function registerDispatcherTools(
       : {}),
     ...(options.spawnDispatcher !== undefined
       ? { spawnDispatcher: options.spawnDispatcher }
+      : {}),
+    ...(options.resolveModel !== undefined
+      ? { resolveModel: options.resolveModel }
       : {}),
     ...(options.language !== undefined ? { language: options.language } : {}),
     ...(options.origin !== undefined ? { origin: options.origin } : {}),

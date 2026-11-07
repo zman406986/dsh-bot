@@ -1368,6 +1368,12 @@ export function createMultitask(
             ...(request.credentialNames !== undefined
               ? { credentialNames: request.credentialNames }
               : {}),
+            // Ticket 285: the resolved route for THIS worker, forwarded only
+            // when the tool actually resolved one. Omitting the key keeps a
+            // host that does not implement the option on exactly today's
+            // inheritance path (the leader's worker default, then its own
+            // live route).
+            ...(request.model !== undefined ? { model: request.model } : {}),
             // Ticket 120: the host calls this the moment the worker id is fixed
             // — before the child can emit `agent/created` or its first
             // `agent/status: running` (both fire inside `startActivation`).

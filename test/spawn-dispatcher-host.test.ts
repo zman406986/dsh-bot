@@ -15,7 +15,7 @@
  * worker — so the contrast stays observable in one file.
  */
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 import {createCordisDshHost, type ActivationLike, type ActivationSpecLike, type AdapterContext, type AgentHandleLike, type AgentLike, type AgentOptionsLike, type CreateAgentOptionsLike} from "../src/adapter/cordis-dsh-host.js";
 import { WAKE_SOURCE_KIND } from "../src/adapter/wake-copy.js";
 import {
@@ -23,6 +23,7 @@ import {
   SUMMONING_DISPATCHER_ID_HANDOFF_LABEL,
 } from "../src/core/policy/prompts.js";
 import { FakeDshHost } from "../src/core/fake-host.js";
+import type { ModelCatalogLike } from "../src/adapter/model-option.js";
 
 interface ComposedChild {
   readonly childId: string;
@@ -111,6 +112,13 @@ function createStubCtx(
     createIdOverride?: string;
     failFollowup?: boolean;
   },
+  /**
+   * Ticket 285: the live model catalog the host reaches through
+   * `ctx.get("llm")`. Present only when a test asks for one, which keeps
+   * "a deployment that mounts no catalog" observable: the resolver answers
+   * `catalog-unavailable` and the spawn proceeds on the inherited route.
+   */
+  llm?: ModelCatalogLike,
 ) {
   const listeners = new Map<string, Array<(payload: never) => void>>();
   const startActivationCalls: ActivationSpecLike[] = [];
@@ -196,6 +204,9 @@ function createStubCtx(
      * observable.
      */
     get(name: string) {
+      // Ticket 285: the model catalog the host's resolver reads. A deployment
+      // that mounts none returns undefined, exactly like the live context.
+      if (name === "llm") return llm;
       if (name === "workspaceRegistry") {
         if (workspaces === undefined) return undefined;
         return {
@@ -2016,3 +2027,373 @@ describe("defect fix: a summoned session files itself under its summoner's works
     assert.match(String(warnings[0]?.[0]), new RegExp(spawned.dispatcherId));
   });
 });
+
+/**
+ * Ticket 285 (.scratch/model-arg/PLAN.md §§1.5, 3.2-3.3 / Task 8): the leader
+ * half of the spawn model option. `spawnDispatcher` already copies the
+ * summoner's LIVE route; an explicit `model` replaces that route, but only
+ * when it names a DIFFERENT provider/model. A same-route choice keeps the
+ * inherited effort/maxTokens, because nothing about the model they belong to
+ * changed — a route change drops them, since the option carries a route only
+ * (plan §1.5).
+ *
+ * Offline: the summoner is a structural stub and the create seam is this
+ * file's ctx stub. No catalog is read here — the tool path validates the raw
+ * value through `host.resolveModelOption`; the host applies the route object
+ * it is handed (plan §3.3 / §8).
+ */
+describe("Ticket 285: spawnDispatcher applies the leader's model option", () => {
+  /**
+   * A summoner whose LIVE selection is the deployment route PLUS effort and a
+   * token cap: exactly the state the peer would inherit today. Every case
+   * below starts from it, so "kept" and "dropped" are both observable.
+   */
+  function bindLiveSummoner(
+    host: ReturnType<typeof createCordisDshHost>,
+  ): void {
+    const summoner = createAgent(
+      "disp-1",
+      0,
+      { cwd: "C:\\work\\project" },
+      { provider: "pA", model: "mA" },
+    );
+    (summoner as unknown as Record<string, unknown>)["model"] = {
+      current: () => ({
+        provider: "pA",
+        model: "mA",
+        reasoningEffort: "high",
+        maxTokens: 8192,
+      }),
+    };
+    host.bindParent(summoner, "disp-1");
+  }
+
+  it("uses the explicit route alone, dropping the inherited effort and maxTokens", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    bindLiveSummoner(host);
+
+    await host.spawnDispatcher({
+      parentSessionId: "disp-1",
+      title: "Peer",
+      prompt: "Own the slice.",
+      model: { provider: "pB", model: "mB" },
+    });
+
+    const options = ctx.createCalls[0] as CreateAgentOptionsLike;
+    // A fresh route is exactly provider+model: the summoner's effort belongs
+    // to pA/mA and the option carries no tuning of its own.
+    assert.deepEqual(options.agentOptions, { provider: "pB", model: "mB" });
+    assert.deepEqual(Object.keys(options.agentOptions ?? {}).sort(), [
+      "model",
+      "provider",
+    ]);
+  });
+
+  it("keeps the inherited effort and maxTokens when the explicit route is the inherited one", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    bindLiveSummoner(host);
+
+    await host.spawnDispatcher({
+      parentSessionId: "disp-1",
+      title: "Peer",
+      prompt: "Own the slice.",
+      model: { provider: "pA", model: "mA" },
+    });
+
+    // Same provider+model means the same model, so the inherited object is
+    // reused whole — including the fields the option itself never carries.
+    assert.deepEqual(ctx.createCalls[0]?.agentOptions, {
+      provider: "pA",
+      model: "mA",
+      reasoningEffort: "high",
+      maxTokens: 8192,
+    });
+  });
+
+  it("leaves the inherited route untouched when model is omitted but worker_model is given", async () => {
+    // Task 8 owns only the LEADER's route. Storing the worker default and
+    // writing the mark row are Task 10; the question here is that
+    // `workerModel` alone never leaks into the leader's agentOptions.
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    bindLiveSummoner(host);
+
+    await host.spawnDispatcher({
+      parentSessionId: "disp-1",
+      title: "Peer",
+      prompt: "Own the slice.",
+      workerModel: { provider: "pC", model: "mC" },
+    });
+
+    assert.deepEqual(ctx.createCalls[0]?.agentOptions, {
+      provider: "pA",
+      model: "mA",
+      reasoningEffort: "high",
+      maxTokens: 8192,
+    });
+  });
+
+  it("warns once and falls back to the inherited route for a malformed explicit route", async () => {
+    // The tool schema keeps provider/model non-empty strings, but the host is
+    // the last guard for a JS caller. A malformed route is ABSENT, not fatal:
+    // handing it to the host would only fail at the first request.
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    bindLiveSummoner(host);
+    const warn = mock.method(console, "warn", () => {});
+    try {
+      await host.spawnDispatcher({
+        parentSessionId: "disp-1",
+        title: "Peer",
+        prompt: "Own the slice.",
+        // Whitespace-only provider: present, yet not a usable route.
+        model: { provider: "   ", model: "mB" },
+      });
+    } finally {
+      mock.restoreAll();
+    }
+
+    assert.deepEqual(ctx.createCalls[0]?.agentOptions, {
+      provider: "pA",
+      model: "mA",
+      reasoningEffort: "high",
+      maxTokens: 8192,
+    });
+    assert.equal(warn.mock.callCount(), 1);
+    assert.match(
+      String(warn.mock.calls[0]?.arguments[0]),
+      /^\[multitask-dispatcher\]/,
+    );
+  });
+});
+
+/**
+ * Ticket 285 (.scratch/model-arg/PLAN.md §§3.2-3.4 / Task 7): the host-side
+ * resolver. Every case is offline — ctx.get("llm") answers a structural stub,
+ * so no provider or network is touched.
+ *
+ * The host wrapper owns exactly three things the pure resolver does not know:
+ * it reads the catalog through the guarded ctx.get seam, it supplies the
+ * SPAWNING session's provider as the bare-id preference (live route first,
+ * options second, the same precedence spawnDispatcher uses), and it adds the
+ * [multitask-dispatcher] prefix to the one warning a rejected value emits.
+ */
+describe("Ticket 285: host.resolveModelOption validates the spawn model option", () => {
+  /** Two providers, one shared bare id: enough for every host-level case. */
+  const catalog: ModelCatalogLike = {
+    listProviders: () => [
+      { id: "alpha", name: "Alpha" },
+      { id: "beta", name: "Beta" },
+    ],
+    async listModels(provider: string) {
+      return provider === "alpha"
+        ? [
+            { id: "alpha-only", name: "Alpha Only" },
+            { id: "shared", name: "Shared" },
+          ]
+        : [
+            { id: "beta-only", name: "Beta Only" },
+            { id: "shared", name: "Shared" },
+          ];
+    },
+  };
+
+  /** A host over the file's structural ctx stub, with (or without) a catalog. */
+  function createHost(llm?: ModelCatalogLike) {
+    const ctx = createStubCtx(undefined, undefined, undefined, llm);
+    return { ctx, host: createCordisDshHost(ctx) };
+  }
+
+  /**
+   * Capture console.warn for one test. The mock silences the line and records
+   * it, so the exact warning text is observable; restore must run in a finally
+   * even when an assertion throws.
+   */
+  function captureWarnings() {
+    const warn = mock.method(console, "warn", () => {});
+    return {
+      warn,
+      lines(): string[] {
+        return warn.mock.calls.map((call) => String(call.arguments[0]));
+      },
+      restore(): void {
+        mock.restoreAll();
+      },
+    };
+  }
+
+  it("resolves a canonical provider/model route", async () => {
+    const { host } = createHost(catalog);
+    host.bindParent(createAgent("disp-1", 0, { cwd: "C:\\work" }), "disp-1");
+
+    const result = await host.resolveModelOption(
+      "alpha/alpha-only",
+      "disp-1",
+      "leader",
+    );
+
+    assert.deepEqual(result, {
+      kind: "resolved",
+      route: { provider: "alpha", model: "alpha-only" },
+    });
+  });
+
+  it("falls back on an unknown route and warns once with the prefix and raw value", async () => {
+    const { host } = createHost(catalog);
+    host.bindParent(createAgent("disp-1", 0, { cwd: "C:\\work" }), "disp-1");
+    const warnings = captureWarnings();
+    try {
+      const result = await host.resolveModelOption(
+        "pZ/mZ",
+        "disp-1",
+        "leader",
+      );
+
+      assert.deepEqual(result, {
+        kind: "fallback",
+        requested: "pZ/mZ",
+        reason: "unknown-model",
+      });
+      const lines = warnings.lines();
+      assert.equal(lines.length, 1);
+      assert.equal(
+        lines[0],
+        '[multitask-dispatcher] model option "pZ/mZ" from session disp-1 was ignored (unknown model); using the summoner\'s current route.',
+      );
+    } finally {
+      warnings.restore();
+    }
+  });
+
+  it("returns absent for an empty value and never warns", async () => {
+    const { host } = createHost(catalog);
+    host.bindParent(createAgent("disp-1", 0, { cwd: "C:\\work" }), "disp-1");
+    const warnings = captureWarnings();
+    try {
+      const result = await host.resolveModelOption("", "disp-1", "leader");
+
+      assert.deepEqual(result, { kind: "absent" });
+      assert.equal(warnings.warn.mock.callCount(), 0);
+    } finally {
+      warnings.restore();
+    }
+  });
+
+  it("prefers the summoning session's live route over its options for a bare id", async () => {
+    const { host } = createHost(catalog);
+    const summoner = createAgent(
+      "disp-1",
+      0,
+      { cwd: "C:\\work" },
+      { provider: "alpha", model: "alpha-only" },
+    );
+    host.bindParent(
+      {
+        ...summoner,
+        // The live selection is what the next request will use; options is
+        // only the deployment default. spawnDispatcher follows the same
+        // precedence, and the bare-id tie-break must too.
+        model: { current: () => ({ provider: "beta", model: "beta-only" }) },
+      },
+      "disp-1",
+    );
+
+    const result = await host.resolveModelOption("shared", "disp-1", "worker");
+
+    assert.deepEqual(result, {
+      kind: "resolved",
+      route: { provider: "beta", model: "shared" },
+    });
+  });
+
+  it("falls back to the options provider when the summoner has no live route", async () => {
+    const { host } = createHost(catalog);
+    host.bindParent(
+      createAgent(
+        "disp-1",
+        0,
+        { cwd: "C:\\work" },
+        { provider: "beta", model: "beta-only" },
+      ),
+      "disp-1",
+    );
+
+    const result = await host.resolveModelOption("shared", "disp-1", "leader");
+
+    assert.deepEqual(result, {
+      kind: "resolved",
+      route: { provider: "beta", model: "shared" },
+    });
+  });
+
+  it("names the worker fallback destination for an invalid worker model", async () => {
+    const { host } = createHost(catalog);
+    host.bindParent(createAgent("leader-1", 0, { cwd: "C:\\work" }), "leader-1");
+    const warnings = captureWarnings();
+    try {
+      const result = await host.resolveModelOption(
+        "pZ/mZ",
+        "leader-1",
+        "worker",
+      );
+
+      assert.equal(result.kind, "fallback");
+      assert.equal(
+        warnings.lines()[0],
+        '[multitask-dispatcher] model option "pZ/mZ" from session leader-1 was ignored (unknown model); using the team leader\'s default worker route or its own route.',
+      );
+    } finally {
+      warnings.restore();
+    }
+  });
+
+  it("names the team leader's own route for an invalid worker_model", async () => {
+    const { host } = createHost(catalog);
+    host.bindParent(createAgent("disp-1", 0, { cwd: "C:\\work" }), "disp-1");
+    const warnings = captureWarnings();
+    try {
+      const result = await host.resolveModelOption(
+        "pZ/mZ",
+        "disp-1",
+        "worker-default",
+      );
+
+      assert.equal(result.kind, "fallback");
+      assert.equal(
+        warnings.lines()[0],
+        '[multitask-dispatcher] worker_model option "pZ/mZ" from session disp-1 was ignored (unknown model); using the team leader\'s own route.',
+      );
+    } finally {
+      warnings.restore();
+    }
+  });
+
+  it("answers catalog-unavailable, without throwing, when no llm service is mounted", async () => {
+    const { host } = createHost(undefined);
+    host.bindParent(createAgent("disp-1", 0, { cwd: "C:\\work" }), "disp-1");
+    const warnings = captureWarnings();
+    try {
+      const result = await host.resolveModelOption(
+        "alpha/alpha-only",
+        "disp-1",
+        "leader",
+      );
+
+      assert.deepEqual(result, {
+        kind: "fallback",
+        requested: "alpha/alpha-only",
+        reason: "catalog-unavailable",
+      });
+      assert.equal(warnings.warn.mock.callCount(), 1);
+      assert.match(
+        warnings.lines()[0] ?? "",
+        /the model catalog is unavailable/,
+      );
+    } finally {
+      warnings.restore();
+    }
+  });
+});
+

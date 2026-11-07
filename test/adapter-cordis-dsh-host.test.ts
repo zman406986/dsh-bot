@@ -581,6 +581,55 @@ describe("CordisDshHost spawn / interrupt / send", () => {
   });
 });
 
+describe("ticket 285: spawn_worker applies the request's model route", () => {
+  it("sends the explicit model as agentOptions on the activation request", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    host.bindParent(createAgent("leader-1"), "leader-1");
+
+    await host.spawnWorker("Do the thing.", {
+      parentSessionId: "leader-1",
+      streamKey: "s1",
+      title: "Thing",
+      model: { provider: "pD", model: "mD" },
+    });
+
+    const spec = ctx.startActivationCalls[0] as unknown as ActivationSpecLike;
+    // provider+model only — the spawn option carries no reasoning effort or
+    // maxTokens (plan §1.5). The host's child merge turns a changed route
+    // into a bare one itself; sending tuning here would contradict the
+    // contract the tool resolves.
+    assert.deepEqual(spec.request.agentOptions, {
+      provider: "pD",
+      model: "mD",
+    });
+  });
+
+  it("omits agentOptions entirely when neither the option nor a stored default exists", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    host.bindParent(createAgent("leader-1"), "leader-1");
+
+    await host.spawnWorker("Do the thing.", {
+      parentSessionId: "leader-1",
+      streamKey: "s1",
+      title: "Thing",
+    });
+
+    const spec = ctx.startActivationCalls[0] as unknown as ActivationSpecLike;
+    // Exact pre-feature request shape: with no route to apply the child
+    // inherits the leader's live route through the host's own child-option
+    // merge (dsh-subagent/lib/types/child-agent.js), and the key must not
+    // appear at all — an explicit undefined would change what the host sees.
+    assert.equal("agentOptions" in spec.request, false);
+    assert.deepEqual(Object.keys(spec.request).sort(), [
+      "maxDepth",
+      "parent",
+      "prompt",
+    ]);
+  });
+});
+
 describe("CordisDshHost settle and step boundary", () => {
   async function spawnOne() {
     const ctx = createStubCtx();

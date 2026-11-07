@@ -76,6 +76,10 @@ import {
 import type {
   DispatcherSpawnOptions,
   DispatcherSpawnResult,
+  ModelFallbackNotice,
+  ModelOptionPurpose,
+  ModelOptionResolution,
+  ModelRoute,
   SpawnResult,
   WorkerSummary,
 } from "./types.js";
@@ -197,6 +201,18 @@ export interface DispatcherToolDeps {
     opts: DispatcherSpawnOptions,
   ) => Promise<DispatcherSpawnResult>;
   /**
+   * Ticket 285: validate one non-empty model option against the live model
+   * catalog. The tool layer trims the value and treats an empty string as
+   * omitted; this seam resolves the rest. A `fallback` result means the
+   * spawn still runs on the inherited route and the calling model gets a
+   * note — never a refusal. Absent is fine while no option is given; absent
+   * WITH a non-empty value is a wiring bug and the handler throws.
+   */
+  readonly resolveModel?: (
+    raw: string,
+    purpose: ModelOptionPurpose,
+  ) => Promise<ModelOptionResolution>;
+  /**
    * Ticket 116: injectable clock for the message_agent rate budget (tests).
    * Default `Date.now`. The other tools' timestamps are unaffected.
    */
@@ -295,6 +311,40 @@ const PROMPT_PARAM: ToolParameterNode = {
   required: true,
   description:
     "Self-contained work instruction: goal, constraints, relevant context, success criteria, report format. The worker does not see this chat.",
+};
+
+/**
+ * Ticket 285: optional model choices on the two spawn tools. The value is
+ * validated by the wired resolver against the live catalog; a rejected
+ * value falls back with a note and never refuses the spawn. Omission means
+ * today's inheritance behavior, and the per-field `required` stays false so
+ * the serialized parent-level `required` array is unchanged.
+ */
+const SPAWN_WORKER_MODEL_PARAM: ToolParameterNode = {
+  type: "string",
+  required: false,
+  description:
+    "Optional model for this worker. Use provider/model-id (for example " +
+    '"deepseek/deepseek-reasoner"). A bare model id is accepted when it is ' +
+    "unique. Omit to inherit your default worker route.",
+};
+
+const SPAWN_DISPATCHER_MODEL_PARAM: ToolParameterNode = {
+  type: "string",
+  required: false,
+  description:
+    "Optional model for the summoned team leader. Use provider/model-id. A " +
+    "bare model id is accepted when it is unique. Omit to inherit your " +
+    "current route.",
+};
+
+const SPAWN_DISPATCHER_WORKER_MODEL_PARAM: ToolParameterNode = {
+  type: "string",
+  required: false,
+  description:
+    "Optional default model for every worker this team leader later spawns. " +
+    "Use provider/model-id. Omit to let workers inherit the team leader's " +
+    "own route. An explicit model on spawn_worker still wins for that worker.",
 };
 
 const WORKER_ID_PARAM: ToolParameterNode = {
@@ -826,6 +876,45 @@ export function createDispatcherTools(
     multitask.todos.prune(createdTodoId);
   }
 
+  /**
+   * Ticket 285: normalize one optional model argument. Absent, empty, and
+   * whitespace-only values all mean "not provided" (no resolver call, no
+   * note). A non-empty value with no wired resolver is a WIRING bug and
+   * throws: reporting a fallback would claim a validation that never ran.
+   * The worker handler calls this before any ledger work, so a wiring error
+   * cannot leave an orphan todo behind.
+   */
+  async function resolveModelArg(
+    value: string | undefined,
+    option: "model" | "worker_model",
+    purpose: ModelOptionPurpose,
+  ): Promise<{
+    route?: ModelRoute;
+    fallback?: ModelFallbackNotice;
+  }> {
+    if (value === undefined) return {};
+    const trimmed = value.trim();
+    if (trimmed === "") return {};
+    const resolve = deps.resolveModel;
+    if (resolve === undefined) {
+      throw new Error(
+        "a model option was provided but no model resolver is wired (host wiring bug)",
+      );
+    }
+    const result = await resolve(trimmed, purpose);
+    if (result.kind === "resolved") return { route: result.route };
+    if (result.kind === "fallback") {
+      return {
+        fallback: {
+          option,
+          requested: trimmed,
+          reason: result.reason,
+        },
+      };
+    }
+    return {};
+  }
+
   const spawnWorker: DispatcherToolDef = {
     name: SPAWN_WORKER_TOOL,
     description: descriptions[SPAWN_WORKER_TOOL],
@@ -836,6 +925,7 @@ export function createDispatcherTools(
         stream_key: STREAM_KEY_PARAM,
         title: TITLE_PARAM,
         prompt: PROMPT_PARAM,
+        model: SPAWN_WORKER_MODEL_PARAM,
         todo_id: {
           type: "string",
           required: false,
@@ -851,6 +941,14 @@ export function createDispatcherTools(
       const title = requireString(args, "title");
       const prompt = requireString(args, "prompt");
       const todoId = optionalString(args, "todo_id");
+      // Ticket 285: resolve BEFORE the todo existence checks and before
+      // any todo creation. A wiring error (or a thrown resolver) must not
+      // leave an orphan ledger entry behind.
+      const resolvedModel = await resolveModelArg(
+        optionalString(args, "model"),
+        "model",
+        "worker",
+      );
 
       // Ticket 151 (ruling 2026-10-28): a GIVEN todo_id must be usable.
       // Existence alone is not enough (review): a foreign session's id must
@@ -901,6 +999,9 @@ export function createDispatcherTools(
         title,
         prompt,
         ...(linkedTodoId !== undefined ? { todoId: linkedTodoId } : {}),
+        ...(resolvedModel.route !== undefined
+          ? { model: resolvedModel.route }
+          : {}),
       };
       let result: SpawnResult;
       try {
@@ -934,7 +1035,13 @@ export function createDispatcherTools(
           workerId: result.workerId,
           streamKey,
           prompt,
+          ...(resolvedModel.fallback !== undefined
+            ? { modelFallbacks: [resolvedModel.fallback] }
+            : {}),
         }),
+        ...(resolvedModel.fallback !== undefined
+          ? { model_fallbacks: [resolvedModel.fallback] }
+          : {}),
       };
     },
   };
@@ -1578,7 +1685,6 @@ export function createDispatcherTools(
       const timeoutRaw = args.timeout_ms;
       if (
         timeoutRaw !== undefined &&
-        timeoutRaw !== null &&
         typeof timeoutRaw !== "number"
       ) {
         return {
@@ -1642,6 +1748,8 @@ export function createDispatcherTools(
           description:
             "Problem and outcome handoff: what to own, what done looks like, and what to report back. Self-contained — the new dispatcher does not see this conversation.",
         },
+        model: SPAWN_DISPATCHER_MODEL_PARAM,
+        worker_model: SPAWN_DISPATCHER_WORKER_MODEL_PARAM,
       },
     },
     async execute(
@@ -1679,6 +1787,26 @@ export function createDispatcherTools(
           "spawn_dispatcher is registered but no dispatcher-spawn seam is wired",
         );
       }
+      // Ticket 285: both optional model values are resolved before the
+      // host call. A fallback is a note on a successful spawn, never a
+      // refusal: the child starts on today's inherited route.
+      const resolvedLeader = await resolveModelArg(
+        optionalString(args, "model"),
+        "model",
+        "leader",
+      );
+      const resolvedWorkerDefault = await resolveModelArg(
+        optionalString(args, "worker_model"),
+        "worker_model",
+        "worker-default",
+      );
+      const modelNotices: ModelFallbackNotice[] = [];
+      if (resolvedLeader.fallback !== undefined) {
+        modelNotices.push(resolvedLeader.fallback);
+      }
+      if (resolvedWorkerDefault.fallback !== undefined) {
+        modelNotices.push(resolvedWorkerDefault.fallback);
+      }
       const signal = readExecSignal(exec);
       let dispatcherId: string;
       try {
@@ -1686,6 +1814,12 @@ export function createDispatcherTools(
           parentSessionId,
           title,
           prompt,
+          ...(resolvedLeader.route !== undefined
+            ? { model: resolvedLeader.route }
+            : {}),
+          ...(resolvedWorkerDefault.route !== undefined
+            ? { workerModel: resolvedWorkerDefault.route }
+            : {}),
           ...(signal !== undefined ? { signal } : {}),
         });
         dispatcherId = result.dispatcherId;
@@ -1706,7 +1840,16 @@ export function createDispatcherTools(
         ok: true,
         dispatcher_id: dispatcherId,
         title,
-        note: formatSpawnDispatcherNote({ title, dispatcherId }),
+        note: formatSpawnDispatcherNote({
+          title,
+          dispatcherId,
+          ...(modelNotices.length > 0
+            ? { modelFallbacks: modelNotices }
+            : {}),
+        }),
+        ...(modelNotices.length > 0
+          ? { model_fallbacks: modelNotices }
+          : {}),
       };
     },
   };

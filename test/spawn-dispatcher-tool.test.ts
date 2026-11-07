@@ -27,6 +27,7 @@ import { createMultitask, type Multitask } from "../src/core/multitask.js";
 import {
   createDispatcherTools,
   readExecSignal,
+  toToolParametersSchema,
   type DispatcherToolDef,
 } from "../src/core/tools.js";
 import {
@@ -39,16 +40,31 @@ import {
   buildWorkerToolFilter,
   WORKER_DENIED_TOOL_CANDIDATES,
 } from "../src/worker/tool-barrier.js";
+import {
+  registerDispatcherTools,
+  type RegisterableTool,
+} from "../src/adapter/dispatcher-tools.js";
+import type { ToolsLike } from "../src/adapter/cordis-dsh-host.js";
 import type {
   DispatcherSpawnOptions,
   DispatcherSpawnResult,
+  ModelOptionPurpose,
+  ModelOptionResolution,
 } from "../src/core/types.js";
+
+/** Ticket 285: one call the handler made into the injected model resolver. */
+interface ResolveModelCall {
+  readonly raw: string;
+  readonly purpose: ModelOptionPurpose;
+}
 
 interface Rig {
   readonly host: FakeDshHost;
   readonly multitask: Multitask;
   readonly tools: DispatcherToolDef[];
   readonly spawnDispatcherCalls: DispatcherSpawnOptions[];
+  /** Ticket 285: resolver calls this tool made, in order. */
+  readonly resolveModelCalls: ResolveModelCall[];
   readonly tool: DispatcherToolDef;
   setSessionId(sessionId: string | null): void;
 }
@@ -62,15 +78,32 @@ interface Rig {
 function rig(options?: {
   hostError?: unknown;
   omitSeam?: boolean;
+  resolveModel?: (
+    raw: string,
+    purpose: ModelOptionPurpose,
+  ) => Promise<ModelOptionResolution>;
 }): Rig {
   const host = new FakeDshHost();
   const multitask = createMultitask(host);
   let sessionId: string | null = "disp-1";
   const spawnDispatcherCalls: DispatcherSpawnOptions[] = [];
+  const resolveModelCalls: ResolveModelCall[] = [];
+  const resolveModel = options?.resolveModel;
 
   const tools = createDispatcherTools({
     multitask,
     getSessionId: () => sessionId,
+    ...(resolveModel !== undefined
+      ? {
+          resolveModel: (
+            raw: string,
+            purpose: ModelOptionPurpose,
+          ): Promise<ModelOptionResolution> => {
+            resolveModelCalls.push({ raw, purpose });
+            return resolveModel(raw, purpose);
+          },
+        }
+      : {}),
     ...(options?.omitSeam === true
       ? {}
       : {
@@ -90,10 +123,40 @@ function rig(options?: {
     multitask,
     tools,
     spawnDispatcherCalls,
+    resolveModelCalls,
     tool,
     setSessionId: (next) => {
       sessionId = next;
     },
+  };
+}
+
+/**
+ * Capture surface for the ADAPTER path — the layer `src/plugin.ts` actually
+ * calls. The rig above builds the core tool set directly, so it can prove the
+ * HANDLER resolves, but not that `registerDispatcherTools` forwards the
+ * resolver dependency the plugin supplies.
+ */
+function adapterToolsCapture(): {
+  readonly ctx: { readonly tools: ToolsLike };
+  readonly registered: RegisterableTool[];
+} {
+  const registered: RegisterableTool[] = [];
+  return {
+    ctx: {
+      tools: {
+        schemas: () => registered.map((tool) => ({ name: tool.name })),
+        register(definition: unknown): () => void {
+          const tool = definition as RegisterableTool;
+          registered.push(tool);
+          return () => {
+            const at = registered.indexOf(tool);
+            if (at >= 0) registered.splice(at, 1);
+          };
+        },
+      },
+    },
+    registered,
   };
 }
 
@@ -104,24 +167,43 @@ describe("ticket 118: spawn_dispatcher — registration and visibility", () => {
     assert.equal(DISPATCHER_TOOL_NAMES[7], SPAWN_DISPATCHER_TOOL);
   });
 
-  it("declares title and prompt required, both provider-valid, nothing else", () => {
+  it("declares title and prompt required, model and worker_model optional, nothing else", () => {
     const r = rig();
     const parameters = r.tool.parameters as {
       type: string;
       additionalProperties: boolean;
-      properties: Record<string, { type: string; required?: boolean }>;
+      properties: Record<
+        string,
+        { type: string; required?: boolean; description?: string }
+      >;
     };
     assert.equal(parameters.type, "object");
     assert.equal(parameters.additionalProperties, false);
     // No stream_key and no todo_id: a dispatcher is not a work stream.
+    // Ticket 285: model and worker_model are the two optional routing args.
     assert.deepEqual(Object.keys(parameters.properties).sort(), [
+      "model",
       "prompt",
       "title",
+      "worker_model",
     ]);
     assert.equal(parameters.properties.title?.required, true);
     assert.equal(parameters.properties.prompt?.required, true);
     assert.equal(parameters.properties.title?.type, "string");
     assert.equal(parameters.properties.prompt?.type, "string");
+    // Ticket 285: both model args are optional strings. The serialized
+    // parent-level required array stays ["title", "prompt"] in authored
+    // property order, so the pre-285 contract is untouched.
+    assert.equal(parameters.properties.model?.type, "string");
+    assert.notEqual(parameters.properties.model?.required, true);
+    assert.equal(parameters.properties.worker_model?.type, "string");
+    assert.notEqual(parameters.properties.worker_model?.required, true);
+    const serialized = toToolParametersSchema(r.tool.parameters) as {
+      additionalProperties: boolean;
+      required: string[];
+    };
+    assert.equal(serialized.additionalProperties, false);
+    assert.deepEqual(serialized.required, ["title", "prompt"]);
     assert.ok(r.tool.description.length > 20);
     assert.equal(r.tool.description, TOOL_DESCRIPTIONS[SPAWN_DISPATCHER_TOOL]);
   });
@@ -182,6 +264,205 @@ describe("ticket 118: spawn_dispatcher — success shape", () => {
     assert.equal(readExecSignal({ signal: controller.signal }), controller.signal);
   });
 
+});
+
+/**
+ * Ticket 285: the opt-in model arguments. The tool resolves each non-empty
+ * value through the injected resolver, hands the resolved route(s) to the
+ * seam, and adds a fallback notice when a value was rejected. A fallback is
+ * still a successful spawn — never a refusal.
+ */
+describe("ticket 285: spawn_dispatcher — model options", () => {
+  it("resolves model and worker_model and passes both routes to the seam", async () => {
+    const r = rig({
+      resolveModel: async (raw) =>
+        raw === "pB/mB"
+          ? { kind: "resolved", route: { provider: "pB", model: "mB" } }
+          : { kind: "resolved", route: { provider: "pC", model: "mC" } },
+    });
+    const result = (await r.tool.execute({
+      title: "Peer",
+      prompt: "Handle it.",
+      model: "pB/mB",
+      worker_model: "pC/mC",
+    })) as SpawnDispatcherToolResult;
+
+    assert.ok(result.ok);
+    if (!result.ok) return;
+    assert.deepEqual(r.spawnDispatcherCalls[0]?.model, {
+      provider: "pB",
+      model: "mB",
+    });
+    assert.deepEqual(r.spawnDispatcherCalls[0]?.workerModel, {
+      provider: "pC",
+      model: "mC",
+    });
+    // The purpose tells the resolver which fallback wording to use.
+    assert.deepEqual(r.resolveModelCalls, [
+      { raw: "pB/mB", purpose: "leader" },
+      { raw: "pC/mC", purpose: "worker-default" },
+    ]);
+    // A resolved value is not a fallback: no structured field, no note line.
+    assert.equal(result.model_fallbacks, undefined);
+    assert.ok(!result.note.includes("was not used"), result.note);
+  });
+
+  it("a model fallback passes no route and carries the notice + a note line", async () => {
+    const r = rig({
+      resolveModel: async () => ({
+        kind: "fallback",
+        requested: "nope/nope",
+        reason: "unknown-model",
+      }),
+    });
+    const result = (await r.tool.execute({
+      title: "Peer",
+      prompt: "Handle it.",
+      model: "nope/nope",
+    })) as SpawnDispatcherToolResult;
+
+    assert.ok(result.ok, "a fallback never refuses the spawn");
+    if (!result.ok) return;
+    const call = r.spawnDispatcherCalls[0];
+    assert.ok(call);
+    assert.equal("model" in call, false, "a fallback passes no route");
+    assert.equal("workerModel" in call, false);
+    assert.deepEqual(result.model_fallbacks, [
+      { option: "model", requested: "nope/nope", reason: "unknown-model" },
+    ]);
+    assert.ok(result.note.includes("was not used"), result.note);
+    assert.ok(result.note.includes("not in the model catalog"), result.note);
+    assert.ok(result.note.includes('Leader model "nope/nope"'), result.note);
+  });
+
+  it("both values falling back -> two notices and two note lines", async () => {
+    const r = rig({
+      resolveModel: async (_raw, purpose) =>
+        purpose === "leader"
+          ? { kind: "fallback", requested: "pB/mB", reason: "unknown-model" }
+          : {
+              kind: "fallback",
+              requested: "pC/mC",
+              reason: "catalog-unavailable",
+            },
+    });
+    const result = (await r.tool.execute({
+      title: "Peer",
+      prompt: "Handle it.",
+      model: "pB/mB",
+      worker_model: "pC/mC",
+    })) as SpawnDispatcherToolResult;
+
+    assert.ok(result.ok);
+    if (!result.ok) return;
+    assert.deepEqual(result.model_fallbacks, [
+      { option: "model", requested: "pB/mB", reason: "unknown-model" },
+      {
+        option: "worker_model",
+        requested: "pC/mC",
+        reason: "catalog-unavailable",
+      },
+    ]);
+    assert.ok(result.note.includes('Leader model "pB/mB"'), result.note);
+    assert.ok(result.note.includes('Worker model "pC/mC"'), result.note);
+    assert.ok(result.note.includes("the model catalog is unavailable"));
+  });
+
+  it("empty or whitespace-only values are omitted: no resolver call, no route, no note", async () => {
+    const r = rig({
+      resolveModel: async () => {
+        throw new Error("the resolver must not be called for an empty value");
+      },
+    });
+    const result = (await r.tool.execute({
+      title: "Peer",
+      prompt: "Handle it.",
+      model: "   ",
+      worker_model: "",
+    })) as SpawnDispatcherToolResult;
+
+    assert.ok(result.ok);
+    if (!result.ok) return;
+    assert.deepEqual(r.resolveModelCalls, []);
+    const call = r.spawnDispatcherCalls[0];
+    assert.ok(call);
+    assert.equal("model" in call, false);
+    assert.equal("workerModel" in call, false);
+    assert.equal(result.model_fallbacks, undefined);
+  });
+
+  it("throws the wiring error when a non-empty value has no resolver", async () => {
+    const r = rig();
+    await assert.rejects(
+      () =>
+        r.tool.execute({
+          title: "Peer",
+          prompt: "Handle it.",
+          model: "pB/mB",
+        }),
+      /no model resolver is wired/,
+    );
+    assert.equal(r.spawnDispatcherCalls.length, 0);
+  });
+});
+
+/**
+ * Ticket 285 (PLAN Task 6): the ADAPTER must forward the resolver.
+ *
+ * `src/plugin.ts` supplies the live dependency to `registerDispatcherTools`,
+ * not to `createDispatcherTools`; a dependency silently dropped between the
+ * two turns every model argument into the handler's wiring error at execute
+ * time. This pins the forwarding itself, with the two purposes the tool uses.
+ */
+describe("ticket 285: adapter registration forwards the model resolver", () => {
+  it("registerDispatcherTools passes resolveModel through for both purposes", async () => {
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host);
+    const capture = adapterToolsCapture();
+    const resolveModelCalls: ResolveModelCall[] = [];
+    const spawnDispatcherCalls: DispatcherSpawnOptions[] = [];
+
+    registerDispatcherTools({
+      ctx: capture.ctx,
+      multitask,
+      getSessionId: () => "disp-1",
+      resolveModel: async (raw, purpose) => {
+        resolveModelCalls.push({ raw, purpose });
+        return raw === "pB/mB"
+          ? { kind: "resolved", route: { provider: "pB", model: "mB" } }
+          : { kind: "resolved", route: { provider: "pC", model: "mC" } };
+      },
+      spawnDispatcher: async (opts) => {
+        spawnDispatcherCalls.push(opts);
+        return host.spawnDispatcher(opts);
+      },
+    });
+
+    const tool = capture.registered.find(
+      (entry) => entry.name === SPAWN_DISPATCHER_TOOL,
+    );
+    assert.ok(tool, `missing tool: ${SPAWN_DISPATCHER_TOOL}`);
+    const result = (await tool.execute({
+      title: "Peer",
+      prompt: "Handle it.",
+      model: "pB/mB",
+      worker_model: "pC/mC",
+    })) as SpawnDispatcherToolResult;
+
+    assert.ok(result.ok);
+    assert.deepEqual(resolveModelCalls, [
+      { raw: "pB/mB", purpose: "leader" },
+      { raw: "pC/mC", purpose: "worker-default" },
+    ]);
+    assert.deepEqual(spawnDispatcherCalls[0]?.model, {
+      provider: "pB",
+      model: "mB",
+    });
+    assert.deepEqual(spawnDispatcherCalls[0]?.workerModel, {
+      provider: "pC",
+      model: "mC",
+    });
+  });
 });
 
 describe("ticket 118: spawn_dispatcher — no worker path", () => {

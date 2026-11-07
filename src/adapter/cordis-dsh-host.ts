@@ -16,6 +16,9 @@ import {
 import type {
   DispatcherSpawnOptions,
   DispatcherSpawnResult,
+  ModelOptionPurpose,
+  ModelOptionResolution,
+  ModelRoute,
 } from "../core/types.js";
 import type { RosterRecentResultSource } from "../core/roster-snapshot.js";
 import {
@@ -30,6 +33,10 @@ import {
 import { applyWorkerComposition } from "../worker/preset.js";
 import { blocksToText, textBlocks, type ContentBlock } from "./content-blocks.js";
 import type { StorageDomainLike } from "./durable-marker.js";
+import {
+  resolveModelOption as resolveModelOptionInCatalog,
+  type ModelCatalogLike,
+} from "./model-option.js";
 import {
   WAKE_SOURCE_KIND,
   resumeWakeCueFor,
@@ -234,6 +241,24 @@ export interface ActivationSpecLike {
      * the 8-slot root pool are subagent-runtime bounds and never reach it.
      */
     readonly maxDepth?: number;
+    /**
+     * Ticket 285 (plan §1.2): the route THIS child's requests should use,
+     * when a spawn option chose one — a plain provider/model pair and nothing
+     * else. The option deliberately carries no reasoning effort or maxTokens
+     * (plan §1.5); a route CHANGE also clears the parent's effort in the
+     * host's child-option merge
+     * (`dsh-subagent/lib/types/child-agent.js:88-91`), so sending tuning here
+     * would describe a model it was not chosen for. Omitted means today's
+     * behaviour: the child inherits the parent's live route.
+     *
+     * The activation provider must advertise the `agentOptions`
+     * capability (`dsh-subagent/lib/types/types.d.ts:153-160`); the live
+     * in-process provider does (`dsh-subagent-spawn-in-process/lib/index.js:21-22`).
+     */
+    readonly agentOptions?: {
+      readonly provider: string;
+      readonly model: string;
+    };
   };
   /**
    * Cancellation before publication only. Once the activation is live, stop
@@ -596,6 +621,24 @@ export interface CordisDshHost extends DshHost {
    * Host errors surface unchanged — no refusal class is invented here.
    */
   spawnDispatcher(opts: DispatcherSpawnOptions): Promise<DispatcherSpawnResult>;
+  /**
+   * Ticket 285 (`.scratch/model-arg/PLAN.md` §§3.2–3.4): validate one spawn
+   * model option against the LIVE model catalog, for the session that is
+   * doing the spawning.
+   *
+   * The tool layer passes the raw argument, the caller's session id, and the
+   * purpose; this wrapper supplies the live catalog, the spawning session's
+   * provider (the bare-id tie-break), and the fallback sentence that purpose
+   * names. A rejected non-empty value is never an error: the spawn proceeds on
+   * the inherited route, this returns `fallback`, and exactly one
+   * `[multitask-dispatcher]` warning reaches the process log. An empty value
+   * returns `absent` and logs nothing.
+   */
+  resolveModelOption(
+    raw: string,
+    sessionId: string,
+    purpose: ModelOptionPurpose,
+  ): Promise<ModelOptionResolution>;
   /**
    * Ticket 176: record which CLASS a session this host activates belongs to.
    * `"user"` is the human's own `/dsh-bot` chat; `"spawned"` is a team leader
@@ -1154,6 +1197,36 @@ function readAgentPresets(
 }
 
 /**
+ * Read the live model catalog (`ctx.llm`) from a live context, guarded — the
+ * same two-step rule as {@link readAgentPresets}, and for the same reason: a
+ * bare `ctx.llm` property read THROWS on a live cordis context that never
+ * injected the service (the trap documented on `readAgentPresets` above).
+ *
+ * Returns `undefined` when the deployment mounts no catalog (a stub host, a
+ * headless composition, or a service that is not active yet). That is NOT an
+ * error: the resolver answers `catalog-unavailable` and the spawn proceeds on
+ * the inherited route, exactly as it does today.
+ */
+function readLlmCatalog(ctx: AdapterContext): ModelCatalogLike | undefined {
+  if (typeof ctx.get !== "function") return undefined;
+  try {
+    const service = ctx.get("llm");
+    if (typeof service !== "object" || service === null) return undefined;
+    const candidate = service as Partial<ModelCatalogLike>;
+    if (
+      typeof candidate.listProviders !== "function" ||
+      typeof candidate.listModels !== "function"
+    ) {
+      return undefined;
+    }
+    return service as ModelCatalogLike;
+  } catch {
+    // Absent, or not yet active: the caller falls back and says so once.
+    return undefined;
+  }
+}
+
+/**
  * One Workspace, narrowed to the only two members a plugin-created session
  * needs to FILE ITSELF under its summoner's project:
  * the ordered `sessionIds` account it reads and the `attachSession` write.
@@ -1404,6 +1477,42 @@ function liveSummonerRoute(agent: AgentLike): Partial<AgentOptionsLike> {
 }
 
 /**
+ * Ticket 285 (plan §§3.3, 8, Task 8): narrow a route object supplied by a
+ * caller to the only shape the spawn model option promises — a provider and a
+ * model, both non-empty after trimming. This is the LAST guard, not catalog
+ * validation: the tool path resolves and validates the raw string, while this
+ * catches a JS caller handing the host an empty or malformed route.
+ *
+ * `undefined` means "not provided" and stays silent. A PRESENT but unusable
+ * route is treated as absent with one warning (a spawn must never be refused,
+ * or handed a route the host would only fail on at its first request); the
+ * caller then keeps its inherited route. Shared by the leader path here and
+ * the worker path (Task 9), so both reject the same shapes the same way.
+ */
+function usableRoute(value: ModelRoute | undefined): ModelRoute | undefined {
+  if (value === undefined) return undefined;
+  // A JS caller can pass anything despite the static type — null and
+  // non-objects included — so read defensively rather than throw here.
+  const record: Record<string, unknown> =
+    typeof value === "object" && value !== null
+      ? (value as unknown as Record<string, unknown>)
+      : {};
+  const provider =
+    typeof record["provider"] === "string" ? record["provider"].trim() : "";
+  const model =
+    typeof record["model"] === "string" ? record["model"].trim() : "";
+  if (provider !== "" && model !== "") return { provider, model };
+  try {
+    console.warn(
+      "[multitask-dispatcher] a spawn model route with an empty provider or model was ignored; using the inherited route.",
+    );
+  } catch {
+    // A broken console must not break the spawn either.
+  }
+  return undefined;
+}
+
+/**
  * Defect fix (a terminal worker was woken back): the durable `worker_sessions`
  * rows are deleted when a worker settles or is stopped, but that delete is
  * asynchronous and best-effort, so an orphan row can survive a crash or a
@@ -1604,6 +1713,20 @@ export function createCordisDshHost(
    *   must resolve the same number.
    */
   const dispatcherGenerations = new Map<string, number>();
+  /**
+   * Ticket 285 (plan §§1.6, 4.2): the model a team leader's workers run on by
+   * default, keyed by the LEADER's session id — the default the leader
+   * received as `worker_model` when it was summoned. A worker spawn resolves
+   * an explicit per-worker route first, then this, then today's inheritance;
+   * a worker-level option never writes it.
+   *
+   * Populated by `spawnDispatcher` through `writeDispatcherMark` and restored
+   * by `refreshDispatcherMarks` from the same durable mark, so a cold-resumed
+   * leader keeps its worker default (Task 10). Values are routes the tool
+   * resolver validated; `spawnWorker` still narrows them with `usableRoute`
+   * because a JS caller can hand us any shape.
+   */
+  const workerModelDefaults = new Map<string, ModelRoute>();
   /**
    * Ticket 138: sessions whose cold resume this process already asked the
    * host for. A second send before the resumed child is announced must not
@@ -3680,11 +3803,37 @@ export function createCordisDshHost(
         parentDelegationDepth,
         workerAgentDef?.maxDepth ?? WORKER_MAX_DEPTH,
       );
+      // Ticket 285 (plan §§3.3, 4.2, Task 9): the worker's route, highest
+      // precedence first — an explicit spawn option, then the default this
+      // leader was given when it was summoned (`workerModelDefaults`), then
+      // nothing, which is today's inheritance through the host's own
+      // child-option merge. `usableRoute` is the same defensive narrowing the
+      // leader path uses: a route object with an empty provider/model is
+      // treated as absent with one warning, never forwarded to a request that
+      // would only fail on its first call. Catalog validation already
+      // happened in the tool path; this is the last guard, not a second
+      // resolver.
+      const explicitWorker = usableRoute(opts.model);
+      const storedDefault = usableRoute(
+        workerModelDefaults.get(opts.parentSessionId),
+      );
+      const workerRoute = explicitWorker ?? storedDefault;
       const request: ActivationSpecLike["request"] = {
         prompt: textBlocks(prompt),
         parent,
         // Child's absolute ceiling: parent depth + 1 hop + leaf budget.
         maxDepth,
+        // The key is omitted ENTIRELY when no route applies — an explicit
+        // `agentOptions: undefined` would still be a property the host (and
+        // every pinned test of this request's shape) can see.
+        ...(workerRoute === undefined
+          ? {}
+          : {
+              agentOptions: {
+                provider: workerRoute.provider,
+                model: workerRoute.model,
+              },
+            }),
       };
       // Ticket 120: RESERVE the child id before the spawn, exactly as
       // `spawnDispatcher` does (ticket 118) and for the same reason — the
@@ -3783,6 +3932,57 @@ export function createCordisDshHost(
       spawnControllers.set(workerId, controller);
       workerActivations.set(workerId, activation);
       return workerId;
+    },
+
+    /**
+     * Ticket 285 (`.scratch/model-arg/PLAN.md` §§3.2–3.4): the host half of
+     * the spawn model option. Everything syntax-specific lives in
+     * `./model-option.js`; this wrapper supplies the three live things that
+     * module cannot know:
+     *
+     * - the catalog, read through the guarded `ctx.get("llm")` seam (a bare
+     *   property read throws on a context that never injected the service);
+     * - the spawning session's provider for the bare-id tie-break, taken from
+     *   its LIVE route first and `options` second — the same precedence
+     *   `spawnDispatcher` uses when it inherits a route;
+     * - the per-purpose fallback sentence, so the log line says what the spawn
+     *   will actually do (plan §3.4).
+     *
+     * Never throws for a bad value: the resolver turns an unknown, ambiguous,
+     * or unreadable route into `fallback` plus one warning, and the caller
+     * spawns on the inherited default.
+     */
+    async resolveModelOption(
+      raw: string,
+      sessionId: string,
+      purpose: ModelOptionPurpose,
+    ): Promise<ModelOptionResolution> {
+      const parent = parents.get(sessionId);
+      const liveRoute = parent === undefined ? {} : liveSummonerRoute(parent);
+      const preferredProvider =
+        liveRoute.provider ?? parent?.options?.provider;
+      const catalog = readLlmCatalog(ctx);
+      const fallbackDescription =
+        purpose === "leader"
+          ? "the summoner's current route"
+          : purpose === "worker"
+            ? "the team leader's default worker route or its own route"
+            : "the team leader's own route";
+      return resolveModelOptionInCatalog({
+        raw,
+        purpose,
+        sessionId,
+        ...(preferredProvider === undefined ? {} : { preferredProvider }),
+        ...(catalog === undefined ? {} : { catalog }),
+        fallbackDescription,
+        warn(message: string): void {
+          try {
+            console.warn(`[multitask-dispatcher] ${message}`);
+          } catch {
+            // A broken console must not break the spawn either.
+          }
+        },
+      });
     },
 
     /**
@@ -3907,6 +4107,26 @@ export function createCordisDshHost(
               ...(maxTokens !== undefined ? { maxTokens } : {}),
             }
           : undefined;
+      // Ticket 285 (plan §1.5, Task 8): the optional leader route REPLACES the
+      // inherited one, with one exception — naming the SAME provider/model is
+      // not a model change, so the inherited object is kept whole and its
+      // reasoningEffort/maxTokens still describe the model they belong to. A
+      // genuine change builds a bare {provider, model}: the option carries no
+      // tuning, and an effort chosen for the summoner's model may not exist on
+      // the chosen one. A malformed route is absent (one warning inside
+      // `usableRoute`) and the inherited route stands.
+      const explicitLeader = usableRoute(opts.model);
+      const leaderAgentOptions: AgentOptionsLike | undefined =
+        explicitLeader === undefined
+          ? agentOptions
+          : agentOptions !== undefined &&
+              agentOptions.provider === explicitLeader.provider &&
+              agentOptions.model === explicitLeader.model
+            ? agentOptions
+            : {
+                provider: explicitLeader.provider,
+                model: explicitLeader.model,
+              };
       // Ticket 118 chunk 3: the child id is still RESERVED here — identity is
       // what lets `agent/created` recognise the summoning session as ours
       // instead of falling through to the worker composition. It is passed as
@@ -4053,7 +4273,9 @@ export function createCordisDshHost(
               ? {}
               : { agentPreset: summonerPreset }),
           },
-          ...(agentOptions === undefined ? {} : { agentOptions }),
+          ...(leaderAgentOptions === undefined
+            ? {}
+            : { agentOptions: leaderAgentOptions }),
           setup: async (agentCtx, agent) => {
             // ADR-0019: the child's own scope takes its scoped tools and
             // policy HERE rather than from `agent/created`. ORDER: `setup`

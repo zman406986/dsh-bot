@@ -52,6 +52,16 @@ export interface WorkerSummary {
   todoId: string | null;
 }
 
+/**
+ * Ticket 285: an explicit provider/model route for an opt-in spawn model
+ * choice. Exactly the two fields the catalog resolves; reasoning effort and
+ * maxTokens are deliberately not part of the option.
+ */
+export interface ModelRoute {
+  readonly provider: string;
+  readonly model: string;
+}
+
 /** Options the core passes to the host when spawning a worker. */
 export interface SpawnOptions {
   parentSessionId: string;
@@ -76,6 +86,51 @@ export interface SpawnOptions {
    * the record is then created after the spawn resolves, exactly as before.
    */
   onWorkerId?: (workerId: string) => void;
+  /**
+   * Ticket 285: model route for this worker. Omitted means the host keeps
+   * today's inheritance behavior (the team leader's worker default, then the
+   * team leader's own live route).
+   */
+  model?: ModelRoute;
+}
+
+/**
+ * Ticket 285: which spawn argument a model value came from. Drives the
+ * fallback warning's wording and the tool-result notice.
+ */
+export type ModelOptionPurpose = "leader" | "worker" | "worker-default";
+
+/** Ticket 285: why a non-empty model option fell back to the inherited route. */
+export type ModelResolutionFailure =
+  | "unknown-model"
+  | "ambiguous-model"
+  | "catalog-unavailable"
+  | "catalog-error";
+
+/**
+ * Ticket 285: result of validating one model option against the live model
+ * catalog. A fallback is not a refusal — the spawn still succeeds on the
+ * normal route and only carries a notice.
+ */
+export type ModelOptionResolution =
+  | { kind: "absent" }
+  | { kind: "resolved"; route: ModelRoute }
+  | {
+      kind: "fallback";
+      requested: string;
+      reason: ModelResolutionFailure;
+      detail?: string;
+    };
+
+/**
+ * Ticket 285: structured tool-result note that a requested model was not
+ * used. Absent on both success results when the option resolved or was
+ * omitted.
+ */
+export interface ModelFallbackNotice {
+  readonly option: "model" | "worker_model";
+  readonly requested: string;
+  readonly reason: ModelResolutionFailure;
 }
 
 /**
@@ -91,6 +146,17 @@ export interface DispatcherSpawnOptions {
   title: string;
   /** Problem and outcome handoff; the child's first user turn. */
   prompt: string;
+  /**
+   * Ticket 285: model route for the summoned team leader. Omitted means the
+   * leader inherits the summoner's current live route, exactly as before.
+   */
+  model?: ModelRoute;
+  /**
+   * Ticket 285: default model route for every worker this team leader later
+   * spawns. Omitted means workers inherit the leader's own live route; an
+   * explicit model on a worker spawn still wins over this default.
+   */
+  workerModel?: ModelRoute;
   /**
    * Cancellation BEFORE publication only (same rule as a worker spawn: once
    * the activation is live, its signal does nothing). Optional — the host
@@ -124,6 +190,11 @@ export interface SpawnRequest {
   todoId?: string;
   /** Env/credential names this worker may resolve. Values never appear here. */
   credentialNames?: readonly string[];
+  /**
+   * Ticket 285: explicit model route for this worker, already validated by
+   * the host's resolver. Omitted means "use today's inheritance behavior".
+   */
+  model?: ModelRoute;
 }
 
 /**

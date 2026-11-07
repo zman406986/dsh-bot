@@ -18,6 +18,7 @@ import type {
   DispatcherOrigin,
   PolicyLanguage,
 } from "./core/policy/prompts.js";
+import type { ModelOptionPurpose } from "./core/types.js";
 import {
   assembleRestartNotice,
   bindDispatcherLifecycle,
@@ -1420,6 +1421,13 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       // a straight pass-through and a refused spawn records no title at all.
       spawnDispatcher: (opts: DispatcherSpawnOptions) =>
         host.spawnDispatcher(opts),
+      // Ticket 285 (PLAN §5, Task 6): the opt-in `model` / `worker_model`
+      // arguments resolve through the host's LIVE model catalog. The session
+      // id is the closure's own — the activated session this surface serves —
+      // so the catalog tie-break and the warning text describe the dispatcher
+      // that actually made the call. Never a process-global id.
+      resolveModel: (raw: string, purpose: ModelOptionPurpose) =>
+        host.resolveModelOption(raw, sessionId, purpose),
       // Ticket 153: the tool descriptions follow the same language (settled
       // on the first activation, before this call).
       language,

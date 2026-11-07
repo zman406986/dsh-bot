@@ -11,6 +11,7 @@ import {
   type InboxJobResolution,
   type Multitask,
 } from "../src/core/multitask.js";
+import { AWAIT_INVALID_TIMEOUT_DETAIL } from "../src/core/settle-records.js";
 import {
   createDispatcherTools,
   HOST_SPAWN_TOOL_CANDIDATES,
@@ -21,7 +22,12 @@ import {
 import {AWAIT_AGENT_TOOL, CHECK_WORKERS_TOOL, DELIVER_RESULT_TOOL, DISPATCHER_TOOL_NAMES, SEND_PEER_TOOL, SPAWN_WORKER_TOOL, STEER_WORKER_TOOL, STOP_WORKER_TOOL} from "../src/core/policy/prompts.js";
 import { toRegisterableTool } from "../src/adapter/dispatcher-tools.js";
 import type {CheckWorkersToolResult, DeliverResultToolResult, SpawnWorkerToolResult, SteerWorkerToolResult, StopWorkerToolResult} from "../src/core/tool-results.js";
-import type { SpawnResult } from "../src/core/types.js";
+import type {
+  ModelOptionPurpose,
+  ModelOptionResolution,
+  SpawnRequest,
+  SpawnResult,
+} from "../src/core/types.js";
 
 function unwrapSpawn(result: SpawnResult): string {
   assert.ok(result.ok, result.ok ? "" : result.detail);
@@ -37,17 +43,35 @@ function byName(tools: DispatcherToolDef[], name: string): DispatcherToolDef {
 async function setup(options?: {
   deliverToUser?: (text: string, paths?: readonly string[]) => Promise<boolean>;
   recentActivity?: (workerId: string) => string | null;
+  resolveModel?: (
+    raw: string,
+    purpose: ModelOptionPurpose,
+  ) => Promise<ModelOptionResolution>;
 }): Promise<{
   host: FakeDshHost;
   multitask: Multitask;
   tools: DispatcherToolDef[];
+  /** Ticket 285: every SpawnRequest the tool handed to the core, in order. */
+  spawnRequests: SpawnRequest[];
   getSessionId: () => string | null;
 }> {
   const host = new FakeDshHost();
   const multitask = createMultitask(host);
+  // Ticket 285: a recording wrapper over the REAL core. Both hops of the
+  // worker-model path are asserted in this file: the tool-to-core request
+  // (recorded here) and, since Task 9, the core-to-host
+  // `SpawnOptions.model` the fake host records in `spawnCalls`.
+  const spawnRequests: SpawnRequest[] = [];
+  const recordingCore: Multitask = {
+    ...multitask,
+    async spawnWorker(request: SpawnRequest): Promise<SpawnResult> {
+      spawnRequests.push(request);
+      return multitask.spawnWorker(request);
+    },
+  };
   let sessionId: string | null = "session-1";
   const tools = createDispatcherTools({
-    multitask,
+    multitask: recordingCore,
     getSessionId: () => sessionId,
     ...(options?.deliverToUser !== undefined
       ? { deliverToUser: options.deliverToUser }
@@ -55,11 +79,15 @@ async function setup(options?: {
     ...(options?.recentActivity !== undefined
       ? { recentActivity: options.recentActivity }
       : {}),
+    ...(options?.resolveModel !== undefined
+      ? { resolveModel: options.resolveModel }
+      : {}),
   });
   return {
     host,
     multitask,
     tools,
+    spawnRequests,
     getSessionId: () => sessionId,
   };
 }
@@ -91,6 +119,141 @@ describe("dispatcher tools — spawn_worker", () => {
     assert.equal(host.spawnCalls.length, 1);
     assert.equal(host.spawnCalls[0]?.prompt, "Summarize the three auth RFCs.");
     assert.equal(multitask.getWorker(result.worker_id)?.todoId, "t-1");
+  });
+
+  // Ticket 285: the opt-in worker model. spawn_worker takes `model` and
+  // nothing else — worker_model belongs to spawn_dispatcher alone.
+  it("declares an optional model and NO worker_model", async () => {
+    const { tools } = await setup();
+    const parameters = byName(tools, SPAWN_WORKER_TOOL).parameters as {
+      type: string;
+      additionalProperties: boolean;
+      properties: Record<string, { type: string; required?: boolean }>;
+    };
+    assert.equal(parameters.type, "object");
+    assert.equal(parameters.additionalProperties, false);
+    assert.deepEqual(Object.keys(parameters.properties).sort(), [
+      "model",
+      "prompt",
+      "stream_key",
+      "title",
+      "todo_id",
+    ]);
+    assert.equal(parameters.properties.model?.type, "string");
+    assert.notEqual(parameters.properties.model?.required, true);
+    // A worker cannot set the leader's worker default.
+    assert.equal("worker_model" in parameters.properties, false);
+  });
+
+  it("passes the resolved model route through on the worker spawn request", async () => {
+    const seen: string[] = [];
+    const { host, spawnRequests, tools } = await setup({
+      resolveModel: async (raw) => {
+        seen.push(raw);
+        return {
+          kind: "resolved",
+          route: { provider: "pD", model: "mD" },
+        };
+      },
+    });
+    const result = (await byName(tools, SPAWN_WORKER_TOOL).execute({
+      stream_key: "model-stream",
+      title: "Model work",
+      prompt: "Do it.",
+      model: "  pD/mD  ",
+    })) as SpawnWorkerToolResult;
+
+    assert.ok(result.ok);
+    if (!result.ok) return;
+    // Trimmed before the resolver sees it; the resolved route is what the
+    // core and, through the core's forwarding, the host receive.
+    assert.deepEqual(seen, ["pD/mD"]);
+    assert.equal(host.spawnCalls.length, 1);
+    assert.deepEqual(spawnRequests[0]?.model, {
+      provider: "pD",
+      model: "mD",
+    });
+    // Task 9: Multitask.spawnWorker forwards the route to the host seam,
+    // which is what turns it into the worker's activation agentOptions.
+    assert.deepEqual(host.spawnCalls[0]?.opts.model, {
+      provider: "pD",
+      model: "mD",
+    });
+    assert.equal(result.model_fallbacks, undefined);
+  });
+
+  it("a model fallback still spawns, adds model_fallbacks, and says so in the ack", async () => {
+    const { host, spawnRequests, tools } = await setup({
+      resolveModel: async () => ({
+        kind: "fallback",
+        requested: "nope",
+        reason: "unknown-model",
+      }),
+    });
+    const result = (await byName(tools, SPAWN_WORKER_TOOL).execute({
+      stream_key: "model-stream",
+      title: "Model work",
+      prompt: "Do it.",
+      model: "nope",
+    })) as SpawnWorkerToolResult;
+
+    assert.ok(result.ok, "a fallback never refuses the spawn");
+    if (!result.ok) return;
+    assert.equal(host.spawnCalls.length, 1);
+    assert.equal("model" in (spawnRequests[0] ?? {}), false);
+    assert.deepEqual(result.model_fallbacks, [
+      {
+        option: "model",
+        requested: "nope",
+        reason: "unknown-model",
+      },
+    ]);
+    assert.ok(
+      result.ack.includes(
+        'Model "nope" was not used (not in the model catalog); this worker uses the inherited route.',
+      ),
+      result.ack,
+    );
+  });
+
+  it("with no model option: no resolver call, no model key, no fallback fields", async () => {
+    let resolverCalls = 0;
+    const { host, spawnRequests, tools } = await setup({
+      resolveModel: async () => {
+        resolverCalls += 1;
+        return { kind: "absent" };
+      },
+    });
+    const result = (await byName(tools, SPAWN_WORKER_TOOL).execute({
+      stream_key: "plain-stream",
+      title: "Plain work",
+      prompt: "Do it.",
+    })) as SpawnWorkerToolResult;
+
+    assert.ok(result.ok);
+    if (!result.ok) return;
+    assert.equal(resolverCalls, 0);
+    assert.equal("model" in (host.spawnCalls[0]?.opts ?? {}), false);
+    assert.equal("model" in (spawnRequests[0] ?? {}), false);
+    assert.equal(result.model_fallbacks, undefined);
+  });
+
+  // Ticket 285: a missing resolver is a wiring bug and must throw BEFORE the
+  // ledger entry is created, so a bad wiring cannot leave an orphan todo.
+  it("a non-empty model with no resolver throws before creating a todo", async () => {
+    const { host, multitask, tools } = await setup();
+    await assert.rejects(
+      () =>
+        byName(tools, SPAWN_WORKER_TOOL).execute({
+          stream_key: "model-stream",
+          title: "Model work",
+          prompt: "Do it.",
+          model: "pD/mD",
+        }),
+      /no model resolver is wired/,
+    );
+    assert.equal(host.spawnCalls.length, 0);
+    assert.deepEqual(multitask.listTodos("session-1"), []);
   });
 
   it("duplicate stream key is refused without a host call", async () => {
@@ -714,6 +877,40 @@ describe("dispatcher tools — deliver_result", () => {
     assert.equal(check.rows[0]?.stage, "ended");
   });
 
+});
+
+describe("dispatcher tools — await_agent timeout validation (ticket 194)", () => {
+  it("refuses an explicit null timeout exactly like any other non-number", async () => {
+    const { host, multitask, tools } = await setup();
+    // A settled owned worker makes the regression fail fast: the buggy null
+    // path would read this record with the default timeout and return
+    // settled, while the fix refuses before any wait is armed.
+    const workerId = unwrapSpawn(
+      await multitask.spawnWorker({
+        parentSessionId: "session-1",
+        streamKey: "null-timeout",
+        title: "Null timeout",
+        prompt: "Go.",
+      }),
+    );
+    host.fireSettled({ workerId, status: "completed", report: "Done." });
+
+    const awaitAgent = byName(tools, AWAIT_AGENT_TOOL);
+    const expected = {
+      ok: false,
+      reason: "invalid-timeout",
+      detail: AWAIT_INVALID_TIMEOUT_DETAIL,
+    };
+    assert.deepEqual(
+      await awaitAgent.execute({ target: workerId, timeout_ms: null }),
+      expected,
+    );
+    assert.deepEqual(
+      await awaitAgent.execute({ target: workerId, timeout_ms: "5000" }),
+      expected,
+    );
+    assert.equal(multitask.settleRecords.waiterCount("session-1"), 0);
+  });
 });
 
 describe("dispatcher tools — the registered surface (tickets 116/117)", () => {

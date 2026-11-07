@@ -148,6 +148,11 @@ export { isTerminalStatus } from "./core/types.js";
 export type {
   DispatcherSpawnOptions,
   DispatcherSpawnResult,
+  ModelFallbackNotice,
+  ModelOptionPurpose,
+  ModelOptionResolution,
+  ModelResolutionFailure,
+  ModelRoute,
   SettledEvent,
   SpawnOptions,
   SpawnRequest,

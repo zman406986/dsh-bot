@@ -496,6 +496,28 @@ describe("dispatcher copy — surface truth and class-aware wakes", () => {
     assert.ok(!note.includes("same dispatcher tools and policy"), note);
   });
 
+  it("the spawn tools teach the optional model arguments (ticket 285)", () => {
+    // The schema is the contract; the description is where the model learns
+    // the option exists (PLAN §3.1). No policy bullet is added for it.
+    assert.ok(
+      TOOL_DESCRIPTIONS[SPAWN_WORKER_TOOL].includes("model"),
+      "spawn_worker description never mentions model",
+    );
+    assert.ok(
+      TOOL_DESCRIPTIONS[SPAWN_DISPATCHER_TOOL].includes("worker_model"),
+      "spawn_dispatcher description never mentions worker_model",
+    );
+    // The ZH face names the same two keys; argument names stay ASCII.
+    assert.ok(
+      TOOL_DESCRIPTIONS_ZH[SPAWN_WORKER_TOOL].includes("model"),
+      "ZH spawn_worker description never mentions model",
+    );
+    assert.ok(
+      TOOL_DESCRIPTIONS_ZH[SPAWN_DISPATCHER_TOOL].includes("worker_model"),
+      "ZH spawn_dispatcher description never mentions worker_model",
+    );
+  });
+
   it("the team leader is told where the summoner id comes from", () => {
     assert.equal(
       formatSummoningDispatcherHandoffLine("disp-1"),

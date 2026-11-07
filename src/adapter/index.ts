@@ -6,6 +6,14 @@ export {
   type TextBlock,
 } from "./content-blocks.js";
 export {
+  formatModelOptionWarning,
+  MODEL_OPTION_VALUE_MAX_CHARS,
+  resolveModelOption,
+  type ModelCatalogLike,
+  type ModelOptionWarningInput,
+  type ResolveModelOptionInput,
+} from "./model-option.js";
+export {
   registerDispatcherTools,
   resolveExecSessionId,
   toRegisterableTool,

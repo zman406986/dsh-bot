@@ -110,7 +110,7 @@ export const DISPATCHER_TOOL_NAMES = [
 /** Model-facing tool descriptions (new copy). */
 export const TOOL_DESCRIPTIONS = {
   [SPAWN_WORKER_TOOL]:
-    "Start a background worker for one stream. Give it the problem, constraints and context it cannot look up — it cannot see this conversation, and it decides the method. Returns at once; its result arrives later. One live worker per stream_key. Each spawn records a todo entry, so title it clearly.",
+    "Start a background worker for one stream. Give it the problem, constraints and context it cannot look up — it cannot see this conversation, and it decides the method. Returns at once; its result arrives later. One live worker per stream_key. Each spawn records a todo entry, so title it clearly. Optional model chooses this worker's model; omit it to inherit your default worker route.",
   [CHECK_WORKERS_TOOL]:
     "List your running and recent workers, or inspect one by id: status, elapsed, tool count, transcript, recent activity. A snapshot — never a wait loop.",
   [STEER_WORKER_TOOL]:
@@ -124,7 +124,7 @@ export const TOOL_DESCRIPTIONS = {
   [AWAIT_AGENT_TOOL]:
     "Wait once, bounded, for one worker to finish; return its terminal status and result. Use it only when your next step is blocked on that worker. timeout_ms 0–120000 (default 30000); 0 reads the current state. still-running and released are normal: the worker keeps going and its result still arrives. Workers only — a dispatcher is not awaitable.",
   [SPAWN_DISPATCHER_TOOL]:
-    "Summon another dispatcher: a team-leader dispatcher with its own workers, ledger, inbox and user — not a worker. Give it the problem and the wanted outcome; it cannot see this conversation. It answers its own user directly and reports back to you. It cannot summon further dispatchers. Returns its session id at once. Message it with message_agent; never wait on it. Being top-level, it is not bound by the subagent depth limit or the live-child pool.",
+    "Summon another dispatcher: a team-leader dispatcher with its own workers, ledger, inbox and user — not a worker. Give it the problem and the wanted outcome; it cannot see this conversation. It answers its own user directly and reports back to you. It cannot summon further dispatchers. Returns its session id at once. Message it with message_agent; never wait on it. Being top-level, it is not bound by the subagent depth limit or the live-child pool. Optional model chooses the team leader's model; optional worker_model sets the default for its workers.",
 } as const;
 
 /**
@@ -137,7 +137,7 @@ export const TOOL_DESCRIPTIONS_ZH: Record<
   string
 > = {
   [SPAWN_WORKER_TOOL]:
-    "为一条工作流启动一个后台工作者。把问题、约束，以及它自己查不到的背景交给它——它看不到这个对话，方法由它自己定。工具立即返回；结果稍后送到。每条 `stream_key` 只允许一个在运行的工作者。每次启动都会记下待办条目，所以标题要写清楚。",
+    "为一条工作流启动一个后台工作者。把问题、约束，以及它自己查不到的背景交给它——它看不到这个对话，方法由它自己定。工具立即返回；结果稍后送到。每条 `stream_key` 只允许一个在运行的工作者。每次启动都会记下待办条目，所以标题要写清楚。可选的 `model` 用来指定这个工作者使用的模型；省略它就沿用你默认的工作者路由。",
   [CHECK_WORKERS_TOOL]:
     "列出在运行和最近的工作者，或按 id 查看其中一个：状态、已用时间、工具调用次数、记录、最近活动。这是快照，不是等待循环。",
   [STEER_WORKER_TOOL]:
@@ -151,7 +151,7 @@ export const TOOL_DESCRIPTIONS_ZH: Record<
   [AWAIT_AGENT_TOOL]:
     "对一个工作者做一次有上限的等待，等它结束，返回最终状态和结果。只在你下一步卡在那个工作者上时使用。`timeout_ms` 为 0 到 120000（默认 30000）；0 表示只读当前状态。`still-running` 和 `released` 都是正常结果：工作者继续运行，结果之后仍会送到。只能等工作者——调度器不能被等待。",
   [SPAWN_DISPATCHER_TOOL]:
-    "召唤另一个调度器：一个团队负责人调度器，有自己的工作者、账本、收件箱和用户——不是工作者。把问题和你要的结果交给它；它看不到这个对话。它直接答复自己的用户，并向你回报。它不能再次召唤调度器。立即返回它的会话 id。用 `message_agent` 给它发消息；绝不要等它。它是顶层会话，不受子代理深度上限和存活子会话池的限制。",
+    "召唤另一个调度器：一个团队负责人调度器，有自己的工作者、账本、收件箱和用户——不是工作者。把问题和你要的结果交给它；它看不到这个对话。它直接答复自己的用户，并向你回报。它不能再次召唤调度器。立即返回它的会话 id。用 `message_agent` 给它发消息；绝不要等它。它是顶层会话，不受子代理深度上限和存活子会话池的限制。可选的 `model` 用来指定团队负责人的模型；可选的 `worker_model` 为它的工作者设定默认模型。",
 };
 
 /**

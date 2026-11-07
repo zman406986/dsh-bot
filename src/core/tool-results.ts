@@ -12,7 +12,13 @@ import {
 } from "./report-clamp.js";
 import type { WorkerLiveness } from "./liveness.js";
 import type { AwaitWorkerOutcome } from "./settle-records.js";
-import type { TerminalWorkerStatus, WorkerStatus, WorkerSummary } from "./types.js";
+import type {
+  ModelFallbackNotice,
+  ModelResolutionFailure,
+  TerminalWorkerStatus,
+  WorkerStatus,
+  WorkerSummary,
+} from "./types.js";
 import type { WorkerStage } from "./worker-stage.js";
 
 /** One check row the model sees from `check_workers`. */
@@ -52,6 +58,12 @@ export type SpawnWorkerToolResult =
       readonly title: string;
       /** Model-facing ack text. Not user-visible. */
       readonly ack: string;
+      /**
+       * Ticket 285: one entry per non-empty model option that fell back to
+       * the inherited route. Absent when the option resolved or was omitted,
+       * so a pre-285 call keeps the exact old result shape.
+       */
+      readonly model_fallbacks?: readonly ModelFallbackNotice[];
     }
   | {
       readonly ok: false;
@@ -242,12 +254,35 @@ export type SpawnDispatcherToolResult =
       readonly title: string;
       /** Model-facing peer/session note. Not user-visible. */
       readonly note: string;
+      /**
+       * Ticket 285: one entry per non-empty model option that fell back to
+       * the inherited route. Absent when both options resolved or were
+       * omitted.
+       */
+      readonly model_fallbacks?: readonly ModelFallbackNotice[];
     }
   | {
       readonly ok: false;
       readonly reason: "invalid-args" | "host-refused";
       readonly detail: string;
     };
+
+/**
+ * Ticket 285: the model-facing reason a rejected model option was not
+ * used. One table for both spawn results, so the wording cannot drift.
+ */
+function modelFallbackReasonText(reason: ModelResolutionFailure): string {
+  switch (reason) {
+    case "unknown-model":
+      return "not in the model catalog";
+    case "ambiguous-model":
+      return "it matches more than one provider; use provider/model";
+    case "catalog-unavailable":
+      return "the model catalog is unavailable";
+    case "catalog-error":
+      return "the model catalog could not be read";
+  }
+}
 
 /**
  * Ticket 118: the `spawn_dispatcher` success note.
@@ -264,13 +299,26 @@ export type SpawnDispatcherToolResult =
 export function formatSpawnDispatcherNote(input: {
   title: string;
   dispatcherId: string;
+  /** Ticket 285: rejected model options; absent means none. */
+  modelFallbacks?: readonly ModelFallbackNotice[];
 }): string {
-  return [
+  const parts = [
     `Summoned "${input.title}" as a peer dispatcher — a team-leader dispatcher with its own workers, ledger, inbox and user, working from the prompt it was given; it does not see this conversation.`,
     "It cannot summon further dispatchers.",
     `Message it with message_agent addressed to ${input.dispatcherId}; its answer arrives later as its own message on a fresh turn. It is a dispatcher in its own chat with its own user and answers that user directly; what it sends you answers what you asked.`,
     "Do not wait on it: a dispatcher is not awaitable (await_agent is workers-only). Tell the user what is underway if they need to know, then end the turn or move to other work.",
-  ].join(" ");
+  ];
+  // Ticket 285: one sentence per rejected value, appended at the end. A
+  // resolved or omitted value adds nothing, so the pre-285 note is
+  // byte-identical.
+  for (const notice of input.modelFallbacks ?? []) {
+    parts.push(
+      notice.option === "model"
+        ? `Leader model "${notice.requested}" was not used (${modelFallbackReasonText(notice.reason)}); the team leader uses the summoner's route.`
+        : `Worker model "${notice.requested}" was not used (${modelFallbackReasonText(notice.reason)}); its workers use the team leader's route.`,
+    );
+  }
+  return parts.join(" ");
 }
 
 /**
@@ -648,17 +696,28 @@ export function formatSpawnAck(input: {
   workerId: string;
   streamKey: string;
   prompt: string;
+  /** Ticket 285: rejected model options; absent means none. */
+  modelFallbacks?: readonly ModelFallbackNotice[];
 }): string {
-  return [
+  const lines = [
     `Started "${input.title}" in the background (worker ${input.workerId}, stream ${input.streamKey}).`,
     "",
     "It runs on its own. Its final response will arrive here when it finishes — you do not need to wait, poll, or keep this turn open. Answer the user now if they need a reply, then end the turn or move to other work.",
-    "",
-    "Self-contained prompt sent:",
-    "---",
-    input.prompt,
-    "---",
-  ].join("\n");
+  ];
+  // Ticket 285: one line per rejected choice, after the opening paragraph
+  // and before the prompt block. A resolved or omitted value adds nothing,
+  // so the pre-285 ack is byte-identical.
+  const fallbacks = input.modelFallbacks ?? [];
+  if (fallbacks.length > 0) {
+    lines.push("");
+    for (const notice of fallbacks) {
+      lines.push(
+        `Model "${notice.requested}" was not used (${modelFallbackReasonText(notice.reason)}); this worker uses the inherited route.`,
+      );
+    }
+  }
+  lines.push("", "Self-contained prompt sent:", "---", input.prompt, "---");
+  return lines.join("\n");
 }
 
 /** Steer success note. Does not re-echo the parked message. */
