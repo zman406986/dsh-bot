@@ -243,6 +243,8 @@ function variantOf(raw: string | undefined): EntryAskVariant | EntryAskRefused {
  * - `no-text` becomes `empty-text`, the parser's own code for the same defect;
  * - `stream-truncated`, `aborted` and `not-configured` become `stream-error`
  *   (a configuration with no route is `off`, decided before sending);
+ * - `tool-call` becomes `stream-error` too: a tool-bearing reply is not an
+ *   entry answer, and the journal keeps the helper's own reason;
  * - `stream-error` and `timeout` keep their names.
  */
 const STREAM_CODE: Readonly<Record<StreamFailureReason, EntryAskRefusalCode>> = Object.freeze({
@@ -251,6 +253,7 @@ const STREAM_CODE: Readonly<Record<StreamFailureReason, EntryAskRefusalCode>> = 
   'stream-truncated': 'stream-error',
   timeout: 'timeout',
   aborted: 'stream-error',
+  'tool-call': 'stream-error',
   'no-text': 'empty-text',
 });
 

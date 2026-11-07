@@ -38,7 +38,8 @@ export function isRacoonsAskRequest(options: unknown): boolean {
 
 /** Why a stream ask produced no text. */
 export type StreamFailureReason =
-  | 'not-configured' | 'stream-error' | 'stream-truncated' | 'timeout' | 'aborted' | 'no-text';
+  | 'not-configured' | 'stream-error' | 'stream-truncated' | 'timeout' | 'aborted'
+  | 'tool-call' | 'no-text';
 
 export interface AskFailure<Reason extends string> {
   readonly status: 'refused';
@@ -246,6 +247,11 @@ async function askRequest(llm: DshLlmService, fields: {
     deadline !== null && signal.aborted && signal.reason === deadline.reason;
   let text = '';
   let finish: string | null = null;
+  // A tool-bearing reply is not an answer, however much adjacent text it
+  // carries: the ask declares main's tools but this seam never executes one,
+  // so the call is the observation half and the finish that concludes it is
+  // not a decision (ISSUE-185).
+  let toolCall = false;
   // The host's own accounting for this call, when it reports one. The chunk is
   // `{type:'usage', usage: TokenUsage}` and arrives before `finish`; it used to
   // be discarded here (ISSUE-056 C6a), which left every ask's cost estimated.
@@ -273,6 +279,11 @@ async function askRequest(llm: DshLlmService, fields: {
         if (isRecord(chunk) && chunk['type'] === 'text-delta'
           && typeof chunk['text'] === 'string') {
           text += chunk['text'];
+          continue;
+        }
+        if (isRecord(chunk)
+          && (chunk['type'] === 'tool-call-delta' || chunk['type'] === 'tool-call')) {
+          toolCall = true;
           continue;
         }
         if (isRecord(chunk) && chunk['type'] === 'usage') {
@@ -309,6 +320,10 @@ async function askRequest(llm: DshLlmService, fields: {
   }
   if (finish === 'max-tokens') {
     return refuse('stream-truncated', 'the answer hit the token cap and may be incomplete');
+  }
+  if (finish === 'tool-calls' || toolCall) {
+    return refuse('tool-call',
+      'the ask stream carried a tool call, so it did not answer with text alone');
   }
   if (text.trim() === '') return refuse('no-text', 'the ask stream carried no text');
   return { status: 'answered', text, finish,
