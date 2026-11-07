@@ -396,15 +396,11 @@ export function createConversationPane(
                 : CONVERSATION_KEYS.unavailable,
             )}
           </div>
-        ) : state.transcript.items.length === 0 ? (
-          <div
-            className={`${CONVERSATION_CLASS}__notice`}
-            data-state="empty"
-          >
-            {t(CONVERSATION_KEYS.empty)}
-          </div>
         ) : (
           <div className={`${CONVERSATION_CLASS}__scroll`}>
+            {/* Continuation is independent of display items: an empty page
+                can still have older history, so the control precedes the
+                empty/nonempty choice. */}
             {state.transcript.hasMore ? (
               <button
                 type="button"
@@ -414,9 +410,18 @@ export function createConversationPane(
                 {t(CONVERSATION_KEYS.more)}
               </button>
             ) : null}
-            {state.transcript.items.map((item) => (
-              <Item key={conversationItemKey(item)} t={t} item={item} />
-            ))}
+            {state.transcript.items.length === 0 ? (
+              <div
+                className={`${CONVERSATION_CLASS}__notice`}
+                data-state="empty"
+              >
+                {t(CONVERSATION_KEYS.empty)}
+              </div>
+            ) : (
+              state.transcript.items.map((item) => (
+                <Item key={conversationItemKey(item)} t={t} item={item} />
+              ))
+            )}
           </div>
         )}
         <Composer

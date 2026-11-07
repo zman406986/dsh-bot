@@ -239,6 +239,136 @@ describe("shell — sidebar copy-id reachability (jsdom)", () => {
       "focusing the copy button (or anything in the row) reveals it",
     );
   });
+
+  /** Install/remove the browser clipboard stub the default writer reaches. */
+  function stubClipboard(
+    writeText: ((text: string) => Promise<void>) | undefined,
+  ): void {
+    if (writeText === undefined) {
+      delete (navigator as { clipboard?: unknown }).clipboard;
+      return;
+    }
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+  }
+
+  /** Let a rejected promise settle so an escaped rejection is observable. */
+  async function settleFailures(): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  it("contains a rejected default browser clipboard write and keeps the id readable", async (ctx) => {
+    stubClipboard(() => Promise.reject(new Error("clipboard denied")));
+    ctx.after(() => stubClipboard(undefined));
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    ctx.after(() => process.off("unhandledRejection", onUnhandled));
+
+    const store = createDispatcherShellStore();
+    store.upsertSessions([
+      { sessionId: "s-1", title: "Dispatcher one", dispatcher: true },
+    ]);
+    const Shell = createDispatcherShell(t, store);
+    const mounted = await mount(createElement(Shell));
+    ctx.after(async () => {
+      await mounted.unmount();
+    });
+
+    const copy = mounted.container.querySelector<HTMLButtonElement>(
+      `.${SHELL_CLASS}__row-copy[data-copy-id="s-1"]`,
+    );
+    assert.ok(copy, "the copy affordance renders");
+    await act(async () => {
+      copy.click();
+    });
+    await settleFailures();
+
+    assert.deepEqual(
+      rejections,
+      [],
+      "the browser rejection is observed, never left unhandled",
+    );
+    assert.equal(copy.textContent, "s-1", "the id stays readable");
+    assert.equal(copy.getAttribute("title"), "s-1", "the title still names the id");
+  });
+
+  it("contains an injected writer's synchronous throw at the copy boundary", async (ctx) => {
+    const reported: string[] = [];
+    const onError = (event: Event): void => {
+      reported.push((event as ErrorEvent).message);
+      event.preventDefault();
+    };
+    dom.window.addEventListener("error", onError);
+    ctx.after(() => dom.window.removeEventListener("error", onError));
+
+    const store = createDispatcherShellStore();
+    store.upsertSessions([
+      { sessionId: "s-1", title: "Dispatcher one", dispatcher: true },
+    ]);
+    const Shell = createDispatcherShell(t, store, {
+      copyToClipboard: () => {
+        throw new Error("clipboard exploded");
+      },
+    });
+    const mounted = await mount(createElement(Shell));
+    ctx.after(async () => {
+      await mounted.unmount();
+    });
+
+    const copy = mounted.container.querySelector<HTMLButtonElement>(
+      `.${SHELL_CLASS}__row-copy[data-copy-id="s-1"]`,
+    );
+    assert.ok(copy, "the copy affordance renders");
+    await act(async () => {
+      copy.click();
+    });
+
+    assert.deepEqual(reported, [], "the writer's throw is contained by the click");
+    assert.equal(copy.textContent, "s-1", "the id stays readable");
+    assert.equal(copy.getAttribute("title"), "s-1");
+  });
+
+  it("contains an injected writer's rejected promise at the copy boundary", async (ctx) => {
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    ctx.after(() => process.off("unhandledRejection", onUnhandled));
+
+    const store = createDispatcherShellStore();
+    store.upsertSessions([
+      { sessionId: "s-1", title: "Dispatcher one", dispatcher: true },
+    ]);
+    const Shell = createDispatcherShell(t, store, {
+      copyToClipboard: () => Promise.reject(new Error("clipboard denied")),
+    });
+    const mounted = await mount(createElement(Shell));
+    ctx.after(async () => {
+      await mounted.unmount();
+    });
+
+    const copy = mounted.container.querySelector<HTMLButtonElement>(
+      `.${SHELL_CLASS}__row-copy[data-copy-id="s-1"]`,
+    );
+    assert.ok(copy, "the copy affordance renders");
+    await act(async () => {
+      copy.click();
+    });
+    await settleFailures();
+
+    assert.deepEqual(
+      rejections,
+      [],
+      "the writer's rejection is observed, never left unhandled",
+    );
+    assert.equal(copy.textContent, "s-1", "the id stays readable");
+  });
 });
 
 describe("conversation composer — focus and accessible naming (jsdom)", () => {
@@ -513,6 +643,63 @@ describe("conversation pane — peer relay and streaming identity (jsdom)", () =
         text: "",
       }),
     );
+  });
+
+  it("shows the load-older control on a ready empty page that still has history", async () => {
+    const conversation = createConversationStore();
+    conversation.applyWindow("s-1", { entries: [], hasMore: true });
+    const olderRequests: string[] = [];
+    const Pane = createConversationPane(t, conversation, {
+      onSend: async () => ({ kind: "sent" }),
+      onLoadOlder: (sessionId) => {
+        olderRequests.push(sessionId);
+      },
+    });
+    const mounted = await mount(createElement(Pane, { sessionId: "s-1" }));
+
+    assert.ok(
+      mounted.container.querySelector(
+        `.${CONVERSATION_CLASS}__notice[data-state="empty"]`,
+      ),
+      "the empty page still explains itself",
+    );
+    const more = mounted.container.querySelector<HTMLButtonElement>(
+      `.${CONVERSATION_CLASS}__more`,
+    );
+    assert.ok(more, "older history remains, so the control must render");
+    assert.equal(more.textContent, t(CONVERSATION_KEYS.more));
+    await act(async () => {
+      more.click();
+    });
+    assert.deepEqual(
+      olderRequests,
+      ["s-1"],
+      "activating it requests the pane's own session",
+    );
+    await mounted.unmount();
+  });
+
+  it("omits the load-older control on a ready empty page with no history", async () => {
+    const conversation = createConversationStore();
+    conversation.applyWindow("s-1", { entries: [], hasMore: false });
+    const Pane = createConversationPane(t, conversation, {
+      onSend: async () => ({ kind: "sent" }),
+      onLoadOlder: () => {},
+    });
+    const mounted = await mount(createElement(Pane, { sessionId: "s-1" }));
+
+    assert.ok(
+      mounted.container.querySelector(
+        `.${CONVERSATION_CLASS}__notice[data-state="empty"]`,
+      ),
+      "the empty notice renders",
+    );
+    assert.equal(
+      mounted.container.querySelector(`.${CONVERSATION_CLASS}__more`),
+      null,
+      "no older history means no load-older control",
+    );
+    await mounted.unmount();
   });
 });
 
