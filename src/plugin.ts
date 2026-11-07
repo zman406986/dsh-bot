@@ -1747,6 +1747,10 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
             shouldHandle: (sessionId) =>
               lifecycle.isDispatcherSession(sessionId),
             onOutcome: logMicrocompactOutcome,
+            // Ticket 265: teardown publishes this before disposing the marker
+            // domain, so a pass parked on the boundary read declines when it
+            // resumes instead of appending with no writable boundary store.
+            isCancelled: () => tearingDown,
           },
           markers,
           () => {

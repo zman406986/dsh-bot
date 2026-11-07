@@ -109,6 +109,7 @@ export type MicrocompactSkipReason =
   | "insufficient-saving"
   | "invalid-keep"
   | "boundary-read-failed"
+  | "cancelled"
   | "threw";
 
 /** What one pre-step invocation concluded. */
@@ -190,8 +191,18 @@ export interface MicrocompactOptions {
   /**
    * Gate: only sessions this returns true for are compacted. The plugin passes
    * the dispatcher-activation predicate so ordinary chats are never rewritten.
+   * Re-checked after the awaited boundary read: dispatcher deactivation while a
+   * pass is parked there must not rewrite the session.
    */
   readonly shouldHandle?: (sessionId: string) => boolean;
+  /**
+   * Registration-lifetime check, consulted before any surface mutation after
+   * an awaited boundary read. `registerMicrocompact` supplies its own flag
+   * (set by the disposer) and ORs it with this one, so unload cannot leave a
+   * parked pass free to append. A cancelled pass declines with "cancelled"
+   * and writes nothing.
+   */
+  readonly isCancelled?: () => boolean;
   /** The plugin's debug sink (never fatal). */
   readonly onOutcome?: (outcome: MicrocompactPassOutcome) => void;
   /** Epoch-ms clock, injectable for tests. */
@@ -361,6 +372,7 @@ export async function runMicrocompactPass(
 
   const sessionId = sessionIdOf(session);
   if (sessionId === null) return declined("no-session");
+  if (options.isCancelled?.() === true) return declined("cancelled");
   if (options.shouldHandle !== undefined && !options.shouldHandle(sessionId)) {
     return declined("disabled");
   }
@@ -431,6 +443,17 @@ export async function runMicrocompactPass(
     previous = await store.readCompactionBoundary(sessionId);
   } catch {
     return declined("boundary-read-failed");
+  }
+  // 5b. Lifetime recheck. This was the pass's only await: teardown (unload /
+  //     HMR) or dispatcher deactivation can land while it was parked, and the
+  //     plugin may already have disposed the boundary store. Re-check the
+  //     registration and the gate BEFORE the synchronous surface appends
+  //     below — appends cannot be undone, and the boundary write after them
+  //     would fail against a disposed store, leaving context mutated with no
+  //     new boundary.
+  if (options.isCancelled?.() === true) return declined("cancelled");
+  if (options.shouldHandle !== undefined && !options.shouldHandle(sessionId)) {
+    return declined("disabled");
   }
   const passSeq =
     options.nextPassSeq !== undefined
@@ -537,7 +560,8 @@ export async function runMicrocompactPass(
 
 /**
  * Register the pre-step listener. Returns the disposer; the caller owns it
- * through the usual `ctx.effect` contract.
+ * through the usual `ctx.effect` contract. The disposer first cancels any
+ * in-flight pass (ticket 265), then unregisters the listener.
  *
  * `resolveMeter` is a guarded getter: the meter lives on the host plane, and a
  * Cordis context that did not declare it throws on direct access, so the
@@ -550,6 +574,19 @@ export function registerMicrocompact(
   resolveMeter: () => TokenMeterLike | undefined,
 ): () => void {
   if (!options.enabled) return () => {};
+
+  /**
+   * Ticket 265: registration lifetime, published by the disposer BEFORE the
+   * listener is unregistered (the ticket-196 ordering). A pass parked on the
+   * boundary read observes this when it resumes and declines before any
+   * append, so teardown cannot leave context mutated with an unwritable
+   * boundary.
+   */
+  let cancelled = false;
+  const passOptions: MicrocompactOptions = {
+    ...options,
+    isCancelled: () => cancelled || (options.isCancelled?.() ?? false),
+  };
 
   const report = (outcome: MicrocompactPassOutcome): void => {
     try {
@@ -571,7 +608,7 @@ export function registerMicrocompact(
     }
     try {
       const outcome = await runMicrocompactPass(
-        options,
+        passOptions,
         resolveMeter(),
         store,
         session,
@@ -586,7 +623,13 @@ export function registerMicrocompact(
   };
 
   const disposer = ctx.on(MICROCOMPACT_EVENT, listener as never);
-  return typeof disposer === "function"
-    ? (disposer as () => void)
-    : () => {};
+  return () => {
+    // Publish the terminal state first: a continuation released from the
+    // boundary read must see cancellation even if unregistration (or the
+    // caller's store disposal) races this disposer.
+    cancelled = true;
+    if (typeof disposer === "function") {
+      (disposer as () => void)();
+    }
+  };
 }

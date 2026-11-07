@@ -29,7 +29,7 @@ import {
   MICROCOMPACT_TRIGGER_RATIO,
 } from "../src/core/microcompact.js";
 import type { CompactionBoundary } from "../src/core/durability.js";
-import {MICROCOMPACT_EVENT, registerMicrocompact, runMicrocompactPass, type MicrocompactContextLike, type MicrocompactSessionLike, type TokenMeterLike} from "../src/adapter/microcompact.js";
+import {MICROCOMPACT_EVENT, registerMicrocompact, runMicrocompactPass, type BoundaryStoreLike, type MicrocompactContextLike, type MicrocompactPassOutcome, type MicrocompactSessionLike, type TokenMeterLike} from "../src/adapter/microcompact.js";
 
 const WINDOW = 1_000_000;
 const THRESHOLD = Math.floor(WINDOW * MICROCOMPACT_TRIGGER_RATIO);
@@ -523,11 +523,16 @@ describe("microcompact listener (ticket 124)", () => {
   function createBus(): MicrocompactContextLike & {
     fire(payload: unknown): Promise<unknown>;
     readonly names: string[];
+    readonly nextCalls: number;
   } {
     const listeners = new Map<string, (payload: never, next: () => Promise<unknown>) => unknown>();
     const names: string[] = [];
+    let nextCalls = 0;
     return {
       names,
+      get nextCalls() {
+        return nextCalls;
+      },
       on(name: string, listener: never) {
         names.push(name);
         listeners.set(name, listener);
@@ -538,7 +543,10 @@ describe("microcompact listener (ticket 124)", () => {
       async fire(payload: unknown) {
         const listener = listeners.get(MICROCOMPACT_EVENT);
         assert.ok(listener, "no pre-step listener registered");
-        return listener(payload as never, async () => ({ kind: "enter", messages: [] }));
+        return listener(payload as never, async () => {
+          nextCalls += 1;
+          return { kind: "enter", messages: [] };
+        });
       },
     };
   }
@@ -590,5 +598,124 @@ describe("microcompact listener (ticket 124)", () => {
         }) as never,
     );
     await assert.doesNotReject(() => bus.fire({ agent: { session } }));
+  });
+
+  /**
+   * Ticket 265: a pass that is already past its trigger check and waiting on
+   * the boundary read must not resume appending after its registration was
+   * disposed. The gate is a manually controlled readCompactionBoundary, so
+   * teardown lands exactly while the pass is suspended at its only await.
+   */
+  describe("listener lifetime (ticket 265)", () => {
+    /** A boundary store whose read parks until the test releases it. */
+    function createGatedStore(): {
+      readonly store: BoundaryStoreLike;
+      readonly started: Promise<void>;
+      readonly writes: CompactionBoundary[];
+      release(boundary?: CompactionBoundary): void;
+    } {
+      const writes: CompactionBoundary[] = [];
+      let signalStarted: (() => void) | undefined;
+      const started = new Promise<void>((resolve) => {
+        signalStarted = () => resolve();
+      });
+      let releaseRead: ((boundary: CompactionBoundary | undefined) => void) | undefined;
+      return {
+        started,
+        writes,
+        release(boundary) {
+          releaseRead?.(boundary);
+        },
+        store: {
+          writeCompactionBoundary(boundary) {
+            writes.push(boundary);
+          },
+          readCompactionBoundary() {
+            signalStarted?.();
+            return new Promise<CompactionBoundary | undefined>((resolve) => {
+              releaseRead = resolve;
+            });
+          },
+        },
+      };
+    }
+
+    it("cancels a pending pass on disposal and appends nothing when the read resumes", async () => {
+      const bus = createBus();
+      const session = createFakeSession(baseSurface(8));
+      const gated = createGatedStore();
+      const outcomes: MicrocompactPassOutcome[] = [];
+      const dispose = registerMicrocompact(
+        bus,
+        {
+          ...OPTIONS,
+          // Still eligible at disposal: cancellation must come from the
+          // registration lifetime, not only from a changed gate.
+          shouldHandle: () => true,
+          onOutcome: (outcome) => outcomes.push(outcome),
+        },
+        gated.store,
+        () => createFakeMeter(THRESHOLD + 1),
+      );
+
+      const pending = bus.fire({ agent: { session } });
+      await gated.started;
+      assert.equal(
+        session.appendLog.length,
+        0,
+        "the pass is parked at the boundary read before any append",
+      );
+
+      // Teardown: publish cancellation, then unregister the listener, exactly
+      // as plugin unload does before the boundary store is disposed.
+      dispose();
+      gated.release(undefined);
+
+      const decision = await pending;
+      assert.deepEqual(decision, { kind: "enter", messages: [] });
+      assert.equal(bus.nextCalls, 1, "the pre-step continuation still runs once");
+      assert.equal(
+        session.appendLog.length,
+        0,
+        "no compaction/prune or replacement may land after disposal",
+      );
+      assert.equal(gated.writes.length, 0, "no boundary row after disposal");
+      assert.equal(outcomes.length, 1);
+      assert.equal(outcomes[0]?.compacted, false);
+      assert.equal(outcomes[0]?.reason, "cancelled");
+    });
+
+    it("declines when dispatcher eligibility is lost while the read is pending", async () => {
+      const bus = createBus();
+      const session = createFakeSession(baseSurface(8));
+      const gated = createGatedStore();
+      const outcomes: MicrocompactPassOutcome[] = [];
+      let eligible = true;
+
+      registerMicrocompact(
+        bus,
+        {
+          ...OPTIONS,
+          shouldHandle: () => eligible,
+          onOutcome: (outcome) => outcomes.push(outcome),
+        },
+        gated.store,
+        () => createFakeMeter(THRESHOLD + 1),
+      );
+
+      const pending = bus.fire({ agent: { session } });
+      await gated.started;
+      eligible = false;
+      gated.release(undefined);
+      await pending;
+
+      assert.equal(
+        session.appendLog.length,
+        0,
+        "a deactivated dispatcher's session is not rewritten",
+      );
+      assert.equal(gated.writes.length, 0);
+      assert.equal(outcomes[0]?.reason, "disabled");
+    });
   });
 });
