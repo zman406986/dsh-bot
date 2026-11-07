@@ -2077,9 +2077,16 @@ export function createMultitask(
       }
       // Nothing restored means there is no record to replay a buffered settle
       // into; holding it would leak an event for a worker this boot cannot
-      // represent.
+      // represent. The buffer is shared by every dispatcher on this core
+      // instance, so only THIS parent's phantoms are ours to drop: a sibling's
+      // buffered settle must survive until that sibling's own rebuild replays
+      // it (ticket 191). The adoption record is the buffer entry's ownership
+      // proof — an entry is only ever buffered for an adopted worker.
       for (const workerId of [...pendingSettles.keys()]) {
-        if (!workers.has(workerId)) pendingSettles.delete(workerId);
+        if (workers.has(workerId)) continue;
+        if (adoptedAwaitingMarker.get(workerId) === parentSessionId) {
+          pendingSettles.delete(workerId);
+        }
       }
       // Restored entries re-join the visible roster (ticket 21 observer);
       // unknown-state rows never land on the roster, so no notification.

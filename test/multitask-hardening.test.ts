@@ -935,6 +935,109 @@ describe("core hardening — a settle inside the adopt-before-rebuild window", (
   });
 });
 
+describe("core hardening — a sibling parent's rebuild keeps a buffered settle", () => {
+  it("parent A's rebuild does not drop parent B's buffered settle", async () => {
+    const PARENT_A = "session-a";
+    const PARENT_B = "session-b";
+    const base = createInMemoryDurability();
+    // Both workers are live at the shared core's boot: one per dispatcher.
+    base.markers.set(
+      "w-sibling-a",
+      markerFor("w-sibling-a", {
+        parentSessionId: PARENT_A,
+        streamKey: "sibling-stream-a",
+      }),
+    );
+    base.markers.set(
+      "w-sibling-b",
+      markerFor("w-sibling-b", {
+        parentSessionId: PARENT_B,
+        streamKey: "sibling-stream-b",
+        todoId: "todo-sibling-b",
+      }),
+    );
+    // Each parent's marker read is held independently, so the two rebuilds
+    // can be released in either order (the interleaving ticket 191 describes).
+    const reads = new Map<string, Deferred>([
+      [PARENT_A, deferred()],
+      [PARENT_B, deferred()],
+    ]);
+    const durability: InMemoryDurability = {
+      ...base,
+      readWorkerMarkers(parentSessionId: string) {
+        const gate = reads.get(parentSessionId);
+        if (gate === undefined) return base.readWorkerMarkers(parentSessionId);
+        return gate.promise.then(() =>
+          base.readWorkerMarkers(parentSessionId),
+        );
+      },
+    };
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host, { durability });
+
+    // A send landed for each worker before its rebuild: both are adopted, so
+    // neither has a roster record yet.
+    assert.equal(multitask.reclaimWorker("w-sibling-a", PARENT_A), false);
+    assert.equal(multitask.reclaimWorker("w-sibling-b", PARENT_B), false);
+    assert.equal(multitask.getWorker("w-sibling-b"), undefined);
+
+    // B's worker finishes inside B's adopt-before-rebuild window: its
+    // terminal event is buffered on the one shared core instance.
+    host.fireSettled({
+      workerId: "w-sibling-b",
+      status: "completed",
+      report: "B's answer",
+    });
+
+    // Both rebuilds are in flight, both marker reads pending.
+    const rebuildA = multitask.rebuildFromDurability(PARENT_A);
+    const rebuildB = multitask.rebuildFromDurability(PARENT_B);
+    reads.get(PARENT_A)?.resolve();
+    await rebuildA;
+    // A's sweep has run. B's read is still pending, so B has no record yet.
+    assert.equal(multitask.getWorker("w-sibling-b"), undefined);
+
+    // Releasing B must still find B's buffered terminal event and replay it.
+    reads.get(PARENT_B)?.resolve();
+    const reportB = await rebuildB;
+    assert.equal(reportB.restored.length, 1);
+
+    const record = multitask.getWorker("w-sibling-b");
+    assert.ok(record, "B's adopted worker is restored");
+    assert.equal(
+      record.status,
+      "completed",
+      "A's cleanup did not swallow B's buffered settle",
+    );
+    const settle = multitask.settleRecords.lookup(PARENT_B, "w-sibling-b");
+    assert.ok(settle, "the settle record is written for B, not A");
+    assert.equal(settle.status, "completed");
+    assert.equal(settle.resultText, "B's answer", "the buffered event is replayed");
+
+    // Exactly one settle wake, and it belongs to B.
+    assert.deepEqual(host.wakeCalls, [PARENT_B]);
+    const wake = multitask.wakeBus.peek(PARENT_B);
+    assert.ok(wake);
+    assert.equal(wake.settledWorkers.length, 1);
+    assert.equal(wake.settledWorkers[0]?.workerId, "w-sibling-b");
+
+    // The terminal replay released B's stream key.
+    const reSpawn = await multitask.spawnWorker({
+      parentSessionId: PARENT_B,
+      streamKey: "sibling-stream-b",
+      title: "Re-dispatched",
+      prompt: "Do it again.",
+    });
+    assert.equal(reSpawn.ok, true, reSpawn.ok ? "" : reSpawn.detail);
+
+    // The linked todo keeps B's delivery obligation.
+    const todo = multitask.todos.get("todo-sibling-b");
+    assert.ok(todo);
+    assert.equal(todo.workerId, "w-sibling-b");
+    assert.equal(todo.delivered, false);
+  });
+});
+
 describe("core hardening — hold release is durable-first", () => {
   it("keeps the in-memory hold when the marker drop rejects", async () => {
     const warnings = captureWarnings();
