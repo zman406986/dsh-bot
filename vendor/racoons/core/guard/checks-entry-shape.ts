@@ -108,12 +108,30 @@ export function checkShape(
       "A shape removal must be exactly the complement of the kept ranges", node.id);
     return;
   }
-  // (b′) The NAMED ranges of a `forgetlines` answer are the removal's claim, so
-  // they are validated here directly — against the landed body's own line
-  // offsets, never against a complement some caller computed (ADR-0026 §4).
-  // `keeplines` names what stays and is deliberately not read here: its plan
-  // claim is pinned byte-for-byte, so this branch exists only for the mirror.
+  // (b′) The NAMED ranges are validated here directly — against the landed
+  // body's own line offsets, never against a complement some caller computed
+  // (ADR-0026 §4). `forgetlines` names what leaves; `keeplines` names what
+  // stays and must equal `op.keptRanges`; `forgetall` keeps nothing; a
+  // `keepall` answer plans no shape at all. This binds a plan supplied
+  // independently of the planner to its answer.
   const answer = c.value.input.answer;
+  if (answer !== undefined && answer.action === "keepall") {
+    report("invalid-plan", "A keepall answer plans no shape", node.id);
+    return;
+  }
+  if (answer !== undefined && answer.action === "keeplines") {
+    const named = namedByteRanges(answer.ranges, offsets, original.length);
+    // An empty selection is a forgetall in disguise, never a shape.
+    if (named === null || named.length === 0 || !sameRanges(named, op.keptRanges)) {
+      report("invalid-line-span",
+        "A keeplines shape must keep exactly the lines the answer names", node.id);
+      return;
+    }
+  }
+  if (answer !== undefined && answer.action === "forgetall" && op.keptRanges.length !== 0) {
+    report("invalid-line-span", "A forgetall shape keeps no line", node.id);
+    return;
+  }
   if (answer !== undefined && answer.action === "forgetlines") {
     const named = namedByteRanges(answer.ranges, offsets, original.length);
     if (named === null) {
@@ -142,8 +160,8 @@ export function checkShape(
 }
 
 /**
- * The NAMED line ranges of a `forgetlines` answer as whole-line byte ranges of
- * the landed body, or `null` when a span is not one. The named spans are checked
+ * The NAMED line ranges of a partial answer as whole-line byte ranges of the
+ * landed body, or `null` when a span is not one. The named spans are checked
  * here, in the guard, against the unit's own line offsets — never by subtracting
  * them from a complement some caller computed (ADR-0026 §4). Order and overlap
  * are normalised by the same function the planner normalises with, so a

@@ -90,6 +90,8 @@ export type EntryShapeRefusal =
   | "keeps-every-line"
   /** `forgetlines` names every line: that is a whole-unit forget, which carries a descriptor. */
   | "drops-every-line"
+  /** `keeplines` names no line: keeping none is a `forgetall` in disguise. */
+  | "keeps-no-line"
   /** The event's action is not one of the grammar's four; fail-open, plan nothing. */
   | "unknown-answer";
 
@@ -193,6 +195,13 @@ export function planEntryShape(
       return { action: "refuse", code: "spans-outside-result",
         detail: `lines ${String(lines.startLine)}–${String(lines.endLineInclusive)} exceed the ${String(totalLines)} line(s) the landed result holds` };
     }
+  }
+  // Keeping no line is a `forgetall` in disguise: an empty `keeplines`
+  // selection would otherwise plan a whole-body removal the answer never
+  // described. Refused by name before any kept selection is derived.
+  if (answer.action === "keeplines" && namedLineRanges.length === 0) {
+    return { action: "refuse", code: "keeps-no-line",
+      detail: "the answer names no line; keeping none needs forgetall and its descriptor" };
   }
   // The two-form ask lets a model say "nothing was dropped" as `keepall` or as a
   // full-range `keeplines` noted `None`. The second form is keep-all, not a
