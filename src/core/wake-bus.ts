@@ -78,6 +78,15 @@ export interface WakeEvent {
    * they join the settled batch lane, never a peer wake.
    */
   readonly externalJobs?: readonly ExternalJobNotice[];
+  /**
+   * Ticket 197: this wake is the turn an already-spent delivery-redrive
+   * attempt paid for. Draining it is that attempt's delivery opportunity,
+   * not a fresh missed one — the reconciler must not charge the same
+   * obligation a second time (or mark it lost at the bound) while composing
+   * this turn. Set on redrive wakes (and on a background batch that subsumes
+   * one), and preserved when a settle or external job joins the batch.
+   */
+  readonly deliveryRedrive?: boolean;
 }
 
 export interface EnqueueSettledInput {
@@ -618,11 +627,16 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
     state.pending = [];
     state.pendingExternalJobs = [];
     const source = sourceFor(settledWorkers, externalJobs);
+    // Ticket 197: a turn that subsumes an owed redrive is the delivery
+    // opportunity its already-spent attempt paid for. The marker keeps the
+    // drain from charging the same obligation again.
+    const subsumesRedrive = state.pendingRedrive;
     setReady(state, {
       sessionId,
       source,
       settledWorkers,
       externalJobs,
+      ...(subsumesRedrive ? { deliveryRedrive: true } : {}),
     });
     // A real background batch subsumes any owed redrive: this turn will
     // surface the undelivered items anyway, so a second turn would be noise.
@@ -705,6 +719,8 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
         sessionId,
         source: "timer",
         settledWorkers: [],
+        // Ticket 197: this turn is what the redrive pass already charged.
+        deliveryRedrive: true,
       });
       state.pendingOwner = "worker-settled";
       notifyReady(sessionId, state);
@@ -743,6 +759,12 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
     state.pendingExternalJobs.unshift(
       ...(state.ready.externalJobs ?? []),
     );
+    // Ticket 197: a reclaimed background batch may be the very turn a
+    // delivery redrive already paid for. Keep the paid flag owed so the
+    // re-flush carries it and its drain does not charge a second attempt.
+    if (state.ready.deliveryRedrive === true) {
+      state.pendingRedrive = true;
+    }
     // The payload is back on the pending lists; a later flush owns a fresh
     // notification. A notification still in flight for the reclaimed wake is
     // stale (its outcome can no longer describe `ready`).
@@ -942,6 +964,12 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
         // this turn, so the redrive is subsumed. A peer or user turn is not
         // about our workers at all — keep the redrive owed for the next one.
         state.pendingRedrive = !isBackground(state.ready.source);
+        if (isBackground(state.ready.source)) {
+          // Ticket 197: the queued turn is the opportunity the redrive pass
+          // just charged for, so its drain must not charge again. Same ready
+          // wake identity — only the paid-turn marker is added.
+          state.ready = { ...state.ready, deliveryRedrive: true };
+        }
         // A ready batch whose host notification failed was never delivered:
         // re-notify it now rather than treating the redrive as subsumed by a
         // turn nobody was told about.
@@ -952,6 +980,8 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
         sessionId,
         source: "timer",
         settledWorkers: [],
+        // Ticket 197: this turn is what the redrive pass already charged.
+        deliveryRedrive: true,
       });
       state.pendingOwner = "worker-settled";
       notifyReady(sessionId, state);

@@ -1030,6 +1030,9 @@ export function createMultitask(
       wake,
       todos: todoLedger.list(sessionId),
       maxRedrives: options?.maxRedrives ?? MAX_DELIVERY_REDRIVES,
+      // Ticket 197: a delivery-redrive wake is the turn its already-spent
+      // attempt paid for; its drain must not charge the same obligation again.
+      redriveTurn: wake.deliveryRedrive === true,
       workers: [...workers.values()]
         .filter((worker) => worker.parentSessionId === sessionId)
         .map((worker) => ({

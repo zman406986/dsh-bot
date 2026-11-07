@@ -7,6 +7,7 @@ import {
 import { FakeDshHost } from "../src/core/fake-host.js";
 import { createMultitask, type Multitask } from "../src/core/multitask.js";
 import { formatLedgerLine } from "../src/core/policy/assembler.js";
+import { composeWakeText } from "../src/plugin.js";
 import {
   MAX_DELIVERY_REDRIVES,
   reconcileTodos,
@@ -418,3 +419,121 @@ describe("delivery obligation — telemetry (D-6)", () => {
     );
   });
 });
+
+describe("delivery obligation — one redrive turn costs one attempt (ticket 197)", () => {
+  it("draining the paid redrive wake does not spend a second attempt", async () => {
+    const durability = createInMemoryDurability();
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host, { durability });
+    const workerId = await spawnForTodo(multitask, host);
+    settleUndelivered(host, workerId);
+    // The settle wake is the first delivery opportunity, not a redrive.
+    multitask.drainWake(SESSION);
+
+    const report = multitask.redriveUndelivered(SESSION);
+    assert.equal(report.redriven.length, 1);
+    assert.equal(todoOf(multitask).redriveAttempts, 1);
+    assert.equal(durability.markers.get(workerId)?.redriveAttempts, 1);
+
+    // That redrive opened a turn. Draining it IS the opportunity the spent
+    // attempt paid for, so it must not charge the same todo again.
+    const drained = multitask.drainWake(SESSION);
+    assert.ok(drained, "the redrive wake is ready");
+    assert.equal(drained.wake.source, "timer");
+    assert.equal(todoOf(multitask).redriveAttempts, 1);
+    assert.equal(drained.reconcile.toRedrive.length, 0);
+    assert.equal(drained.reconcile.lost.length, 0);
+    assert.equal(drained.reconcile.landedUndelivered.length, 1);
+    assert.equal(
+      durability.markers.get(workerId)?.redriveAttempts,
+      1,
+      "the ledger and the durable marker agree",
+    );
+  });
+
+  it("a redriven result keeps its result notice and transcript pointer across restart", async () => {
+    const durability = createInMemoryDurability();
+
+    // Process 1: settle undelivered, spend the first attempt, drain its wake.
+    const hostA = new FakeDshHost();
+    const coreA = createMultitask(hostA, { durability });
+    const workerId = await spawnForTodo(coreA, hostA);
+    hostA.fireSettled({
+      workerId,
+      status: "completed",
+      report: "result",
+      transcriptRef: "worker-transcript",
+    });
+    coreA.drainWake(SESSION);
+    assert.equal(coreA.redriveUndelivered(SESSION).redriven.length, 1);
+    coreA.drainWake(SESSION);
+
+    // Process 2: rebuild from the marker and redrive the recovered result.
+    const hostB = new FakeDshHost();
+    const recovered = createMultitask(hostB, { durability });
+    await recovered.rebuildFromDurability(SESSION);
+    const report = recovered.redriveUndelivered(SESSION);
+    assert.equal(report.redriven.length, 1);
+    assert.equal(todoOf(recovered).redriveAttempts, 2);
+    assert.equal(durability.markers.get(workerId)?.redriveAttempts, 2);
+
+    const wakeText = composeWakeText(recovered, SESSION);
+    assert.notEqual(
+      wakeText,
+      null,
+      "the recovery wake must retain the result notice",
+    );
+    assert.ok(
+      wakeText?.includes("worker-transcript"),
+      "the recovery wake keeps the transcript pointer",
+    );
+    assert.equal(
+      todoOf(recovered).redriveAttempts,
+      2,
+      "draining the paid turn spends no extra attempt",
+    );
+    assert.equal(
+      durability.markers.get(workerId)?.redriveAttempts,
+      2,
+      "the ledger and the durable marker agree after the drain",
+    );
+  });
+
+  it("the lifetime bound still escalates after the allowed redrive turns", async () => {
+    const durability = createInMemoryDurability();
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host, { durability });
+    const workerId = await spawnForTodo(multitask, host);
+    settleUndelivered(host, workerId);
+    multitask.drainWake(SESSION);
+
+    for (let attempt = 1; attempt <= MAX_DELIVERY_REDRIVES; attempt += 1) {
+      assert.equal(multitask.redriveUndelivered(SESSION).redriven.length, 1);
+      const drained = multitask.drainWake(SESSION);
+      assert.ok(drained);
+      assert.equal(
+        todoOf(multitask).redriveAttempts,
+        attempt,
+        "one attempt per opened redrive turn",
+      );
+      assert.equal(
+        todoOf(multitask).status,
+        "in_progress",
+        "a paid turn is not a fresh miss",
+      );
+    }
+
+    // The spent lifetime budget survives a restart: the rebuilt core must
+    // escalate rather than hand the obligation a fresh allowance.
+    const recovered = createMultitask(new FakeDshHost(), { durability });
+    await recovered.rebuildFromDurability(SESSION);
+    assert.equal(todoOf(recovered).redriveAttempts, MAX_DELIVERY_REDRIVES);
+
+    const final = recovered.redriveUndelivered(SESSION);
+    assert.equal(final.redriven.length, 0);
+    assert.equal(final.lost.length, 1);
+    assert.equal(todoOf(recovered).status, "lost");
+    assert.equal(todoOf(recovered).dispositionReason, "max-redrives");
+  });
+});
+

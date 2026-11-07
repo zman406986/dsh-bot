@@ -185,6 +185,13 @@ export interface ReconcileInput {
    * Defaults to {@link MAX_DELIVERY_REDRIVES}.
    */
   readonly maxRedrives?: number;
+  /**
+   * Ticket 197: this wake is the delivery-redrive turn an already-spent
+   * attempt paid for. Its items are still reported as owed, but the pass
+   * does not charge them another attempt or escalate them at the bound —
+   * draining the paid turn IS the opportunity that attempt bought.
+   */
+  readonly redriveTurn?: boolean;
 }
 
 const DEFAULT_COMPLETED_RETENTION_MS = 60 * 60 * 1000;
@@ -332,6 +339,10 @@ export function reconcileTodos(input: ReconcileInput): ReconcileReport {
     // Counting it as a redrive would spend part of the budget on the happy
     // path and shorten the real retry allowance.
     if (todo.workerId !== null && settledNow.has(todo.workerId)) continue;
+    // Ticket 197: the redrive wake IS the opportunity its spent attempt paid
+    // for. Draining it must not charge the obligation again — or escalate it
+    // at the bound before that paid turn has delivered anything.
+    if (input.redriveTurn === true) continue;
     if (todo.redriveAttempts >= maxRedrives) {
       const escalated = setStatus(todo, "lost", "max-redrives");
       mutations.push({
