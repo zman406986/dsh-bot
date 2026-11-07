@@ -1,6 +1,6 @@
 # No-verbatim-copy review 2026-11-08 (ticket 183 — bounded third pass)
 
-**Status:** recorded · **Ticket:** [183](../Issue-tracker/open/183-post-oct28-adapted-copy-quality-review.md) · **Review window:** `5dbf04c..3d08313` · **Tree reviewed:** `3d08313` · **Date:** 2026-11-08
+**Status:** recorded · **Ticket:** [183](../Issue-tracker/resolved/183-post-oct28-adapted-copy-quality-review.md) · **Review window:** `5dbf04c..3d08313` · **Tree reviewed:** `3d08313` · **Date:** 2026-11-08
 
 ## Question and bounds
 
