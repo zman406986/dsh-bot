@@ -733,15 +733,16 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
       // (ticket 58). Re-arming it keeps the obligation alive for the next
       // idle turn instead of silently dropping it.
       state.pendingRedrive = true;
-    } else if (state.ready.source === "external-event") {
-      // Ticket 113: external jobs re-queue at the FRONT of their lane so
-      // the reclaimed batch re-presents in its original order.
-      state.pendingExternalJobs.unshift(
-        ...(state.ready.externalJobs ?? []),
-      );
     } else {
       state.pending.unshift(...state.ready.settledWorkers);
     }
+    // Ticket 113/199: external jobs re-queue at the FRONT of their lane so
+    // the reclaimed batch re-presents in its original order. A mixed wake
+    // (e.g. source worker-settled) keeps them alongside its worker notices
+    // instead of dropping the intake payload with the source discriminator.
+    state.pendingExternalJobs.unshift(
+      ...(state.ready.externalJobs ?? []),
+    );
     // The payload is back on the pending lists; a later flush owns a fresh
     // notification. A notification still in flight for the reclaimed wake is
     // stale (its outcome can no longer describe `ready`).

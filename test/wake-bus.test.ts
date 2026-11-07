@@ -316,6 +316,68 @@ describe("wake bus — user wake preempts background", () => {
   });
 });
 
+describe("wake bus — priority reclaim preserves mixed background payloads", () => {
+  it("a priority peer reclaiming a dormant mixed wake keeps its external intake jobs", () => {
+    const delivered: string[] = [];
+    const bus = createWakeBus({ onDeliver: (id) => { delivered.push(id); } });
+    const job = {
+      jobId: "job-199",
+      promptText: "intake prompt that must survive the reclaim",
+      jobDir: "/inbox/job-199",
+    };
+
+    // Dormant dispatcher: the worker settles and the inbox job is accepted
+    // while the dispatcher turn is still open. Both flush together at turn
+    // end into ONE undrained mixed background wake.
+    bus.noteTurnStarted("session-1");
+    bus.enqueueExternalJob({ sessionId: "session-1", job });
+    bus.enqueueWorkerSettled(settled("session-1", "w-199", "Worker", "report"));
+    bus.noteTurnEnded("session-1");
+
+    const mixed = bus.peek("session-1");
+    assert.ok(mixed);
+    assert.equal(mixed.source, "worker-settled");
+    assert.equal(mixed.settledWorkers.length, 1);
+    assert.deepEqual(mixed.externalJobs, [job]);
+
+    // A priority peer arrives before the dormant wake is drained. The peer
+    // turn goes first; the reclaimed background payload must remain queued.
+    bus.enqueuePeer({
+      sessionId: "session-1",
+      notice: {
+        messageId: "p-199",
+        fromAgentId: "peer-199",
+        fromName: "Peer 199",
+        to: { kind: "agent", agentId: "session-1" },
+        conversationId: "c-199",
+        text: "priority peer message",
+        priority: true,
+        createdAtMs: 1,
+      },
+      effectivePriority: true,
+    });
+
+    const peerWake = bus.drain("session-1");
+    assert.ok(peerWake);
+    assert.equal(peerWake.source, "peer");
+    assert.equal(peerWake.peerMessages?.length, 1);
+    assert.equal(peerWake.peerMessages?.[0]?.text, "priority peer message");
+    assert.equal(peerWake.externalJobs, undefined, "intake stays out of the peer wake");
+
+    // After the peer turn ends, the reclaimed background batch presents both
+    // categories: the worker notice and the original inbox payload.
+    bus.noteTurnStarted("session-1");
+    bus.noteTurnEnded("session-1");
+    const background = bus.drain("session-1");
+    assert.ok(background);
+    assert.equal(background.source, "worker-settled");
+    assert.equal(background.settledWorkers.length, 1);
+    assert.equal(background.settledWorkers[0]?.workerId, "w-199");
+    assert.equal(background.settledWorkers[0]?.resultText, "report");
+    assert.deepEqual(background.externalJobs, [job], "intake survives the reclaim");
+  });
+});
+
 describe("wake bus — wake payload", () => {
   it("the wake carries status, title, and result text for every settled worker", async () => {
     const host = new FakeDshHost();
