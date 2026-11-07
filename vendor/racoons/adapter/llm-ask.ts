@@ -261,25 +261,40 @@ async function askRequest(llm: DshLlmService, fields: {
     };
     (request as unknown as Record<symbol, unknown>)[RACOONS_ASK_MARK] = true;
     const iterator = llm.stream(request)[Symbol.asyncIterator]();
-    for (;;) {
-      const step = await nextWithin(iterator, signal);
-      if (step.done === true) break;
-      const chunk = step.value;
-      if (isRecord(chunk) && chunk['type'] === 'text-delta'
-        && typeof chunk['text'] === 'string') {
-        text += chunk['text'];
-        continue;
+    let completed = false;
+    try {
+      for (;;) {
+        const step = await nextWithin(iterator, signal);
+        if (step.done === true) {
+          completed = true;
+          break;
+        }
+        const chunk = step.value;
+        if (isRecord(chunk) && chunk['type'] === 'text-delta'
+          && typeof chunk['text'] === 'string') {
+          text += chunk['text'];
+          continue;
+        }
+        if (isRecord(chunk) && chunk['type'] === 'usage') {
+          // The one shipped arithmetic (`./usage.ts`) maps the host's disjoint
+          // buckets to the core's `ApiUsage`. A row it cannot use is no claim,
+          // never a zero one: the field stays absent and the ask is still answered.
+          usage = usageOfChunk(chunk) ?? usage;
+          continue;
+        }
+        if (isRecord(chunk) && chunk['type'] === 'finish') {
+          finish = finishKind(chunk['reason']);
+          break;
+        }
       }
-      if (isRecord(chunk) && chunk['type'] === 'usage') {
-        // The one shipped arithmetic (`./usage.ts`) maps the host's disjoint
-        // buckets to the core's `ApiUsage`. A row it cannot use is no claim,
-        // never a zero one: the field stays absent and the ask is still answered.
-        usage = usageOfChunk(chunk) ?? usage;
-        continue;
-      }
-      if (isRecord(chunk) && chunk['type'] === 'finish') {
-        finish = finishKind(chunk['reason']);
-        break;
+    } finally {
+      if (!completed) {
+        // A finish chunk is yielded before the stream is done, so breaking on it
+        // leaves the owned iterator open. Close it; a close failure must not
+        // replace the ask outcome already decided above.
+        try {
+          await iterator.return?.();
+        } catch { /* the primary ask outcome wins */ }
       }
     }
   } catch (error) {
