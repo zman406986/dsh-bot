@@ -17,10 +17,11 @@
  * the `assistant` answer, and `appendMessage` the general case. Every append
  * first re-asserts the fork's own invariant: the system hash, the tool hash and
  * every existing message hash still match what was recorded. A drifted byte is
- * refused, never repaired or re-rendered. Assistant turns alternate: a second
- * `assistant` turn in a row is refused. Two `user` turns in a row are LEGAL and
- * normal — a judge ask after a seed whose last message is the user's turn is
- * provider-legal, and refusing it stalled the pass (CRITIC-026 P2#5).
+ * refused, never repaired or re-rendered. Non-user roles must alternate: a
+ * second `assistant` turn or a second `tool` turn in a row is refused. Two
+ * `user` turns in a row are LEGAL and normal — a judge ask after a seed whose
+ * last message is the user's turn is provider-legal, and refusing it stalled
+ * the pass (CRITIC-026 P2#5).
  *
  * Each append returns a NEW fork: the previous one is untouched, so a caller
  * holding a prefix reference sees the same bytes it always saw. Its recorded
@@ -118,7 +119,7 @@ const MESSAGES: Readonly<Record<ForkErrorCode, string>> = {
   "tools-hash-drift": "The fork's tool list changed after the seed.",
   "message-hash-drift": "A fork message changed after it was appended.",
   "role-conflict":
-    "A fork refuses a second assistant turn in a row; a user ask after a user turn is legal.",
+    "A fork refuses two assistant turns or two tool turns in a row; a user ask after a user turn is legal.",
   "invalid-message": "A fork message carries a known role and string text.",
 };
 
@@ -223,8 +224,8 @@ export function appendMessage(fork: WireFork, message: WireMessage): WireFork {
   if (!isMessage(message)) fail("invalid-message");
   const last = fork.messages[fork.messages.length - 1];
   // A user turn after a user turn is provider-legal and is exactly what a judge
-  // ask does when main's last sent turn is the user's. Only assistant turns
-  // must alternate: two answers with no ask between them are refused.
+  // ask does when main's last sent turn is the user's. Non-user turns must
+  // alternate: two answers or two tool results in a row are refused.
   if (last !== undefined && last.role === message.role && message.role !== "user") {
     fail("role-conflict");
   }

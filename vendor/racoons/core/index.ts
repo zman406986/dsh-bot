@@ -194,8 +194,8 @@ export { renderHistory, TURN_SEPARATOR } from './judge/assembly.js';
 // never on a re-render. `seedFork` asserts the copy hashes to the input;
 // `appendAsk`, `appendVerdict` and `appendMessage` grow it append-only,
 // re-asserting the system, tools and per-index message hashes before each
-// append and refusing a second assistant turn in a row (two user asks in a row
-// are provider-legal). The hash helpers are public because a send seam
+// append and refusing a second assistant or tool turn in a row (two user asks
+// in a row are provider-legal). The hash helpers are public because a send seam
 // re-asserts the same hashes before it sends.
 export type {
   ForkErrorCode, WireFork, WireMessage, WireRequest, WireTool,
