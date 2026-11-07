@@ -1353,6 +1353,102 @@ function readSessionController(
 }
 
 /**
+ * The host's session-title service, narrowed to the two members a summoned
+ * dispatcher needs.
+ *
+ * `rename` is the native EXPLICIT title write: it appends one `session/title`
+ * event with source `user`, the same public path the host uses for sessions it
+ * creates itself (`dsh-schedule/lib/index.js:1519-1529`) and the sidebar rename
+ * action calls through the session controller
+ * (`dsh-api-session-controller/lib/index.js:729-748`). Two consequences matter
+ * here: the title is DURABLE (the plugin's roster label is not), and a `user`
+ * title pins itself, so the host's model auto-naming never rewrites it.
+ *
+ * `get` is optional because it is best-effort: when a host version exposes it,
+ * the helper below skips a session another native path already named.
+ */
+interface SessionTitleLike {
+  /** Current stored title, when the host version exposes it. */
+  get?(session: unknown): unknown;
+  /** Native explicit title write. Synchronous in dsh 0.2.2. */
+  rename(session: unknown, title: string): unknown;
+}
+
+/**
+ * Read the host's session-title service from a live context, guarded — the
+ * same two-step rule as {@link readAgentPresets}: a bare `ctx.sessionTitle`
+ * property read THROWS on a live cordis context that never injected the
+ * service, so the host's documented `ctx.get` accessor
+ * (`cordis/lib/index.js:763`) is the only safe read.
+ *
+ * Returns `undefined` when the deployment mounts no title service, when the
+ * service exposes no `rename`, or when the read itself throws. Titles are an
+ * optional host surface: a headless or minimal profile must still summon, so
+ * an absent service is a valid composition, not an error.
+ */
+function readSessionTitle(ctx: AdapterContext): SessionTitleLike | undefined {
+  if (typeof ctx.get !== "function") return undefined;
+  try {
+    const service = ctx.get("sessionTitle");
+    if (typeof service !== "object" || service === null) return undefined;
+    const candidate = service as Partial<SessionTitleLike>;
+    return typeof candidate.rename === "function"
+      ? (service as SessionTitleLike)
+      : undefined;
+  } catch {
+    // Absent, not yet active, or a broken read: the caller simply names
+    // nothing and the session stays "Untitled".
+    return undefined;
+  }
+}
+
+/**
+ * Write a summoned dispatcher's spawn title into the host's title store.
+ *
+ * This is the native EXPLICIT rename, not model auto-naming: the dispatcher
+ * already chose the words, so no model call is made and none is needed. The
+ * host owns the title policy — normalization, control-character stripping and
+ * UTF-8 truncation (`dsh-session-title/lib/index.js:24-54`) — and throws when
+ * a title normalizes to empty. Both outcomes are caught here.
+ *
+ * Never throws. Naming is bookkeeping around a session that already exists and
+ * whose first turn is about to be queued: a missing service, a failed read or
+ * a refused rename must leave the spawn intact (the session simply stays
+ * "Untitled"). A title another native path already stored wins — this helper
+ * only fills a gap.
+ */
+function nameSummonedDispatcher(
+  titles: SessionTitleLike | undefined,
+  session: unknown,
+  title: string,
+): void {
+  const normalizedInput = title.trim();
+  if (titles === undefined || normalizedInput.length === 0) return;
+  if (titles.get !== undefined) {
+    try {
+      // Do not overwrite a title another native path already produced.
+      if (titles.get(session) !== undefined) return;
+    } catch {
+      // A read failure must not suppress the write; fall through to rename.
+    }
+  }
+  try {
+    titles.rename(session, normalizedInput);
+  } catch (error) {
+    // Naming is bookkeeping: a failure must never turn a successful spawn
+    // into a host refusal or suppress the first turn.
+    try {
+      console.warn(
+        "[multitask-dispatcher] summoned dispatcher could not be named:",
+        error,
+      );
+    } catch {
+      // A broken console must not break the spawn either.
+    }
+  }
+}
+
+/**
  * Ticket 177: read a resumed session's durable dispatcher class, never
  * letting a plugin-supplied reader break the host's resume path.
  *
@@ -4460,6 +4556,17 @@ export function createCordisDshHost(
             `workspace attach for ${dispatcherId}`,
           );
         }
+        // Name the child through the host's NATIVE title store — an explicit
+        // rename, not model auto-naming. Before `followup`, deliberately: a
+        // blank session is hidden from the sidebar until its first turn lands,
+        // so naming first means the row already carries this title at first
+        // paint. Naming is bookkeeping; a failure here must never fail the
+        // spawn.
+        nameSummonedDispatcher(
+          readSessionTitle(ctx),
+          handle.agent.session,
+          opts.title,
+        );
         // The handoff prompt is the summoned dispatcher's FIRST user turn.
         // `followup` is the only call that both queues a whole turn and wakes
         // the driver (`dsh-agent-loop/lib/index.js:806-808`) — creating the

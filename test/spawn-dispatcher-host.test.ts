@@ -72,6 +72,31 @@ function createAgent(
 }
 
 /**
+ * Auto-title plan (.scratch/auto-title/PLAN.md §4.2/§9.1): the host's
+ * optional `sessionTitle` service, reached through `ctx.get("sessionTitle")`.
+ * `get` answers the stored title (absent = none yet); `rename` is the native
+ * explicit write. The fake is deliberately tiny: those two methods are the
+ * whole surface the host helper may use.
+ */
+interface FakeSessionTitleOptions {
+  /** What `get` answers. `undefined` (the default) means "no stored title". */
+  current?: unknown;
+  /** Make the READ throw: a failed read must not suppress the write. */
+  getThrows?: boolean;
+  /** Make the WRITE throw: naming is bookkeeping, never a spawn refusal. */
+  renameThrows?: boolean;
+}
+
+/** One recorded `rename(session, title)` call, with the turn ordering. */
+interface SessionTitleRenameCall {
+  /** `session?.id` exactly as the host handed it over. */
+  readonly sessionId: unknown;
+  readonly title: string;
+  /** True when the child's first `followup` had already been recorded. */
+  readonly followupSeen: boolean;
+}
+
+/**
  * Structural ctx stub.
  *
  * `agents.create` is the dispatcher seam (ADR-0032). It honours `sessionId`,
@@ -120,6 +145,12 @@ function createStubCtx(
    * `catalog-unavailable` and the spawn proceeds on the inherited route.
    */
   llm?: ModelCatalogLike,
+  /**
+   * Auto-title plan §9.1: the fake host title service. Omitted means the
+   * deployment mounts none — `ctx.get("sessionTitle")` answers undefined,
+   * which is the optional-service case every existing test already exercises.
+   */
+  sessionTitle?: FakeSessionTitleOptions,
 ) {
   const listeners = new Map<string, Array<(payload: never) => void>>();
   const startActivationCalls: ActivationSpecLike[] = [];
@@ -133,6 +164,15 @@ function createStubCtx(
   }> = [];
   const composedChildren: ComposedChild[] = [];
   const events: string[] = [];
+  /** Auto-title plan §9.1: every native rename the fake title service receives. */
+  const sessionTitleCalls: SessionTitleRenameCall[] = [];
+  /**
+   * Auto-title plan §9.1: flipped by the created child's `followup` BEFORE the
+   * call is recorded, so a rename recorded while it is `false` provably landed
+   * before the first turn. Deliberately NOT part of `events`: four existing
+   * tests assert that array's exact contents.
+   */
+  let followupSeen = false;
   const state: { failNextWith: unknown } = { failNextWith: undefined };
   let nextChild = 1;
   /**
@@ -185,6 +225,7 @@ function createStubCtx(
     presetMounts: Array<{ ctx: unknown; id: string | undefined }>;
     workspaceAttaches: Array<{ workspaceId: string; sessionId: string }>;
     events: string[];
+    sessionTitleCalls: SessionTitleRenameCall[];
     failNextCreateWith(error: unknown): void;
     holdNextActivation(): void;
     releaseHeldActivation(): void;
@@ -197,6 +238,7 @@ function createStubCtx(
     presetMounts,
     workspaceAttaches,
     events,
+    sessionTitleCalls,
     /**
      * DEFECT FIX: the preset registry the host reaches through
      * `ctx.get("agentPresets")`, and the Workspace registry it reaches through
@@ -208,6 +250,30 @@ function createStubCtx(
       // Ticket 285: the model catalog the host's resolver reads. A deployment
       // that mounts none returns undefined, exactly like the live context.
       if (name === "llm") return llm;
+      // Auto-title plan §4.2: the optional host title service. `get` is
+      // configurable so "no title yet", "already named", and "the read throws"
+      // are each observable; an omitted fake means no service at all.
+      if (name === "sessionTitle") {
+        if (sessionTitle === undefined) return undefined;
+        return {
+          get(_session: unknown) {
+            if (sessionTitle.getThrows === true) {
+              throw new Error("title store unavailable");
+            }
+            return sessionTitle.current;
+          },
+          rename(session: unknown, title: string) {
+            if (sessionTitle.renameThrows === true) {
+              throw new Error("not live");
+            }
+            sessionTitleCalls.push({
+              sessionId: (session as { id?: unknown } | null | undefined)?.id,
+              title,
+              followupSeen,
+            });
+          },
+        };
+      }
       if (name === "workspaceRegistry") {
         if (workspaces === undefined) return undefined;
         return {
@@ -328,6 +394,9 @@ function createStubCtx(
             ? {}
             : { options: options.agentOptions }),
           followup(message: unknown) {
+            // Auto-title plan §9.1: BEFORE recording, so a rename captured with
+            // `followupSeen === false` provably ran before the first turn.
+            followupSeen = true;
             followupCalls.push({ sessionId: childId, message });
             events.push("followup");
             if (seams?.failFollowup === true) {
@@ -1626,6 +1695,195 @@ describe("ticket 159: the spawn title travels with its own session id", () => {
     // still ran exactly once with the spawn's own title.
     assert.equal(hooked.length, 1);
     assert.equal(hooked[0]?.title, "Original label");
+  });
+});
+
+/**
+ * Auto-title plan (`.scratch/auto-title/PLAN.md` §4.2/§4.3/§9.1): a summoned team
+ * leader's session is named from the `title` the dispatcher already had to
+ * supply, through the host's own optional `sessionTitle` service — the same
+ * native explicit rename the sidebar and the schedule feature use.
+ *
+ * What these tests pin: exactly one `rename` with the exact spawn title,
+ * addressed to the session the host actually created, AFTER the create resolves
+ * and BEFORE the handoff `followup` (so the sidebar's first paint already has a
+ * title). The service is optional and its failures are bookkeeping: no service,
+ * an existing title, a throwing read, a throwing write, or a blank direct title
+ * must all leave the spawn and its first turn intact.
+ *
+ * These tests FAIL before the adapter change for one reason: nothing calls
+ * `rename` today, so `sessionTitleCalls` stays empty.
+ */
+describe("auto-title: a summoned team leader is named from the spawn title", () => {
+  /** A bound summoner with a real directory: the summon path requires one. */
+  function summonerHost(
+    ctx: ReturnType<typeof createStubCtx>,
+    id = "disp-title",
+  ) {
+    const host = createCordisDshHost(ctx);
+    host.bindParent(createAgent(id, 0, { cwd: "C:\\work\\project" }), id);
+    return host;
+  }
+
+  it("renames the child exactly once, with the exact spawn title, before the first turn", async () => {
+    const ctx = createStubCtx(undefined, undefined, undefined, undefined, {});
+    const host = summonerHost(ctx);
+
+    const result = await host.spawnDispatcher({
+      parentSessionId: "disp-title",
+      title: "Invoice import fix",
+      prompt: "Own the invoice import fix and report the outcome.",
+    });
+
+    assert.equal(ctx.sessionTitleCalls.length, 1);
+    const rename = ctx.sessionTitleCalls[0];
+    // IDENTITY: the rename names the session the spawn reports back — the live
+    // agent's session, not the reservation.
+    assert.equal(rename?.sessionId, result.dispatcherId);
+    // EXACT title: normalization/truncation is the host's policy, not ours.
+    assert.equal(rename?.title, "Invoice import fix");
+    // ORDER: the title must land before the handoff turn is queued, which is
+    // what makes the sidebar row appear already named.
+    assert.equal(rename?.followupSeen, false);
+    // …and the first turn is still delivered.
+    assert.equal(ctx.followupCalls.length, 1);
+    assert.equal(ctx.followupCalls[0]?.sessionId, result.dispatcherId);
+  });
+
+  it("does not overwrite a title the host already stored", async () => {
+    const ctx = createStubCtx(undefined, undefined, undefined, undefined, {
+      current: { title: "Already named" },
+    });
+    const host = summonerHost(ctx);
+
+    const result = await host.spawnDispatcher({
+      parentSessionId: "disp-title",
+      title: "Invoice import fix",
+      prompt: "Own the invoice import fix.",
+    });
+
+    // Native title wins; the plugin only fills a gap.
+    assert.equal(ctx.sessionTitleCalls.length, 0);
+    assert.match(result.dispatcherId, UUID_RE);
+    assert.equal(ctx.followupCalls.length, 1);
+  });
+
+  it("summons normally when the deployment mounts no title service", async () => {
+    // Every existing test already omits the fake (plan §9.1 test 8); this one
+    // asserts the absence explicitly. `get("sessionTitle")` answers undefined
+    // on a headless/minimal profile, and naming is skipped silently.
+    const ctx = createStubCtx();
+    assert.equal(ctx.get?.("sessionTitle"), undefined);
+    const host = summonerHost(ctx);
+
+    const result = await host.spawnDispatcher({
+      parentSessionId: "disp-title",
+      title: "Invoice import fix",
+      prompt: "Own the invoice import fix.",
+    });
+
+    assert.match(result.dispatcherId, UUID_RE);
+    assert.equal(ctx.followupCalls.length, 1);
+    assert.equal(ctx.followupCalls[0]?.sessionId, result.dispatcherId);
+  });
+
+  it("still writes the title when the service's read throws", async () => {
+    const ctx = createStubCtx(undefined, undefined, undefined, undefined, {
+      getThrows: true,
+    });
+    const host = summonerHost(ctx);
+
+    const result = await host.spawnDispatcher({
+      parentSessionId: "disp-title",
+      title: "Invoice import fix",
+      prompt: "Own the invoice import fix.",
+    });
+
+    // A read failure must not suppress the write.
+    assert.equal(ctx.sessionTitleCalls.length, 1);
+    assert.equal(ctx.sessionTitleCalls[0]?.sessionId, result.dispatcherId);
+    assert.equal(ctx.sessionTitleCalls[0]?.title, "Invoice import fix");
+    assert.equal(ctx.followupCalls.length, 1);
+  });
+
+  it("keeps the summon when the service's rename throws", async () => {
+    const ctx = createStubCtx(undefined, undefined, undefined, undefined, {
+      renameThrows: true,
+    });
+    const host = summonerHost(ctx);
+
+    // The warning path is our own; silence it so the suite output stays clean.
+    const original = console.warn;
+    console.warn = () => {};
+    let result: { dispatcherId: string };
+    try {
+      result = await host.spawnDispatcher({
+        parentSessionId: "disp-title",
+        title: "Invoice import fix",
+        prompt: "Own the invoice import fix.",
+      });
+    } finally {
+      console.warn = original;
+    }
+
+    // Naming is bookkeeping, not a spawn failure: the child exists and its
+    // first turn is still delivered.
+    assert.match(result.dispatcherId, UUID_RE);
+    assert.equal(ctx.followupCalls.length, 1);
+    assert.equal(ctx.followupCalls[0]?.sessionId, result.dispatcherId);
+  });
+
+  it("skips a whitespace-only title from a direct host caller", async () => {
+    // The tool already refuses a blank title before the host; this covers a
+    // caller that reaches the host directly. Naming must not rename the child
+    // to a blank string, and the spawn must proceed.
+    const ctx = createStubCtx(undefined, undefined, undefined, undefined, {});
+    const host = summonerHost(ctx);
+
+    const result = await host.spawnDispatcher({
+      parentSessionId: "disp-title",
+      title: "   ",
+      prompt: "Own the invoice import fix.",
+    });
+
+    assert.equal(ctx.sessionTitleCalls.length, 0);
+    assert.match(result.dispatcherId, UUID_RE);
+    assert.equal(ctx.followupCalls.length, 1);
+  });
+
+  it("two summons in flight keep their own titles", async () => {
+    // The ticket-159 interleaving, reused: A parks before `setup` while B runs
+    // to completion. Each rename must stay paired with its own created session
+    // and its own title — no shared queue, no cross-pairing.
+    const ctx = createStubCtx(undefined, undefined, undefined, undefined, {});
+    const host = createCordisDshHost(ctx);
+    host.bindParent(createAgent("chat-a"), "chat-a");
+    host.bindParent(createAgent("chat-b"), "chat-b");
+
+    ctx.holdNextActivation();
+    const spawnA = host.spawnDispatcher({
+      parentSessionId: "chat-a",
+      title: "Alpha job",
+      prompt: "Own alpha.",
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    const spawnB = host.spawnDispatcher({
+      parentSessionId: "chat-b",
+      title: "Beta job",
+      prompt: "Own beta.",
+    });
+    const b = await spawnB;
+    ctx.releaseHeldActivation();
+    const a = await spawnA;
+
+    assert.equal(ctx.sessionTitleCalls.length, 2);
+    const titleById = new Map(
+      ctx.sessionTitleCalls.map((call) => [String(call.sessionId), call.title]),
+    );
+    assert.equal(titleById.get(a.dispatcherId), "Alpha job");
+    assert.equal(titleById.get(b.dispatcherId), "Beta job");
+    // Genuinely different sessions, so a swap would be meaningful.
+    assert.notEqual(a.dispatcherId, b.dispatcherId);
   });
 });
 

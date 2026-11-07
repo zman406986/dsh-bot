@@ -142,7 +142,11 @@ export interface ModelFallbackNotice {
 export interface DispatcherSpawnOptions {
   /** The spawning dispatcher's session — the authority agent resolves from it. */
   parentSessionId: string;
-  /** Activation label; the host shows it as the child's title. */
+  /**
+   * Activation label; the adapter now writes it through the host title service
+   * as the child's stored session title at spawn (durable, ticket 286), so
+   * the sidebar shows it instead of "Untitled". Workers are unaffected.
+   */
   title: string;
   /** Problem and outcome handoff; the child's first user turn. */
   prompt: string;

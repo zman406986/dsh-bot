@@ -1,13 +1,14 @@
 # 285 — Opt-in model choice for summoned team leaders and workers
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Blocked by:** nothing. Optional tool parameters plus one adapter resolver; no transcript or WorkerRecord schema change (the dispatcher mark gains one optional field).
 **Related:** ADR-0035 (the decision), ADR-0032 (a summoned dispatcher is a top-level session), ADR-0025 (mitosis), ADR-0034 (two dispatcher classes), `.scratch/model-arg/PLAN.md` (implementation detail).
+**Resolution:** resolved 2026-11-08 on `main` at commit `2e2e551` — full gate green: 1185 tests pass / 0 fail, typecheck, docs.
 
 ## Implementation status
 
-2026-11-08: plan Tasks 1–10 are implemented on `feat/spawn-model-option`; Task 11 is this docs pass. Focused suites are green. The full offline suite and the merge run are handled separately. The ticket stays open until the merge.
+2026-11-08: plan Tasks 1–10 are implemented on `feat/spawn-model-option`; Task 11 is this docs pass. Focused suites are green. The full offline suite and the merge run were handled separately; merged to `main` at `2e2e551`.
 
 ## Problem
 

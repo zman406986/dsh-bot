@@ -40,6 +40,12 @@ function createStubCtx() {
   const followupCalls: unknown[] = [];
   const listeners = new Map<string, Array<(payload: never) => void>>();
   const jobListCalls: unknown[] = [];
+  /**
+   * Auto-title plan §9.1 test 6: every native `rename(session, title)` the
+   * host's title service receives. A WORKER spawn must add none — only a
+   * summoned team leader is named.
+   */
+  const sessionTitleCalls: Array<{ sessionId: unknown; title: string }> = [];
   const composedChildren: Array<{
     childId: string;
     sections: string[];
@@ -98,6 +104,8 @@ function createStubCtx() {
     sendMessageCalls: RecordedCall[];
     followupCalls: unknown[];
     jobListCalls: unknown[];
+    sessionTitleCalls: Array<{ sessionId: unknown; title: string }>;
+    get(name: string): unknown;
     activationSeams: typeof activationSeams;
     composedChildren: Array<{
       childId: string;
@@ -114,8 +122,26 @@ function createStubCtx() {
     sendMessageCalls,
     followupCalls,
     jobListCalls,
+    sessionTitleCalls,
     activationSeams,
     composedChildren,
+    /**
+     * Auto-title plan §4.2: the host's optional `sessionTitle` service. It is
+     * mounted here so the worker path can be checked for NOT calling it;
+     * every other service lookup answers undefined, exactly like a minimal
+     * deployment (the guarded reads already treat that as "absent").
+     */
+    get(name: string) {
+      if (name !== "sessionTitle") return undefined;
+      return {
+        rename(session: unknown, title: string) {
+          sessionTitleCalls.push({
+            sessionId: (session as { id?: unknown } | null | undefined)?.id,
+            title,
+          });
+        },
+      };
+    },
     fire(name: string, ...payloads: unknown[]) {
       for (const cb of listeners.get(name) ?? []) {
         (cb as (...args: unknown[]) => void)(...payloads);
@@ -414,6 +440,27 @@ describe("CordisDshHost spawn / interrupt / send", () => {
     // needs childDepth <= maxDepth). Sending the leaf budget 0 refused every
     // live spawn.
     assert.equal(spec.request.maxDepth, 1);
+  });
+
+  it("never names a worker: the host title service is not touched", async () => {
+    // Auto-title plan §9.1 test 6 / §6: a worker is not a sidebar row and keeps
+    // its `subagent.label`; only the summoned-dispatcher path may rename. The
+    // stub mounts a recording title service, so a stray rename would show up
+    // rather than pass silently.
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    host.bindParent(createAgent("disp-1"), "disp-1");
+
+    const workerId = await host.spawnWorker("Do the thing.", {
+      parentSessionId: "disp-1",
+      streamKey: "s1",
+      title: "Thing",
+    });
+
+    assert.equal(typeof workerId, "string");
+    assert.notEqual(workerId, "");
+    assert.equal(host.owns(workerId), true);
+    assert.equal(ctx.sessionTitleCalls.length, 0);
   });
 
   it("spawn with WorkerAgentDef composes the child at agent/created; the contract never rides the task prompt", async () => {
