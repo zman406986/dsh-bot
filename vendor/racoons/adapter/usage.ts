@@ -101,10 +101,15 @@ export function readAssistantUsage(event: DshUsageSource): DshUsageRead | null {
   }
   // Both cache counters absent is an unknown cache, never a cold one.
   const cacheTotal = (cacheRead.value ?? 0) + (cacheWrite.value ?? 0);
+  const inputTotal = input + cacheTotal;
+  if (!Number.isSafeInteger(cacheTotal) || !Number.isSafeInteger(inputTotal)) {
+    return { kind: 'invalid',
+      reason: 'aggregate token counts must be non-negative safe integers' };
+  }
   return { kind: 'usage', usage: {
     // The host's uncached input plus its two cached buckets: the one prompt the
     // core's `inputTokens` names, with the cached part still readable below.
-    inputTokens: input + cacheTotal,
+    inputTokens: inputTotal,
     outputTokens: output,
     cachedInputTokens: cacheRead.value === null && cacheWrite.value === null
       ? null : cacheTotal,
