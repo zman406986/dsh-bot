@@ -25,7 +25,8 @@
  *   a plain session row. `null` is used because the owner scope has no
  *   field-delete verb; the client reads it as "not a dispatcher here".
  * - `unavailable` — a mirror key carried a value that failed
- *   `parseRosterSnapshot` (version skew / corruption): the session stays
+ *   `parseRosterSnapshot` (version skew / corruption), or a parser-valid
+ *   snapshot naming a different session (ticket 282): the session stays
  *   flagged (the key exists — it IS one of ours) but presence degrades to
  *   "unavailable" — never a wrong roster (design-17's fail-closed rule).
  *
@@ -313,9 +314,10 @@ export interface DispatcherShellStore {
   /**
    * Apply one RAW per-session mirror value from the settings document
    * (ticket 79): a parsed snapshot, or `null` for the host's deactivation
-   * clear. A non-null value that fails `parseRosterSnapshot` marks the
-   * session `unavailable` (flagged, honest-empty presence). Junk session
-   * ids are refused.
+   * clear. A non-null value that fails `parseRosterSnapshot` — or parses
+   * but names a different `dispatcherSessionId` (ticket 282) — marks the
+   * key's session `unavailable` (key-derived flag, honest-empty presence).
+   * Junk session ids are refused.
    */
   applySessionMirror(sessionId: string, value: unknown): void;
   /** Honest degrade: a session's presence is known to be unavailable. */
@@ -501,9 +503,14 @@ export function createDispatcherShellStore(): DispatcherShellStore {
         return;
       }
       const snapshot = parseRosterSnapshot(value);
+      // The key is the attachment claim (module comment): a snapshot naming
+      // another session is misdelivered, not this session's truth. Degrade
+      // it like a corrupt value; the flag stays key-derived (ticket 282).
+      const mismatch =
+        snapshot !== null && snapshot.dispatcherSessionId !== sessionId;
       applyMirror(
         sessionId,
-        snapshot === null
+        snapshot === null || mismatch
           ? { kind: "unavailable" }
           : { kind: "snapshot", snapshot },
       );
