@@ -509,7 +509,13 @@ export interface RacoonsMount {
    * package sent itself is ignored, so an ask never becomes a seed.
    */
   observeWire(options: unknown): void;
-  runStep(session: DshMountSession, ordinals: { turn: number; step: number }): Promise<StepOutcome>;
+  /**
+   * One step boundary. `signal` is the host phase's own AbortSignal when the
+   * caller has one (ISSUE-189): the entry ask forwards it and stops the batch
+   * when the caller aborts, instead of waiting out the ask's stream deadline.
+   */
+  runStep(session: DshMountSession, ordinals: { turn: number; step: number },
+    signal?: AbortSignal): Promise<StepOutcome>;
   runTurnEnd(session: DshMountSession, turn: number): Promise<TurnEndOutcome>;
   /**
    * Run one record-only prune pass now (ISSUE-022 chunk 5). The `/prune`
@@ -547,6 +553,22 @@ const ENTRY_ASK_REFUSED_RAW_CHARS = 4000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** Structural AbortSignal test: a fake host may pass a plain object in tests. */
+function isAbortSignal(value: unknown): value is AbortSignal {
+  return value !== null && typeof value === 'object'
+    && typeof (value as AbortSignal).aborted === 'boolean'
+    && typeof (value as AbortSignal).addEventListener === 'function';
+}
+
+/**
+ * The caller cancellation fact, read through a helper so TypeScript cannot
+ * narrow an AbortSignal's `aborted` to `false` after the first check: the flag
+ * changes asynchronously, and every later check must be its own read.
+ */
+function callerAborted(signal: AbortSignal | undefined): boolean {
+  return signal !== undefined && isAbortSignal(signal) && signal.aborted;
 }
 
 /** Validate the flat knobs and fill the engine's defaults. */
@@ -1828,7 +1850,11 @@ export function createRacoonsMount(options: {
    * early exit journals ONE line naming why the seam did nothing.
    */
   async function runEntryAsks(entry: RacoonsSessionEntry, session: DshMountSession,
-    captures: readonly Capture[]): Promise<void> {
+    captures: readonly Capture[], signal?: AbortSignal): Promise<void> {
+    // ISSUE-189: an already-aborted caller asks nothing. The host's phase
+    // signal is the only cancellation this seam has; a cancelled step must not
+    // start an ask whose answer could append turns after the abort.
+    if (callerAborted(signal)) return;
     const llm = options.llm;
     const route = judgeRouteOf(entry.host ?? session, options.judgeRoute);
     // One breaker reading for the whole step. A disabled breaker is machinery
@@ -1837,6 +1863,8 @@ export function createRacoonsMount(options: {
     // breaker reading at all, and says so.
     const breaker = await breakerReading(entry);
     for (const capture of captures) {
+      // One aborted caller stops the whole batch: later captures are not asked.
+      if (callerAborted(signal)) return;
       if (!entryAskable(entry, capture)) continue;
       if (llm === undefined) {
         journal('entry-ask-off', { sessionId: entry.sessionId, eventId: capture.eventId,
@@ -1884,7 +1912,8 @@ export function createRacoonsMount(options: {
       // held to. `judgeTimeoutMs` belongs to the prune pass; an entry ask that
       // shared it would let `judgeTimeoutMs: 0` (deadline off) hold a step
       // indefinitely.
-      const outcome = await askEntry({ resultBytes: node.bytes, seed, surface, llm, route });
+      const outcome = await askEntry({ resultBytes: node.bytes, seed, surface, llm, route,
+        ...(signal === undefined ? {} : { signal }) });
       if (outcome.status === 'off') {
         journal('entry-ask-off', { sessionId: entry.sessionId, eventId: capture.eventId,
           callId: capture.item.callId, byteLength: capture.item.bytes.length,
@@ -1903,8 +1932,14 @@ export function createRacoonsMount(options: {
           retried: outcome.retried,
           turns: outcome.turns.length,
           ...(outcome.usage === undefined ? {} : { usage: outcome.usage }) });
+        // An abort while the stream was pending releases the batch here: the
+        // helper's refusal is the cancellation, not a content decision.
+        if (callerAborted(signal)) return;
         continue;
       }
+      // ISSUE-189: a late valid answer has no caller to apply for. Recheck
+      // before the first host write (the two ask turns) and before the apply.
+      if (callerAborted(signal)) return;
       // Answered: append the WHOLE exchange as the turns the ask produced, in
       // order, then apply the answer over them.
       const appended = appendAskTurns(session, outcome.turns);
@@ -1933,6 +1968,7 @@ export function createRacoonsMount(options: {
         answerNodeId: answerEventId,
         summary: outcome.answer.action === 'keepall' ? '' : outcome.answer.summary,
       };
+      if (callerAborted(signal)) return;
       await applyEntryAnswer(entry, session, capture, node, exchange, answerEventId,
         outcome.answer, outcome.raw);
       // The host surface moved (an exchange appended at least, and possibly
@@ -2135,7 +2171,10 @@ export function createRacoonsMount(options: {
    * the live session.
    */
   async function runStep(session: DshMountSession,
-    ordinals: { turn: number; step: number }): Promise<StepOutcome> {
+    ordinals: { turn: number; step: number }, signal?: AbortSignal): Promise<StepOutcome> {
+    // The host supplies a real AbortSignal; a rig or fake may pass a structural
+    // stand-in. Only a real one can cancel an ask, so normalize at the seam.
+    const cancellation = isAbortSignal(signal) ? signal : undefined;
     const entry = await sessionFor(session.id, session);
     const queued = buffers.get(session.id) ?? [];
     buffers.set(session.id, []);
@@ -2170,7 +2209,7 @@ export function createRacoonsMount(options: {
     // step yet, so a result's unit is asked once before any later seam can name
     // it. Sequential, one ask per result, and fail-open throughout: the step is
     // never held past the ask's own deadline.
-    await runEntryAsks(entry, session, landed);
+    await runEntryAsks(entry, session, landed, cancellation);
     // An answered exchange appended turns and may have rewound them: the
     // at-rest pass must plan against the surface that actually stands now.
     syncPass(entry, session);
@@ -2658,12 +2697,14 @@ export function createRacoonsPlugin(options: RacoonsPluginOptions = {}): {
         agent?: { session?: DshMountSession };
         turn?: number;
         step?: number;
+        signal?: AbortSignal;
       }, next: () => unknown) => {
         const session = payload.agent?.session;
         if (session === undefined) return next();
         try {
           const stepResult = await mount.runStep(session,
-            { turn: Number(payload.turn ?? 0), step: Number(payload.step ?? 0) });
+            { turn: Number(payload.turn ?? 0), step: Number(payload.step ?? 0) },
+            payload.signal);
           for (const application of stepResult.entryApplications) {
             try { publishEntry(session, application.request, application.capture); }
             catch (error) {
