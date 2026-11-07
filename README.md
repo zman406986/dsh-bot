@@ -91,7 +91,7 @@ Both spawn tools take an optional model.
   deepseek/deepseek-reasoner
   ```
 
-  A bare model id works only when it names exactly one catalog model.
+  A bare model id works when it names exactly one catalog model, or when one of its providers is the spawning session's provider; otherwise it is ambiguous and falls back.
 - Omit the argument to keep today's behavior: a leader inherits the summoning dispatcher's live route, and a worker inherits its leader's default or route.
 - An unknown or invalid value does not refuse the spawn. The spawn falls back to the inherited route, writes one `[multitask-dispatcher]` warning to the dsh process log, and adds a short note to the tool result.
 

@@ -14,7 +14,7 @@ The host already supports per-child routes: a leader can be created with `agentO
 
 1. **Optional tool parameters, not prompt directives.** `spawn_worker` gains `model`; `spawn_dispatcher` gains `model` and `worker_model`. Omitted means today's behaviour. `worker_model` is only on `spawn_dispatcher`: a team leader cannot summon another dispatcher, so it chooses each worker with `spawn_worker.model` or lets its inherited default apply.
 
-2. **Value syntax.** `provider/model-id` is preferred; a bare model id is accepted only when it resolves to exactly one catalog model. Provider and model are matched against the live catalog, exact first and case-insensitively second; the catalog's canonical spelling is stored. Whitespace is trimmed and empty means omitted. The model part may contain slashes: the longest registered provider prefix is tried first, then the whole string as a bare id. A bare id found under several providers prefers the spawning session's provider. No display-name aliases, no `default`/`inherit` sentinel, and no quoting layer in v1.
+2. **Value syntax.** `provider/model-id` is preferred; a bare model id is accepted when it resolves to exactly one catalog model, or when one of its providers is the spawning session's provider. Provider and model are matched against the live catalog, exact first and case-insensitively second; the catalog's canonical spelling is stored. Whitespace is trimmed and empty means omitted. The model part may contain slashes: the longest registered provider prefix is tried first, then the whole string as a bare id. A bare id found under several providers prefers the spawning session's provider. No display-name aliases, no `default`/`inherit` sentinel, and no quoting layer in v1.
 
 3. **Precedence.** Worker: `spawn_worker.model` → the leader's `worker_model` → the leader's current route. Team leader: `spawn_dispatcher.model` → the summoner's current route. There is no third level today.
 
@@ -22,7 +22,7 @@ The host already supports per-child routes: a leader can be created with `agentO
 
 5. **Durable worker default.** The host keeps the leader's `worker_model` under the actual leader session id and writes it to the leader's durable dispatcher mark, so a refresh or restart restores it. An explicit `spawn_worker.model` still wins for that worker. If the mark cannot be written or read, the default is lost and workers inherit the leader's route; the existing mark-failure logging covers it. Legacy mark rows without the field remain valid, and no durable domain version bump is needed.
 
-6. **The host applies the route; prompt text does not change.** The core carries a resolved route through the existing spawn requests. The host sets it as `agentOptions` on the leader's `ctx.agents.create` or on the worker's subagent activation request. A route change clears the inherited reasoning effort; it does not change the parent's `maxTokens` (see Consequences).
+6. **The host applies the route; prompt text does not change.** The core carries a resolved route through the existing spawn requests. The host sets it as `agentOptions` on the leader's `ctx.agents.create` or on the worker's subagent activation request. An explicit leader route that differs from the inherited one replaces it with a bare provider/model, dropping the inherited reasoning effort and `maxTokens`; a worker route change clears the inherited reasoning effort, but the subagent merge keeps the parent's `maxTokens` (see Consequences).
 
 ## Consequences
 
