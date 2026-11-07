@@ -1,7 +1,7 @@
 import { Guard } from '../guard/guard.js';
 import type { BreakerState, ValidationResult } from '../guard/types.js';
 import type { LedgerEntry, RecallOptions } from '../ledger/types.js';
-import type { EpisodeId, RecallId } from '../types/identity.js';
+import type { EpisodeId, NodeId, RecallId } from '../types/identity.js';
 import type { HarnessObservation, TelemetryEvent } from '../types/telemetry.js';
 import type { SessionSnapshot } from '../types/transcript.js';
 import type { RulePlan } from '../rules/types.js';
@@ -38,7 +38,15 @@ export class RacoonsEngine {
   private readonly options: EngineOptions;
   private queue: Promise<void> = Promise.resolve();
   private readonly unchangedEvents = new Set<string>();
-  private readonly seenRefetches = new Set<string>();
+  /**
+   * ISSUE-237: refetch accounting is per LANDED RESULT OCCURRENCE, not per
+   * engine event. The entry observation and its answer are two event ids over
+   * the same `ToolResultNode`, and counting both made one fetch report twice.
+   * A genuinely later fetch has its own node id, so it still reports — the key
+   * is neither the source hash nor the recall id (those would suppress a real
+   * re-fetch of identical bytes).
+   */
+  private readonly seenRefetches = new Set<NodeId>();
   /** One `receipt-conflict` per intent and host; `committedState` runs every pass (R4). */
   private readonly reportedConflicts = new Set<string>();
   private faulted = false;
@@ -350,8 +358,8 @@ export class RacoonsEngine {
   }
 
   private async refetch(input: EngineInput, entries: readonly LedgerEntry[]): Promise<void> {
-    if (input.kind !== 'entry' || this.seenRefetches.has(input.eventId)) return;
-    this.seenRefetches.add(input.eventId);
+    if (input.kind !== 'entry' || this.seenRefetches.has(input.result.id)) return;
+    this.seenRefetches.add(input.result.id);
     const hash = await sha256(input.result.bytes);
     const applied = new Set(entries.flatMap(({ event }) => event.kind === 'applied'
       ? [event.receipt.intentId] : []));
