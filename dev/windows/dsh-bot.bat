@@ -6,8 +6,6 @@ rem
 rem  Usage:
 rem    dsh-bot.bat                  build, then boot the multitask profile
 rem    dsh-bot.bat web              build, then boot web + committed overlay
-rem    dsh-bot.bat racoons          build, then boot web + RACOONS overlay
-rem                                 (optional test feature; OFF by default)
 rem    dsh-bot.bat -NoBuild         skip the build (refused if build is stale)
 rem    dsh-bot.bat -DryRun          resolve and print the command, boot nothing
 rem    extra arguments after the route are passed to dsh
@@ -37,8 +35,11 @@ set "NOOPEN="
 if "%~1"=="" goto args_done
 set "ARG=%~1"
 if /i "!ARG!"=="web" goto arg_web
+if /i "!ARG!"=="racoons" (
+  echo [dsh-bot] the racoons route was removed; this launcher has no racoons switch.
+  exit /b 1
+)
 if /i "!ARG!"=="multitask" goto arg_multitask
-if /i "!ARG!"=="racoons" goto arg_racoons
 if /i "!ARG!"=="-NoBuild" goto arg_nobuild
 if /i "!ARG!"=="-DryRun" goto arg_dryrun
 if /i "!ARG!"=="-NoOpen" goto arg_noopen
@@ -53,10 +54,6 @@ shift
 goto parse
 :arg_multitask
 set "ROUTE=multitask"
-shift
-goto parse
-:arg_racoons
-set "ROUTE=racoons"
 shift
 goto parse
 :arg_nobuild
@@ -78,7 +75,7 @@ shift
 goto parse
 
 :usage
-echo Usage: dsh-bot.bat [web^|multitask^|racoons] [-NoBuild] [-DryRun] [-NoOpen] [dsh args]
+echo Usage: dsh-bot.bat [web^|multitask] [-NoBuild] [-DryRun] [-NoOpen] [dsh args]
 exit /b 1
 
 :args_done
@@ -146,16 +143,6 @@ if defined NOBUILD if not defined DRYRUN (
 
 if /i "%ROUTE%"=="web" (
   set "PATCH=%REPO%\dev\cordis.web.patch.yml"
-  if not exist "!PATCH!" (
-    echo [dsh-bot] overlay missing: !PATCH!
-    pause
-    exit /b 1
-  )
-  set "CMDLINE=--profile web --patch "!PATCH!""
-  goto launch
-)
-if /i "%ROUTE%"=="racoons" (
-  set "PATCH=%REPO%\dev\cordis.racoons.patch.yml"
   if not exist "!PATCH!" (
     echo [dsh-bot] overlay missing: !PATCH!
     pause

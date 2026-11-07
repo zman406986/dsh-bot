@@ -5,6 +5,7 @@
 copy changes what the Desktop shortcut runs.
 
 It builds `lib` and `client`, then boots the `multitask` profile by
-default. `web` and `racoons` routes, `-NoBuild`, `-DryRun` and `-NoOpen`
-are documented in the file header. The RACOONS launcher was retired;
-`dsh-bot.bat racoons` is the remaining switch.
+default. The `web` route, `-NoBuild`, `-DryRun` and `-NoOpen` are
+documented in the file header. There is no racoons switch: that feature is
+off by default and is not production-ready; use its patch file only for
+isolated testing.

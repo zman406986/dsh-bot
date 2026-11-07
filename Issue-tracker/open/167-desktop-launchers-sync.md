@@ -103,6 +103,7 @@ state at the time they were written. The human launch check remains open.
 2026-11-07: Consolidation (owner request). Only one launcher remains. The
 tracked source of truth is `dev/windows/dsh-bot.bat`; the Desktop
 `dsh-bot.bat` is a small forwarder to it, so the two can no longer drift.
-The separate `dsh-bot-RACOONS.bat` was deleted; its feature switch is the
-`racoons` route on the single launcher. DoD rows about the second launcher
-are retired with it. The human launch check is now one file, not two.
+The separate `dsh-bot-RACOONS.bat` was deleted; the single launcher has no
+racoons switch, and that feature stays off by default (its patch file remains
+for isolated testing only). DoD rows about the second launcher are retired
+with it. The human launch check is now one file, not two.

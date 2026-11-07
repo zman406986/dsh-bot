@@ -96,7 +96,7 @@ Every field is a setting on the plugin's card on dsh's Plugins page. A saved cha
 | `racoonsContextWindowTokens` | `0` | Only used while racoons is enabled. Context window for the automatic prune. `0` leaves it off. |
 | `microcompactEnabled` | `false` | Clears old tool results on dispatcher sessions. Off, and not yet checked live. |
 
-The context-cleanup library (racoons) is an optional test feature and is **off by default**. When it is on, it covers every session in the dsh process; removed content can be restored by its recall id, and originals are stored per session under the storage root. Turn it on with `racoonsEnabled: true` — the `dev/windows/dsh-bot.bat racoons` route and `dev/cordis.racoons.patch.yml` are the supported ways.
+The context-cleanup library (racoons) is an optional test feature, **off by default and not exposed by the launcher**. The current vendored version is not production-ready. For isolated testing only, configure it directly with `racoonsEnabled: true` and `dev/cordis.racoons.patch.yml`.
 
 ## Project layout
 
