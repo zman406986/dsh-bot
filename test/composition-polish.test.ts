@@ -48,6 +48,7 @@ import {
   type AgentLike,
   type CommandDefinitionLike,
   type CommandResultLike,
+  type ToolsLike,
 } from "../src/adapter/index.js";
 import type { DurableWorkerMarker } from "../src/core/durability.js";
 import {
@@ -61,7 +62,7 @@ import {
 } from "../src/client/roster-store.js";
 import {
   TOOLVIEW_DEGRADED_KEY,
-  TOOLVIEW_FIELD_KEYS,
+  TOOLVIEW_DETAIL_KEYS,
 } from "../src/client/toolviews.js";
 import {localeDictionary, validateLocaleDictionary} from "../src/client/overlay.js";
 
@@ -74,10 +75,53 @@ async function flushActivation(): Promise<void> {
 
 interface TestAgent extends AgentLike {
   readonly injected: unknown[];
+  readonly scopedTools: ToolsLike & {
+    registeredNames(): string[];
+    get(
+      name: string,
+    ):
+      | { execute: (args: unknown, exec?: unknown) => Promise<unknown> }
+      | undefined;
+  };
+}
+
+/**
+ * ADR-0019 scoped surface. The plugin refuses the process-global fallback, so
+ * every ordinary test agent carries the per-agent tool scope a live host
+ * mints.
+ */
+function createScopedTools(): TestAgent["scopedTools"] {
+  const scoped = new Map<
+    string,
+    { name: string; execute: (args: unknown, exec?: unknown) => Promise<unknown> }
+  >();
+  return {
+    schemas: () => [...scoped.keys()].map((name) => ({ name })),
+    register(definition: unknown) {
+      const tool = definition as {
+        name: string;
+        execute: (args: unknown, exec?: unknown) => Promise<unknown>;
+      };
+      if (scoped.has(tool.name)) {
+        throw new Error(
+          `tool "${tool.name}" is already registered (for a ` +
+            `per-agent variant, register through that agent's ` +
+            `\`agent.ctx\` instead)`,
+        );
+      }
+      scoped.set(tool.name, tool);
+      return () => {
+        scoped.delete(tool.name);
+      };
+    },
+    registeredNames: () => [...scoped.keys()],
+    get: (name) => scoped.get(name),
+  };
 }
 
 function createAgent(id: string): TestAgent {
   const injected: unknown[] = [];
+  const scopedTools = createScopedTools();
   return {
     session: { id, header: { parentSession: null, delegationDepth: 0 } },
     followup() {},
@@ -85,6 +129,8 @@ function createAgent(id: string): TestAgent {
       injected.push(message);
     },
     injected,
+    ctx: { tools: scopedTools },
+    scopedTools,
   };
 }
 
@@ -390,10 +436,10 @@ describe("composition polish — dormant registration matrix (design-17 §3.2/§
     // 2 lifecycle + 4 host (`subagent/end`, `session/event`, `agent/created`,
     // the last being the worker-composition seam, passive while no spawn is in
     // flight, and `agent/disposed`, which releases a resumed-user-dispatcher
-    // record when its session goes away — ticket 163 defect 3) + the
-    // ticket-145 racoons mount's four (`session/event`, `llm/stream`,
-    // `agent/pre-step`, `agent/turn-stopping`).
-    assert.equal(ctx.listenerCount(), 10);
+    // record when its session goes away — ticket 163 defect 3). Owner ruling
+    // 2026-11-05: the ticket-145 racoons mount's four listeners are absent by
+    // default — racoons is off unless `racoonsEnabled` turns it on.
+    assert.equal(ctx.listenerCount(), 6);
   });
 
   it("activation is what raises the surface: tools appear, nothing is mirrored", async () => {
@@ -403,24 +449,25 @@ describe("composition polish — dormant registration matrix (design-17 §3.2/§
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await flushActivation();
 
-    // Eight dispatcher tools + the ticket-145 per-session recall (this
-    // context-less agent takes the plugin-level fallback). Ticket 174 /
-    // ADR-0033 removed `request_access`.
-    assert.deepEqual(ctx.toolNames().sort(), [
+    // Eight dispatcher tools in the activated agent's OWN scope (ADR-0019;
+    // the global fallback is refused). Ticket 174 / ADR-0033 removed
+    // `request_access`; owner ruling 2026-11-05 keeps racoons off by default,
+    // so no `recall`.
+    assert.deepEqual(agent.scopedTools.registeredNames().sort(), [
       "await_agent",
       "check_workers",
       "deliver_result",
       "message_agent",
-      "recall",
       "spawn_dispatcher",
       "spawn_worker",
       "steer_worker",
       "stop_worker",
     ]);
+    assert.deepEqual(ctx.toolNames(), [], "no process-global dispatcher tool");
     // The roster view now comes from the core through check_workers; no
     // settings document is written.
     assert.deepEqual(ctx.updates, [], "no settings mirror exists to write to");
-    const check = ctx.tool("check_workers");
+    const check = agent.scopedTools.get("check_workers");
     assert.ok(check);
     const roster = (await check.execute({})) as {
       ok: boolean;
@@ -441,7 +488,7 @@ describe("composition polish — deactivation honesty (design-17 §3.2)", () => 
     // so the restored terminal row is already there.
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await flushActivation();
-    const check = ctx.tool("check_workers");
+    const check = agent.scopedTools.get("check_workers");
     assert.ok(check, "activation raised the tool surface");
     const first = (await check.execute({})) as {
       ok: boolean;
@@ -454,7 +501,11 @@ describe("composition polish — deactivation honesty (design-17 §3.2)", () => 
 
     // Session end: the dispatcher unbinds and its tool surface disappears.
     ctx.fire("agent/disposed", { agent });
-    assert.deepEqual(ctx.toolNames(), [], "the activated tool surface is gone");
+    assert.deepEqual(
+      agent.scopedTools.registeredNames(),
+      [],
+      "the activated tool surface is gone",
+    );
 
     // Re-activation raises a new surface over the same core state.
     const again = ctx.runCommand({
@@ -466,7 +517,7 @@ describe("composition polish — deactivation honesty (design-17 §3.2)", () => 
       text: DISPATCHER_START_SUCCESS,
     });
     await flushActivation();
-    const checkAgain = ctx.tool("check_workers");
+    const checkAgain = agent.scopedTools.get("check_workers");
     assert.ok(checkAgain, "re-activation raises the surface again");
     const second = (await checkAgain.execute({})) as {
       ok: boolean;
@@ -501,12 +552,29 @@ describe("composition polish — locale validation + literal sweep (§8)", () =>
       "roster.unavailable",
       "roster.loading",
       "roster.landed",
-      "roster.activity.toolcalls",
+      "roster.activity.toolcalls.one",
+      "roster.activity.toolcalls.other",
+      "roster.fact.started",
       "activation.presence-hint",
-      ROSTER_FINISHED_COUNT_KEY,
+      `${ROSTER_FINISHED_COUNT_KEY}.one`,
+      `${ROSTER_FINISHED_COUNT_KEY}.other`,
       TOOLVIEW_DEGRADED_KEY,
+      "toolview.details",
       ...Object.values(ROSTER_SECTION_KEYS),
-      ...Object.values(TOOLVIEW_FIELD_KEYS),
+      ...Object.values(TOOLVIEW_DETAIL_KEYS),
+      // Readable-status display: the six human status words and every
+      // refusal cause the parsers can select.
+      "status.starting",
+      "status.working",
+      "status.adjusting",
+      "status.done",
+      "status.failed",
+      "status.stopped",
+      "toolview.cause.failed",
+      "toolview.cause.unknown-worker",
+      "toolview.cause.unknown-todo",
+      "toolview.cause.unknown-agent",
+      "toolview.cause.unknown-dispatcher",
       // Ticket 174 / ADR-0033 removed the per-access-class blocked phrases
       // with the worker access-ask feature.
     ];

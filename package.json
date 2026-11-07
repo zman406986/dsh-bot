@@ -49,12 +49,13 @@
     "build": "npm run build:vendor && tsc -p tsconfig.json",
     "build:client": "node --import tsx scripts/build-client.ts",
     "check:client": "node --import tsx scripts/build-client.ts --check",
-    "e2e": "node dev/e2e-mock.mjs",
+    "check:build": "node dev/build-freshness.mjs",
+    "e2e": "npm run check:build && npm run check:client && node dev/e2e-mock.mjs",
     "typecheck": "npm run build:vendor && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit && npm run typecheck:test",
     "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
     "pretest": "npm run build:vendor",
     "test": "tsx --tsconfig tsconfig.client.json --test test/**/*.test.ts",
-    "lint:docs": "node tools/doc-lint.mjs && node tools/issue-index.mjs --check && node tools/adr-index.mjs --check",
+    "lint:docs": "node tools/doc-lint.mjs --self-test && node tools/doc-lint.mjs && node tools/issue-index.mjs --check && node tools/adr-index.mjs --check",
     "prepare": "npm run build",
     "prepack": "npm run build:client"
   },
@@ -68,7 +69,7 @@
     "url": "https://github.com/zman406986/dsh-bot/issues"
   },
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=22.15.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*"

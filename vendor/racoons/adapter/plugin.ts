@@ -2361,17 +2361,44 @@ export function publishAppend(session: DshMountSession, request: RacoonsApplicat
 }
 
 /**
+ * The host's sessions service, resolved safely. A Cordis context that was not
+ * given a service can throw on property access, and dsh-bot's mount context
+ * supplies no `sessions` at all. Resolve through `ctx.get` first (same guarded
+ * seam as `resolveToolHost`), then fall back to the structural property, and
+ * treat anything without `list` as absent.
+ */
+function resolveSessionsService(ctx: DshMountContext): { list(): readonly DshMountSession[] } | undefined {
+  let value: unknown;
+  try {
+    value = typeof ctx.get === 'function' ? ctx.get('sessions') : undefined;
+  } catch {
+    value = undefined;
+  }
+  if (value === undefined || value === null) {
+    try { value = ctx.sessions; } catch { return undefined; }
+  }
+  return isRecord(value) && typeof value['list'] === 'function'
+    ? value as unknown as { list(): readonly DshMountSession[] }
+    : undefined;
+}
+
+/**
  * The one live session this process is driving. dsh's turn-stopping hook may
  * carry no agent, and the headless profile runs exactly one session per process,
  * so the store's single live session is that turn's owner. More than one live
  * session means this hook cannot know which one ended: it refuses rather than
- * guess.
+ * guess. A missing sessions service is tolerated (undefined), never assumed.
  */
 export function singleLiveSession(ctx: DshMountContext): DshMountSession | undefined {
-  const store = ctx.sessions;
-  if (store === undefined || typeof store.list !== 'function') return undefined;
-  const live = store.list();
-  return live.length === 1 ? live[0] : undefined;
+  const store = resolveSessionsService(ctx);
+  if (store === undefined) return undefined;
+  let live: readonly DshMountSession[];
+  try {
+    live = store.list();
+  } catch {
+    return undefined;
+  }
+  return Array.isArray(live) && live.length === 1 ? live[0] : undefined;
 }
 
 /**
@@ -2661,12 +2688,22 @@ export function createRacoonsPlugin(options: RacoonsPluginOptions = {}): {
       // The last seal opportunity in a one-shot run: the loop appends `turn/end`
       // right after this serial hook, and no pre-step follows. Dispatching a
       // serial hook is not the `session/event` boundary, so appending is legal.
+      let warnedUnresolvedTurnEnd = false;
       ctx.on('agent/turn-stopping', async (payload: {
         turn?: number;
         agent?: { session?: DshMountSession };
       }) => {
         const session = payload.agent?.session ?? singleLiveSession(ctx);
-        if (session === undefined) return;
+        if (session === undefined) {
+          // A host that supplies no usable `sessions` service (or more than one
+          // live session) cannot name this turn's owner. Skipping is correct;
+          // doing it silently is not, so the first occurrence is logged once.
+          if (!warnedUnresolvedTurnEnd) {
+            warnedUnresolvedTurnEnd = true;
+            warn('agent/turn-stopping: no session resolved (no usable sessions service or more than one live session); turn-end work skipped');
+          }
+          return;
+        }
         try {
           const turnResult = await mount.runTurnEnd(session, Number(payload.turn ?? 0));
           if (turnResult.appendRequest !== null) {

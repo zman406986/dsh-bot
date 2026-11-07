@@ -123,6 +123,8 @@ describe("applyWorkerComposition", () => {
       "message_agent",
       "await_agent",
       "spawn_dispatcher",
+      // Second-round audit: the optional host user-reach verb is denied too.
+      "request_access",
     ]);
     // Work tools survive.
     assert.ok(!restrictions[0]?.deny?.includes("read"));
@@ -134,7 +136,11 @@ describe("applyWorkerComposition", () => {
     });
     applyWorkerComposition(ctx, createWorkerAgentDef(), agent);
 
-    assert.deepEqual(restrictions, [{ deny: ["spawn_worker"] }]);
+    // `request_access` is a context-global name in this fixture, so the
+    // candidate intersection picks it up as well (second-round audit).
+    assert.deepEqual(restrictions, [
+      { deny: ["spawn_worker", "request_access"] },
+    ]);
   });
 
 });

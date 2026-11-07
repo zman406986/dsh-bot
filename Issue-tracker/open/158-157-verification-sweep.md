@@ -1,44 +1,47 @@
-# 158 — Ticket 157 verification sweep: unverified test edits, full suite re-run, live restart check
+# 158 — Verification sweep after ticket 157 landed: full suite re-run, by-eye UI check, live restart check
 
 **Status:** open
 **Labels:** ready-for-agent
-**Blocked by:** nothing — all source work from ticket 157 is in the tree and typechecks; this ticket is the verification lane that ticket 157 could not finish.
+**Blocked by:** nothing — ticket 157 is resolved and landed (commit `1b259db`); this ticket is the verification lane that survived it.
 **Origin:** owner ruling 2026-10-29 — stop work, do not test further, file any pending verification as a ticket for the next team.
-**Related:** ticket 157 (the implementation, still `open`), ADR-0032, ADR-0025 (decisions 1–5 stand), `.scratch/repo-analysis/2026-10-28-summon-parallel-session-plan.md` (§10 transport), `.scratch/repo-analysis/2026-10-28-repo-subagent-assumptions.md`.
+**Related:** ticket 157 (the implementation — resolved and landed in commit `1b259db` on 2026-11-04), ADR-0032, ADR-0025 (decisions 1–5 stand), `.scratch/repo-analysis/2026-10-28-summon-parallel-session-plan.md` (§10 transport), `.scratch/repo-analysis/2026-10-28-repo-subagent-assumptions.md`.
 
 ## Problem
 
-Ticket 157's implementation landed in the working tree, **uncommitted**, and the project typechecks clean (`npx tsc -p tsconfig.json --noEmit` → exit 0). Verification did not finish. Two test files carry edits that were **written but never run**, so nobody knows whether they pass — and one of them was left half-edited after an agent was stopped mid-task.
+Ticket 157 is no longer an uncommitted working-tree change. It landed in commit `1b259db` ("Ticket 157: a summoned dispatcher is a top-level session, not a subagent child") and was closed as resolved on 2026-11-04. The test edits this ticket was filed to verify were run green in the 2026-10-30 grouped run (100 tests, 0 failures; see Comments).
 
-Nothing here is merged or committed. That is deliberate: the owner stopped work before the lane was green.
+What remains is the part that run could not settle: a full-suite sweep (§3), a by-eye check of the rebuilt client bundle (§4), and one live restart probe (§5). Those are the checks this ticket still owns.
 
 ## What is verified
 
+- Ticket 157 landed in commit `1b259db` and was closed as resolved on 2026-11-04 (`Issue-tracker/resolved/157-summoned-dispatcher-is-a-parallel-session.md`).
 - `npx tsc -p tsconfig.json --noEmit` → exit 0, confirmed repeatedly against the final tree.
-- `test/spawn-dispatcher-host.test.ts` → 16 pass, 0 fail — **before** the new ordering test was added (`:377-460`, unrun).
+- `test/spawn-dispatcher-host.test.ts` → 16 pass before the new ordering test was added; the 2026-10-30 grouped run then passed that file including the ordering test (§2).
 - `test/client-toolviews.test.ts` + restart-honesty + shell-seat-composition → 179 pass, 0 fail.
 - `policy-assembler` + `policy-zh-assets` + `policy-peer-roster` → 79 pass, 0 fail.
 - `test/dispatcher-resume-reactivation.test.ts` → 8 pass, 0 fail.
 - `test/adapter-cordis-dsh-host.test.ts` + `test/adapter-dispatcher-tools.test.ts` → 84 pass; `test/message-agent.test.ts` → 26 pass.
 - `node tools/doc-lint.mjs` → 0 findings (run before ticket 158 existed; the ADR-0032 index row is in place).
 
-## What is NOT verified — the work this ticket owns
+## What is NOT verified — the live work this ticket still owns
 
-### 1. `test/spawn-dispatcher-activation.test.ts` is half-reasoned and unrun
-Last **observed** run, taken before the most recent edits: **32 tests, 21 pass, 11 fail.** Edits made afterwards were never re-run. They claimed to fix:
+Sections 1 and 2 below are retained as history: both were run green in the 2026-10-30 grouped run (100 tests, 0 fail). The checks this ticket still owns are §3, §4's by-eye half, and §5.
+
+### 1. `test/spawn-dispatcher-activation.test.ts` — closed by the 2026-10-30 run
+Last **observed** run, taken before the most recent edits: **32 tests, 21 pass, 11 fail.** Edits made afterwards were never re-run at the time this section was written. They claimed to fix:
 - the `resumeTarget` stub (`:315`) — a durably marked session now resumes parentless at depth 0, an unmarked worker still parented at parentDepth+1;
 - five ticket-130/138/141 cold-resume and legacy-row tests, re-based to top-level and to the host's real boot order (activate a user chat first, which warms the mark mirror);
 - the worker-hop test (`:879`) — 1 `startActivation`, parent depth 0, `maxDepth` 1;
 - the recursion test (`:929`) — a dispatcher hop is not a delegation hop;
 - the identity probe (`:1167`) — no origin, null parent, depth 0, `resolveSessionKind` → `"normal"`.
 
-No test was deleted. **Do not assume any of this passes.** Note the reported failure mode at that time was `TypeError: Cannot read properties of undefined (reading 'content')` at `textOf` (`:74`) — an assertion reading a message the stub never delivered.
+No test was deleted. The 2026-10-30 grouped run passed this file; see Comments.
 
-### 2. One new test is written but never run
+### 2. One new test — closed by the 2026-10-30 run
 `test/spawn-dispatcher-host.test.ts:377-460` —
 `setup composes, never drives: a wake parked for the child flushes after create, never inside setup`.
 It asserts: zero turns driven inside `setup`; exactly 2 followups (spawn prompt first, then the wake turn with `source.kind === "agent-message"`); and the trace `["park","create","setup","published","followup","followup"]`.
-Two flagged risks for its first run: it reassigns `ctx.agents.create` (the stub type may be non-optional), and it pushes onto `ctx.events`; neither is compiler-checked yet. A known gap, already stated by its author: the stub never fires `agent/created` with a *parented* header, so the listener-driven flush path is covered only by the explicit post-create flush, not by the event path.
+Two flagged risks for its first run: it reassigns `ctx.agents.create` (the stub type may be non-optional), and it pushes onto `ctx.events`; neither is compiler-checked yet. A known gap, already stated by its author: the stub never fires `agent/created` with a *parented* header, so the listener-driven flush path is covered only by the explicit post-create flush, not by the event path. The 2026-10-30 grouped run passed the file.
 
 ### 3. No full-suite run has happened since the change
 Suites were only ever run one file at a time. **~19 suites and ~450 cases** touch this area (the estimate in `.scratch/repo-analysis/2026-10-28-repo-subagent-assumptions.md`: ~120 need re-reasoning, ~330 are fixture/comment/copy). Several were never touched at all and may still pin the subagent shape — e.g. `test/spawned-dispatcher-kind.test.ts`, `test/session-kind-projection.test.ts`, `test/client-session-kind.test.ts` (partially updated), `test/coexistence.test.ts`, `test/activation-lifecycle.test.ts`, `test/worker-composition.test.ts`, `test/plugin-scaffold.test.ts`.
@@ -52,21 +55,21 @@ Settling it needs one live restart with a summoned dispatcher and a log of the m
 
 ## Acceptance
 
-- [ ] `test/spawn-dispatcher-activation.test.ts` runs green, or every remaining failure is re-reasoned/deleted with a stated reason. No number re-pinning to make it pass.
-- [ ] The new ordering test in `test/spawn-dispatcher-host.test.ts` runs green, with any stub-type fixups it needs.
+- [x] `test/spawn-dispatcher-activation.test.ts` runs green (2026-10-30 grouped run, 100/100 across the grouped files).
+- [x] The new ordering test in `test/spawn-dispatcher-host.test.ts` runs green (same grouped run).
 - [ ] Full offline suite run covers every suite in §3 and any other suite pinning the subagent shape; failures are triaged, not deleted silently.
-- [ ] `npx tsc -p tsconfig.json --noEmit` and `npx tsc -p tsconfig.client.json --noEmit` both exit 0.
-- [ ] Client bundle rebuilt; the running GUI at `http://127.0.0.1:3080` shows tool-call arguments and results instead of "Tool call details are unavailable." after a page refresh. Confirmed by eye on at least one `spawn_dispatcher` call.
+- [x] `npx tsc -p tsconfig.json --noEmit` and `npx tsc -p tsconfig.client.json --noEmit` both exit 0.
+- [ ] Client bundle rebuilt (done 2026-10-30); the running GUI at `http://127.0.0.1:3080` shows tool-call arguments and results instead of "Tool call details are unavailable." after a page refresh. Confirmed by eye on at least one `spawn_dispatcher` call.
 - [ ] Live restart check (read the live-test guide first, kill timer at launch): a summoned dispatcher survives restart and re-activates. The mark answer at the first `agent/created` is recorded either way.
-- [ ] Ticket 157 is annotated with what this sweep proved, and closed only when all of the above are true.
+- [ ] Every remaining check above is recorded against the landed commit `1b259db`, not against the working tree described when this ticket was filed.
 
 ## Constraints
 
-- **No merge, no commit.** The owner stopped work before that decision; committing is theirs.
-- The existing uncommitted diff is the whole change — do not "clean it up" by reverting hunks to make a test pass.
+- **No commit from this verification lane.** Ticket 157 is already landed in `1b259db`; do not revert or re-apply its hunks to make a check pass.
+- Do not "clean up" later working-tree changes by reverting hunks to make a test pass.
 - Offline first (S8). The only live work permitted is the two items that cannot be settled statically (§4 rebuild+refresh, §5 restart), and only under `read-before-running-live-and-browser-tests.md`.
-- Do not re-open settled decisions: top-level creation, no parent/origin/depth, no cap of ours, cold resume in v1, uniform policy for every dispatcher, no `"spawned"` policy variant. ADR-0032 records them.
-- Unrelated `"spawned"` string literals must stay: approval outcome kinds (`src/client/approval-cards.ts`, `approval-pane.tsx`) and worker FSM status (`src/core/types.ts`, `worker-fsm.ts`). Only the dispatcher-origin member was retired.
+- Do not re-open settled decisions: top-level creation, no parent/origin/depth, no cap of ours, cold resume in v1, the two dispatcher policy classes (ADR-0034), and a summoned dispatcher may not summon (ticket 176). ADR-0032 and ADR-0034 record them.
+- Unrelated `"spawned"` string literals must stay: approval outcome kinds and worker FSM status. Only the dispatcher-origin member was retired.
 
 ## Comments
 
@@ -91,3 +94,11 @@ root cause of the incident this ticket grew out of: the running process was
 loading a `lib/` build older than `src/`, so lib-level "fix is present"
 checks were green while the live app kept the old behaviour. Re-check the
 `lib` timestamp against `src` before trusting any live result.
+
+2026-11-07: Status correction (second-round audit). The premise this ticket
+was filed under — ticket 157 uncommitted, not merged, two test files unrun —
+is no longer true. Ticket 157 landed in `1b259db` and is resolved; the
+2026-10-30 grouped run already closed §1 and §2. The title, Related line,
+Problem, acceptance and constraints are updated to match. This ticket stays
+**open** for the full-suite sweep (§3), the by-eye UI check (§4) and the live
+restart probe (§5); none of those has been run.

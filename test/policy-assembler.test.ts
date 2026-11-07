@@ -24,11 +24,15 @@ import {
   STEER_WORKER_TOOL,
   STOP_WORKER_TOOL,
   TOOL_DESCRIPTIONS,
+  TOOL_DESCRIPTIONS_ZH,
   buildDispatcherPolicySection,
   buildPeerWakeInstructionsBlock,
   buildStandingRulesBlock,
   buildWakeInstructionsBlock,
+  buildWorkerReplyWakeInstructionsBlock,
+  formatSummoningDispatcherHandoffLine,
   resolvePolicyLanguage,
+  SUMMONING_DISPATCHER_ID_HANDOFF_LABEL,
 } from "../src/core/policy/prompts.js";
 import type { PeerNotice } from "../src/core/peer-types.js";
 import { bindDispatcherLifecycle } from "../src/adapter/parent-agent.js";
@@ -39,6 +43,7 @@ import {
   formatMessageAgentDormantSteerNote,
   formatDormantSteerNote,
   formatSpawnAck,
+  formatSpawnDispatcherNote,
   formatSteerNote,
   formatStopNote,
 } from "../src/core/tool-results.js";
@@ -123,7 +128,7 @@ const TEAM_LEADER_WAKE_EN = [
   "",
   "1. Match each settled worker to its ledger entry (`todo_id` on the worker record). A settle closes one part, not the job.",
   "2. Re-chunk what is left. A finished part usually changes the split: decide what can run in parallel now, and dispatch it before you answer anyone.",
-  "3. Report back to whoever gave you the task order. `message_agent` to your parent agent; use the user-facing send if the user directly ordered something from you.",
+  "3. Report back to whoever gave you the task order. `message_agent` to the dispatcher that summoned you, addressed to the session id on the \"Summoning dispatcher session id\" line of your handoff prompt; use the user-facing send if the user directly ordered something from you.",
   "4. Report failures early instead of exhausting save attempts. If the approach looks like a dead end, report at the first sign.",
   "5. Silence is a valid outcome only when nothing changed for anyone above you.",
 ].join("\n");
@@ -147,6 +152,24 @@ function peerNote(): PeerNotice {
     createdAtMs: 1_700_000_000_000,
   };
 }
+
+/** A worker's mid-task reply, so the worker-reply block is selected. */
+function workerReplyNote(): PeerNotice {
+  return {
+    messageId: "msg-2",
+    fromAgentId: "w-1",
+    fromName: "worker reply (blocked) — Rewrite auth docs",
+    to: { kind: "agent", agentId: "self-session" },
+    conversationId: "conv-1",
+    text: "I cannot reach the auth fixtures.",
+    priority: false,
+    createdAtMs: 1_700_000_000_001,
+    origin: { kind: "worker-reply", workerId: "w-1", status: "blocked" },
+  };
+}
+
+const countHeadings = (text: string, heading: string): number =>
+  text.split(heading).length - 1;
 
 describe("policy assembler", () => {
   it("flag OFF yields an empty policy in every origin and language", () => {
@@ -232,9 +255,12 @@ describe("policy assembler", () => {
     // PRE-split chief-of-staff bytes, captured before the split landed, so
     // any drift in the class the user still reads fails here.
     const SHIPPED = {
-      standing: "76fccd7e67d4157d0ef1fc70f8ac54c4a0e42be0f6290e7d432d225599f3bd51",
-      wake: "79c556007306408ec59dffa2e8d935df6e1ef7ca59a3ac7d6a9f3d42fa1410a9",
-      peer: "a4429b302910a945b0b5507aae5897229c02ac1ff48b2f04b5c0c4d995e603bd",
+      // Re-pinned after the reference-prose re-authoring (standing rule,
+      // wake step 3), the sender-address wording (peer step 4), and the
+      // conversational-delivery step 4 (ADR-0009); no other drift is allowed.
+      standing: "7ef18b9e8878cac79d5004e304988ef5e859df1e690d06b00fa49b0aa03dc0a4",
+      wake: "5b6a7caa9ad2845fc5939620561e6004a65386c93cccfeec6d42c89083962b1c",
+      peer: "3b7608ff8e70f513a3ed053cde934f40e101cbbb1b25136da953197dce18a8c1",
     } as const;
     const sha = (text: string) =>
       createHash("sha256").update(text, "utf8").digest("hex");
@@ -409,10 +435,18 @@ describe("policy assembler", () => {
     assert.ok(assembleWakeTurn([notice({ report: "" })]).includes(emptyReportPlaceholder()));
     assert.ok(assembleWakeTurn([notice({ status: "error", report: "boom" })]).includes("Worker failed:"));
 
-    // An aborted worker never exposes report text (no revival).
+    // An aborted worker never reads as a completed deliverable. A settle with
+    // no text keeps the bookkeeping placeholder; a partial report is kept but
+    // explicitly labelled as partial (report-clamp's 2026-11-07 status-aware
+    // change — discarding real findings would leave the dispatcher nothing to
+    // report).
     const aborted = assembleWakeTurn([notice({ status: "aborted", report: "secret work product" })]);
-    assert.ok(aborted.includes("Stopped before completion"));
-    assert.ok(!aborted.includes("secret work product"));
+    assert.ok(aborted.includes("Worker stopped before completion. Partial report:"));
+    assert.ok(aborted.includes("secret work product"));
+    assert.ok(!aborted.includes(emptyReportPlaceholder()));
+    const abortedEmpty = assembleWakeTurn([notice({ status: "aborted", report: "" })]);
+    assert.ok(abortedEmpty.includes("Stopped before completion"));
+    assert.ok(abortedEmpty.includes("No report"));
   });
 
   it("maps a settled worker notice onto the wake row", () => {
@@ -438,6 +472,122 @@ describe("policy assembler", () => {
     assert.ok(formatMessageAgentDormantSteerNote("x").length > 0);
     assert.ok(formatStopNote().includes("Tell the user only if"));
     assert.ok(TOOL_DESCRIPTIONS[CHECK_WORKERS_TOOL].includes("never a wait loop"));
+  });
+});
+
+describe("dispatcher copy — surface truth and class-aware wakes", () => {
+  it("spawn_dispatcher describes a team-leader dispatcher that cannot summon", () => {
+    const description = TOOL_DESCRIPTIONS[SPAWN_DISPATCHER_TOOL];
+    assert.ok(description.includes("team-leader dispatcher"), description);
+    assert.ok(description.includes("own workers, ledger, inbox and user"), description);
+    assert.ok(description.includes("cannot summon further dispatchers"), description);
+    assert.ok(!description.includes("same dispatcher tools and policy"), description);
+    assert.ok(!description.includes("your tools and policy"), description);
+    // The ZH face makes the same two claims.
+    assert.ok(TOOL_DESCRIPTIONS_ZH[SPAWN_DISPATCHER_TOOL].includes("团队负责人"));
+    assert.ok(TOOL_DESCRIPTIONS_ZH[SPAWN_DISPATCHER_TOOL].includes("不能再次召唤"));
+    // The result note makes the same promise as the tool description.
+    const note = formatSpawnDispatcherNote({
+      title: "Own the login bug",
+      dispatcherId: "disp-2",
+    });
+    assert.ok(note.includes("team-leader dispatcher"), note);
+    assert.ok(note.includes("cannot summon further dispatchers"), note);
+    assert.ok(!note.includes("same dispatcher tools and policy"), note);
+  });
+
+  it("the team leader is told where the summoner id comes from", () => {
+    assert.equal(
+      formatSummoningDispatcherHandoffLine("disp-1"),
+      `${SUMMONING_DISPATCHER_ID_HANDOFF_LABEL}: disp-1`,
+    );
+    const wake = buildWakeInstructionsBlock("en", "spawned");
+    assert.ok(wake.includes(SUMMONING_DISPATCHER_ID_HANDOFF_LABEL), wake);
+    assert.ok(wake.includes("handoff prompt"), wake);
+    assert.ok(!wake.includes("your parent agent"), wake);
+    assert.ok(!wake.includes("to your parent agent"), wake);
+    const policy = buildDispatcherPolicySection("spawned");
+    assert.ok(policy.includes("handoff prompt"), policy);
+  });
+
+  it("steer_worker tells the truth about dormant workers", () => {
+    const description = TOOL_DESCRIPTIONS[STEER_WORKER_TOOL];
+    assert.ok(description.includes("dormant"), description);
+    assert.ok(description.includes("resumed"), description);
+    assert.ok(!description.includes("Refused when the worker is not running"), description);
+    // The ZH face mirrors the same rule.
+    assert.ok(TOOL_DESCRIPTIONS_ZH[STEER_WORKER_TOOL].includes("休眠"), "ZH dormant");
+    assert.ok(TOOL_DESCRIPTIONS_ZH[STEER_WORKER_TOOL].includes("恢复"), "ZH resume");
+  });
+
+  it("the re-authored delivery copy no longer echoes the reference phrasing", () => {
+    for (const text of [
+      TOOL_DESCRIPTIONS[DELIVER_RESULT_TOOL],
+      buildStandingRulesBlock("en", "user"),
+      buildWakeInstructionsBlock("en", "user"),
+      buildWakeInstructionsBlock("en", "spawned"),
+    ]) {
+      assert.ok(!text.toLowerCase().includes("concrete thing"), text);
+    }
+    assert.ok(!buildWakeInstructionsBlock("en", "user").includes("it worked"));
+  });
+
+  it("the team-leader policy names workers, not a retired subagent verb", () => {
+    for (const language of POLICY_LANGUAGES) {
+      const policy = buildDispatcherPolicySection("spawned", 2, language);
+      assert.ok(!policy.toLowerCase().includes("subagent"), language);
+    }
+    assert.ok(buildDispatcherPolicySection("spawned").includes("worker"));
+  });
+
+  it("the peer wake renders its 'What to do now' heading exactly once", () => {
+    assert.equal(
+      countHeadings(assemblePeerWakeTurn([peerNote()]), "## What to do now"),
+      1,
+    );
+    assert.equal(
+      countHeadings(
+        assemblePeerWakeTurn([peerNote()], "en", "spawned"),
+        "## What to do now",
+      ),
+      1,
+    );
+    assert.equal(
+      countHeadings(
+        assemblePeerWakeTurn([workerReplyNote()], "en", "user"),
+        "## What to do now",
+      ),
+      1,
+    );
+  });
+
+  it("the peer wake omits the parenthetical when the sender name is its id", () => {
+    const text = assemblePeerWakeTurn([{ ...peerNote(), fromName: "peer-session-1" }]);
+    assert.ok(text.includes("### peer-session-1\n"), text);
+    assert.ok(!text.includes("peer-session-1 (peer-session-1)"), text);
+    // A real display name still keeps its address visible.
+    const named = assemblePeerWakeTurn([peerNote()]);
+    assert.ok(named.includes("### Peer A (peer-session-1)"), named);
+  });
+
+  it("worker-reply wakes use the team-leader variant: report upward, not to the user", () => {
+    const user = buildWorkerReplyWakeInstructionsBlock("en", "user");
+    assert.ok(user.includes("Tell the user when it changes"), "chief bytes preserved");
+    assert.ok(!user.includes("report it upward"));
+
+    const leader = buildWorkerReplyWakeInstructionsBlock("en", "spawned");
+    assert.ok(leader.includes("report it upward"), leader);
+    assert.ok(leader.includes(SUMMONING_DISPATCHER_ID_HANDOFF_LABEL), leader);
+    assert.ok(!leader.includes("Tell the user when it changes"), leader);
+
+    // The assembler threads the class into the block it selects.
+    const wake = assemblePeerWakeTurn([workerReplyNote()], "en", "spawned");
+    assert.ok(wake.includes("report it upward"), wake);
+    assert.ok(!wake.includes("Tell the user when it changes"), wake);
+    assert.equal(
+      assemblePeerWakeTurn([workerReplyNote()]),
+      assemblePeerWakeTurn([workerReplyNote()], "en", "user"),
+    );
   });
 });
 

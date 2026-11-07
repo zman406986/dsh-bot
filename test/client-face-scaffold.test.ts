@@ -19,6 +19,7 @@ import {LOCALE_NAMESPACE, localeDictionary, SHELL_OVERLAY_SLOT, validateLocaleDi
 import {CLIENT_MODULE_ID} from "../src/client/wrapper.js";
 import { buildClient } from "../scripts/build-client.js";
 import {ROOT_FRAME_SLOT} from "../src/client/shell-mount.js";
+import {SIDEBAR_TRAILING_SLOT} from "../src/client/session-kind.js";
 
 /**
  * Fake the client face the way the shipped Cordis runtime behaves:
@@ -346,15 +347,15 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
     // keys left with the capsule's deletion — ticket 89, 2026-09-19.)
     assert.deepEqual(keys, [
       "activation.presence-hint",
-      // Ticket 123: the session-kind glyph labels (accessible names on a
-      // 16px mark, never visible paragraph copy). Ticket 177 added the
-      // summoned-dispatcher class beside the human-started one.
       "indicator.dispatcher",
       "indicator.team-leader",
       "indicator.worker",
-      "roster.activity.toolcalls",
+      "roster.activity.toolcalls.one",
+      "roster.activity.toolcalls.other",
       "roster.empty",
-      "roster.finished.count",
+      "roster.fact.started",
+      "roster.finished.count.one",
+      "roster.finished.count.other",
       "roster.landed",
       "roster.loading",
       "roster.section.active",
@@ -372,28 +373,22 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
       "settings.card.failed",
       "settings.card.field.enabled.hint",
       "settings.card.field.enabled.label",
-      // Ticket 113 / ADR-0023: the file-inbox settings-card fields (one
-      // label/hint pair per schema field, in the same pairing rule).
       "settings.card.field.inboxDir.hint",
       "settings.card.field.inboxDir.label",
       "settings.card.field.inboxEnabled.hint",
       "settings.card.field.inboxEnabled.label",
       "settings.card.field.inboxRescanIntervalMs.hint",
       "settings.card.field.inboxRescanIntervalMs.label",
-      // Ticket 124: the microcompact switch (one label/hint pair per schema
-      // field, same pairing rule).
       "settings.card.field.microcompactEnabled.hint",
       "settings.card.field.microcompactEnabled.label",
-      // Ticket 145: the racoons trio replaces the old opt-in switch (one
-      // label/hint pair per schema field, same pairing rule).
       "settings.card.field.racoonsContextWindowTokens.hint",
       "settings.card.field.racoonsContextWindowTokens.label",
+      "settings.card.field.racoonsEnabled.hint",
+      "settings.card.field.racoonsEnabled.label",
       "settings.card.field.racoonsRecordOnly.hint",
       "settings.card.field.racoonsRecordOnly.label",
       "settings.card.field.racoonsStorageRoot.hint",
       "settings.card.field.racoonsStorageRoot.label",
-      // Ticket 108: the wake-coalescing window field (one label/hint pair
-      // per schema field, in the same pairing rule).
       "settings.card.field.wakeCoalesceWindowMs.hint",
       "settings.card.field.wakeCoalesceWindowMs.label",
       "settings.card.invalid",
@@ -403,24 +398,20 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
       "settings.card.save",
       "settings.card.title",
       "settings.card.unsaved",
-      // Ticket 81 (ADR-0020 slice 5): the approval cards' own chrome (the
-      // option labels, location line, expired copy, and secret-stored
-      // reassurance ride the projections as ticket 30's shipped copy —
-      // never re-keyed here) plus the dispatch card's gate label.
       "shell.approval.failed",
       "shell.approval.no-channel",
       "shell.approval.secret-promise",
       "shell.approval.submitted",
       "shell.approval.target",
       "shell.approval.unavailable",
-      // Ticket 77 (ADR-0020 slice 1): the wrapper shell's chrome copy.
-      // Ticket 80 (ADR-0020 slice 4): the conversation pane's copy.
       "shell.conv.attachment-only",
       "shell.conv.empty",
       "shell.conv.interrupted",
+      "shell.conv.message",
       "shell.conv.more",
       "shell.conv.no-channel",
       "shell.conv.role-assistant",
+      "shell.conv.role-peer",
       "shell.conv.role-user",
       "shell.conv.send",
       "shell.conv.send-failed",
@@ -431,10 +422,12 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
       "shell.conv.waiting",
       "shell.conv.working",
       "shell.conversation.pending",
-      "shell.dispatch.gating",
+      "shell.dispatch.refused",
+      "shell.dispatch.refused-generic",
+      "shell.dispatch.started",
+      "shell.dispatch.started-generic",
       "shell.empty",
       "shell.noselection",
-      // Ticket 68 (ADR-0018 in-scope area): the first-run onboarding beats.
       "shell.onboard.background.body",
       "shell.onboard.background.title",
       "shell.onboard.done",
@@ -451,27 +444,120 @@ describe("client face scaffold — locale dictionary (Finding 6)", () => {
       "shell.onboard.tools.body",
       "shell.onboard.tools.title",
       "shell.row.copy-id",
-      "shell.row.finished",
-      "shell.row.needs-you",
+      "shell.row.finished.one",
+      "shell.row.finished.other",
+      "shell.row.needs-you.one",
+      "shell.row.needs-you.other",
       "shell.row.presence-unavailable",
-      "shell.row.working",
+      "shell.row.working.one",
+      "shell.row.working.other",
+      "shell.seat.failed",
       "shell.sidebar.label",
       "shell.title",
+      "status.adjusting",
+      "status.done",
+      "status.failed",
+      "status.starting",
+      "status.stopped",
+      "status.working",
+      "toolview.await.done",
+      "toolview.await.failed",
+      "toolview.await.gone",
+      "toolview.await.pending",
+      "toolview.await.refused",
+      "toolview.await.released",
+      "toolview.await.stopped",
+      "toolview.await.working",
+      "toolview.cause.already-settled",
+      "toolview.cause.duplicate-stream-key",
+      "toolview.cause.failed",
+      "toolview.cause.host-refused",
+      "toolview.cause.inbox-full",
+      "toolview.cause.invalid-args",
+      "toolview.cause.invalid-envelope",
+      "toolview.cause.invalid-timeout",
+      "toolview.cause.message-id-reuse",
+      "toolview.cause.no-delivery-channel",
+      "toolview.cause.not-awaitable",
+      "toolview.cause.not-running",
+      "toolview.cause.rate-limited",
+      "toolview.cause.self-target",
+      "toolview.cause.send-failed",
+      "toolview.cause.todo-already-linked",
+      "toolview.cause.too-many-waits",
+      "toolview.cause.unknown-agent",
+      "toolview.cause.unknown-dispatcher",
+      "toolview.cause.unknown-todo",
+      "toolview.cause.unknown-todo-id",
+      "toolview.cause.unknown-worker",
+      "toolview.check.pending",
+      "toolview.check.refused",
+      "toolview.check.summary.none",
+      "toolview.check.summary.one",
+      "toolview.check.summary.other",
       "toolview.degraded",
-      "toolview.field.agent",
-      "toolview.field.attachments",
-      "toolview.field.delivered",
-      "toolview.field.delivered-as",
-      "toolview.field.dispatcher",
-      "toolview.field.outcome",
-      "toolview.field.peer",
-      "toolview.field.priority",
-      "toolview.field.status",
-      "toolview.field.steer",
-      "toolview.field.stream",
-      "toolview.field.title",
-      "toolview.field.todo",
-      "toolview.field.worker",
+      "toolview.deliver.done",
+      "toolview.deliver.pending",
+      "toolview.deliver.recorded",
+      "toolview.deliver.refused",
+      "toolview.detail.call",
+      "toolview.detail.dispatcher",
+      "toolview.detail.elapsed",
+      "toolview.detail.message",
+      "toolview.detail.mode",
+      "toolview.detail.reason",
+      "toolview.detail.settled",
+      "toolview.detail.status",
+      "toolview.detail.stream",
+      "toolview.detail.target",
+      "toolview.detail.todo",
+      "toolview.detail.transcript",
+      "toolview.detail.waited",
+      "toolview.detail.worker",
+      "toolview.details",
+      "toolview.dispatcher.pending",
+      "toolview.dispatcher.pending-generic",
+      "toolview.dispatcher.refused",
+      "toolview.dispatcher.refused-generic",
+      "toolview.dispatcher.summoned",
+      "toolview.dispatcher.summoned-generic",
+      "toolview.fact.attachments.one",
+      "toolview.fact.attachments.other",
+      "toolview.fact.dormant",
+      "toolview.fact.keeps-running",
+      "toolview.fact.priority",
+      "toolview.fact.released-stream",
+      "toolview.fact.todo-completed",
+      "toolview.fact.todo-marked-done",
+      "toolview.fact.todo-marked-done-ref",
+      "toolview.fact.turn-stopped",
+      "toolview.fact.user-spoke",
+      "toolview.fact.via-peer",
+      "toolview.fact.via-steer",
+      "toolview.fact.waited",
+      "toolview.message.pending",
+      "toolview.message.refused",
+      "toolview.message.sent",
+      "toolview.peer.pending",
+      "toolview.peer.refused",
+      "toolview.peer.sent",
+      "toolview.spawn.pending",
+      "toolview.spawn.pending-generic",
+      "toolview.spawn.refused",
+      "toolview.spawn.refused-generic",
+      "toolview.spawn.started",
+      "toolview.spawn.started-generic",
+      "toolview.steer.pending",
+      "toolview.steer.refused",
+      "toolview.steer.sent",
+      "toolview.stop.pending",
+      "toolview.stop.refused",
+      "toolview.stop.released",
+      "toolview.stop.stopped",
+      "toolview.subject.agent",
+      "toolview.subject.dispatcher",
+      "toolview.subject.todo",
+      "toolview.subject.worker",
     ]);
     assert.deepEqual(Object.keys(localeDictionary.zh).sort(), keys);
     assert.ok(localeDictionary.en["roster.title"]?.length > 0);
@@ -516,6 +602,35 @@ describe("client face scaffold — apply over fake client seams", () => {
       (candidate) => candidate.parent === SHELL_OVERLAY_SLOT,
     );
     assert.equal(overlay, undefined, "no shell.overlay inject post-cutover");
+  });
+
+  it("the one layout seat is the trailing sidebar cell, never the leading one", () => {
+    // ADR-0024's rider licenses exactly one additive registration; the
+    // 2026-11-06 human ruling moved it to `sidebar.session.row.trailing`
+    // because `sidebar.session.row.leading` is replaced by the row's own
+    // status dot whenever the row is not idle
+    // (`dsh-client-ui-workspace/lib/client.js:2608`), while the trailing seat
+    // renders beside that dot (`:2634`, contract
+    // `.../contract/slots.d.ts:148-161`).
+    const ctx = createClientCtx();
+    apply(ctx);
+
+    const sidebar = ctx.injects.filter((candidate) =>
+      candidate.parent.startsWith("sidebar.session.row."),
+    );
+    assert.deepEqual(
+      sidebar.map((candidate) => candidate.parent),
+      [SIDEBAR_TRAILING_SLOT],
+      "exactly one sidebar-row seat, and it is the trailing one",
+    );
+    assert.equal(
+      ctx.injects.some(
+        (candidate) => candidate.parent === "sidebar.session.row.leading",
+      ),
+      false,
+      "the status-gated leading cell is left to the product",
+    );
+    assert.equal(sidebar[0]?.entries.length, 1);
   });
 
   it("fiber teardown (HMR/unload) reverses the namespace and the entry; re-apply restores", () => {
@@ -579,6 +694,20 @@ describe("client face scaffold — host inject guard semantics (ticket 84)", () 
     // client settings-scope watch left with dsh 0.2.1, and the settings page's
     // form arrives through the slot owner props.
     assert.deepEqual(ctx.injectRequests, []);
+  });
+
+  it("declares only the faces the LIVE entries read (the dormant shell resolves its own)", () => {
+    // The live composition is the locale namespace, the nine tool views, the
+    // settings card, and the sidebar glyph: all of them read `slots`/`locale`
+    // only. A module-level requirement on sessions/remote/conversation/
+    // configForms held those entries hostage to clients that may be absent
+    // (the live defect this pin prevents), so those faces must NOT appear.
+    assert.deepEqual([...clientInject].sort(), ["locale", "slots"]);
+    // And the strict host (where every undeclared read throws) still applies
+    // without any of those providers: nothing in `apply` touches them.
+    const ctx = createStrictHostCtx();
+    assert.doesNotThrow(() => apply(ctx));
+    assert.equal(ctx.injects.length, 3, "toolviews + settings card + glyph");
   });
 
   // (The staging launcher's layout-cell test left with the launcher's

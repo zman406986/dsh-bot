@@ -15,7 +15,17 @@ import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {atomicWriteFile, claimInboxJob, readInboxQueue, startInboxWatcher, writeInboxCancelled, writeInboxFailed, writeInboxReply, type InboxQueueEntry, type InboxWatcherHandle} from "../src/adapter/inbox-watcher.js";
+import {
+  atomicWriteFile,
+  claimInboxJob,
+  readInboxQueue,
+  startInboxWatcher,
+  writeInboxCancelled,
+  writeInboxFailed,
+  writeInboxReply,
+  type InboxQueueEntry,
+  type InboxWatcherHandle,
+} from "../src/adapter/inbox-watcher.js";
 
 /** Manual scheduler: timers are recorded, never real. */
 function createManualSchedule() {
@@ -140,6 +150,7 @@ describe("inbox watcher — job-dir writes (ticket 113, ADR-0023)", () => {
         jobId: "j-1",
         dir: join(root, "j-1"),
         text: "work",
+        source: "queue.jsonl",
         images: [],
       };
       await claimInboxJob(entry, 1234);

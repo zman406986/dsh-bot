@@ -28,6 +28,19 @@ export interface SendMessageCall {
   message: string;
 }
 
+/**
+ * One interrupt attempt with the authority answer the live adapter would
+ * compute. The real host resolves the worker's spawning dispatcher and
+ * REJECTS when none is bound (`cordis-dsh-host.ts` `interruptWorker`:
+ * "no parent agent bound for worker ...; the interrupt was not issued"), so
+ * `authorityAvailable: false` is the honest record of an attempt that
+ * recorded the call but never reached `ctx.subagents.interrupt`.
+ */
+export interface InterruptCall {
+  workerId: string;
+  authorityAvailable: boolean;
+}
+
 /** Ticket 116: one wake request with its optional structured origin. */
 export interface WakeOriginCall {
   sessionId: string;
@@ -49,7 +62,22 @@ export class FakeDshHost implements DshHost {
    */
   readonly dispatcherSpawnCalls: DispatcherSpawnCall[] = [];
   readonly interruptCalls: string[] = [];
+  /**
+   * One row per interrupt attempt, with the answer the live adapter's
+   * authority guard would give. `interruptCalls` stays the string list the
+   * existing core tests assert; this is the fidelity surface beside it.
+   */
+  readonly interruptAuthorityCalls: InterruptCall[] = [];
+  /**
+   * Opt-in: worker ids the host has no live spawning dispatcher for — the
+   * restart case. `interruptWorker` still records the attempt, then rejects
+   * with the live adapter's missing-parent error instead of claiming a stop
+   * that was never issued.
+   */
+  readonly noInterruptAuthority = new Set<string>();
   readonly sendMessageCalls: SendMessageCall[] = [];
+  /** Attempts that rejected, with the error the caller saw. */
+  readonly sendMessageFailures: Array<SendMessageCall & { error: unknown }> = [];
   readonly wakeCalls: string[] = [];
   /**
    * Ticket 116: every wake request with its optional structured origin.
@@ -76,6 +104,8 @@ export class FakeDshHost implements DshHost {
 
   #settledCallbacks: Array<(event: SettledEvent) => void> = [];
   #stepBoundaryCallbacks: Array<(workerId: string) => void | Promise<void>> = [];
+  /** Opt-in one-shot `sendMessage` failure, consumed by the next call. */
+  #nextSendMessageFailure: { error: unknown } | null = null;
   #nextId = 1;
   /**
    * Ticket 118: dispatcher ids use their OWN sequence so adding a dispatcher
@@ -101,6 +131,19 @@ export class FakeDshHost implements DshHost {
   async spawnDispatcher(
     opts: DispatcherSpawnOptions,
   ): Promise<DispatcherSpawnResult> {
+    // The core type makes the parent mandatory: a dispatcher exists only as a
+    // peer summoned FROM a dispatcher session. A missing/empty parent is not a
+    // spawn the live host could serve — its bound-parent lookup throws — so
+    // the fake refuses it by name instead of minting an orphan id.
+    if (
+      typeof opts?.parentSessionId !== "string" ||
+      opts.parentSessionId.trim() === ""
+    ) {
+      throw new Error(
+        "FakeDshHost: spawnDispatcher requires a non-empty parentSessionId " +
+          "(the core type forbids a missing parent)",
+      );
+    }
     const dispatcherId = `fake-dispatcher-${this.#nextDispatcherId++}`;
     this.dispatcherSpawnCalls.push({ opts, dispatcherId });
     return { dispatcherId };
@@ -108,10 +151,43 @@ export class FakeDshHost implements DshHost {
 
   async interruptWorker(workerId: string): Promise<void> {
     this.interruptCalls.push(workerId);
+    const authorityAvailable = !this.noInterruptAuthority.has(workerId);
+    this.interruptAuthorityCalls.push({ workerId, authorityAvailable });
+    // Live adapter: no bound spawning dispatcher => the interrupt is not
+    // issued, and the call REJECTS instead of claiming success. The core has
+    // already marked the worker terminal and catches this (the committed
+    // abort still returns `{ok:true}`), so the refusal is observable without
+    // reviving the worker.
+    if (!authorityAvailable) {
+      throw new Error(
+        `CordisDshHost: no parent agent bound for worker ${workerId}; the interrupt was not issued`,
+      );
+    }
   }
 
   async sendMessage(workerId: string, message: string): Promise<void> {
-    this.sendMessageCalls.push({ workerId, message });
+    const call: SendMessageCall = { workerId, message };
+    this.sendMessageCalls.push(call);
+    const failure = this.#nextSendMessageFailure;
+    if (failure !== null) {
+      this.#nextSendMessageFailure = null;
+      this.sendMessageFailures.push({ ...call, error: failure.error });
+      throw failure.error;
+    }
+  }
+
+  /**
+   * Opt-in: reject the NEXT `sendMessage`, modelling the live adapter's
+   * "no parent agent bound; cannot send" throw. Consumed once, so a later
+   * send succeeds unless the test asks again — the default path stays the
+   * pre-existing success behaviour every core test relies on.
+   */
+  failNextSendMessage(
+    error: unknown = new Error(
+      "CordisDshHost: no parent agent bound; cannot send",
+    ),
+  ): void {
+    this.#nextSendMessageFailure = { error };
   }
 
   /** Ticket 142: the core's wake seam for a dormant, durably marked worker. */

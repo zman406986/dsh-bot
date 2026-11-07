@@ -53,8 +53,12 @@ function createBus(): Recorder {
   const interrupted: string[] = [];
   const drainedSources: string[] = [];
   const bus = createWakeBus({
-    onDeliver: (id) => delivered.push(id),
-    onInterrupt: (id) => interrupted.push(id),
+    onDeliver: (id) => {
+      delivered.push(id);
+    },
+    onInterrupt: (id) => {
+      interrupted.push(id);
+    },
     onDrain: (event) => drainedSources.push(event.source),
   });
   return { delivered, interrupted, drainedSources, bus };
@@ -495,5 +499,33 @@ describe("wake bus — turn ownership", () => {
     const { bus } = createBus();
     bus.noteTurnStarted(SESSION);
     assert.equal(bus.getTurnOwner(SESSION), "user");
+  });
+
+  it("cancelTurn clears the turn and ready wake without flushing or delivering", () => {
+    const { bus, delivered } = createBus();
+    // Mid-turn work queued for a turn that is ending with the activation.
+    bus.noteTurnStarted(SESSION);
+    bus.enqueueWorkerSettled({
+      parentSessionId: SESSION,
+      ...settled("w-mid"),
+    });
+    assert.deepEqual(delivered, []);
+
+    bus.cancelTurn(SESSION);
+    assert.equal(bus.isBusy(SESSION), false);
+    assert.equal(bus.getTurnOwner(SESSION), null);
+    assert.equal(bus.peek(SESSION), undefined);
+    assert.deepEqual(delivered, [], "cancelTurn never opens a turn");
+
+    // An already-ready wake is cleared without being re-delivered.
+    bus.enqueueWorkerSettled({
+      parentSessionId: "idle-session",
+      ...settled("w-ready"),
+    });
+    assert.deepEqual(delivered, ["idle-session"]);
+    assert.ok(bus.peek("idle-session"));
+    bus.cancelTurn("idle-session");
+    assert.equal(bus.peek("idle-session"), undefined);
+    assert.deepEqual(delivered, ["idle-session"]);
   });
 });

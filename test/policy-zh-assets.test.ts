@@ -220,8 +220,8 @@ describe("remaining model-facing copy — ZH face (ticket 153 step 2)", () => {
       [keyof typeof BLOCKS, (typeof BLOCKS)[keyof typeof BLOCKS]]
     >) {
       for (const origin of ["user", "spawned"] as const) {
-        const en = block(EN, origin);
-        const zh = block(ZH, origin);
+        const en: string = block(EN, origin);
+        const zh: string = block(ZH, origin);
         const where = `${name}/${origin}`;
         assert.equal(
           zh.split("\n").length,

@@ -77,10 +77,14 @@ function createStubCtx(options: {
       return { kind: "enter", messages: [] };
     };
     for (const listener of list) {
-      result = await (listener as (p: unknown, n: () => Promise<unknown>) => unknown)(
-        payload,
-        next,
-      );
+      // Listeners are stored in the host's `(...args: never[])` shape; this
+      // fake drives the wide two-argument microcompact callback by hand.
+      result = await (
+        listener as unknown as (
+          p: unknown,
+          n: () => Promise<unknown>,
+        ) => unknown
+      )(payload, next);
     }
     if (!nextCalled) return result;
     return result;
@@ -319,13 +323,13 @@ describe("microcompact plugin wiring (ticket 124)", () => {
     assert.equal(dict.microcompactEnabled?.meta?.default, false);
   });
 
-  it("adds NO pre-step listener when the field is off (the racoons mount's own one stays)", () => {
+  it("adds NO pre-step listener when the field is off (racoons off adds none either)", () => {
     const ctx = createStubCtx({ tokenMeter: createMeter(999_999_999) });
     apply(ctx as never, volatileConfig({ enabled: true }));
-    // Ticket 145: the racoons mount is unconditional inside the enabled path
-    // and registers its own `agent/pre-step` boundary listener, so the count
-    // is exactly that one — microcompact contributes nothing while off.
-    assert.equal((ctx.listeners.get("agent/pre-step") ?? []).length, 1);
+    // Owner ruling 2026-11-05: racoons is off by default, so its `agent/pre-step`
+    // boundary listener is absent too. Microcompact contributes nothing while
+    // off, so the default product registers no pre-step listener at all.
+    assert.equal((ctx.listeners.get("agent/pre-step") ?? []).length, 0);
     assert.doesNotThrow(() => {
       for (const dispose of ctx.disposers) dispose();
     });
@@ -337,8 +341,8 @@ describe("microcompact plugin wiring (ticket 124)", () => {
       ctx as never,
       volatileConfig({ enabled: true, microcompactEnabled: true }),
     );
-    // The racoons boundary listener + this pass's own.
-    assert.equal((ctx.listeners.get("agent/pre-step") ?? []).length, 2);
+    // This pass's own listener; racoons is off by default.
+    assert.equal((ctx.listeners.get("agent/pre-step") ?? []).length, 1);
     for (const dispose of ctx.disposers) dispose();
     assert.equal((ctx.listeners.get("agent/pre-step") ?? []).length, 0);
   });

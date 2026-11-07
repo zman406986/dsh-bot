@@ -46,6 +46,8 @@ import {
 } from "./peer-types.js";
 import {
   formatCheckSummary,
+  formatDeliverResultRecorded,
+  formatDeliverResultUnknownTarget,
   formatMessageAgentRateLimited,
   formatMessageAgentRefusal,
   formatMessageAgentSteerNote,
@@ -54,6 +56,8 @@ import {
   formatPeerSendAck,
   formatSpawnAck,
   formatSpawnDispatcherNote,
+  formatStopHoldReleaseFailedNote,
+  formatUnknownWorkerDetail,
   formatSteerNote,
   formatStopNote,
   formatStopUnknownStateNote,
@@ -161,9 +165,10 @@ export interface DispatcherToolDeps {
   /** Dispatcher parent session id. */
   readonly getSessionId: () => string | null;
   /**
-   * User-facing send. When omitted, deliver_result still marks the todo
-   * delivered and returns ok — the wake turn itself is already user-visible
-   * via the host followup path.
+   * User-facing send. When omitted, delivery is conversational (ADR-0009):
+   * the dispatcher's own reply is the channel, so `deliver_result` marks the
+   * todo delivered and returns `channel: "reply"` telling the model to state
+   * the result in that reply. It never claims the user already saw it.
    */
   readonly deliverToUser?: DeliverToUserFn;
   /** Optional recent-activity resolver for check rows. */
@@ -997,7 +1002,7 @@ export function createDispatcherTools(
           return {
             ok: false,
             reason: "unknown-worker",
-            detail: `unknown worker: ${workerId}`,
+            detail: formatUnknownWorkerDetail(workerId),
           };
         }
         const summaries = multitask.listWorkers(parentSessionId);
@@ -1006,7 +1011,7 @@ export function createDispatcherTools(
           return {
             ok: false,
             reason: "unknown-worker",
-            detail: `unknown worker: ${workerId}`,
+            detail: formatUnknownWorkerDetail(workerId),
           };
         }
         const row = toCheckRow(
@@ -1055,8 +1060,23 @@ export function createDispatcherTools(
       },
     },
     async execute(args): Promise<SteerWorkerToolResult> {
+      const sessionId = requireSessionId();
       const workerId = requireString(args, "worker_id");
       const message = requireString(args, "message");
+      // Foreign-worker fence (same silent shape as `message_agent`): a worker
+      // this session does not own — live OR dormant — must read exactly like a
+      // nonexistent id, or the refusal would leak that it exists. The core's
+      // `steerWorker` has no caller-session argument, so the fence lives here.
+      const owner =
+        multitask.getWorker(workerId)?.parentSessionId ??
+        multitask.durableWorkerParent(workerId);
+      if (owner !== undefined && owner !== sessionId) {
+        return {
+          ok: false,
+          reason: "unknown-worker",
+          detail: formatUnknownWorkerDetail(workerId),
+        };
+      }
       const result = await multitask.steerWorker(workerId, message);
       if (!result.ok) {
         return {
@@ -1065,9 +1085,13 @@ export function createDispatcherTools(
           detail: result.detail,
         };
       }
-      const title = multitask.getWorker(workerId)?.title ?? workerId;
+      const record = multitask.getWorker(workerId);
+      const title = record?.title ?? workerId;
       return {
         ok: true,
+        worker_id: workerId,
+        ...(record !== undefined ? { title: record.title } : {}),
+        ...(result.dormant === true ? { dormant: true as const } : {}),
         // Ticket 142: a dormant worker's session is being resumed, so the
         // "next step boundary" copy would be false for it.
         note:
@@ -1089,36 +1113,60 @@ export function createDispatcherTools(
       },
     },
     async execute(args): Promise<StopWorkerToolResult> {
+      const sessionId = requireSessionId();
       const workerId = requireString(args, "worker_id");
       const record = multitask.getWorker(workerId);
+      // Foreign-worker fence: a live worker owned by another dispatcher must
+      // read exactly like a nonexistent id, or the refusal would leak that it
+      // exists. Checked BEFORE `abortWorker`, which is session-agnostic.
+      if (record !== undefined && record.parentSessionId !== sessionId) {
+        return {
+          ok: false,
+          reason: "already-settled",
+          detail: formatUnknownWorkerDetail(workerId),
+        };
+      }
       if (record === undefined) {
         // Ticket 59: a worker that was live at crash time is deliberately not
         // on the roster, but it still holds its stream key. Stopping it is the
         // dispatcher's way of abandoning that stream — the hold's documented
         // escape hatch, and the only action the restart notice points at.
         // Session-scoped, so one session can never release another's stream.
-        const sessionId = getSessionId();
-        const hold =
-          sessionId === null
-            ? undefined
-            : multitask
-                .listUnknownStateHolds(sessionId)
-                .find((held) => held.workerId === workerId);
+        const hold = multitask
+          .listUnknownStateHolds(sessionId)
+          .find((held) => held.workerId === workerId);
         if (hold !== undefined) {
-          const released = await multitask.releaseUnknownStateHold(workerId);
-          if (released) {
+          // The outcome shape distinguishes "nothing was held" (a concurrent
+          // release) from "the store refused the drop". The boolean shape
+          // collapsed both into false, which made a known hold read as an
+          // unknown worker while its stream key stayed occupied.
+          const release =
+            await multitask.releaseUnknownStateHoldOutcome(workerId);
+          if (release.ok) {
             return {
               ok: true,
+              worker_id: workerId,
+              mode: "released-hold",
               note: formatStopUnknownStateNote(workerId, hold.streamKey),
             };
           }
+          if (release.reason === "hold-release-failed") {
+            return {
+              ok: false,
+              reason: "hold-release-failed",
+              detail: formatStopHoldReleaseFailedNote(workerId),
+            };
+          }
+          // `not-held`: the hold disappeared between the listing and the
+          // release. Fall through to the ordinary refusal — nothing was
+          // released by this call.
         }
         // abortWorker throws on unknown; map to already-settled-shaped refusal
         // so the model gets a clean tool result rather than an exception.
         return {
           ok: false,
           reason: "already-settled",
-          detail: `unknown worker: ${workerId}`,
+          detail: formatUnknownWorkerDetail(workerId),
         };
       }
       const result = await multitask.abortWorker(workerId);
@@ -1129,7 +1177,13 @@ export function createDispatcherTools(
           detail: result.detail,
         };
       }
-      return { ok: true, note: formatStopNote() };
+      return {
+        ok: true,
+        worker_id: workerId,
+        title: record.title,
+        mode: "stopped",
+        note: formatStopNote(),
+      };
     },
   };
 
@@ -1144,13 +1198,13 @@ export function createDispatcherTools(
           type: "string",
           required: true,
           description:
-            "What the user sees. Lead with the concrete finished thing.",
+            "What the user sees. Start with the specific outcome.",
         },
         todo_id: {
           type: "string",
           required: false,
           description:
-            "Ledger entry to mark completed after this send succeeds.",
+            "Ledger entry to mark completed once this result is recorded for the user.",
         },
         attachment_paths: {
           type: "array",
@@ -1162,22 +1216,82 @@ export function createDispatcherTools(
       },
     },
     async execute(args): Promise<DeliverResultToolResult> {
+      const sessionId = requireSessionId();
       const text = requireString(args, "text");
       const todoId = optionalString(args, "todo_id");
       const attachmentPaths = optionalStringArray(args, "attachment_paths");
 
-      let delivered = true;
-      let detail: string | undefined;
-      if (deps.deliverToUser !== undefined) {
-        try {
-          delivered = await deps.deliverToUser(
-            text,
-            attachmentPaths === undefined ? undefined : attachmentPaths,
-          );
-        } catch (error) {
-          delivered = false;
-          detail = error instanceof Error ? error.message : String(error);
+      // Ledger fence (same silent shape as `message_agent`): a todo owned by
+      // another dispatcher must read exactly like a typo, and must never be
+      // marked delivered by this session. Checked before any send so a foreign
+      // id cannot close another session's obligation.
+      let todoTitle: string | undefined;
+      if (todoId !== undefined) {
+        const entry = multitask.todos.get(todoId);
+        if (entry === undefined || entry.sessionId !== sessionId) {
+          return {
+            ok: false,
+            delivered: false,
+            todo_completed: null,
+            reason: "unknown-target",
+            detail: formatDeliverResultUnknownTarget(todoId),
+          };
         }
+        todoTitle = entry.title;
+      }
+
+      // ADR-0009: delivery is conversational. The shipped plugin wires no
+      // separate user-facing send, so the dispatcher's own reply IS the
+      // channel: the obligation closes here (markDelivered, which also fires
+      // the inbox `replied` hook), and the result tells the model to state it
+      // in that reply. It never claims the user has already seen it.
+      if (deps.deliverToUser === undefined) {
+        let todoCompleted: string | null = null;
+        if (todoId !== undefined) {
+          // Ticket 113: the delivered text rides to the core so an
+          // inbox-origin item's reply writer can land it in the job dir
+          // (reply.md) — the dispatcher's reply is the channel.
+          const marked = multitask.markDelivered(todoId, text);
+          if (!marked) {
+            return {
+              ok: false,
+              delivered: false,
+              todo_completed: null,
+              reason: "send-failed",
+              detail: `todo ${todoId} could not be marked delivered, so the obligation is still open; state the result in your reply anyway.`,
+            };
+          }
+          todoCompleted = todoId;
+        }
+        const attachmentsNotSent =
+          attachmentPaths === undefined ? 0 : attachmentPaths.length;
+        return {
+          ok: true,
+          delivered: true,
+          channel: "reply",
+          todo_completed: todoCompleted,
+          ...(todoTitle !== undefined ? { todo_title: todoTitle } : {}),
+          ...(attachmentsNotSent > 0
+            ? { attachments_not_sent: attachmentsNotSent }
+            : {}),
+          detail: formatDeliverResultRecorded({
+            ...(todoCompleted !== null ? { todoId: todoCompleted } : {}),
+            ...(todoTitle !== undefined ? { todoTitle } : {}),
+            ...(attachmentsNotSent > 0 ? { attachmentsNotSent } : {}),
+          }),
+        };
+      }
+
+      let delivered = false;
+      let detail: string | undefined;
+      try {
+        delivered = await deps.deliverToUser(
+          text,
+          attachmentPaths === undefined ? undefined : attachmentPaths,
+        );
+      } catch (error) {
+        delivered = false;
+        detail = error instanceof Error ? error.message : String(error);
       }
 
       if (!delivered) {
@@ -1185,6 +1299,7 @@ export function createDispatcherTools(
           ok: false,
           delivered: false,
           todo_completed: null,
+          reason: "send-failed",
           ...(detail !== undefined ? { detail } : {}),
         };
       }
@@ -1203,7 +1318,9 @@ export function createDispatcherTools(
       return {
         ok: true,
         delivered: true,
+        channel: "send",
         todo_completed: todoCompleted,
+        ...(todoTitle !== undefined ? { todo_title: todoTitle } : {}),
         ...(detail !== undefined ? { detail } : {}),
       };
     },
@@ -1355,6 +1472,7 @@ export function createDispatcherTools(
           target,
           delivered_as: "steer",
           message_id: messageId,
+          ...(result.dormant === true ? { dormant: true as const } : {}),
           // Ticket 142: a dormant worker gets honest copy — its session is
           // being resumed and the text arrives as its next message, so the
           // "next step boundary" promise a live steer makes would be false.

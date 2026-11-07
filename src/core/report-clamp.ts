@@ -5,7 +5,7 @@
  */
 
 /**
- * Max characters of a completed worker report body in a wake notice.
+ * Max characters of the KEPT completed-report text in a wake notice.
  *
  * Ticket 63 / register A-7: the reference has **no** equivalent bound — it
  * substitutes only for empty/aborted/error settles, never truncates — so there
@@ -13,6 +13,11 @@
  * The body is the bound that matters most: the wake notice is the dispatcher's
  * only source for the user's answer, so clamping too low silently destroys a
  * real deliverable mid-sentence.
+ *
+ * The bound applies to the report text itself. The truncation marker is
+ * appended AFTER the kept prefix, so the rendered notice can exceed this value
+ * by the marker's length (which carries the shown/total counts and an optional
+ * transcript pointer). The prefix is never shortened to make room for it.
  */
 export const REPORT_CLAMP_CHARS = 4000;
 
@@ -73,30 +78,81 @@ export function clampReport(
   return `${kept}${truncationMarker(limit, text.length, transcriptRef)}`;
 }
 
-/** Clamp an error message body. Empty → a minimal error note. */
+/**
+ * The worker-report normalizer's sentinel for an error settle with no text
+ * (`src/worker/report.ts`). The adapter normalizes before wake composition, so
+ * the sentinel can arrive here as ordinary-looking report text; it carries no
+ * failure detail and must be phrased as absent text, not echoed as a message.
+ */
+const EMPTY_ERROR_MARKER = "worker failed with no message";
+
+/**
+ * Status-aware substitute for an error settle that carried no message text.
+ * Spelled out as a sentence because it stands alone in the wake notice; the
+ * transcript pointer is included only when the caller actually has one.
+ */
+export function emptyErrorReportBody(
+  transcriptRef: string | null = null,
+): string {
+  const pointer =
+    transcriptRef !== null && transcriptRef.length > 0
+      ? ` Full transcript: ${transcriptRef}`
+      : "";
+  return `Worker failed. No error message was recorded.${pointer}`;
+}
+
+/** Clamp an error message body. Empty → an honest no-message note. */
 export function clampError(
   raw: string | null | undefined,
   options?: { limit?: number },
 ): string {
   const limit = options?.limit ?? ERROR_CLAMP_CHARS;
   const text = (raw ?? "").trim();
-  if (text.length === 0) return "worker failed with no message";
+  if (text.length === 0) return "No error message was recorded.";
   if (text.length <= limit) return text;
   return `${text.slice(0, limit)}…\n[error truncated: ${limit} of ${text.length} characters.]`;
 }
 
 /**
  * Full wake-context body for one settled worker, by status.
- * Aborted → no report body (bookkeeping only).
+ *
+ * Status-aware on purpose: an error settle with no text must say that no error
+ * message was recorded (and point at the transcript only when one exists), not
+ * reuse the completed-report placeholder or the bare clamp fallback.
+ *
+ * Aborted is status-aware too: the placeholder is right only when there is no
+ * stored text (empty, or the completed-report placeholder a normalized empty
+ * settle carries). An aborted worker that DID produce findings keeps them,
+ * labelled as partial — discarding them throws away the only answer the
+ * dispatcher can report. The label prevents partial work from reading as a
+ * completed deliverable.
  */
 export function formatWakeReportBody(
   status: "completed" | "error" | "aborted",
   report: string | null | undefined,
   transcriptRef: string | null = null,
 ): string {
-  if (status === "aborted") return abortedReportBody();
+  if (status === "aborted") {
+    const text = (report ?? "").trim();
+    if (
+      text.length === 0 ||
+      text === emptyReportPlaceholder() ||
+      text === abortedReportBody()
+    ) {
+      return abortedReportBody();
+    }
+    return `Worker stopped before completion. Partial report:\n${clampReport(text, { transcriptRef })}`;
+  }
   if (status === "error") {
-    return `Worker failed:\n${clampError(report)}`;
+    const text = (report ?? "").trim();
+    if (
+      text.length === 0 ||
+      text === emptyReportPlaceholder() ||
+      text === EMPTY_ERROR_MARKER
+    ) {
+      return emptyErrorReportBody(transcriptRef);
+    }
+    return `Worker failed:\n${clampError(text)}`;
   }
   return clampReport(report, { transcriptRef });
 }

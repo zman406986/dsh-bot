@@ -9,10 +9,12 @@
  * same presentation-only discipline as the shell and roster panel.
  *
  * Scope honesty (AC + exceptions):
- * - text-only: user + assistant turns, streaming-in-place assistant text,
- *   tool activity as collapsible per-tool rows re-hosting ticket 24's
- *   toolview parsers. U-B excludes rich ergonomics; U-C excludes timeline
- *   cards; U-E keeps delivery text-only.
+ * - text-only: user + assistant turns, peer-relay turns (another dispatcher's
+ *   message, labelled with its sender — user-role on the wire, never rendered
+ *   as the user's own words), streaming-in-place assistant text, tool
+ *   activity as collapsible per-tool rows re-hosting ticket 24's toolview
+ *   parsers. U-B excludes rich ergonomics; U-C excludes timeline cards; U-E
+ *   keeps delivery text-only.
  * - the composer is a plain textarea + send: NO draft persistence of any
  *   kind (component state only; switching sessions remounts it and the
  *   draft is gone — recorded, never simulated: ADR-0018 U-B), no attachments
@@ -37,11 +39,11 @@
  * build + typecheck (S8); the store/projection/composer logic is asserted
  * offline in the test suite.
  */
-import { useState } from "react";
+import { useId, useRef, useState } from "react";
 import { useSyncExternalStore } from "react";
 import type { JSX } from "react";
 import type { TranslateFn } from "./overlay.js";
-import { TOOLVIEW_DEGRADED_KEY, type ToolviewModel } from "./toolviews.js";
+import { ToolviewBody } from "./toolview-panel.js";
 import { DispatchCardView } from "./dispatch-card-view.js";
 import type {
   ConversationItem,
@@ -74,12 +76,7 @@ export const CONVERSATION_CSS = `
 .${CONVERSATION_CLASS}__tool{font-size:12px;min-width:0}
 .${CONVERSATION_CLASS}__tool-head{display:flex;gap:6px;align-items:baseline;min-width:0}
 .${CONVERSATION_CLASS}__tool-name{font-weight:600;opacity:.85;overflow-wrap:anywhere}
-.${CONVERSATION_CLASS}__tool-body{display:flex;flex-direction:column;gap:3px;padding:4px 0 2px 12px;opacity:.85}
-.${CONVERSATION_CLASS}__field{display:flex;gap:6px;min-width:0}
-.${CONVERSATION_CLASS}__field-label{flex:none;color:var(--dsw-alias-label-tertiary)}
-.${CONVERSATION_CLASS}__field-value{overflow-wrap:anywhere}
-.${CONVERSATION_CLASS}__rows{list-style:none;margin:2px 0 0;padding:0;display:flex;flex-direction:column;gap:3px}
-.${CONVERSATION_CLASS}__row{display:flex;gap:6px;flex-wrap:wrap;min-width:0}
+.${CONVERSATION_CLASS}__tool-body{display:flex;flex-direction:column;gap:3px;padding:4px 0 2px 12px;opacity:.85;min-width:0}
 .${CONVERSATION_CLASS}__composer{display:flex;flex-direction:column;gap:6px;padding:10px 14px;border-top:1px solid var(--dsw-alias-border-l3)}
 .${CONVERSATION_CLASS}__input{width:100%;box-sizing:border-box;min-height:60px;resize:vertical;padding:8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-1);color:inherit;font:inherit}
 .${CONVERSATION_CLASS}__bar{display:flex;gap:8px;align-items:center;min-height:26px}
@@ -161,11 +158,15 @@ export const CONVERSATION_KEYS = {
   more: "shell.conv.more",
   roleUser: "shell.conv.role-user",
   roleAssistant: "shell.conv.role-assistant",
+  /** A peer dispatcher's relayed message (user-role on the wire, not the user). */
+  rolePeer: "shell.conv.role-peer",
   working: "shell.conv.working",
   interrupted: "shell.conv.interrupted",
   attachmentOnly: "shell.conv.attachment-only",
   toolRunning: "shell.conv.tool-running",
   toolFailed: "shell.conv.tool-failed",
+  /** The composer textarea's own accessible name (never the send button's). */
+  message: "shell.conv.message",
   send: "shell.conv.send",
   sending: "shell.conv.sending",
   noChannel: "shell.conv.no-channel",
@@ -182,26 +183,44 @@ function Composer(props: {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [errorKey, setErrorKey] = useState<string | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  /** Describes the textarea while an honest failure line is on screen. */
+  const statusId = useId();
   const view = describeComposer({ text, sending });
+
+  /** Settle one send attempt, restoring focus the composer never lost. */
+  const settle = (outcome: ConversationSendOutcome | null): void => {
+    setSending(false);
+    setErrorKey(
+      outcome === null ? CONVERSATION_KEYS.sendFailed : sendOutcomeCopyKey(outcome),
+    );
+    if (outcome !== null && outcome.kind === "sent") setText("");
+    // The textarea stays mounted (read-only, never disabled) while sending;
+    // focusing it again keeps the user's next keystroke where it belongs even
+    // if the host shifted focus while the wire call settled.
+    inputRef.current?.focus();
+  };
 
   const submit = (): void => {
     if (!view.canSend) return;
     setSending(true);
     setErrorKey(null);
-    void onSend(sessionId, text).then((outcome) => {
-      setSending(false);
-      setErrorKey(sendOutcomeCopyKey(outcome));
-      if (outcome.kind === "sent") setText("");
-    });
+    void onSend(sessionId, text).then(
+      (outcome) => settle(outcome),
+      () => settle(null),
+    );
   };
 
   return (
     <div className={`${CONVERSATION_CLASS}__composer`}>
       <textarea
+        ref={inputRef}
         className={`${CONVERSATION_CLASS}__input`}
-        aria-label={t(CONVERSATION_KEYS.send)}
+        aria-label={t(CONVERSATION_KEYS.message)}
+        aria-describedby={errorKey !== null ? statusId : undefined}
+        aria-busy={sending ? "true" : undefined}
+        readOnly={sending}
         value={text}
-        disabled={sending}
         onChange={(event) => setText(event.target.value)}
         onKeyDown={(event) => {
           if (event.key !== "Enter") return;
@@ -219,7 +238,13 @@ function Composer(props: {
       />
       <div className={`${CONVERSATION_CLASS}__bar`}>
         {errorKey !== null ? (
-          <span className={`${CONVERSATION_CLASS}__status`}>{t(errorKey)}</span>
+          <span
+            id={statusId}
+            className={`${CONVERSATION_CLASS}__status`}
+            role="status"
+          >
+            {t(errorKey)}
+          </span>
         ) : null}
         <button
           type="button"
@@ -234,61 +259,22 @@ function Composer(props: {
   );
 }
 
-/** Ticket 24's re-hosted body: the parsed fields + status rows (read-only). */
-function ToolBody(props: {
-  t: TranslateFn;
-  view: ToolviewModel;
-}): JSX.Element {
-  const { t, view } = props;
-  if (view.kind === "degraded") {
-    return <span>{t(TOOLVIEW_DEGRADED_KEY)}</span>;
+/**
+ * Stable React identity for one transcript item. A streaming item is keyed by
+ * its `attemptId` ALONE: the reducer rewrites a streaming item's `seq` on
+ * every delta (`conversation-store.ts`), so including `seq` remounted the
+ * item (and threw away its DOM/text state) chunk by chunk. Every other kind
+ * keeps its durable event position; a tool row also pins its call id, since
+ * the settled replacement keeps the same seq.
+ */
+export function conversationItemKey(item: ConversationItem): string {
+  if (item.kind === "assistant-streaming") {
+    return `${item.kind}:${item.attemptId}`;
   }
-  return (
-    <>
-      {view.fields.map((field) => (
-        <span
-          key={field.labelKey}
-          className={`${CONVERSATION_CLASS}__field`}
-          data-field={field.labelKey}
-        >
-          <span className={`${CONVERSATION_CLASS}__field-label`}>
-            {t(field.labelKey)}
-          </span>
-          <span className={`${CONVERSATION_CLASS}__field-value`}>
-            {field.value}
-          </span>
-        </span>
-      ))}
-      {view.statusRows.length > 0 ? (
-        <ul className={`${CONVERSATION_CLASS}__rows`}>
-          {view.statusRows.map((row, index) => (
-            <li
-              key={`${row.workerId}-${index}`}
-              className={`${CONVERSATION_CLASS}__row`}
-              data-status={row.statusLabel ?? undefined}
-            >
-              <span className={`${CONVERSATION_CLASS}__field-value`}>
-                {row.workerId}
-              </span>
-              <span className={`${CONVERSATION_CLASS}__field-value`}>
-                {row.title}
-              </span>
-              {row.statusLabel !== null ? (
-                <span className={`${CONVERSATION_CLASS}__field-value`}>
-                  {row.statusLabel}
-                </span>
-              ) : null}
-              {row.activity !== null ? (
-                <span className={`${CONVERSATION_CLASS}__field-value`}>
-                  {row.activity}
-                </span>
-              ) : null}
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </>
-  );
+  if (item.kind === "tool") {
+    return `${item.kind}:${item.seq}:${item.callId}`;
+  }
+  return `${item.kind}:${item.seq}`;
 }
 
 function Item(props: { t: TranslateFn; item: ConversationItem }): JSX.Element {
@@ -331,7 +317,7 @@ function Item(props: { t: TranslateFn; item: ConversationItem }): JSX.Element {
           ) : null}
         </summary>
         <div className={`${CONVERSATION_CLASS}__tool-body`}>
-          <ToolBody t={t} view={item.view} />
+          <ToolviewBody t={t} view={item.view} />
         </div>
         </details>
       </>
@@ -340,12 +326,23 @@ function Item(props: { t: TranslateFn; item: ConversationItem }): JSX.Element {
   const roleKey =
     item.kind === "user"
       ? CONVERSATION_KEYS.roleUser
-      : CONVERSATION_KEYS.roleAssistant;
+      : item.kind === "peer"
+        ? CONVERSATION_KEYS.rolePeer
+        : CONVERSATION_KEYS.roleAssistant;
   const text = item.text;
   return (
     <div
       className={`${CONVERSATION_CLASS}__item`}
-      data-role={item.kind === "user" ? "user" : "assistant"}
+      data-role={
+        item.kind === "peer"
+          ? "peer"
+          : item.kind === "user"
+            ? "user"
+            : "assistant"
+      }
+      {...(item.kind === "peer" && item.senderSessionId !== null
+        ? { title: item.senderSessionId, "data-sender": item.senderSessionId }
+        : {})}
     >
       <span className={`${CONVERSATION_CLASS}__role`}>{t(roleKey)}</span>
       {text.length > 0 ? (
@@ -418,17 +415,7 @@ export function createConversationPane(
               </button>
             ) : null}
             {state.transcript.items.map((item) => (
-              <Item
-                key={`${item.kind}:${item.seq}:${
-                  item.kind === "tool"
-                    ? item.callId
-                    : item.kind === "assistant-streaming"
-                      ? item.attemptId
-                      : ""
-                }`}
-                t={t}
-                item={item}
-              />
+              <Item key={conversationItemKey(item)} t={t} item={item} />
             ))}
           </div>
         )}

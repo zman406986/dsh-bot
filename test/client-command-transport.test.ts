@@ -90,6 +90,46 @@ describe("posture — session lifecycle only, never worker/turn management", () 
     });
   });
 
+  it("reads the host's {ok, value} reply instead of expecting a bare undefined", async () => {
+    const transportFor = (reply: unknown) =>
+      bindCommandTransport({
+        remote: () => ({
+          commands: { execute: async () => reply },
+        }),
+        sessions: () => undefined,
+      });
+
+    // `ok: false` is a command that did not run, never "executed".
+    assert.deepEqual(
+      await transportFor({ ok: false, value: undefined }).sendCommand(
+        "s-1",
+        "/dsh-bot",
+      ),
+      { kind: "failed" },
+    );
+    // An accepted execution with no value is the host's "no command ran".
+    assert.deepEqual(
+      await transportFor({ ok: true, value: undefined }).sendCommand(
+        "s-1",
+        "/dsh-bot",
+      ),
+      { kind: "unresolved" },
+    );
+    // A resolved value is the executed command.
+    assert.deepEqual(
+      await transportFor({ ok: true, value: { handled: true } }).sendCommand(
+        "s-1",
+        "/dsh-bot",
+      ),
+      { kind: "executed" },
+    );
+    // The legacy bare-undefined face keeps its meaning.
+    assert.deepEqual(
+      await transportFor(undefined).sendCommand("s-1", "/dsh-bot"),
+      { kind: "unresolved" },
+    );
+  });
+
   it("an absent remote face is contained (no throw, honest no-channel)", async () => {
     const transport = bindCommandTransport({
       remote: () => undefined,

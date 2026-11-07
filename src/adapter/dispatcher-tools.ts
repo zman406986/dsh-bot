@@ -22,6 +22,7 @@ import type {
   DispatcherSpawnOptions,
   DispatcherSpawnResult,
 } from "../core/types.js";
+import { formatDeliverResultRecorded } from "../core/tool-results.js";
 import {
   createDispatcherTools,
   toToolParametersSchema,
@@ -33,6 +34,17 @@ import type { ToolsLike } from "./cordis-dsh-host.js";
 import type {
   DispatcherOrigin,
   PolicyLanguage,
+} from "../core/policy/prompts.js";
+import {
+  AWAIT_AGENT_TOOL,
+  CHECK_WORKERS_TOOL,
+  DELIVER_RESULT_TOOL,
+  MESSAGE_AGENT_TOOL,
+  SEND_PEER_TOOL,
+  SPAWN_DISPATCHER_TOOL,
+  SPAWN_WORKER_TOOL,
+  STEER_WORKER_TOOL,
+  STOP_WORKER_TOOL,
 } from "../core/policy/prompts.js";
 
 /** Structural tool registration shape (mirrors dsh ToolRuntime.register). */
@@ -89,6 +101,157 @@ export function structuredPresentationMeta(
   return record;
 }
 
+/** One display subject on the durable record. JSON-only (no prompt/report text). */
+export interface ToolviewDisplaySubject {
+  readonly kind: "worker" | "dispatcher" | "todo" | "agent";
+  readonly id: string;
+  readonly title?: string;
+}
+
+/** Narrow to a plain object record. */
+function displayRecord(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+/** Non-empty string. */
+function displayString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/**
+ * Build one JSON-serializable `display.subject` for a tool result.
+ *
+ * Only identity the multittask core already holds is read: a worker's title
+ * and kind, a todo entry's title, or (for a dispatcher target) the title the
+ * call itself carried. Never a prompt, a report, or transcript text.
+ *
+ * The client parser treats a missing projection as "old transcript" and
+ * degrades to a short ref, so an absent answer is safe.
+ */
+export function projectDisplaySubject(
+  toolName: string,
+  args: unknown,
+  value: unknown,
+  multitask: Multitask,
+): ToolviewDisplaySubject | null {
+  const argRecord = displayRecord(args);
+  const resultRecord = displayRecord(value);
+  const workerSubject = (
+    id: string | null,
+    title?: string | null,
+  ): ToolviewDisplaySubject | null => {
+    if (id === null) return null;
+    const workerTitle = multitask.getWorker(id)?.title ?? title ?? null;
+    return withTitle("worker", id, workerTitle);
+  };
+  switch (toolName) {
+    case SPAWN_WORKER_TOOL:
+      return workerSubject(
+        displayString(resultRecord?.worker_id),
+        displayString(resultRecord?.title),
+      );
+    case CHECK_WORKERS_TOOL:
+      return workerSubject(displayString(argRecord?.worker_id));
+    case STEER_WORKER_TOOL:
+    case STOP_WORKER_TOOL:
+      return workerSubject(
+        displayString(resultRecord?.worker_id) ??
+          displayString(argRecord?.worker_id),
+        displayString(resultRecord?.title),
+      );
+    case DELIVER_RESULT_TOOL: {
+      const todoId =
+        displayString(resultRecord?.todo_completed) ??
+        displayString(argRecord?.todo_id);
+      if (todoId === null) return null;
+      const title = multitask.todos.get(todoId)?.title ?? null;
+      return withTitle("todo", todoId, title);
+    }
+    case MESSAGE_AGENT_TOOL: {
+      const target =
+        displayString(resultRecord?.target) ??
+        displayString(argRecord?.target);
+      if (target === null) return null;
+      const worker = multitask.getWorker(target);
+      if (worker !== undefined) {
+        return withTitle("worker", target, worker.title);
+      }
+      return withTitle(
+        resultRecord?.delivered_as === "peer" ? "dispatcher" : "agent",
+        target,
+        displayString(resultRecord?.title),
+      );
+    }
+    case AWAIT_AGENT_TOOL:
+      return workerSubject(
+        displayString(resultRecord?.target) ??
+          displayString(argRecord?.target),
+      );
+    case SPAWN_DISPATCHER_TOOL: {
+      const dispatcherId = displayString(resultRecord?.dispatcher_id);
+      if (dispatcherId === null) return null;
+      return withTitle(
+        "dispatcher",
+        dispatcherId,
+        displayString(resultRecord?.title) ??
+          displayString(argRecord?.title),
+      );
+    }
+    case SEND_PEER_TOOL: {
+      const target =
+        displayString(resultRecord?.to_session) ??
+        displayString(argRecord?.to_session);
+      return target === null ? null : withTitle("dispatcher", target, null);
+    }
+    default:
+      return null;
+  }
+}
+
+/** Attach a title only when it is a non-empty string (JSON-serializable). */
+function withTitle(
+  kind: ToolviewDisplaySubject["kind"],
+  id: string,
+  title: string | null | undefined,
+): ToolviewDisplaySubject {
+  return typeof title === "string" && title.length > 0
+    ? { kind, id, title }
+    : { kind, id };
+}
+
+/**
+ * Compose the prose-stripped meta with the optional `display` projection.
+ * The projection is tiny (kind/id/title) and losslessly JSON-serializable,
+ * so it survives the host's durable `tool/result` event unchanged.
+ */
+export function composePresentationMeta(
+  args: unknown,
+  value: unknown,
+  display: ((args: unknown, value: unknown) => ToolviewDisplaySubject | null) | undefined,
+): unknown {
+  const meta = structuredPresentationMeta(args, value);
+  if (display === undefined) return meta;
+  if (
+    meta === null ||
+    typeof meta !== "object" ||
+    Array.isArray(meta)
+  ) {
+    return meta;
+  }
+  let subject: ToolviewDisplaySubject | null;
+  try {
+    subject = display(args, value);
+  } catch {
+    // A projection failure must never break the tool result the model reads.
+    return meta;
+  }
+  if (subject === null) return meta;
+  return { ...(meta as Record<string, unknown>), display: { subject } };
+}
+
 /** Render a structured tool result as a single model-facing text block. */
 function renderStructured(_args: unknown, value: unknown): Array<{
   type: string;
@@ -108,20 +271,57 @@ function renderStructured(_args: unknown, value: unknown): Array<{
   if (typeof record.note === "string") {
     return [{ type: "text", text: record.note }];
   }
-  if (typeof record.detail === "string" && record.ok === false) {
-    return [{ type: "text", text: record.detail }];
-  }
+  // `deliver_result` is checked before the generic failure-detail branch: its
+  // honest no-delivery result carries both `ok: false` and a detail, and the
+  // delivery-specific copy must win.
   if (typeof record.delivered === "boolean") {
+    if (!record.delivered) {
+      // A `delivered: false` result is always a refusal: the text did not
+      // reach the user. The old `no-delivery-channel` prefix is kept for
+      // historical rows; new results carry `reason: "send-failed"`.
+      const prefix =
+        record.reason === "no-delivery-channel"
+          ? "Not delivered — recorded only for your reply."
+          : "Not delivered to the user.";
+      return [
+        {
+          type: "text",
+          text: `${prefix}${typeof record.detail === "string" ? ` ${record.detail}` : ""}`,
+        },
+      ];
+    }
+    if (record.channel === "reply") {
+      // Delivery is conversational (ADR-0009): the obligation is recorded and
+      // the dispatcher's own reply is the channel. Never render this as
+      // "Delivered to the user" — they have not read anything yet.
+      return [
+        {
+          type: "text",
+          text: formatDeliverResultRecorded({
+            ...(typeof record.todo_completed === "string"
+              ? { todoId: record.todo_completed }
+              : {}),
+            ...(typeof record.todo_title === "string"
+              ? { todoTitle: record.todo_title }
+              : {}),
+            ...(typeof record.attachments_not_sent === "number"
+              ? { attachmentsNotSent: record.attachments_not_sent }
+              : {}),
+          }),
+        },
+      ];
+    }
     const todo =
       typeof record.todo_completed === "string" ? record.todo_completed : "none";
     return [
       {
         type: "text",
-        text: record.delivered
-          ? `Delivered to the user. Todo completed: ${todo}.`
-          : `Not delivered.${typeof record.detail === "string" ? ` ${record.detail}` : ""}`,
+        text: `Delivered to the user. Todo completed: ${todo}.`,
       },
     ];
+  }
+  if (typeof record.detail === "string" && record.ok === false) {
+    return [{ type: "text", text: record.detail }];
   }
   return [{ type: "text", text: JSON.stringify(value) }];
 }
@@ -149,6 +349,7 @@ export function resolveExecSessionId(exec: unknown): string | null {
 export function toRegisterableTool(
   def: DispatcherToolDef,
   executeOverride?: (args: Record<string, unknown>, exec?: unknown) => Promise<unknown>,
+  display?: (args: unknown, value: unknown) => ToolviewDisplaySubject | null,
 ): RegisterableTool {
   return {
     name: def.name,
@@ -163,7 +364,10 @@ export function toRegisterableTool(
       render: renderStructured,
       // Ticket 81 FINDING 2: the structured result rides the durable record
       // as `meta` (the reducer's preferred input); see RegisterableTool.
-      presentationMeta: structuredPresentationMeta,
+      // Readable-status display: the same record also carries the compact
+      // `display.subject` (kind/id/title) when a projection is supplied.
+      presentationMeta: (args: unknown, value: unknown): unknown =>
+        composePresentationMeta(args, value, display),
     },
     execute(args: unknown, exec?: unknown): Promise<unknown> {
       const record =
@@ -264,7 +468,11 @@ export function registerDispatcherTools(
   });
   const disposers: Array<() => void> = [];
   for (const def of defs) {
-    const dispose = tools.register(toRegisterableTool(def));
+    const dispose = tools.register(
+      toRegisterableTool(def, undefined, (args, value) =>
+        projectDisplaySubject(def.name, args, value, options.multitask),
+      ),
+    );
     disposers.push(dispose);
   }
   return disposers;

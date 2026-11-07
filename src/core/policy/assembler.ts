@@ -299,10 +299,15 @@ export function buildPeerRosterSnapshot(
 
 /**
  * Append the roster to an already-assembled text so it is the LAST section of
- * that text (ticket 121). For callers whose body is composed from several
- * blocks — the wake turn's `reminder + wake + inbox` — this puts the roster
- * at the true tail instead of inside the reminder. `null`/empty roster
- * returns the input unchanged (byte-identical).
+ * that text (ticket 121). `null`/empty roster returns the input unchanged
+ * (byte-identical).
+ *
+ * No shipped caller uses this helper today: the live wake path gets its
+ * roster inside {@link assembleTurnReminder}, where the roster is already the
+ * reminder's tail, and appending it again here would duplicate the section.
+ * It stays as the sanctioned placement for a future composer whose body has
+ * blocks after the reminder (`reminder + wake + inbox`); that composer must
+ * then build the reminder WITHOUT a roster snapshot, or dedupe it itself.
  */
 export function appendPeerRosterTail(
   text: string,
@@ -452,10 +457,9 @@ export function noticeFromSettled(
  * New copy only. The cue marks the turn as another assistant — never
  * the user. Tests assert cue tokens and structure, not full prose.
  *
- * `origin` (ticket 175) reaches the peer block only. The worker-reply block
- * below stays class-free on purpose: ticket 170 still owns it, and the
- * ticket-175 out-of-scope list records the surviving defect there (a team
- * leader's blocked-worker reply should also point upward).
+ * `origin` (ticket 175) reaches both instruction blocks: a team leader's
+ * worker reply must report upward to its summoner, not to its own user, so
+ * the class selects a worker-reply variant too.
  */
 export function assemblePeerWakeTurn(
   notices: readonly PeerNotice[],
@@ -482,7 +486,14 @@ export function assemblePeerWakeTurn(
   } else {
     for (const notice of notices) {
       sections.push("");
-      sections.push(`### ${notice.fromName} (${notice.fromAgentId})`);
+      // A dispatcher sender's `fromName` IS its session id, so `name (id)`
+      // would print the same value twice. Omit the parenthetical then; the
+      // id remains the heading's visible address either way.
+      sections.push(
+        notice.fromName === notice.fromAgentId
+          ? `### ${notice.fromAgentId}`
+          : `### ${notice.fromName} (${notice.fromAgentId})`,
+      );
       sections.push(
         `- ${zh ? "目标" : "Target"}: ${peerTargetLabel(notice.to)}`,
       );
@@ -502,15 +513,15 @@ export function assemblePeerWakeTurn(
   }
 
   sections.push("");
-  sections.push(headings[2]);
-  sections.push("");
+  // The selected block supplies its own "What to do now" heading; pushing
+  // `headings[2]` here would render the heading twice.
   // A wake carrying only worker replies is not peer traffic: its senders are
   // this dispatcher's own workers, and the peer block's silence rule would
   // bury a `blocked` dead-end report — the one message that needs a decision.
   // Mixed wakes keep the peer block, whose rules cover both senders.
   sections.push(
     notices.length > 0 && notices.every(isWorkerReply)
-      ? buildWorkerReplyWakeInstructionsBlock(language)
+      ? buildWorkerReplyWakeInstructionsBlock(language, origin)
       : buildPeerWakeInstructionsBlock(language, origin),
   );
   return sections.join("\n");

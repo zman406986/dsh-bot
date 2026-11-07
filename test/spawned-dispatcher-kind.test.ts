@@ -9,9 +9,10 @@
  * this file pins, end to end, against the REAL pieces — real `CordisDshHost`,
  * real projection unit, real probe — over a structural ctx whose
  * `agents.create` creates the session the way the installed host does
- * (`setup` composes, then `session/created` — the moment the projection's
- * `init` runs — then `agent/created`; the durable mark row is written only
- * after the create resolves). Three binding facts:
+ * (`session/created` — the moment the projection's `init` runs — then `setup`
+ * composes the agent while it is still unpublished, then `agent/created`; the
+ * durable mark row is written only after the create resolves). Three binding
+ * facts:
  *
  * 1. The mirror is SEEDED at the reserve site, so the projection's `init` —
  *    which runs at session creation, inside `ctx.agents.create` — sees the
@@ -40,7 +41,7 @@ import {
   type AgentLike,
   type CreateAgentOptionsLike,
 } from "../src/adapter/cordis-dsh-host.js";
-import {applySessionKindProjection, DISPATCHER_SESSION_KIND, initSessionKindProjection, TEAM_LEADER_SESSION_KIND, registerSessionKindProjection, SESSION_KIND_PROJECTION_KEY, SESSION_KIND_PROJECTION_STATE_VERSION, sessionKindProjectionDefinition, type DispatcherMarkProbe, type SessionKindProjectionState, type SessionProjectionDefinitionLike, type SessionProjectionEventLike} from "../src/adapter/session-kind-projection.js";
+import {applySessionKindProjection, dispatcherClassOf, DISPATCHER_SESSION_KIND, initSessionKindProjection, sessionKindOf, TEAM_LEADER_SESSION_KIND, registerSessionKindProjection, SESSION_KIND_PROJECTION_KEY, SESSION_KIND_PROJECTION_STATE_VERSION, sessionKindProjectionDefinition, type DispatcherMarkProbe, type SessionKindProjectionState, type SessionProjectionDefinitionLike, type SessionProjectionEventLike} from "../src/adapter/session-kind-projection.js";
 
 interface StubSessionHeader {
   readonly id: string;
@@ -115,10 +116,11 @@ function createFakeRegistry() {
 
 /**
  * Structural ctx stub. `agents.create` creates the child exactly like the
- * installed host: `setup` composes while the agent is still unpublished, then
- * publication announces `session/created` (the moment the real registry's
- * `init` runs) and `agent/created`. The durable mark row is written only after
- * the create resolves, so the seed is the only source `init` can see.
+ * installed host: the session is created first (`session/created`, the moment
+ * the real registry's `init` runs), then `setup` composes the agent while it
+ * is still unpublished, then `agent/created` publishes it. The durable mark
+ * row is written only after the create resolves, so the seed is the only
+ * source `init` can see.
  *
  * ADR-0032 (ticket 157): a dispatcher summon no longer rides
  * `ctx.subagents.startActivation`. That stub stays because the adapter
@@ -198,10 +200,16 @@ function createStubCtx(options?: {
         const createdId = state.mintOwnId ? `host-session-${nextChild++}` : reservedId;
         state.mintOwnId = false;
         const agent = createAgent(createdId);
-        // The real factory runs `setup` while unpublished, then publishes:
-        // `session/created` first, `agent/created` second.
-        await spec.setup?.({}, agent);
+        // `session/created` completes BEFORE the publication-time `setup`:
+        // the session exists first, then the agent's scope is composed while
+        // still unpublished, then `agent/created` publishes it. Verified in
+        // the installed host (`dsh-agent-loop/lib/index.js` `initializeAgent`,
+        // 0.2.2-rc.1): `sessions.announce` → awaited `setup` →
+        // `agents.announce`. The projection registry's `init` therefore runs
+        // before setup, and the adapter must have seeded the mirror before
+        // `agents.create` was even called.
         options?.onSessionCreated?.({ id: createdId });
+        await spec.setup?.({}, agent);
         ctx.fire("agent/created", { agent, source: "startup" });
         return { agent, dispose: async () => {} };
       },
@@ -429,6 +437,98 @@ describe("ticket 140 review fix: the cold case and the abstain rule", () => {
     assert.equal(state.resolved, undefined, "a real 'no' is cached as resolved");
   });
 
+});
+
+/**
+ * Defect fix — pre-177 spawned dispatchers were downgraded to user.
+ *
+ * A cold resume reads the class from the session-kind projection. Pre-177
+ * cells for spawned children are `active: true` with NO `dispatcherClass`;
+ * the reader used to answer `"user"` for those, so a legacy team leader came
+ * back as the chief of staff and regained the summon tool. The reader now
+ * answers null ("cannot say"), which sends the host to its durable-mark
+ * fallback — fail-closed to `"spawned"` when the legacy child's
+ * `dispatcher_sessions` row exists, and `"user"` for a chat with no row.
+ */
+describe("pre-177 resumed dispatcher: the class reader abstains, the durable mark decides", () => {
+  /** The pre-177 cell: a dispatcher, but its class was never recorded. */
+  const LEGACY_ACTIVE_ROW: SessionKindProjectionState = {
+    active: true,
+    pendingStarts: [],
+    pendingStops: [],
+  };
+
+  /** A projection answering the legacy cell on the deprecated read face. */
+  function registryAnsweringLegacyRow() {
+    return {
+      stateOf(_session: unknown, key: string): SessionKindProjectionState {
+        assert.equal(key, SESSION_KIND_PROJECTION_KEY);
+        return LEGACY_ACTIVE_ROW;
+      },
+    };
+  }
+
+  /** Only `peekDispatcherMark` matters to the resumed-class fallback. */
+  function markerStore(marked: readonly string[]) {
+    return {
+      writeWorkerMarker() {},
+      readWorkerMarkers: () => [],
+      deleteWorkerMarker() {},
+      peekDispatcherMark(sessionId: string) {
+        return marked.includes(sessionId)
+          ? { kind: "dispatcher" as const, mark: { sessionId } }
+          : { kind: "not-dispatcher" as const };
+      },
+    };
+  }
+
+  it("resumes a legacy team leader as SPAWNED when its durable mark exists", () => {
+    const registry = registryAnsweringLegacyRow();
+    const resumed: Array<{ sessionId: string; origin: unknown }> = [];
+    const ctx = createStubCtx();
+    createCordisDshHost(ctx, {
+      markers: markerStore(["legacy-leader"]),
+      sessionKindOf: (session) => sessionKindOf(registry, session),
+      dispatcherClassOf: (session) => dispatcherClassOf(registry, session),
+      onUserDispatcherResumed: (_agent, sessionId, origin) => {
+        resumed.push({ sessionId, origin });
+      },
+    });
+
+    // The reader abstains on the legacy cell; it does NOT claim "user".
+    assert.equal(dispatcherClassOf(registry, {}), null);
+
+    ctx.fire("agent/created", {
+      agent: createAgent("legacy-leader"),
+      source: "startup",
+    });
+    assert.deepEqual(resumed, [
+      { sessionId: "legacy-leader", origin: "spawned" },
+    ]);
+  });
+
+  it("leaves a genuine user chat as USER when no durable mark exists", () => {
+    const registry = registryAnsweringLegacyRow();
+    const resumed: Array<{ sessionId: string; origin: unknown }> = [];
+    const ctx = createStubCtx();
+    createCordisDshHost(ctx, {
+      // The store answers "open" and holds no mark for this chat.
+      markers: markerStore([]),
+      sessionKindOf: (session) => sessionKindOf(registry, session),
+      dispatcherClassOf: (session) => dispatcherClassOf(registry, session),
+      onUserDispatcherResumed: (_agent, sessionId, origin) => {
+        resumed.push({ sessionId, origin });
+      },
+    });
+
+    ctx.fire("agent/created", {
+      agent: createAgent("genuine-user-chat"),
+      source: "startup",
+    });
+    assert.deepEqual(resumed, [
+      { sessionId: "genuine-user-chat", origin: "user" },
+    ]);
+  });
 });
 
 function sessionKindView(state: SessionKindProjectionState): unknown {

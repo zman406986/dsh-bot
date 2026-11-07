@@ -1,52 +1,170 @@
 /**
- * Per-tool call view components (ticket 24; layout fixed by ticket 169).
+ * Per-tool call view components (ticket 24; readable-status anatomy).
  *
- * Presentation only, like the roster panel: views parse their props through
- * `describeToolview` (pure, never throws) and render a compact detail row —
- * worker id, title, outcome, steer text, or the check roster's status rows
- * with the core FSM vocabulary verbatim. No actions, no fetches, no authority
- * (design-16 §3.4).
+ * Two exports, one body:
+ * - `createToolviewComponent(toolName, t)` — the keyed `tool.call.toolview`
+ *   entry the host renders in the shipped chat.
+ * - `ToolviewBody` — the same three-level body, re-hosted by the shell's
+ *   conversation pane. One body means the two renderers cannot drift.
  *
- * Ticket 169: the row ships its own stylesheet (`TOOLVIEW_CSS`,
- * `toolview-styles.ts`) and puts a separator element between fields. Before
- * that, the `__field*` class names had no stylesheet behind them anywhere in
- * the tree, so every span stayed inline and a four-field row rendered as one
- * unbroken string (`Worker063f41a2…TitleAdd stale-build…Outcomeok`). The
- * separation is now structural in three independent layers — flex block
- * layout, a `gap`, and a real separator element — so no single lost rule can
- * collapse the row again.
+ * The body is:
+ * 1. one primary sentence (localized template, no field label);
+ * 2. at most two facts joined by the shared ` · ` separator;
+ * 3. a nested `<details><summary>Details</summary><dl>` with full ids,
+ *    stream keys, transcript refs, message ids, raw reason codes and times.
  *
- * The row is read-only and emits each field exactly once: the outcome is a
- * field like any other, and nothing here mirrors it onto a second line.
+ * `check_workers` additionally renders one readable row per worker inside
+ * the same body: title first, one localized status word (raw status stays in
+ * `data-status`), facts, optional activity line, short ref last.
  *
- * Zero-hook function components created through a factory so the translate
- * seat and tool name are captured at registration time; the renderer
- * controls the props face, which the parser treats defensively. Rendering is
- * covered by build success + typecheck + the static-markup pins in
- * `test/client-toolviews.test.ts` (S8: no DOM harness).
+ * All copy resolves through the `t` seat; this file contains no user-facing
+ * sentence and no inline English. Rendering is covered by build + typecheck
+ * + the static-markup pins in `test/client-toolviews.test.ts` (S8: no DOM
+ * harness).
  */
 import { Fragment, type JSX } from "react";
 import type { TranslateFn } from "./overlay.js";
 import {
   TOOLVIEW_DEGRADED_KEY,
+  TOOLVIEW_DETAILS_KEY,
   describeToolview,
+  type ToolviewDetail,
+  type ToolviewFact,
+  type ToolviewStatusRow,
 } from "./toolviews.js";
+import {
+  FACT_SEPARATOR,
+  formatCount,
+  formatTemplate,
+} from "./status-format.js";
 import { TOOLVIEW_CLASS as VIEW_CLASS, TOOLVIEW_CSS } from "./toolview-styles.js";
 
+/** Resolve one localized fact through the translate seat. */
+function factText(t: TranslateFn, fact: ToolviewFact): string {
+  switch (fact.kind) {
+    case "text":
+      return fact.text;
+    case "copy":
+      return formatTemplate(t(fact.key), fact.values);
+    case "count":
+      return formatCount(t, fact.keyBase, fact.count);
+  }
+}
+
 /**
- * One literal space, rendered as its own text node wherever two pieces of the
- * row must not fuse.
- *
- * Flex layout ignores whitespace-only children (they are not flex items), so
- * this costs nothing visually while the stylesheet is present — but if the
- * stylesheet ever stops applying, the row degrades to separated plain text
- * instead of the fused run ticket 169 reported.
- *
- * Written as an escape because `test/composition-polish.test.ts` treats any
- * quoted literal holding a space as a possible dictionary bypass, and a space
- * is not user-facing copy to localize.
+ * Resolve the primary sentence. A cause (refusal) and a generic subject noun
+ * are locale keys, so they are translated here rather than baked into the
+ * parser's values.
  */
-const FIELD_SPACE = "\u0020";
+function primaryText(
+  t: TranslateFn,
+  view: Extract<ReturnType<typeof describeToolview>, { kind: "detail" }>,
+): string {
+  const values: Record<string, string> = { ...view.primaryValues };
+  if (view.causeKey !== null) values["cause"] = t(view.causeKey);
+  if (view.subject === null && view.subjectKey !== null) {
+    values["subject"] = t(view.subjectKey);
+  }
+  return formatTemplate(t(view.primaryKey), values);
+}
+
+/** The nested Details area; omitted entirely when there is nothing to show. */
+function Details(props: {
+  t: TranslateFn;
+  details: readonly ToolviewDetail[];
+}): JSX.Element | null {
+  const { t, details } = props;
+  if (details.length === 0) return null;
+  return (
+    <details className={`${VIEW_CLASS}__details`}>
+      <summary>{t(TOOLVIEW_DETAILS_KEY)}</summary>
+      <dl>
+        {details.map((detail, index) => (
+          <Fragment key={`${detail.labelKey}-${index}`}>
+            <dt>{t(detail.labelKey)}</dt>
+            <dd>{detail.value}</dd>
+          </Fragment>
+        ))}
+      </dl>
+    </details>
+  );
+}
+
+/** One `check_workers` row, ordered the readable way. */
+function StatusRow(props: {
+  t: TranslateFn;
+  row: ToolviewStatusRow;
+  index: number;
+}): JSX.Element {
+  const { t, row, index } = props;
+  const facts = row.facts.map((fact) => factText(t, fact)).join(FACT_SEPARATOR);
+  return (
+    <li
+      key={`${row.workerId}-${index}`}
+      className={`${VIEW_CLASS}__row`}
+      data-status={row.statusLabel ?? undefined}
+      data-worker-id={row.workerId}
+    >
+      <span className={`${VIEW_CLASS}__row-title`}>{row.title}</span>
+      {row.statusWordKey !== null ? (
+        <span className={`${VIEW_CLASS}__row-status`}>
+          {t(row.statusWordKey)}
+        </span>
+      ) : null}
+      {facts.length > 0 ? (
+        <span className={`${VIEW_CLASS}__row-facts`}>{facts}</span>
+      ) : null}
+      {row.activity !== null ? (
+        <span className={`${VIEW_CLASS}__row-activity`}>{row.activity}</span>
+      ) : null}
+      {row.title === row.shortRef ? null : (
+        <span className={`${VIEW_CLASS}__row-ref`}>{row.shortRef}</span>
+      )}
+    </li>
+  );
+}
+
+/**
+ * The shared tool-call body. Pure and props-driven: same props in, same
+ * element out; no hooks, no store, no actions.
+ */
+export function ToolviewBody(props: {
+  t: TranslateFn;
+  view: ReturnType<typeof describeToolview>;
+}): JSX.Element {
+  const { t, view } = props;
+  if (view.kind === "degraded") {
+    return (
+      <>
+        <style>{TOOLVIEW_CSS}</style>
+        <span className={`${VIEW_CLASS}__degraded`}>
+          {t(TOOLVIEW_DEGRADED_KEY)}
+        </span>
+      </>
+    );
+  }
+
+  const facts = view.facts.map((fact) => factText(t, fact)).join(FACT_SEPARATOR);
+  return (
+    <div className={`${VIEW_CLASS}__body`} data-status={view.state}>
+      <style>{TOOLVIEW_CSS}</style>
+      <div className={`${VIEW_CLASS}__primary`}>
+        {primaryText(t, view)}
+      </div>
+      {facts.length > 0 ? (
+        <div className={`${VIEW_CLASS}__facts`}>{facts}</div>
+      ) : null}
+      {view.statusRows.length > 0 ? (
+        <ul className={`${VIEW_CLASS}__rows`}>
+          {view.statusRows.map((row, index) => (
+            <StatusRow key={`${row.workerId}-${index}`} t={t} row={row} index={index} />
+          ))}
+        </ul>
+      ) : null}
+      <Details t={t} details={view.details} />
+    </div>
+  );
+}
 
 /**
  * Create the toolview component for one wire tool name. Pure and
@@ -58,94 +176,9 @@ export function createToolviewComponent(
 ): (props: unknown) => JSX.Element {
   return (props: unknown) => {
     const view = describeToolview(toolName, props);
-
-    if (view.kind === "degraded") {
-      return (
-        <div className={VIEW_CLASS} data-tool={toolName}>
-          <style>{TOOLVIEW_CSS}</style>
-          <span className={`${VIEW_CLASS}__degraded`}>
-            {t(TOOLVIEW_DEGRADED_KEY)}
-          </span>
-        </div>
-      );
-    }
-
     return (
       <div className={VIEW_CLASS} data-tool={toolName}>
-        <style>{TOOLVIEW_CSS}</style>
-        {view.fields.map((field, index) => (
-          <Fragment key={field.labelKey}>
-            {index > 0 ? (
-              <>
-                {/* A real separator box AND a whitespace text node. Flex
-                    layout ignores the whitespace (it is not a flex item), so
-                    the visible gap comes from `gap` + the dot; if the
-                    stylesheet is ever lost, the whitespace still keeps the
-                    fields apart as plain inline text. */}
-                {FIELD_SPACE}
-                <span
-                  className={`${VIEW_CLASS}__sep`}
-                  aria-hidden="true"
-                  data-separator=""
-                />
-                {FIELD_SPACE}
-              </>
-            ) : null}
-            <span
-              className={`${VIEW_CLASS}__field`}
-              data-field={field.labelKey}
-            >
-              <span
-                className={`${VIEW_CLASS}__field-label`}
-                data-field-label={field.labelKey}
-              >
-                {t(field.labelKey)}
-              </span>
-              {FIELD_SPACE}
-              <span
-                className={`${VIEW_CLASS}__field-value`}
-                data-field-value={field.labelKey}
-              >
-                {field.value}
-              </span>
-            </span>
-          </Fragment>
-        ))}
-        {view.statusRows.length > 0 ? (
-          <ul className={`${VIEW_CLASS}__rows`}>
-            {view.statusRows.map((row, index) => (
-              <li
-                key={`${row.workerId}-${index}`}
-                className={`${VIEW_CLASS}__row`}
-                data-status={row.statusLabel ?? undefined}
-              >
-                <span className={`${VIEW_CLASS}__row-id`}>
-                  {row.workerId}
-                </span>
-                {FIELD_SPACE}
-                <span className={`${VIEW_CLASS}__row-title`}>
-                  {row.title}
-                </span>
-                {row.statusLabel !== null ? (
-                  <>
-                    {FIELD_SPACE}
-                    <span className={`${VIEW_CLASS}__row-status`}>
-                      {row.statusLabel}
-                    </span>
-                  </>
-                ) : null}
-                {row.activity !== null ? (
-                  <>
-                    {FIELD_SPACE}
-                    <span className={`${VIEW_CLASS}__row-activity`}>
-                      {row.activity}
-                    </span>
-                  </>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        ) : null}
+        <ToolviewBody t={t} view={view} />
       </div>
     );
   };

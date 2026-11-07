@@ -161,6 +161,18 @@ export interface WakeBus {
   /** Mark the dispatcher session idle; flush pending work in rank order. */
   noteTurnEnded(sessionId: string): void;
   /**
+   * Abandon the session's turn WITHOUT flushing anything. For an activation
+   * that is ending (the session is being disposed), never an ordinary turn
+   * boundary: `noteTurnEnded` is correct there because it flushes and may open
+   * the next turn. Here the dispatcher is going away, so opening a wake turn
+   * would address a session that no longer exists (and, for a marked
+   * dispatcher, cold-resume it). Clears busy/currentTurn, any prepared ready
+   * wake, the pending owner, an owed redrive, and an armed coalescing window.
+   * Queued work payloads stay queued: teardown is not a data drop, and a
+   * re-activated session may still surface them.
+   */
+  cancelTurn(sessionId: string): void;
+  /**
    * Ticket 108: invalidate every pending coalescing window — bump the
    * generation, cancel all armed timers, and make any timer that still
    * fires a no-op. Pending wake data is untouched; delivery of it stays
@@ -197,6 +209,23 @@ interface SessionWakeState {
   /** Wake already prepared for the next (or current) turn. */
   ready: WakeEvent | null;
   /**
+   * True when the CURRENT ready wake's last host notification failed. The
+   * wake is still there (it was marked ready before notifying), but the host
+   * was never told, so the next flush/turn-end must re-notify it instead of
+   * treating the failed delivery as final.
+   */
+  deliveryFailed: boolean;
+  /**
+   * Monotonic identity of the current ready wake. A join (a settle/external
+   * job landing in the same batch) keeps the version: the host notification
+   * still addresses the same wake, and a drain sees the joined content. A
+   * replacement or a clear bumps it, so a late outcome for the old wake is
+   * ignored instead of marking the new one.
+   */
+  readyVersion: number;
+  /** Version of the ready wake whose notification is in flight, if any. */
+  deliveryInFlightVersion: number | null;
+  /**
    * A delivery redrive is owed (ticket 58). Held as a flag rather than a
    * queue entry: any turn that opens will surface the undelivered items
    * anyway, so coalescing N redrives into the next turn is correct.
@@ -224,14 +253,22 @@ export interface WakeBusOptions {
    * turn. Ticket 116: `origin` is the wake's STRUCTURED provenance when the
    * wake was caused by another agent (a peer wake). The host stamps it on
    * the follow-up message's source; it is never re-derived from text.
+   *
+   * Reject-aware by contract: the host seam is async, so a returned promise
+   * is owned by the bus (see {@link WakeBusOptions.coalesceFailBudget}).
+   * A fire-and-forget `void` at a call site would make a failed wake an
+   * unhandled rejection instead of a counted delivery failure.
    */
-  onDeliver: (sessionId: string, origin?: AgentMessageWakeOrigin) => void;
+  onDeliver: (
+    sessionId: string,
+    origin?: AgentMessageWakeOrigin,
+  ) => void | Promise<void>;
   /**
    * Called when a priority peer must abort a live non-user dispatcher
    * turn. Soft-fallback hosts may no-op; the ready peer wake still wins
-   * the next flush.
+   * the next flush. Same reject-aware contract as `onDeliver`.
    */
-  onInterrupt?: (sessionId: string) => void;
+  onInterrupt?: (sessionId: string) => void | Promise<void>;
   /** Called after drain hands a ready wake to the caller. */
   onDrain?: (event: WakeEvent) => void;
   /**
@@ -251,13 +288,19 @@ export interface WakeBusOptions {
    */
   schedule?: (fn: () => void, ms: number) => () => void;
   /**
-   * Ticket 108 fail budget: consecutive coalesced-drain deliveries whose
-   * `onDeliver` throws before the bus degrades to immediate mode. Default
+   * Ticket 108 fail budget: consecutive deliveries whose `onDeliver` throws
+   * or rejects before the bus degrades to immediate mode. Default
    * {@link DEFAULT_COALESCE_FAIL_BUDGET}. Degraded mode bypasses the window
    * for every subsequent drain — wakes are never dropped.
    */
   coalesceFailBudget?: number;
-  /** Called once when the bus flips into degraded immediate mode. */
+  /**
+   * Called once when the bus flips into degraded immediate mode. Observer
+   * code: a throw is swallowed, and a promise returned by the callback (the
+   * type stays `void` so value-returning callbacks keep compiling) is observed
+   * — telemetry must never break the delivery path or become an unhandled
+   * rejection.
+   */
   onDegraded?: (info: WakeBusDegradedInfo) => void;
 }
 
@@ -340,6 +383,9 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
         normalPeers: [],
         pendingExternalJobs: [],
         ready: null,
+        deliveryFailed: false,
+        readyVersion: 0,
+        deliveryInFlightVersion: null,
         pendingRedrive: false,
         coalescing: null,
       };
@@ -386,26 +432,170 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
   }
 
   /**
-   * Run the normal flush path for a coalesced window drain, wrapped in the
-   * ticket-108 fail budget: N consecutive throwing deliveries flip the bus
-   * into degraded immediate mode. The flush marks `ready` BEFORE notifying,
-   * so a throw never drops the wake — the host just wasn't told, and
-   * delivery redrive remains the backstop.
+   * Count one failed delivery against the ticket-108 budget. A delivery
+   * failure is not a dropped wake — the ready wake was marked BEFORE the
+   * host was notified, so the host simply was not told and delivery redrive
+   * remains the backstop.
+   *
+   * `onDegraded` is observer code: a throw or a rejected promise must never
+   * escape the delivery path (dsh treats an unhandled rejection as fatal) and
+   * must never prevent the failure from being counted.
    */
-  function runCoalescedDrain(sessionId: string, state: SessionWakeState): void {
-    try {
-      tryFlush(sessionId, state);
-      coalesceFailures = 0;
-    } catch (error) {
-      coalesceFailures += 1;
-      if (degraded) return;
-      if (coalesceFailures >= coalesceFailBudget) {
-        degraded = true;
-        onDegraded?.({
+  function reportDeliveryFailure(error: unknown): void {
+    coalesceFailures += 1;
+    if (degraded) return;
+    if (coalesceFailures >= coalesceFailBudget) {
+      degraded = true;
+      if (onDegraded === undefined) return;
+      try {
+        const result: unknown = onDegraded({
           consecutiveFailures: coalesceFailures,
           lastError: error,
         });
+        if (result !== undefined) {
+          void Promise.resolve(result).catch(() => {
+            // Degrade telemetry must never break the bus.
+          });
+        }
+      } catch {
+        // Degrade telemetry must never break the bus.
       }
+    }
+  }
+
+  /**
+   * Invoke one DELIVERY callback and own its outcome. The host seam may be
+   * async, so a rejection is observed here and counted toward the degrade
+   * budget; a synchronous throw from a callback double takes the same path.
+   * Wake ordering is unchanged: every call is still made synchronously in
+   * place, and the promise is never awaited.
+   *
+   * `onOutcome` reports success/failure to the caller so it can track whether
+   * the current ready wake still needs a retry. Only delivery outcomes touch
+   * the degrade budget — an interrupt result is not a delivery.
+   */
+  function invokeDelivery(
+    run: () => void | Promise<void>,
+    onOutcome?: (ok: boolean) => void,
+  ): void {
+    let result: void | Promise<void>;
+    try {
+      result = run();
+    } catch (error) {
+      reportDeliveryFailure(error);
+      onOutcome?.(false);
+      return;
+    }
+    if (result === undefined) {
+      // A synchronous callback that returned normally is a success.
+      coalesceFailures = 0;
+      onOutcome?.(true);
+      return;
+    }
+    void Promise.resolve(result).then(
+      () => {
+        coalesceFailures = 0;
+        onOutcome?.(true);
+      },
+      (error: unknown) => {
+        reportDeliveryFailure(error);
+        onOutcome?.(false);
+      },
+    );
+  }
+
+  /**
+   * Invoke the interrupt seam and own its failure WITHOUT touching the delivery
+   * budget. A successful no-op interrupt used to reset consecutive delivery
+   * failures, which let an endless "deliver fails, interrupt succeeds" loop
+   * never degrade; interrupt outcomes are a separate concern and are neither
+   * counted nor reset here.
+   */
+  function invokeInterrupt(sessionId: string): void {
+    if (onInterrupt === undefined) return;
+    let result: void | Promise<void>;
+    try {
+      result = onInterrupt(sessionId);
+    } catch {
+      return;
+    }
+    if (result !== undefined) {
+      void Promise.resolve(result).catch(() => {
+        // An interrupt failure must not leak or touch the delivery budget;
+        // the ready wake still wins the next flush.
+      });
+    }
+  }
+
+  /**
+   * Install a ready wake (or clear it) as a NEW delivery identity: a pending
+   * notification for the previous wake becomes stale, and no retry is owed for
+   * this one until it is notified.
+   */
+  function setReady(state: SessionWakeState, wake: WakeEvent | null): void {
+    state.ready = wake;
+    state.readyVersion += 1;
+    state.deliveryFailed = false;
+    state.deliveryInFlightVersion = null;
+  }
+
+  /**
+   * Notify the host that a ready wake exists, and remember whether it worked.
+   * The wake itself is never dropped on failure; `deliveryFailed` is what
+   * makes the next flush/turn-end re-notify the SAME batch instead of
+   * stranding it. A notification for a wake that has since been replaced or
+   * drained is stale and must not mark the replacement.
+   */
+  function notifyReady(
+    sessionId: string,
+    state: SessionWakeState,
+    origin?: AgentMessageWakeOrigin,
+  ): void {
+    if (state.ready === null) return;
+    const version = state.readyVersion;
+    if (state.deliveryInFlightVersion === version) return;
+    state.deliveryInFlightVersion = version;
+    state.deliveryFailed = false;
+    invokeDelivery(
+      () => onDeliver(sessionId, origin),
+      (ok) => {
+        if (state.deliveryInFlightVersion === version) {
+          state.deliveryInFlightVersion = null;
+        }
+        if (state.readyVersion !== version || state.ready === null) return;
+        state.deliveryFailed = !ok;
+      },
+    );
+  }
+
+  /** Re-notify the current ready wake after a failed delivery, once. */
+  function retryFailedDelivery(
+    sessionId: string,
+    state: SessionWakeState,
+  ): void {
+    if (!state.deliveryFailed || state.ready === null) return;
+    if (state.ready.source === "user") {
+      // The host opens user turns itself; there is no onDeliver to retry.
+      state.deliveryFailed = false;
+      return;
+    }
+    notifyReady(sessionId, state, state.ready.messageOrigin);
+  }
+
+  /**
+   * Run the normal flush path for a coalesced window drain, wrapped in the
+   * ticket-108 fail budget: consecutive throwing or rejecting deliveries
+   * flip the bus into degraded immediate mode. The flush marks `ready`
+   * BEFORE notifying, so a failure never drops the wake — the host just
+   * wasn't told, and delivery redrive remains the backstop.
+   */
+  function runCoalescedDrain(sessionId: string, state: SessionWakeState): void {
+    // Delivery failures are counted by `invokeDelivery` where they happen;
+    // this catch only covers a non-delivery throw in the flush bookkeeping.
+    try {
+      tryFlush(sessionId, state);
+    } catch (error) {
+      reportDeliveryFailure(error);
     }
   }
 
@@ -428,17 +618,17 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
     state.pending = [];
     state.pendingExternalJobs = [];
     const source = sourceFor(settledWorkers, externalJobs);
-    state.ready = {
+    setReady(state, {
       sessionId,
       source,
       settledWorkers,
       externalJobs,
-    };
+    });
     // A real background batch subsumes any owed redrive: this turn will
     // surface the undelivered items anyway, so a second turn would be noise.
     state.pendingRedrive = false;
     state.pendingOwner = ownerForSource(source);
-    onDeliver(sessionId);
+    notifyReady(sessionId, state);
   }
 
   /**
@@ -491,18 +681,18 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
       const peerMessages = state.priorityPeers;
       state.priorityPeers = [];
       const wake = makePeerWake(sessionId, peerMessages);
-      state.ready = wake;
+      setReady(state, wake);
       state.pendingOwner = "peer";
-      onDeliver(sessionId, wake.messageOrigin);
+      notifyReady(sessionId, state, wake.messageOrigin);
       return;
     }
     if (state.normalPeers.length > 0) {
       const peerMessages = state.normalPeers;
       state.normalPeers = [];
       const wake = makePeerWake(sessionId, peerMessages);
-      state.ready = wake;
+      setReady(state, wake);
       state.pendingOwner = "peer";
-      onDeliver(sessionId, wake.messageOrigin);
+      notifyReady(sessionId, state, wake.messageOrigin);
       return;
     }
     // Real background content first — it subsumes an owed redrive, because
@@ -511,13 +701,13 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
     if (state.ready !== null) return;
     if (state.pendingRedrive) {
       state.pendingRedrive = false;
-      state.ready = {
+      setReady(state, {
         sessionId,
         source: "timer",
         settledWorkers: [],
-      };
+      });
       state.pendingOwner = "worker-settled";
-      onDeliver(sessionId);
+      notifyReady(sessionId, state);
     }
   }
 
@@ -552,7 +742,10 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
     } else {
       state.pending.unshift(...state.ready.settledWorkers);
     }
-    state.ready = null;
+    // The payload is back on the pending lists; a later flush owns a fresh
+    // notification. A notification still in flight for the reclaimed wake is
+    // stale (its outcome can no longer describe `ready`).
+    setReady(state, null);
   }
 
   /**
@@ -567,7 +760,7 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
     reclaimReadyNonUser(state);
     const peerMessages = [notice, ...state.priorityPeers];
     state.priorityPeers = [];
-    state.ready = makePeerWake(sessionId, peerMessages);
+    setReady(state, makePeerWake(sessionId, peerMessages));
     state.pendingOwner = "peer";
   }
 
@@ -589,6 +782,10 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
           settledWorkers: [...state.ready.settledWorkers, notice],
           source: "worker-settled",
         };
+        // The joining settle is a new delivery opportunity for a batch whose
+        // notification failed; re-notify it now instead of waiting for a
+        // turn end nobody was told to produce.
+        retryFailedDelivery(input.parentSessionId, state);
         return;
       }
       state.pending.push(notice);
@@ -623,8 +820,12 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
       ) {
         if (effectivePriority) {
           becomeReadyPriorityPeer(input.sessionId, state, notice);
-          onInterrupt?.(input.sessionId);
-          onDeliver(input.sessionId, state.ready?.messageOrigin);
+          invokeInterrupt(input.sessionId);
+          notifyReady(
+            input.sessionId,
+            state,
+            state.ready?.messageOrigin,
+          );
         } else {
           state.normalPeers.push(notice);
         }
@@ -644,7 +845,11 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
           becomeReadyPriorityPeer(input.sessionId, state, notice);
           // Host may already have been notified for the reclaimed batch;
           // re-notify so it can drain the replacement peer wake.
-          onDeliver(input.sessionId, state.ready?.messageOrigin);
+          notifyReady(
+            input.sessionId,
+            state,
+            state.ready?.messageOrigin,
+          );
         } else {
           // Separate turns: do not join a settled/peer ready wake.
           state.normalPeers.push(notice);
@@ -679,6 +884,9 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
               ? state.ready.source
               : "external-event",
         };
+        // Same rule as a joining settle: a failed notification makes the
+        // next joining item a retry opportunity for the whole batch.
+        retryFailedDelivery(input.sessionId, state);
         return;
       }
       state.pendingExternalJobs.push(input.job);
@@ -705,11 +913,11 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
       // Reclaim any undelivered non-user batch so the user goes first.
       reclaimReadyNonUser(state);
       // The host opens the user's turn itself — no onDeliver for user wakes.
-      state.ready = {
+      setReady(state, {
         sessionId,
         source: "user",
         settledWorkers: [],
-      };
+      });
       state.pendingOwner = "user";
     },
 
@@ -733,15 +941,19 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
         // this turn, so the redrive is subsumed. A peer or user turn is not
         // about our workers at all — keep the redrive owed for the next one.
         state.pendingRedrive = !isBackground(state.ready.source);
+        // A ready batch whose host notification failed was never delivered:
+        // re-notify it now rather than treating the redrive as subsumed by a
+        // turn nobody was told about.
+        retryFailedDelivery(sessionId, state);
         return;
       }
-      state.ready = {
+      setReady(state, {
         sessionId,
         source: "timer",
         settledWorkers: [],
-      };
+      });
       state.pendingOwner = "worker-settled";
-      onDeliver(sessionId);
+      notifyReady(sessionId, state);
     },
 
     noteTurnStarted(sessionId: string, owner?: TurnOwner): void {
@@ -767,7 +979,32 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
       }
       if (state.ready === null) {
         tryFlush(sessionId, state);
+        return;
       }
+      // A non-user ready wake is waiting because its host notification failed
+      // (a successful one would normally have opened a turn). Turn end is the
+      // natural retry point: re-notify the SAME batch instead of returning
+      // forever on a ready wake nobody was told about.
+      retryFailedDelivery(sessionId, state);
+    },
+
+    cancelTurn(sessionId: string): void {
+      const state = sessions.get(sessionId);
+      // A session with no bus state has no turn to cancel — creating one here
+      // would only leave idle bookkeeping behind.
+      if (state === undefined) return;
+      state.busy = false;
+      state.currentTurn = null;
+      state.pendingOwner = null;
+      state.pendingRedrive = false;
+      // A timer armed for this session must not fire after teardown. The
+      // generation guard in `dispose` covers a bus teardown; this covers the
+      // per-session deactivation case.
+      cancelCoalescedDrain(state);
+      // Drop any prepared wake WITHOUT notifying the host. `setReady(state,
+      // null)` also bumps the version, so a late delivery outcome for the old
+      // ready wake can no longer mark anything.
+      setReady(state, null);
     },
 
     dispose(): void {
@@ -784,7 +1021,9 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
       const state = sessions.get(sessionId);
       if (state === undefined || state.ready === null) return undefined;
       const event = state.ready;
-      state.ready = null;
+      // The caller now owns delivery of this wake; no retry is owed and any
+      // notification still in flight for it is stale.
+      setReady(state, null);
       onDrain?.(event);
       return event;
     },

@@ -4,9 +4,11 @@
  * Deliberately decoupled from the host `tsc` build (`npm run build`): dsh
  * loads browser code from a single self-contained script that registers via
  * `window.__ModuleLoader__.load({id, factory})` (Finding 4), so this script
- * compiles `src/client/index.ts` with esbuild (CJS, react kept external — it
- * is a platform seed word on the dsh web side) and wraps the output in the
- * loader shell from `src/client/wrapper.ts`.
+ * compiles `src/client/index.ts` with esbuild (CJS) and wraps the output in the
+ * loader shell from `src/client/wrapper.ts`. The external specifier list is
+ * READ FROM `package.json` -> `dsh.client.external`, the same record dsh reads
+ * at boot: the manifest is the single source of truth, so the builder cannot
+ * externalize a specifier the host was never told to seed (nor miss one it was).
  *
  * Run: `npm run build:client` → writes `client/index.js` (the
  * `exports["./client"]` target). Also importable: `buildClient()` returns the
@@ -111,6 +113,22 @@ export function compareBundles(
 }
 
 /**
+ * The `dsh.client.external` list from package.json — the host's seed list.
+ * Read at build time so the builder and the manifest can never disagree.
+ */
+async function readClientExternals(): Promise<string[]> {
+  const raw = await readFile(path.join(repoRoot, "package.json"), "utf8");
+  const manifest = JSON.parse(raw) as {
+    dsh?: { client?: { external?: unknown } };
+  };
+  const external = manifest.dsh?.client?.external;
+  if (!Array.isArray(external) || external.some((entry) => typeof entry !== "string")) {
+    throw new Error("package.json dsh.client.external must be an array of strings");
+  }
+  return external as string[];
+}
+
+/**
  * Build the browser bundle in memory and return the loader-shell text.
  * Throws when esbuild reports errors (build failure is loud, per Finding 4:
  * a missing/broken built bundle fails plugin activation).
@@ -123,7 +141,7 @@ export async function buildClient(): Promise<string> {
     platform: "browser",
     target: "es2022",
     jsx: "automatic",
-    external: ["react", "react/jsx-runtime", "react-dom"],
+    external: await readClientExternals(),
     sourcemap: false,
     minify: false,
     write: false,

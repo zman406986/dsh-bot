@@ -1,10 +1,22 @@
-# 168 — Installed dsh is 0.2.1-rc.2 while the repo, README and launchers name 0.2.1-rc.3
+# 168 — dsh baseline version mismatch (resolved: installed and documented versions now agree)
 
-**Status:** open
+**Status:** resolved
 **Labels:** needs-owner-decision
-**Related:** 144 (the dsh 0.2.1-rc.3 baseline ruling this contradicts); 167 (the Desktop launchers, whose missing-dsh error text names rc.3); `README.md` §What you need; owner request, 2026-10-30 ("stop, wrap up, file what is left").
+**Related:** 144 (the earlier rc.3 baseline ruling — superseded by the shared `dev/dsh-baseline.txt`, currently `0.2.2-rc.1`); 167 (the Desktop launchers, which read that file); `README.md` §What you need; owner request, 2026-10-30 ("stop, wrap up, file what is left").
 
-## Problem
+## Resolution — 2026-11-07
+
+The mismatch described below no longer exists on this tree. Observed:
+
+- `npm ls -g @deepseek-ai/dsh` → `@deepseek-ai/dsh@0.2.2-rc.1`
+- the installed package manifest (`…\node_modules\@deepseek-ai\dsh\package.json`) → `"version": "0.2.2-rc.1"`
+- `dev/dsh-baseline.txt` → `0.2.2-rc.1`
+- `README.md` §What you need → "last run against dsh 0.2.2-rc.1"
+- both `dsh-bot.bat` and `dsh-bot-RACOONS.bat` read `dev\dsh-baseline.txt` for the missing-dsh install hint; the only literal left is their documented fallback for an incomplete checkout.
+
+Ticket 144's rc.3 baseline has been superseded; `dev/dsh-baseline.txt` is the one source of truth for every launcher, and the installed, documented and tested versions agree. Nothing was observed to break, so no further action is needed here.
+
+## Problem (as filed 2026-10-30)
 
 Observed on the owner's machine on 2026-10-30:
 
@@ -57,8 +69,10 @@ of the README is told to install a version that is not the one in use.
 
 ## DoD
 
-- [ ] Owner picks: reword to rc.2, or upgrade to rc.3.
-- [ ] `README.md`, `dsh-bot.bat` and `dsh-bot-RACOONS.bat` all name the same,
-      actually-installed version.
-- [ ] If the baseline moved, ticket 158 records that its live checks were run
-      against the new baseline.
+- [x] The version question is settled by observation rather than by picking
+      between the two options below: installed, documented and baseline file
+      all read `0.2.2-rc.1`.
+- [x] `README.md`, `dsh-bot.bat` and `dsh-bot-RACOONS.bat` all name the same,
+      actually-installed version (the launchers read `dev/dsh-baseline.txt`).
+- [x] The baseline move is recorded on ticket 158, which remains open for its
+      live checks; no live check has been run for this ticket.

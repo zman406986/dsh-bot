@@ -24,56 +24,66 @@ interface TestAgent extends AgentLike {
 
 /**
  * A per-agent scoped tool surface (ADR-0019): what the live host mints per
- * agent loop. Registrations here are visible only to THIS agent.
+ * agent loop. Registrations here are visible only to THIS agent. The plugin
+ * refuses the retired process-global fallback, so ordinary test agents carry
+ * one.
  */
+interface ScopedToolSurface extends ToolsLike {
+  registeredNames(): string[];
+  get(
+    name: string,
+  ): { execute: (args: unknown, exec?: unknown) => Promise<unknown> } | undefined;
+}
+
+function createScopedTools(): ScopedToolSurface {
+  const scoped = new Map<
+    string,
+    { name: string; execute: (args: unknown, exec?: unknown) => Promise<unknown> }
+  >();
+  return {
+    schemas: () => [...scoped.keys()].map((name) => ({ name })),
+    register(definition: unknown) {
+      const tool = definition as {
+        name: string;
+        execute: (args: unknown, exec?: unknown) => Promise<unknown>;
+      };
+      // Shipped rule: duplicate tool name throws
+      // (dsh-tools lib/index.js:2538, NamedEntries factory).
+      if (scoped.has(tool.name)) {
+        throw new Error(
+          `tool "${tool.name}" is already registered (for a ` +
+            `per-agent variant, register through that agent's ` +
+            `\`agent.ctx\` instead)`,
+        );
+      }
+      scoped.set(tool.name, tool);
+      return () => {
+        scoped.delete(tool.name);
+      };
+    },
+    registeredNames: () => [...scoped.keys()],
+    get: (name) => scoped.get(name),
+  };
+}
+
 interface ScopedAgent extends TestAgent {
   readonly ctx?: {
-    readonly tools: ToolsLike & {
-      registeredNames(): string[];
-    };
+    readonly tools: ScopedToolSurface;
   };
 }
 
 function createScopedAgent(id: string): ScopedAgent {
-  const agent = createAgent(id) as ScopedAgent;
-  const scoped = new Map<
-    string,
-    { execute: (args: unknown, exec?: unknown) => Promise<unknown> }
-  >();
-  agent.ctx = {
-    tools: {
-      schemas: () => [...scoped.keys()].map((name) => ({ name })),
-      register(definition: {
-        name: string;
-        execute: (args: unknown, exec?: unknown) => Promise<unknown>;
-      }) {
-        // Shipped rule: duplicate tool name throws
-        // (dsh-tools lib/index.js:2538, NamedEntries factory).
-        if (scoped.has(definition.name)) {
-          throw new Error(
-            `tool "${definition.name}" is already registered (for a ` +
-              `per-agent variant, register through that agent's ` +
-              `\`agent.ctx\` instead)`,
-          );
-        }
-        scoped.set(definition.name, definition);
-        return () => {
-          scoped.delete(definition.name);
-        };
-      },
-      registeredNames: () => [...scoped.keys()],
-    },
-  };
-  return agent;
+  return createAgent(id) as ScopedAgent;
 }
 
 function createAgent(
   id: string,
-  opts?: { topLevel?: boolean; withInject?: boolean },
-): TestAgent {
+  opts?: { topLevel?: boolean; withInject?: boolean; withScopedTools?: boolean },
+): TestAgent & { ctx?: { tools: ScopedToolSurface } } {
   const topLevel = opts?.topLevel ?? true;
   const injected: unknown[] = [];
-  const agent: TestAgent = {
+  const withScoped = opts?.withScopedTools ?? true;
+  const agent: TestAgent & { ctx?: { tools: ScopedToolSurface } } = {
     session: {
       id,
       header: topLevel
@@ -82,6 +92,9 @@ function createAgent(
     },
     followup() {},
     injected,
+    ...(withScoped
+      ? { ctx: { tools: createScopedTools() } }
+      : {}),
     ...(opts?.withInject === false
       ? {}
       : {
@@ -271,10 +284,10 @@ describe("activation lifecycle — flag matrix (design-16 §3.7)", () => {
     // Two lifecycle listeners (agent/disposed, agent/status) + four host
     // listeners (subagent/end, session/event, agent/created — the worker
     // composition seam, passive until a spawn is in flight — and agent/disposed,
-    // the resumed-user-dispatcher release from ticket 163 defect 3) + the
-    // ticket-145 racoons mount (session/event, llm/stream, agent/pre-step and
-    // agent/turn-stopping), which is always on inside the enabled path.
-    assert.equal(ctx.listenerCount(), 10);
+    // the resumed-user-dispatcher release from ticket 163 defect 3). Owner
+    // ruling 2026-11-05: the ticket-145 racoons mount adds four more, but only
+    // when `racoonsEnabled` is on — the default product is racoons-free.
+    assert.equal(ctx.listenerCount(), 6);
     // No dispatcher tool claims a dormant key: a stock caller sees stock.
     for (const name of [
       "spawn_worker",
@@ -305,45 +318,44 @@ describe("activation lifecycle — command behavior", () => {
     assert.deepEqual(result, { kind: "success", text: DISPATCHER_START_SUCCESS });
     assert.equal(agent.injected.length, 1);
     assert.ok(textOf(agent.injected[0]).includes("# Multitask dispatcher"));
-    // Full dispatcher surface: eight tools (ticket 117 added await_agent,
-    // ticket 118 added spawn_dispatcher) + the ticket-145 per-session recall
-    // (this context-less agent takes the plugin-level fallback surface).
-    // Ticket 174 / ADR-0033 removed the global `request_access`.
-    assert.deepEqual(ctx.toolNames().sort(), [
+    // Full dispatcher surface in the agent's OWN scope: eight tools (ticket
+    // 117 added await_agent, ticket 118 added spawn_dispatcher). Owner ruling
+    // 2026-11-05: the ticket-145 per-session `recall` is absent by default —
+    // racoons is off unless `racoonsEnabled` turns it on. Ticket 174 /
+    // ADR-0033 removed the global `request_access`.
+    assert.deepEqual(agent.ctx?.tools.registeredNames().sort(), [
       "await_agent",
       "check_workers",
       "deliver_result",
       "message_agent",
-      "recall",
       "spawn_dispatcher",
       "spawn_worker",
       "steer_worker",
       "stop_worker",
     ]);
+    // Nothing claims a process-global name.
+    assert.deepEqual(ctx.toolNames(), []);
   });
 
-  it("the context-less fallback is single-session: a second chat hits the host duplicate error (ticket 91)", () => {
+  it("the context-less path refuses the global fallback instead of leaking tools", () => {
     const ctx = createFullCtx();
     apply(ctx, volatileConfig({ enabled: true }));
-    // Context-less agents take the plugin-level global fallback
-    // (src/plugin.ts:480-486). That shape holds ONE tool surface, so a second
-    // dispatcher session collides on the same names. Live hosts cannot reach
-    // this (every agent loop mints `agent.ctx`), but the offline suite must
-    // not pretend the fallback scales: the shipped registry throws, and the
-    // old permissive fake silently REPLACED the first session's closures
-    // (mis-routing its calls). Pinned loud, not silent.
-    const first = createAgent("s-1");
-    ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent: first });
-    assert.equal(ctx.toolNames().length, 9);
 
-    assert.throws(
-      () =>
-        ctx.runCommand({
-          commandId: DISPATCHER_START_COMMAND,
-          agent: createAgent("s-2"),
-        }),
-      /tool "spawn_worker" is already registered/,
+    // A host without `agent.ctx.tools` is a wiring bug. The plugin must not
+    // register the dispatcher tools on the process-global registry (that
+    // exposed them to every session and closed over one session id).
+    const first = createAgent("s-1", { withScopedTools: false });
+    ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent: first });
+    assert.deepEqual(ctx.toolNames(), []);
+    assert.equal(first.injected.length, 1, "activation itself still stands");
+
+    // A second bare session is not a duplicate registration (nothing was
+    // registered at all).
+    const second = createAgent("s-2", { withScopedTools: false });
+    assert.doesNotThrow(() =>
+      ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent: second }),
     );
+    assert.deepEqual(ctx.toolNames(), []);
   });
 
   it("activation in a child chat is refused with not-top-level copy", () => {
@@ -388,10 +400,10 @@ describe("activation lifecycle — deactivation and HMR", () => {
     const agent = createAgent("s-1");
 
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
-    assert.equal(ctx.toolNames().length, 9);
+    assert.equal(agent.ctx?.tools.registeredNames().length, 8);
 
     ctx.fire("agent/disposed", { agent });
-    assert.deepEqual(ctx.toolNames(), []);
+    assert.deepEqual(agent.ctx?.tools.registeredNames(), []);
 
     // Re-consent is deliberate: another explicit command re-attaches.
     const again = ctx.runCommand({
@@ -403,7 +415,7 @@ describe("activation lifecycle — deactivation and HMR", () => {
       text: DISPATCHER_START_SUCCESS,
     });
     assert.equal(agent.injected.length, 2);
-    assert.equal(ctx.toolNames().length, 9);
+    assert.equal(agent.ctx?.tools.registeredNames().length, 8);
   });
 
   it("dispose-all (HMR simulation) leaves no lingering binding or surface", () => {
@@ -411,13 +423,14 @@ describe("activation lifecycle — deactivation and HMR", () => {
     apply(ctx, volatileConfig({ enabled: true }));
     const agent = createAgent("s-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
-    assert.equal(ctx.toolNames().length, 9);
+    assert.equal(agent.ctx?.tools.registeredNames().length, 8);
 
     for (const dispose of [...ctx.disposers]) {
       dispose();
     }
 
     assert.deepEqual(ctx.commandNames(), []);
+    assert.deepEqual(agent.ctx?.tools.registeredNames(), []);
     assert.deepEqual(ctx.toolNames(), []);
     assert.equal(ctx.listenerCount(), 0);
     // The command itself is unregistered: nothing lingers to activate with.
@@ -444,8 +457,9 @@ describe("activation lifecycle — dispatcher tool surface (ADR-0019)", () => {
     });
     assert.deepEqual(result, { kind: "success", text: DISPATCHER_START_SUCCESS });
 
-    // Eight dispatcher tools + the ticket-145 per-session recall live in THIS
-    // agent's scope only…
+    // The eight dispatcher tools live in THIS agent's scope only. Owner
+    // ruling 2026-11-05: the ticket-145 per-session `recall` is absent by
+    // default — racoons is off unless `racoonsEnabled` turns it on.
     assert.deepEqual(
       agent.ctx?.tools.registeredNames().sort(),
       [
@@ -453,7 +467,6 @@ describe("activation lifecycle — dispatcher tool surface (ADR-0019)", () => {
         "check_workers",
         "deliver_result",
         "message_agent",
-        "recall",
         "spawn_dispatcher",
         "spawn_worker",
         "steer_worker",
@@ -476,7 +489,7 @@ describe("activation lifecycle — dispatcher tool surface (ADR-0019)", () => {
     ctx.fire("agent/disposed", { agent: first });
 
     assert.deepEqual(first.ctx?.tools.registeredNames(), []);
-    assert.equal(second.ctx?.tools.registeredNames().length, 9);
+    assert.equal(second.ctx?.tools.registeredNames().length, 8);
     // The sibling's surface is untouched, and no global tool exists to leak
     // past a session (ticket 174 / ADR-0033 removed `request_access`).
     assert.deepEqual(ctx.toolNames(), []);
@@ -490,7 +503,7 @@ describe("activation lifecycle — dispatcher tool surface (ADR-0019)", () => {
     const agent = createAgent("s-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
 
-    const spawn = ctx.tool("spawn_worker");
+    const spawn = agent.ctx?.tools.get("spawn_worker");
     assert.ok(spawn);
     const value = (await spawn.execute(
       { stream_key: "k", title: "T", prompt: "P" },

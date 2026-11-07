@@ -2,19 +2,22 @@
 
 **Status:** open
 **Labels:** ready-for-human
-**Related:** 127 (the RACOONS launcher and its `%~dp0` resolution rule); 144 (the dsh 0.2.1-rc.3 baseline); 145 (racoons mounts unconditionally, options `racoonsRecordOnly` / `racoonsStorageRoot` / `racoonsContextWindowTokens`); owner request, 2026-10-29.
+**Related:** 127 (the RACOONS launcher and its `%~dp0` resolution rule); 144 (the earlier dsh rc.3 baseline — now superseded by `dev/dsh-baseline.txt`, currently `0.2.2-rc.1`); 145 (racoons is opt-in since ADR-0033/ticket 174: `racoonsEnabled` gates the mount, and `racoonsRecordOnly` / `racoonsStorageRoot` / `racoonsContextWindowTokens` apply only while it is enabled); owner request, 2026-10-29.
 
 ## What to do
 
 Bring both Desktop launchers back in line with the repo as it stands
-(racoons vendored as npm workspaces, dsh rc.3 baseline):
+(racoons vendored as npm workspaces and opt-in via `racoonsEnabled`,
+dsh 0.2.2-rc.1 baseline read from `dev/dsh-baseline.txt`):
 
 - `dsh-bot.bat`: drop the hardcoded `C:\Users\TZhen\Desktop\dsh-bot` repo
   path — the owner works from two devices with different home directories
   (`TZhen…` and `TZ…`), so the launcher must resolve the `dsh-bot` folder
   beside itself, exactly as `dsh-bot-RACOONS.bat` already does.
-- `dsh-bot.bat`: the missing-dsh error should name dsh `0.2.1-rc.3`
-  (ticket 144 baseline, README §What you need), not `0.2.1-rc.2`.
+- `dsh-bot.bat`: the missing-dsh error should read the shared
+  `dev\dsh-baseline.txt` baseline (currently `0.2.2-rc.1`), not a hardcoded
+  version. The RACOONS launcher already does; the main launcher has the same
+  fallback literal for an incomplete checkout.
 - `dsh-bot.bat`: the header still calls this file "the ONLY launcher file";
   the RACOONS launcher exists, so reword.
 - `dsh-bot-RACOONS.bat`: add the opt-in `-NoOpen` switch recorded as an
@@ -32,7 +35,8 @@ Bring both Desktop launchers back in line with the repo as it stands
 ## DoD
 
 - [x] Main launcher resolves the adjacent checkout on either desktop root.
-- [x] Missing-dsh error names 0.2.1-rc.3.
+- [x] Missing-dsh error reads the shared baseline in `dev/dsh-baseline.txt`
+      (currently `0.2.2-rc.1`), not a hardcoded version.
 - [x] RACOONS launcher takes `-NoOpen`; without it behaviour is unchanged.
 - [x] Both launchers refuse to serve a build older than the source: the main
       one on its `-NoBuild` path, the RACOONS one unless `-Build` is passed.
@@ -86,3 +90,12 @@ with and without `-NoOpen`, rejects `-Bogus` with the updated usage line, and
 reaches the start line under `-Build` with both build calls replaced by
 `echo`. No dsh start, no real build, no browser, no model contact. Cost to
 know: the guard spawns one PowerShell process per launch (~0.3 s).
+
+2026-11-07: Premise correction (second-round audit). The baseline is no
+longer `0.2.1-rc.3`: `dev/dsh-baseline.txt` holds `0.2.2-rc.1` and both
+launchers now read it, so their missing-dsh text follows the shared file
+instead of naming rc.3. Racoons no longer mounts unconditionally either — it
+is off by default and gated by `racoonsEnabled`, with the RACOONS launcher and
+`dev\cordis.racoons.patch.yml` as the manual switch (ADR-0033/ticket 174).
+The DoD row and Related line are updated; the dated comments above record the
+state at the time they were written. The human launch check remains open.

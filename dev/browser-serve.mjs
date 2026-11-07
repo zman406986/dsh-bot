@@ -13,9 +13,10 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:net';
+import { assertBuildFresh } from './build-freshness.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, '..');
@@ -30,6 +31,17 @@ function argValue(name, fallback) {
 const TIMEOUT_MS = Number(argValue('--timeout-ms', '900000'));
 const SCRIPT = argValue('--script', '');
 const OUT = resolve(argValue('--out', join(REPO, '.scratch', 'testing', 'browser-serve')));
+
+// Refuse before creating evidence or starting the mock: this script boots the
+// built plugin from lib/ and the web overlay serves client/. Never rebuild
+// automatically — a stale build must be refreshed by the caller first.
+try {
+  assertBuildFresh('browser-serve');
+} catch (error) {
+  console.error(`[serve] ${error.message}`);
+  process.exit(1);
+}
+
 mkdirSync(OUT, { recursive: true });
 const HOME = join(OUT, 'dsh-home');
 mkdirSync(HOME, { recursive: true });
@@ -46,6 +58,62 @@ function killTree(pid) {
   if (pid === undefined) return;
   // Best-effort teardown: taskkill failures at shutdown are not actionable.
   spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+}
+
+/** Parse `tasklist /FO CSV /NH` into `{ image, pid }` rows. */
+function parseTasklistCsv(stdout) {
+  return String(stdout ?? '')
+    .split(/\r?\n/)
+    .map((line) => {
+      const fields = line.match(/"([^"]*)"/g);
+      if (fields === null || fields.length < 2) return null;
+      const image = fields[0].slice(1, -1).trim();
+      const pid = fields[1].slice(1, -1).trim();
+      if (image.length === 0 || !/^\d+$/.test(pid)) return null;
+      return { image, pid: Number(pid) };
+    })
+    .filter((row) => row !== null);
+}
+
+/** One PID's `tasklist` CSV rows, or null when tasklist itself could not run. */
+function tasklistFor(pid) {
+  const result = spawnSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (result.error !== undefined || result.status !== 0) return null;
+  return result.stdout;
+}
+
+/** Is the PID still the executable we launched? A recycled PID is not ours. */
+function launchedProcessAlive(pid, expectedImage, tasklistCsv) {
+  const wantPid = Number(pid);
+  const wantImage = String(expectedImage ?? '').toLowerCase();
+  return parseTasklistCsv(tasklistCsv).some((row) => {
+    if (row.pid !== wantPid) return false;
+    return wantImage === '' || row.image.toLowerCase() === wantImage;
+  });
+}
+
+/**
+ * Kill one launched child only while its PID still names our executable. A kill
+ * timer can fire long after exit; Windows recycles PIDs, so an identity-less
+ * `taskkill /T /F` could kill an innocent process. When tasklist cannot answer
+ * we skip the kill rather than guess.
+ */
+function killIfOurs(entry) {
+  if (entry.exited || entry.pid === undefined) return false;
+  const csv = tasklistFor(entry.pid);
+  if (csv === null) {
+    console.log(`[serve] tasklist failed for ${entry.label} (pid ${entry.pid}); not killing`);
+    return false;
+  }
+  if (!launchedProcessAlive(entry.pid, entry.image, csv)) {
+    console.log(`[serve] pid ${entry.pid} is no longer ${entry.image}; not killing`);
+    return false;
+  }
+  killTree(entry.pid);
+  return true;
 }
 
 function launch(label, command, args, env) {
@@ -65,17 +133,24 @@ function launch(label, command, args, env) {
   };
   child.stdout.on('data', capture);
   child.stderr.on('data', capture);
-  const entry = { label, child, pid: child.pid, exited: false };
+  const entry = { label, child, pid: child.pid, image: basename(command), exited: false, timer: null };
   child.on('exit', () => {
     entry.exited = true;
+    // Clear the timer on exit: it must never fire at a PID that has already
+    // been released and possibly recycled.
+    if (entry.timer !== null) {
+      clearTimeout(entry.timer);
+      entry.timer = null;
+    }
   });
   children.push(entry);
   // Kill timer armed AT LAUNCH (AGENTS.md), not only at teardown.
-  const timer = setTimeout(() => {
+  entry.timer = setTimeout(() => {
+    if (entry.exited) return;
     console.log(`[serve] kill timer fired for ${label} (pid ${entry.pid})`);
     shutdown(1);
   }, TIMEOUT_MS);
-  timer.unref?.();
+  entry.timer.unref?.();
   return entry;
 }
 
@@ -105,7 +180,11 @@ function shutdown(code) {
   if (shuttingDown) return;
   shuttingDown = true;
   for (const entry of children) {
-    if (!entry.exited) killTree(entry.pid);
+    if (entry.timer !== null) {
+      clearTimeout(entry.timer);
+      entry.timer = null;
+    }
+    if (!entry.exited) killIfOurs(entry);
   }
   setTimeout(() => process.exit(code), 500);
 }

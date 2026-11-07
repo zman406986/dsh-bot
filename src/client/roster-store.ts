@@ -56,6 +56,28 @@ import {
   type RosterSnapshotWorker,
 } from "../core/roster-snapshot.js";
 import { isTerminalStatus, type WorkerStatus } from "../core/types.js";
+import {
+  formatDuration,
+  shortRef,
+  statusWordKey,
+} from "./status-format.js";
+
+/**
+ * The pure formatter leaf is re-exported here so every existing
+ * `roster-store` import keeps resolving while there is exactly ONE
+ * implementation (`status-format.ts`).
+ */
+export {
+  FACT_SEPARATOR,
+  displaySubject,
+  formatCount,
+  formatDuration,
+  formatFacts,
+  formatTemplate,
+  shortRef,
+  statusWord,
+  statusWordKey,
+} from "./status-format.js";
 
 /** How often the mounted panel re-evaluates staleness without a push. */
 export const ROSTER_STALE_RECHECK_MS = 10_000;
@@ -185,8 +207,15 @@ export interface RosterRowView {
    * and forwards an unknown kind verbatim rather than hiding the row.
    */
   readonly kindLabel: string;
-  /** Core FSM vocabulary, verbatim (design-16 §6 "as-is"). */
+  /** Core FSM vocabulary, verbatim — the `data-status` raw value. */
   readonly statusLabel: string;
+  /**
+   * Locale key for the ONE visible status word (`status.working`, …). The raw
+   * `statusLabel` never renders as prose; it stays in data attributes.
+   */
+  readonly statusWordKey: string;
+  /** Short worker reference (`worker 7f3a`) for rows without a title. */
+  readonly shortRef: string;
   /** Dot/ring visual state the six FSM statuses map onto (CSS hook). */
   readonly visual: RosterStatusVisual;
   /** Ledger linkage metadata — muted, never a task board (design-17 §4.9). */
@@ -268,8 +297,9 @@ export function rosterViewCopyKey(view: RosterPanelView): string | null {
 }
 
 /**
- * Status label mapping. The identity function IS the contract: the panel
- * never invents a display vocabulary; the core FSM word renders verbatim.
+ * Status label mapping. The identity function IS the wire contract: the raw
+ * core FSM word is what `data-status` carries and what model-facing text
+ * uses. The VISIBLE word comes from `statusWordKey` (`status.working`, …).
  */
 export function rosterStatusLabel(status: WorkerStatus): string {
   return status;
@@ -304,34 +334,11 @@ export function rosterStatusVisual(status: WorkerStatus): RosterStatusVisual {
 }
 
 /**
- * Replace `{key}` placeholders in a locale template with values. An
- * unknown placeholder stays verbatim so a copy typo degrades visibly
- * instead of silently vanishing.
+ * Compact locale-neutral elapsed text. Kept as a named alias so every
+ * pre-existing import resolves; the implementation is the shared
+ * `status-format.ts` leaf.
  */
-export function formatTemplate(
-  template: string,
-  values: Readonly<Record<string, string>>,
-): string {
-  return template.replace(/\{([a-z]+)\}/g, (match, key: string) =>
-    key in values ? (values[key] as string) : match,
-  );
-}
-
-/**
- * Compact locale-neutral elapsed text: `42s`, `3m 5s`, `2h 5m`, `1d 3h`.
- * Negative inputs (clock skew) clamp to `0s`.
- */
-export function formatRosterElapsed(ms: number): string {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  const days = Math.floor(totalSeconds / 86_400);
-  const hours = Math.floor((totalSeconds % 86_400) / 3_600);
-  const minutes = Math.floor((totalSeconds % 3_600) / 60);
-  const seconds = totalSeconds % 60;
-  if (days > 0) return `${days}d ${hours}h`;
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  if (minutes > 0) return `${minutes}m ${seconds}s`;
-  return `${seconds}s`;
-}
+export const formatRosterElapsed = formatDuration;
 
 /**
  * Kind-typed generic label from the snapshot's `kind` field (design-17 §4.2 /
@@ -353,7 +360,9 @@ export function rosterGenericTitle(
   kind: RosterSnapshotWorker["kind"],
   workerId: string,
 ): string {
-  return `${rosterKindLabel(kind)} ${workerId}`;
+  const label = rosterKindLabel(kind);
+  const ref = shortRef(workerId, label);
+  return ref === label || ref.startsWith(`${label} `) ? ref : `${label} ${ref}`;
 }
 
 /**
@@ -418,6 +427,8 @@ export function describeRosterPanel(
           : rosterGenericTitle(worker.kind, worker.workerId),
       kindLabel: rosterKindLabel(worker.kind),
       statusLabel: rosterStatusLabel(worker.status),
+      statusWordKey: statusWordKey(worker.status) ?? "status.working",
+      shortRef: shortRef(worker.workerId, rosterKindLabel(worker.kind)),
       visual: rosterStatusVisual(worker.status),
       todoId: worker.todoId,
       marker: landed ? { kind: "landed" } : null,

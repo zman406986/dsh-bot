@@ -3,28 +3,37 @@
  * from the host's session event window to a text-only transcript, plus the
  * per-session store the shell's main pane binds.
  *
- * THE SEAM (verified, `docs/research/wrapper-vehicle-seams.md` Finding 7;
- * file:line citations in ticket 80's Phase 1 comment): a session's replay
- * face is `sessions.binding(id).eventSource` — an
+ * THE SEAM (`docs/research/wrapper-vehicle-seams.md` Finding 7; shape
+ * re-based on the installed 0.2.x contract): a session's replay face is the
+ * `eventSource` on the binding its retained reference carries —
+ * `sessions.retain(id, {source})` → `reference.ready` →
+ * `reference.binding.eventSource` — an
  * `ObservableSnapshot<SessionEventWindow>` whose `entries` fold history pages
  * and the live tail together, `hasMore` gates the scoped `loadOlder()`
- * pagination, and the window opens when the session is STAGED
- * (`sessions.open(id)`, which the shell's selection already rides — ticket
- * 79's `onOpen` hook). This module mirrors those shapes STRUCTURALLY (no
- * import from `@deepseek-ai/*` — the established discipline of
- * `shell-feed.ts`), so a runtime serving the verified face reads directly and
- * any deviation degrades honestly instead of lying.
+ * pagination, and retaining the session is what opens it (0.2.x removed the
+ * `sessions.open(id)` selection verb; selection is view-owned). This module
+ * mirrors those shapes STRUCTURALLY (no import from `@deepseek-ai/*` — the
+ * established discipline of `shell-feed.ts`), so a runtime serving the
+ * verified face reads directly and any deviation degrades honestly instead
+ * of lying.
  *
  * Turn-model reduction (the ticket's offline constraint: "turn-model
  * reduction from session/event-shaped payloads"). Over the window's entries
  * IN ORDER (single pass; the whole window is re-reduced per snapshot, so no
  * client-side attempt ledger exists — the host owns the window):
  * - `user/message` (its data IS the `UserMessage`) with
- *   `source.kind === "user"` → a user turn (text blocks joined verbatim).
- *   Other user-role sources (the host's synthetic injected context — file
- *   notices, skill content, goal rounds) are model-facing context, not the
- *   user's speech: SKIPPED, never rendered as the user's words (recorded
- *   gap, module tail).
+ *   `source.kind === "user"` → a user turn (text blocks joined as separate
+ *   paragraphs).
+ *   A user-role message whose source is the host's peer relay — dispatcher to
+ *   dispatcher traffic, `{kind: "agent-message", form: "relay",
+ *   senderSessionId}` (`src/core/peer-types.ts` `AgentMessageWakeOrigin`;
+ *   stamped on the durable follow-up by the adapter's
+ *   `requestDispatcherWakeup`) → a distinct `peer` turn carrying the sender,
+ *   so a summoned dispatcher's report is visible instead of dropped. Other
+ *   user-role sources (the host's synthetic injected context — file notices,
+ *   skill content, goal rounds) are model-facing context, not the user's
+ *   speech: SKIPPED, never rendered as the user's words (recorded gap,
+ *   module tail).
  * - `assistant/message` → an assistant turn (text blocks joined; U-E keeps
  *   delivery text-only). `interrupted: true` is carried so the pane can say
  *   so; usage/model/stream records are outside the text-only minimum
@@ -116,6 +125,18 @@ export interface ConversationSourceLike {
 /** One transcript item; `seq` is the event's durable position (ordering). */
 export type ConversationItem =
   | { readonly kind: "user"; readonly seq: number; readonly text: string }
+  /**
+   * A dispatcher-to-dispatcher message delivered into this session: host
+   * `user/message` with an `agent-message` source. User-role on the wire, but
+   * not the user's speech — the pane labels it with its sender.
+   */
+  | {
+      readonly kind: "peer";
+      readonly seq: number;
+      readonly text: string;
+      /** The sending session, when the source names one. */
+      readonly senderSessionId: string | null;
+    }
   | {
       readonly kind: "assistant";
       readonly seq: number;
@@ -193,15 +214,27 @@ function textOfContent(content: unknown): string {
       parts.push(record.text);
     }
   }
-  return parts.join("");
+  // Separate blocks are distinct paragraphs, not one run-on line.
+  return parts.join("\n\n");
 }
 
-/** `isError` of a tool-result message's FIRST block (the correlation one). */
-function toolResultIsError(message: unknown): boolean {
+/**
+ * Whether a tool-result event reports an error. The host attaches the flag to
+ * the result MESSAGE (`message.isError`) and, for a structured failure, an
+ * `error` field on the event data. The legacy first-block `isError` is kept
+ * as a defensive fallback for an older payload shape.
+ */
+function toolResultIsError(
+  message: unknown,
+  data?: Record<string, unknown> | null,
+): boolean {
   const record = asRecord(message);
-  if (record === null || !Array.isArray(record.content)) return false;
-  const first = asRecord(record.content[0]);
-  return first?.isError === true;
+  if (record?.isError === true) return true;
+  const first = Array.isArray(record?.content)
+    ? asRecord((record.content as unknown[])[0])
+    : null;
+  if (first?.isError === true) return true;
+  return data?.error !== undefined && data.error !== null;
 }
 
 /**
@@ -282,17 +315,27 @@ function sourceKind(source: unknown): string | null {
   return typeof kind === "string" ? kind : null;
 }
 
+/** The relay sender named by an `agent-message` source, when it names one. */
+function sourceSender(source: unknown): string | null {
+  const sender = asRecord(source)?.senderSessionId;
+  return typeof sender === "string" && sender.length > 0 ? sender : null;
+}
+
 type ToolItem = Extract<ConversationItem, { kind: "tool" }>;
 type StreamingItem = Extract<ConversationItem, { kind: "assistant-streaming" }>;
 
 /**
  * Reduce one window's entries into the text-only transcript (pure; module
- * comment). A window without an array `entries` is unreadable → `null` (the
- * caller marks the session unavailable — empty and unreadable differ).
+ * comment). A window that is not an object — or one without an array
+ * `entries` — is unreadable → `null` (the caller marks the session
+ * unavailable — empty and unreadable differ). The object guard is load-
+ * bearing: the feed publishes whatever the host hands it, and a null/primitive
+ * window must degrade, not throw into the publisher's listener loop.
  */
 export function reduceConversationWindow(
-  window: ConversationWindowLike,
+  window: ConversationWindowLike | null | undefined,
 ): ConversationTranscript | null {
+  if (typeof window !== "object" || window === null) return null;
   const entries = window.entries;
   if (!Array.isArray(entries)) return null;
 
@@ -355,12 +398,27 @@ export function reduceConversationWindow(
     switch (event.type) {
       case "user/message": {
         // The event data IS the UserMessage (content + source at top level).
-        if (data === null || sourceKind(data.source) !== "user") continue;
-        items.push({
-          kind: "user",
-          seq: event.seq,
-          text: textOfContent(data.content),
-        });
+        if (data === null) continue;
+        const kind = sourceKind(data.source);
+        if (kind === "user") {
+          items.push({
+            kind: "user",
+            seq: event.seq,
+            text: textOfContent(data.content),
+          });
+          break;
+        }
+        // Peer relay: a user-role message another dispatcher sent. The user
+        // did not say it, so it keeps its own kind and sender label.
+        if (kind === "agent-message" || kind === "relay") {
+          items.push({
+            kind: "peer",
+            seq: event.seq,
+            text: textOfContent(data.content),
+            senderSessionId: sourceSender(data.source),
+          });
+        }
+        // Every other source (synthetic context) stays model-facing context.
         break;
       }
       case "assistant/message": {
@@ -425,9 +483,7 @@ export function reduceConversationWindow(
                   result: resultRecord,
                 })
               : null,
-          failed:
-            toolResultIsError(data.message) ||
-            (data.error !== undefined && data.error !== null),
+          failed: toolResultIsError(data.message, data),
           settled: true,
         };
         toolCalls.set(callId, { item: updated, args: call.args });
@@ -473,6 +529,12 @@ export interface ConversationStore {
    * a well-formed window reduces to `ready`. Junk session ids are refused.
    */
   applyWindow(sessionId: string, window: ConversationWindowLike): void;
+  /**
+   * A window exists but its initial open has not settled: keep (or restore)
+   * the honest `waiting` state instead of rendering the window's provisional
+   * empty revision as an empty transcript.
+   */
+  markWaiting(sessionId: string): void;
   /** Honest degrade: no readable window exists for this session. */
   markUnavailable(sessionId: string): void;
   /** The state for one session (`waiting` before the first window). */
@@ -490,7 +552,15 @@ export function createConversationStore(): ConversationStore {
   function emit(next: Map<string, ConversationState>): void {
     version += 1;
     box = { state: { transcripts: next, version } };
-    for (const listener of [...listeners]) listener();
+    // One subscriber must not silence the rest (or escape into a publisher's
+    // listener loop): each call is isolated.
+    for (const listener of [...listeners]) {
+      try {
+        listener();
+      } catch {
+        // contained: the next subscriber still runs
+      }
+    }
   }
 
   return {
@@ -513,6 +583,16 @@ export function createConversationStore(): ConversationStore {
           ? ({ kind: "unavailable" } as const)
           : ({ kind: "ready", transcript } as const),
       );
+      emit(next);
+    },
+    markWaiting(sessionId) {
+      if (typeof sessionId !== "string" || sessionId.length === 0) return;
+      // An absent entry already reads as waiting; only a stale ready or
+      // unavailable slot needs rewriting.
+      const current = box.state.transcripts.get(sessionId);
+      if (current === undefined || current.kind === "waiting") return;
+      const next = new Map(box.state.transcripts);
+      next.set(sessionId, { kind: "waiting" });
       emit(next);
     },
     markUnavailable(sessionId) {

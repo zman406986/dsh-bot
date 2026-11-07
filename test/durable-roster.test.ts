@@ -533,6 +533,10 @@ describe("durable roster marker — restart rebuild", () => {
 describe("in-memory durability — dispatcher mark peek (ticket 140 polish)", () => {
   it("answers with the same three-way shape as the durable store", async () => {
     const durability = createInMemoryDurability();
+    // The port types these optional so thinner stubs can omit them; the
+    // in-memory store always implements them.
+    assert.ok(durability.peekDispatcherMark);
+    assert.ok(durability.writeDispatcherMark);
 
     // The map is always "open", so absence is a definitive "no".
     assert.deepEqual(durability.peekDispatcherMark("chat-1"), {

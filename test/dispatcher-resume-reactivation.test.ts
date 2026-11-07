@@ -46,7 +46,8 @@ import { describe, it } from "node:test";
 import { apply } from "../src/plugin.js";
 import { createCordisDshHost } from "../src/adapter/cordis-dsh-host.js";
 import { volatileConfig } from "./support/plugin-config.js";
-import {DISPATCHER_START_COMMAND, SESSION_KIND_PROJECTION_KEY, RESTART_DEGRADED_NOTICE, type AgentLike, type CommandDefinitionLike, type CommandResultLike, type SessionProjectionDefinitionLike, type SessionKindProjectionState, type ToolsLike} from "../src/adapter/index.js";
+import {DISPATCHER_START_COMMAND, SESSION_KIND_PROJECTION_KEY, RESTART_DEGRADED_NOTICE, type AgentLike, type CommandDefinitionLike, type CommandResultLike, type SessionProjectionChildLike, type SessionProjectionDefinitionLike, type SessionKindProjectionState, type ToolsLike} from "../src/adapter/index.js";
+import type { DurableWorkerMarker } from "../src/core/durability.js";
 
 function tick(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
@@ -195,7 +196,7 @@ function createProjectionRegistry(options?: { throwOnRead?: boolean }) {
         definitions.delete(definition.key);
       };
     },
-    stateOf(session: unknown, key: string): unknown {
+    stateOf(session: unknown, key: string): SessionKindProjectionState | undefined {
       if (options?.throwOnRead === true) {
         throw new Error("projection fold exploded");
       }
@@ -267,9 +268,14 @@ function createCtx(options?: {
     },
     // The real registration route: the plugin asks for the optional service
     // and registers the unit on the child it gets back.
-    inject(services: readonly string[], callback: (child: unknown) => void) {
+    inject(
+      services: readonly string[],
+      callback: (child: SessionProjectionChildLike) => void,
+    ) {
       void services;
-      callback({ sessionProjections: projections ?? undefined });
+      callback(
+        projections == null ? {} : { sessionProjections: projections },
+      );
     },
     // The guarded READ route (cordis `ctx.get`).
     get(name: string) {
@@ -335,9 +341,15 @@ function createCtx(options?: {
               storage.set(name, table);
             }
             const rows = table;
+            // The stub's table map is shared across logical tables, so its
+            // values are opaque; this view is only ever read as markers.
             return {
-              get: (key: string) => rows.get(key),
-              entries: () => rows.entries(),
+              get: (key: string) =>
+                rows.get(key) as DurableWorkerMarker | undefined,
+              entries: () =>
+                rows.entries() as IterableIterator<
+                  [string, DurableWorkerMarker]
+                >,
               async put(key: string, value: unknown) {
                 rows.set(key, value);
               },
@@ -370,13 +382,12 @@ function createCtx(options?: {
   return ctx;
 }
 
-/** The 9 tools registered on the dispatcher's OWN scope (ticket 145 recall). */
+/** The 8 tools registered on the dispatcher's OWN scope (racoons off by default). */
 const DISPATCHER_SCOPED_TOOLS = [
   "await_agent",
   "check_workers",
   "deliver_result",
   "message_agent",
-  "recall",
   "spawn_dispatcher",
   "spawn_worker",
   "steer_worker",
@@ -384,7 +395,7 @@ const DISPATCHER_SCOPED_TOOLS = [
 ];
 
 /**
- * The reported surface: the 9 scoped tools. Ticket 174 / ADR-0033 removed the
+ * The reported surface: the 8 scoped tools. Ticket 174 / ADR-0033 removed the
  * global `request_access`, so the full surface IS the scoped set.
  */
 const DISPATCHER_FULL_SURFACE = [
@@ -392,7 +403,6 @@ const DISPATCHER_FULL_SURFACE = [
   "check_workers",
   "deliver_result",
   "message_agent",
-  "recall",
   "spawn_dispatcher",
   "spawn_worker",
   "steer_worker",
@@ -403,7 +413,7 @@ const DISPATCHER_FULL_SURFACE = [
 const TOP_LEVEL_HEADER = { parentSession: null, delegationDepth: 0 } as const;
 
 describe("ticket 147 — a user-started dispatcher re-activates after restart", () => {
-  it("a resumed generation-1 dispatcher gets its 9 tools back, one policy, no degraded notice", async () => {
+  it("a resumed generation-1 dispatcher gets its 8 tools back, one policy, no degraded notice", async () => {
     // ── first process: the owner runs /dsh-bot in a normal chat ─────────
     const storage = new Map<string, Map<string, unknown>>();
     const first = createCtx({ storage });
@@ -429,7 +439,7 @@ describe("ticket 147 — a user-started dispatcher re-activates after restart", 
     // Dormant boot is untouched: the plugin registered the projection unit,
     // and no tool surface exists before a session is announced.
     assert.ok(
-      second.projections.definitionFor(SESSION_KIND_PROJECTION_KEY),
+      second.projections?.definitionFor(SESSION_KIND_PROJECTION_KEY),
       "apply registers the real sessionKind unit",
     );
     assert.deepEqual(second.globalToolNames(), []);
@@ -599,14 +609,31 @@ describe("ticket 163 defect 3 — a disposed dispatcher re-activates on re-annou
 describe("ticket 163 defect 4 — sessionController is read through one guarded accessor", () => {
   /** A minimal structural ctx whose `sessionController` READ throws. */
   function createFacadelessCtx() {
+    const listeners = new Map<string, Array<(payload: unknown) => void>>();
     const ctx = {
       get(name: string): unknown {
         void name;
         // Nothing answers `get`, so the accessor falls through to the property.
         return undefined;
       },
-      on() {
-        return () => {};
+      on(name: string, cb: (payload: never) => void) {
+        const list = listeners.get(name) ?? [];
+        list.push(cb as (payload: unknown) => void);
+        listeners.set(name, list);
+        return () => {
+          listeners.set(
+            name,
+            (listeners.get(name) ?? []).filter(
+              (entry) => entry !== (cb as (payload: unknown) => void),
+            ),
+          );
+        };
+      },
+      /** Test surface: deliver a host event to the registered listeners. */
+      fire(name: string, payload: unknown) {
+        for (const cb of [...(listeners.get(name) ?? [])]) {
+          cb(payload);
+        }
       },
       subagents: {
         async startActivation() {
@@ -667,28 +694,84 @@ describe("ticket 163 defect 4 — sessionController is read through one guarded 
     );
   });
 
-  it("a facade reached through ctx.get is still preferred, unchanged", async () => {
-    // The guard must not break the working path: when the service IS there,
-    // it is used and `resolveAgent` is called.
+  it("sendMessage never routes a worker through the peer facade", async () => {
+    // Worker sessions carry `origin: "subagent"`, and the host's session
+    // facade refuses that shape by design (`session/agent-busy`, "use subagent
+    // delivery for this child session"). Subagent delivery is the worker route
+    // even when a facade is mounted — consulting it is the crash.
     const resolved: string[] = [];
-    const followed: unknown[] = [];
     const ctx = createFacadelessCtx() as Record<string, unknown>;
     ctx["get"] = (name: string) =>
       name === "sessionController"
         ? {
             async resolveAgent(sessionId: string) {
               resolved.push(sessionId);
-              return {
-                agent: { session: { id: sessionId }, followup: (m: unknown) => followed.push(m) },
-              };
+              return { error: new Error("session is owned by subagent routing") };
             },
           }
         : undefined;
     const host = createCordisDshHost(ctx as never);
 
-    await host.sendMessage("peer-1", "carry on");
+    const caught = await host.sendMessage("some-worker", "carry on").then(
+      () => undefined,
+      (error: unknown) => error,
+    );
 
-    assert.deepEqual(resolved, ["peer-1"]);
-    assert.equal(followed.length, 1);
+    assert.deepEqual(resolved, [], "the peer facade must not be asked");
+    assert.ok(caught instanceof Error);
+    assert.match(caught.message, /no parent agent bound/);
+  });
+
+  it("a marked non-live dispatcher wake survives the throwing property read and stays parked", async () => {
+    // The reachable path: `sendMessage` no longer reads the facade, but
+    // `resumeDormantDispatcher` does. A marked session that is not live is a
+    // wake, and the guarded accessor must answer "no facade" instead of
+    // letting the cordis property-read throw escape.
+    const ctx = createFacadelessCtx();
+    const host = createCordisDshHost(ctx as never, {
+      markers: {
+        listDispatcherMarks() {
+          return [{ sessionId: "chat-cold" }];
+        },
+      } as never,
+    });
+    await host.refreshDispatcherMarks();
+
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map((arg) => String(arg)).join(" "));
+    };
+    try {
+      await host.requestDispatcherWakeup("chat-cold");
+      await drain();
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    assert.ok(
+      !warnings.some((line) => line.includes("sessionController is not injected")),
+      "the simulated cordis throw must never escape the accessor",
+    );
+    assert.ok(
+      warnings.some((line) => line.includes("is undeliverable")),
+      "the wake degrades honestly instead of claiming a resume",
+    );
+
+    // Parked, not dropped: the next announcement still delivers it once.
+    const followed: unknown[] = [];
+    const resumed = {
+      session: {
+        id: "chat-cold",
+        header: { parentSession: null, delegationDepth: 0 },
+      },
+      followup(message: unknown) {
+        followed.push(message);
+      },
+      inject() {},
+    };
+    ctx.fire("agent/created", { agent: resumed, source: "resume" });
+    await drain();
+    assert.equal(followed.length, 1, "the parked wake is still an obligation");
   });
 });

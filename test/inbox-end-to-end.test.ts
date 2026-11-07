@@ -11,8 +11,11 @@
  *    no checkpoints) — the ADR-0023 off switch is total;
  * 2. the full pipeline: queue.jsonl → watcher claim → checkpoint → the
  *    external-event wake carrying the "## Inbox jobs" section →
- *    deliver_result (todo_id from the checkpoint) → reply.md + status.json
- *    `{status:"replied"}` + terminal checkpoint;
+ *    deliver_result (todo_id from the checkpoint). Delivery is conversational
+ *    (ADR-0009): with no separate `deliverToUser` channel wired, the
+ *    dispatcher's reply IS the channel, so the tool closes the obligation
+ *    (`channel: "reply"`) and the reply writer lands reply.md/status.json and
+ *    a terminal checkpoint;
  * 3. restart re-presentation of a claimed-but-unreplied job across two host
  *    lives over the SAME tables: no double claim (status.json's claimedAtMs
  *    never rewritten), the boot rescan re-presents (presentAttempts 2), and
@@ -55,6 +58,7 @@ import {
   DISPATCHER_START_COMMAND,
   INBOX_TABLE_NAME,
   MARKER_TABLE_NAME,
+  WORKER_SESSION_TABLE_NAME,
   type AdapterContext,
   type AgentLike,
   type CommandDefinitionLike,
@@ -86,39 +90,23 @@ async function pollUntil(
 }
 
 interface TestAgent extends AgentLike {
+  /** Narrow the base view's opaque `id` to the string this fixture mints. */
+  readonly session: AgentLike["session"] & { readonly id: string };
   readonly woken: unknown[];
-}
-
-function createAgent(id: string): TestAgent {
-  const woken: unknown[] = [];
-  return {
-    session: {
-      id,
-      header: { parentSession: null, delegationDepth: 0 },
-    },
-    followup(message: unknown) {
-      woken.push(message);
-    },
-    inject() {},
-    woken,
-  };
-}
-
-/**
- * A test agent with its OWN scoped tool surface (the live host's
- * `agent.ctx` shape — ADR-0019 per-agent visibility). Two dispatcher
- * sessions can coexist in one context because each activation registers
- * its tools in its own agent's scope instead of the plugin-level registry
- * (which throws on duplicates — ticket 91).
- */
-interface ScopedTestAgent extends TestAgent {
   readonly ctx: { tools: ToolsLike };
   scopedTool(
     name: string,
   ): { execute: (args: unknown, exec?: unknown) => Promise<unknown> } | undefined;
 }
 
-function createScopedAgent(id: string): ScopedTestAgent {
+/**
+ * A test agent with its OWN scoped tool surface (the live host's `agent.ctx`
+ * shape — ADR-0019 per-agent visibility). The plugin refuses the retired
+ * process-global fallback, so every activation fixture carries one. Two
+ * dispatcher sessions can coexist because each activation registers its
+ * tools in its own agent's scope (ticket 91).
+ */
+function createAgent(id: string): TestAgent {
   const woken: unknown[] = [];
   const scoped = new Map<
     string,
@@ -154,6 +142,10 @@ function createScopedAgent(id: string): ScopedTestAgent {
     },
     scopedTool: (name) => scoped.get(name),
   };
+}
+
+function createScopedAgent(id: string): TestAgent {
+  return createAgent(id);
 }
 
 function textOf(message: unknown): string {
@@ -510,7 +502,7 @@ describe("inbox end to end — the off switch (ticket 113, ADR-0023)", () => {
 });
 
 describe("inbox end to end — the full pipeline (ticket 113, ADR-0023)", () => {
-  it("queue line → claim → inbox wake → deliver_result → reply.md + status.json + terminal checkpoint", async () => {
+  it("queue line → claim → inbox wake → deliver_result closes the obligation through the dispatcher's reply", async () => {
     const parent = await mkdtemp(join(tmpdir(), "dsh-inbox-e2e-"));
     const root = join(parent, "inbox");
     const shared = createSharedTables();
@@ -521,9 +513,9 @@ describe("inbox end to end — the full pipeline (ticket 113, ADR-0023)", () => 
           inboxEnabled: true,
           inboxDir: root,
           inboxRescanIntervalMs: 1000,
-  }));
-      const agent = createAgent("s-1");
-      ctx.bindAgent(agent);
+      }));
+      const agent = createScopedAgent("s-1");
+      ctx.bindAgent(agent as never);
       const started = ctx.runCommand({
         commandId: DISPATCHER_START_COMMAND,
         agent,
@@ -555,31 +547,256 @@ describe("inbox end to end — the full pipeline (ticket 113, ADR-0023)", () => 
       // system's view of our state), then the dispatcher replies with it.
       const presented = readCheckpoints(shared).get("job-1");
       assert.ok(presented?.todoId, "the checkpoint carries the todo id");
-      const deliver = ctx.tool("deliver_result");
+      const deliver = agent.scopedTool("deliver_result");
       assert.ok(deliver, "deliver_result is registered on activation");
       const result = (await deliver.execute({
         text: "All done",
         todo_id: presented.todoId,
-      })) as { ok?: boolean };
+      })) as {
+        ok?: boolean;
+        delivered?: boolean;
+        channel?: string;
+        todo_completed?: unknown;
+        reason?: string;
+      };
+      // ADR-0009: delivery is conversational. With no separate user-facing
+      // send wired, the dispatcher's own reply IS the channel: the obligation
+      // closes here, and the result must say so without pretending the user
+      // has already seen it.
       assert.equal(result.ok, true);
+      assert.equal(result.delivered, true);
+      assert.equal(result.channel, "reply");
+      assert.equal(result.todo_completed, presented.todoId);
 
-      // Reply writer: reply.md + status.json replied + terminal checkpoint.
+      // The reply writer rides the `replied` resolution: reply.md is the done
+      // signal, status.json carries the terminal outcome, and the checkpoint
+      // closes so the boot rescan never re-presents the job.
       await pollUntil(async () => {
         const checkpoint = readCheckpoints(shared).get("job-1");
         return checkpoint?.state === "replied";
       });
-      const reply = await readFile(join(root, "job-1", "reply.md"), "utf8");
-      assert.equal(reply, "All done\n", "reply.md carries the delivered text");
+      assert.equal(
+        await readFile(join(root, "job-1", "reply.md"), "utf8"),
+        "All done\n",
+      );
       const status = await readStatus(join(root, "job-1"));
       assert.equal(status.status, "replied");
-      assert.equal(status.replyBytes, Buffer.byteLength("All done\n"));
-      const terminal = readCheckpoints(shared).get("job-1");
-      assert.equal(terminal?.state, "replied");
-      assert.equal(terminal?.sessionId, "s-1");
+      assert.equal(typeof status.endedAt, "number");
+      const replied = readCheckpoints(shared).get("job-1");
+      assert.equal(replied?.state, "replied");
+      assert.equal(typeof replied?.endedAtMs, "number");
+    } finally {
+      ctx.dispose();
+      await removeTempRoot(parent);
+    }
+  });
+
+  it("a worker error still writes the honest failed status and closes the checkpoint", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "dsh-inbox-failed-"));
+    const root = join(parent, "inbox");
+    const shared = createSharedTables();
+    const ctx = createInboxCtx(shared);
+    try {
+      pluginApply(ctx as never, volatileConfig({
+        enabled: true,
+        inboxEnabled: true,
+        inboxDir: root,
+        inboxRescanIntervalMs: 1000,
+      }));
+      const agent = createAgent("s-1");
+      ctx.bindAgent(agent as never);
+      ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
+      await flushActivation();
+      await pollUntil(() => dirExists(root));
+
+      await writeQueue(root, [
+        JSON.stringify({ jobId: "job-err", text: "Build the widget" }),
+      ]);
+      await pollUntil(async () => {
+        const checkpoint = readCheckpoints(shared).get("job-err");
+        return checkpoint?.state === "presented";
+      });
+      const presented = readCheckpoints(shared).get("job-err");
+      assert.ok(presented?.todoId, "the checkpoint carries the todo id");
+
+      // No delivery channel exists, but a worker ERROR is a terminal path the
+      // reply writer owns: status.json {status:"failed"} + closed checkpoint.
+      const spawn = agent.scopedTool("spawn_worker");
+      assert.ok(spawn);
+      const spawned = (await spawn.execute(
+        {
+          stream_key: "err",
+          title: "Widget worker",
+          prompt: "Do it",
+          todo_id: presented.todoId,
+        },
+        { agent: { session: { id: "s-1" } } },
+      )) as { ok: boolean; worker_id: string };
+      assert.equal(spawned.ok, true);
+      ctx.fire("subagent/end", {
+        id: spawned.worker_id,
+        stopReason: "error",
+        lastAssistantMessage: [{ type: "text", text: "boom" }],
+      });
+
+      await pollUntil(async () => {
+        const checkpoint = readCheckpoints(shared).get("job-err");
+        return checkpoint?.state === "failed";
+      });
+      const status = await readStatus(join(root, "job-err"));
+      assert.equal(status.status, "failed");
+      assert.equal(status.error, "boom");
+      await assert.rejects(
+        readFile(join(root, "job-err", "reply.md"), "utf8"),
+        "the failed path writes no reply.md",
+      );
+      const terminal = readCheckpoints(shared).get("job-err");
+      assert.equal(terminal?.state, "failed");
       assert.ok(terminal?.endedAtMs !== null, "the checkpoint is closed");
     } finally {
       ctx.dispose();
       await removeTempRoot(parent);
+    }
+  });
+
+  it("no resolvable job dir refuses to write into the process cwd and keeps the checkpoint non-terminal", async () => {
+    // The hook's one hard rule: `join("", jobId)` must never be used. This job
+    // has no `jobDir` on its origin and no inbox root is configured, so the
+    // writer refuses, warns once, and leaves the checkpoint for the boot
+    // rescan instead of littering the process cwd with reply.md/status.json.
+    const shared = createSharedTables();
+    const ctx = createInboxCtx(shared);
+    try {
+      // A live-at-crash worker whose linked todo carries an inbox origin with
+      // no directory. It is rebuilt as a ticket-59 hold, reattached when the
+      // host announces the worker, and then fails — one terminal path that
+      // fires the plugin's `onInboxJobResolved` hook.
+      shared.tables.set(
+        MARKER_TABLE_NAME,
+        new Map<string, unknown>([
+          [
+            "w-nowhere",
+            {
+              workerId: "w-nowhere",
+              parentSessionId: "s-1",
+              streamKey: "nowhere",
+              title: "Job with no directory",
+              status: "running",
+              transcriptRef: null,
+              todoId: "todo-nowhere",
+              external: {
+                kind: "inbox",
+                jobId: "job-nowhere",
+                jobDir: "",
+              },
+              startedAtMs: 1,
+              updatedAtMs: 2,
+            },
+          ],
+        ]),
+      );
+      shared.tables.set(
+        WORKER_SESSION_TABLE_NAME,
+        new Map<string, unknown>([
+          ["w-nowhere", { sessionId: "w-nowhere", parentSessionId: "s-1" }],
+        ]),
+      );
+      shared.tables.set(
+        INBOX_TABLE_NAME,
+        new Map<string, unknown>([
+          [
+            "job-nowhere",
+            {
+              jobId: "job-nowhere",
+              state: "presented",
+              jobDir: "",
+              sessionId: "s-1",
+              todoId: "todo-nowhere",
+              claimedAtMs: 1_000,
+              presentedAtMs: 2_000,
+              endedAtMs: null,
+              presentAttempts: 1,
+            },
+          ],
+        ]),
+      );
+
+      // Inbox intake is OFF: `inboxRoot` is empty, so only the job's own
+      // (empty) dir could resolve — and it must not fall back to the cwd.
+      pluginApply(ctx as never, volatileConfig({ enabled: true }));
+      const agent = createAgent("s-1");
+      ctx.bindAgent(agent);
+      ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
+      await flushActivation();
+
+      const worker: AgentLike = {
+        session: {
+          id: "w-nowhere",
+          header: { parentSession: "s-1", delegationDepth: 1 },
+        },
+        followup() {},
+        inject() {},
+      };
+      ctx.bindAgent(worker as AgentLike & { session: { id: string } });
+      ctx.fire("agent/created", { agent: worker, source: "resume" });
+      await flushActivation();
+      // Adoption + reclaim are async (the worker-session row round-trip).
+      // Wait for the live roster entry before firing its terminal settle;
+      // `check_workers` is the plugin's own observable view.
+      await pollUntil(async () => {
+        const check = agent.scopedTool("check_workers");
+        if (check === undefined) return false;
+        const roster = (await check.execute({})) as {
+          rows?: Array<{ worker_id?: string }>;
+        };
+        return (roster.rows ?? []).some(
+          (row) => row.worker_id === "w-nowhere",
+        );
+      });
+
+      const warnings: string[] = [];
+      const originalWarn = console.warn;
+      console.warn = (...args: unknown[]) => {
+        warnings.push(args.map((arg) => String(arg)).join(" "));
+      };
+      try {
+        ctx.fire("subagent/end", {
+          id: "w-nowhere",
+          stopReason: "error",
+          lastAssistantMessage: [{ type: "text", text: "boom" }],
+        });
+        await flushActivation();
+      } finally {
+        console.warn = originalWarn;
+      }
+
+      const refusals = warnings.filter(
+        (line) =>
+          line.includes("job-nowhere") &&
+          line.includes("refusing to write"),
+      );
+      assert.equal(refusals.length, 1, "the refusal is logged exactly once");
+      assert.ok(
+        refusals[0]?.includes("process cwd"),
+        "the warning names the hazard it avoids",
+      );
+
+      // Nothing was written where the process runs.
+      await assert.rejects(
+        stat(join(process.cwd(), "reply.md")),
+        "no reply.md may land in the process cwd",
+      );
+      await assert.rejects(
+        stat(join(process.cwd(), "status.json")),
+        "no status.json may land in the process cwd",
+      );
+
+      // The checkpoint stays non-terminal so the boot rescan can retry.
+      const checkpoint = readCheckpoints(shared).get("job-nowhere");
+      assert.equal(checkpoint?.state, "presented");
+      assert.equal(checkpoint?.endedAtMs, null);
+    } finally {
+      ctx.dispose();
     }
   });
 

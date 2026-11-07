@@ -53,6 +53,7 @@ function todoFixture(overrides: Partial<TodoItem> & { id: string }): TodoItem {
     redriveAttempts: 0,
     disposition: null,
     dispositionReason: null,
+    external: null,
     createdAtMs: 1_000,
     updatedAtMs: 1_000,
     ...overrides,

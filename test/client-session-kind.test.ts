@@ -17,8 +17,11 @@
  *    without calling a hook. The worker factory stays exported as retained
  *    machinery even though no seat composes it (see claim 3).
  * 3. **The composition registers one seat.** ADR-0024's 2026-10-18 rider
- *    licenses the `sidebar.session.row.leading` dispatcher cell, and it is
- *    again the only seat composed: ticket 140's
+ *    licenses one `sidebar.session.row` seat for the dispatcher mark, and the
+ *    owner's 2026-11-06 ruling moved it from the leading cell to
+ *    `sidebar.session.row.trailing` — the only per-row seat the host does not
+ *    replace with its own status dot while a session works. Nothing registers
+ *    into `sidebar.session.row.leading` any more. Ticket 140's
  *    `conversation.session.header.actions` chip was removed on 2026-10-28,
  *    when a summoned dispatcher became a top-level session with its own
  *    sidebar row. The WORKER marker is still declined (ticket 123 §B,
@@ -72,7 +75,7 @@ import {
   DISPATCHER_GLYPH_ORDER,
   SESSION_KIND_COPY_KEYS,
   SESSION_KIND_GLYPH_CSS,
-  SIDEBAR_LEADING_SLOT,
+  SIDEBAR_TRAILING_SLOT,
   TEAM_LEADER_PROJECTION_VALUE,
   WORKER_GLYPH,
   createDispatcherClassGlyph,
@@ -219,18 +222,36 @@ describe("session-kind — pure resolution", () => {
 });
 
 describe("session-kind — registration contracts", () => {
-  it("the dispatcher cell contract targets the sidebar leading slot, higher than the stock schedule mark", () => {
+  it("the dispatcher cell contract targets the sidebar trailing slot, higher than the installed trailing occupant", () => {
     const registration = dispatcherGlyphRegistration();
     assert.deepEqual(registration, {
-      name: SIDEBAR_LEADING_SLOT,
+      name: SIDEBAR_TRAILING_SLOT,
       id: DISPATCHER_GLYPH_ENTRY_ID,
       order: DISPATCHER_GLYPH_ORDER,
       locale: LOCALE_NAMESPACE,
     });
-    // The stock schedule plugin occupies the same 16px cell at order 10
-    // (`dsh-client-ui-schedule/lib/client.js:7528`); a higher order keeps it
-    // in front and never shadows it.
+    // The installed trailing occupant is `experimental-client-ui-forge`'s
+    // `forge-panel.row` at order 10
+    // (`dsh-experimental-client-ui-forge/lib/client.js:11745-11751`); a higher
+    // order keeps it in front and never shadows it.
     assert.ok(registration.order > 10);
+  });
+
+  it("the seat is the trailing list, not the status-gated leading cell", () => {
+    // The 2026-11-06 human ruling: the leading cell is a hard either/or with
+    // the row's own status dot — the product replaces its occupant whenever
+    // the row is not idle (`dsh-client-ui-workspace/lib/client.js:2608`), so
+    // the mark vanished exactly while a dispatcher was working. The trailing
+    // seat is drawn for every non-blank row beside that dot
+    // (`dsh-client-ui-workspace/lib/client.js:2634`, contract
+    // `.../contract/slots.d.ts:148-161`), which is why the licence moved.
+    assert.equal(SIDEBAR_TRAILING_SLOT, "sidebar.session.row.trailing");
+    assert.notEqual(SIDEBAR_TRAILING_SLOT, "sidebar.session.row.leading");
+    // Nothing claims the leading cell: the rider stays at one registration and
+    // that registration is the trailing one.
+    const registration = dispatcherGlyphRegistration();
+    assert.notEqual(registration.name, "sidebar.session.row.leading");
+    assert.equal(registration.name, SIDEBAR_TRAILING_SLOT);
   });
 
   it("no worker/header registration exists — that seat is not licensed", async () => {
@@ -282,6 +303,29 @@ describe("session-kind — registration contracts", () => {
       localeDictionary.zh["indicator.dispatcher"],
       localeDictionary.zh["indicator.team-leader"],
     );
+  });
+
+  it("accessible names are role words, not session descriptions", () => {
+    // The mark names the ROLE, once: "Dispatcher", "Summoned dispatcher",
+    // "Worker". No "session" in the accessible name, in either face.
+    assert.equal(localeDictionary.en["indicator.dispatcher"], "Dispatcher");
+    assert.equal(
+      localeDictionary.en["indicator.team-leader"],
+      "Summoned dispatcher",
+    );
+    assert.equal(localeDictionary.en["indicator.worker"], "Worker");
+    for (const key of Object.values(SESSION_KIND_COPY_KEYS)) {
+      assert.doesNotMatch(
+        localeDictionary.en[key]!,
+        /session/i,
+        `en ${key} says session`,
+      );
+      assert.doesNotMatch(
+        localeDictionary.zh[key]!,
+        /会话/,
+        `zh ${key} says session`,
+      );
+    }
   });
 });
 
@@ -767,17 +811,28 @@ function createCompositionCtx() {
 }
 
 describe("session-kind — the default composition", () => {
-  it("registers the sidebar cell, one entry, and no header chip", () => {
+  it("registers the trailing sidebar cell, one entry, and no header chip", () => {
     const ctx = createCompositionCtx();
     apply(ctx);
 
     const sidebar = ctx.injects.find(
-      (record) => record.parent === SIDEBAR_LEADING_SLOT,
+      (record) => record.parent === SIDEBAR_TRAILING_SLOT,
     );
-    assert.ok(sidebar, "the dispatcher glyph injects into the sidebar cell");
+    assert.ok(sidebar, "the dispatcher glyph injects into the trailing cell");
     assert.equal(sidebar.entries.length, 1);
     assert.deepEqual(sidebar.entries[0]?.options, dispatcherGlyphRegistration());
     assert.equal(typeof sidebar.entries[0]?.component, "function");
+
+    // The leading cell is left to the product: it belongs to the row's own
+    // status dot whenever the row is not idle (2026-11-06 ruling), so no
+    // registration of ours may claim that seat.
+    assert.equal(
+      ctx.injects.find(
+        (record) => record.parent === "sidebar.session.row.leading",
+      ),
+      undefined,
+      "nothing registers into the status-gated leading cell",
+    );
 
     // The ticket-140 header chip was removed (2026-10-28): a summoned
     // dispatcher is a top-level session, so the sidebar cell marks it and a
@@ -795,7 +850,7 @@ describe("session-kind — the default composition", () => {
     const ctx = createCompositionCtx();
     apply(ctx);
     const sidebar = ctx.injects.find(
-      (record) => record.parent === SIDEBAR_LEADING_SLOT,
+      (record) => record.parent === SIDEBAR_TRAILING_SLOT,
     );
     const component = sidebar?.entries[0]?.component as
       | ((props: unknown) => unknown)

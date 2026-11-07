@@ -18,6 +18,7 @@
  */
 
 import type { SteerResult } from "../core/types.js";
+import type { PolicyLanguage } from "../core/policy/prompts.js";
 import type {
   AdapterContext,
   AgentLike,
@@ -70,22 +71,77 @@ export function dispatcherSteerNotRunning(workerId: string): string {
 }
 
 /**
+ * One language face of the command copy. The EN face is the pre-existing,
+ * byte-identical copy above; the ZH face is new client/host copy written for
+ * this repo.
+ */
+export interface DispatcherSteerCopy {
+  readonly description: string;
+  readonly inputHint: string;
+  success(workerId: string): string;
+  readonly notActive: string;
+  readonly notDispatcher: string;
+  readonly usage: string;
+  unknownWorker(workerId: string): string;
+  notRunning(workerId: string): string;
+}
+
+/** EN copy — every string is the shipped pre-153 byte-for-byte copy. */
+export const DISPATCHER_STEER_COPY_EN: DispatcherSteerCopy = {
+  description: DISPATCHER_STEER_DESCRIPTION,
+  inputHint: DISPATCHER_STEER_INPUT_HINT,
+  success: dispatcherSteerSuccess,
+  notActive: DISPATCHER_STEER_NOT_ACTIVE,
+  notDispatcher: DISPATCHER_STEER_NOT_DISPATCHER,
+  usage: DISPATCHER_STEER_USAGE,
+  unknownWorker: dispatcherSteerUnknownWorker,
+  notRunning: dispatcherSteerNotRunning,
+};
+
+/** ZH copy (new text, no reference material consulted). */
+export const DISPATCHER_STEER_COPY_ZH: DispatcherSteerCopy = {
+  description: "向正在运行的工作者发送中途指示。最新的指示生效。",
+  inputHint: "工作者 ID，然后是你要说的指示",
+  success: (workerId) => `已为 ${workerId} 排队纠偏。`,
+  notActive: "还没有激活的调度器。请先在顶层聊天中运行 /dsh-bot。",
+  notDispatcher:
+    "纠偏在调度器聊天中进行。请在运行过 /dsh-bot 的聊天中发送 /dispatcher-steer。",
+  usage:
+    "请提供工作者 ID 和指示。示例：/dispatcher-steer worker-1 先处理失败的测试。",
+  unknownWorker: (workerId) =>
+    `未知工作者：${workerId}。请查看工作者名单中的有效 ID。`,
+  notRunning: (workerId) =>
+    `工作者 ${workerId} 未在运行；它可能已经完成。`,
+};
+
+/**
+ * Resolve the copy face. Only the two shipped languages exist; anything else
+ * fails closed to EN (`resolvePolicyLanguage` already does this upstream).
+ */
+export function dispatcherSteerCopy(
+  language: PolicyLanguage | undefined,
+): DispatcherSteerCopy {
+  return language === "zh" ? DISPATCHER_STEER_COPY_ZH : DISPATCHER_STEER_COPY_EN;
+}
+
+/**
  * Map a core steer refusal to user-visible command copy. The worker id comes
  * from the parsed invocation, not the core detail string.
  */
 export function steerRefusalCopy(
   result: SteerResult,
   workerId: string,
+  copy: DispatcherSteerCopy = DISPATCHER_STEER_COPY_EN,
 ): CommandResultLike {
   if (result.ok) {
     // Not a refusal — the caller handles success; never invent copy here.
-    return { kind: "error", text: DISPATCHER_STEER_USAGE };
+    return { kind: "error", text: copy.usage };
   }
   switch (result.reason) {
     case "unknown-worker":
-      return { kind: "error", text: dispatcherSteerUnknownWorker(workerId) };
+      return { kind: "error", text: copy.unknownWorker(workerId) };
     case "not-running":
-      return { kind: "error", text: dispatcherSteerNotRunning(workerId) };
+      return { kind: "error", text: copy.notRunning(workerId) };
   }
 }
 
@@ -125,6 +181,12 @@ export interface RegisterDispatcherSteerCommandOptions {
    * the same `Multitask.steerWorker` call the `steer_worker` tool makes.
    */
   readonly steer: (workerId: string, message: string) => Promise<SteerResult>;
+  /**
+   * Lazy model-facing language getter (ticket 153's settled language). Read
+   * per invocation so a late settlement is honored; absent means EN, keeping
+   * every pre-localization caller byte-identical.
+   */
+  readonly language?: () => PolicyLanguage;
 }
 
 /**
@@ -136,30 +198,32 @@ export interface RegisterDispatcherSteerCommandOptions {
 export function createDispatcherSteerCommand(
   options: RegisterDispatcherSteerCommandOptions,
 ): CommandDefinitionLike {
+  const initialCopy = dispatcherSteerCopy(options.language?.());
   return {
     name: DISPATCHER_STEER_COMMAND,
-    description: DISPATCHER_STEER_DESCRIPTION,
-    input: { hint: DISPATCHER_STEER_INPUT_HINT },
+    description: initialCopy.description,
+    input: { hint: initialCopy.inputHint },
     handler(invocation) {
+      const copy = dispatcherSteerCopy(options.language?.());
       const agent: AgentLike | undefined = invocation?.agent;
       const active = options.activeSessionIds();
       const sessionId =
         agent?.session == null ? undefined : String(agent.session.id);
       if (active.length === 0 || sessionId === undefined) {
-        return { kind: "error", text: DISPATCHER_STEER_NOT_ACTIVE };
+        return { kind: "error", text: copy.notActive };
       }
       if (!active.includes(sessionId)) {
-        return { kind: "error", text: DISPATCHER_STEER_NOT_DISPATCHER };
+        return { kind: "error", text: copy.notDispatcher };
       }
       const parsed = parseSteerInput(invocation.rawInput);
       if (parsed === null) {
-        return { kind: "error", text: DISPATCHER_STEER_USAGE };
+        return { kind: "error", text: copy.usage };
       }
       return options.steer(parsed.workerId, parsed.instruction).then(
         (result): CommandResultLike =>
           result.ok
-            ? { kind: "success", text: dispatcherSteerSuccess(parsed.workerId) }
-            : steerRefusalCopy(result, parsed.workerId),
+            ? { kind: "success", text: copy.success(parsed.workerId) }
+            : steerRefusalCopy(result, parsed.workerId, copy),
       );
     },
   };

@@ -37,6 +37,7 @@ import {
   type AgentLike,
   type CommandDefinitionLike,
   type CommandResultLike,
+  type SessionProjectionChildLike,
   type ToolsLike,
 } from "../src/adapter/index.js";
 import { ROSTER_SETTINGS_KEY } from "../src/core/roster-snapshot.js";
@@ -61,8 +62,8 @@ function textOf(message: unknown): string {
 interface ScopedAgent extends AgentLike {
   /** Messages `inject` received (ticket 159: the per-turn peer roster). */
   readonly injected: unknown[];
-  readonly scopedToolNames(): string[];
-  readonly scopedTool: (
+  scopedToolNames(): string[];
+  scopedTool: (
     name: string,
   ) =>
     | { execute: (args: unknown, exec?: unknown) => Promise<unknown> }
@@ -187,9 +188,14 @@ function createMultiCtx() {
         }
       }
     },
-    inject(services: readonly string[], callback: (child: unknown) => void) {
+    inject(
+      services: readonly string[],
+      callback: (child: SessionProjectionChildLike) => void,
+    ) {
       if (services.includes("settings")) {
-        callback({ settings: settingsProvider });
+        // This fake also answers `settings` for the ticket-91 scope pins; the
+        // shape is not a projection child, hence the one assertion.
+        callback({ settings: settingsProvider } as unknown as SessionProjectionChildLike);
       }
     },
     on(name: string, cb: (payload: never) => void) {
@@ -392,7 +398,7 @@ async function spawnVia(
 }
 
 describe("multi-dispatcher — scoped surfaces (ADR-0019)", () => {
-  it("each dispatcher sees only its own eight tools plus recall, and no global tool", async () => {
+  it("each dispatcher sees only its own eight tools, and no global tool", async () => {
     const multi = createMultiCtx();
     apply(multi.ctx, volatileConfig({ enabled: true }));
     const a = createScopedAgent("s-a");
@@ -401,13 +407,13 @@ describe("multi-dispatcher — scoped surfaces (ADR-0019)", () => {
     await activate(multi, a);
     await activate(multi, b);
 
-    // Eight dispatcher tools + the ticket-145 per-session recall.
+    // Eight dispatcher tools. Owner ruling 2026-11-05: the ticket-145
+    // per-session `recall` is absent by default — racoons is off.
     assert.deepEqual(a.scopedToolNames().sort(), [
       "await_agent",
       "check_workers",
       "deliver_result",
       "message_agent",
-      "recall",
       "spawn_dispatcher",
       "spawn_worker",
       "steer_worker",
@@ -418,7 +424,6 @@ describe("multi-dispatcher — scoped surfaces (ADR-0019)", () => {
       "check_workers",
       "deliver_result",
       "message_agent",
-      "recall",
       "spawn_dispatcher",
       "spawn_worker",
       "steer_worker",

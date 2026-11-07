@@ -108,6 +108,7 @@ export type MicrocompactSkipReason =
   | "nothing-eligible"
   | "insufficient-saving"
   | "invalid-keep"
+  | "boundary-read-failed"
   | "threw";
 
 /** What one pre-step invocation concluded. */
@@ -420,7 +421,23 @@ export async function runMicrocompactPass(
     return declined("insufficient-saving", selection.freedTokens);
   }
 
-  // 5. Apply. One `compaction/prune` + replacement pair per node, synchronous
+  // 5. Read the previous boundary BEFORE touching the surface. Absent and
+  //    unreadable are different answers: treating a failed read as "no
+  //    previous boundary" would reset the monotonic `passSeq` to 1 and
+  //    overwrite the session's only row. A failed read skips the whole pass
+  //    (nothing applied, nothing written) and says why; a later pass retries.
+  let previous: CompactionBoundary | undefined;
+  try {
+    previous = await store.readCompactionBoundary(sessionId);
+  } catch {
+    return declined("boundary-read-failed");
+  }
+  const passSeq =
+    options.nextPassSeq !== undefined
+      ? options.nextPassSeq(previous)
+      : (previous?.passSeq ?? 0) + 1;
+
+  // 6. Apply. One `compaction/prune` + replacement pair per node, synchronous
   //    and adjacent — the shadow-price protocol. Selection ran against the
   //    current surface, and every replacement is a single-node replace, so the
   //    surface positions of nodes we have not reached yet are untouched.
@@ -476,7 +493,7 @@ export async function runMicrocompactPass(
   // apply). Decline honestly instead of writing an empty boundary.
   if (clearedSeqs.length === 0) return declined("nothing-eligible");
 
-  // 6. One rollback unit: the boundary row is written ONLY now, after every
+  // 7. One rollback unit: the boundary row is written ONLY now, after every
   //    replacement landed, and it describes exactly what was replaced. Either
   //    the whole boundary is present or no compaction is recorded.
   //
@@ -487,13 +504,6 @@ export async function runMicrocompactPass(
   //    resume then sees "no compaction" and the next pass detects the already
   //    cleared nodes and skips them. A store failure still propagates so the
   //    listener reports `threw` instead of pretending it succeeded.
-  const previous = await Promise.resolve(
-    store.readCompactionBoundary(sessionId),
-  ).catch(() => undefined);
-  const passSeq =
-    options.nextPassSeq !== undefined
-      ? options.nextPassSeq(previous)
-      : (previous?.passSeq ?? 0) + 1;
   const boundary: CompactionBoundary = {
     sessionId,
     passSeq,

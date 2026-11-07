@@ -89,6 +89,8 @@ export type CommandSendResult =
   | { readonly kind: "executed" }
   /** The host resolved NO command (unknown name/syntax — e.g. flag off). */
   | { readonly kind: "unresolved" }
+  /** The host resolved the command but reported `ok: false` (it did not run). */
+  | { readonly kind: "failed" }
   /** No command channel is reachable (service absent in this runtime). */
   | { readonly kind: "no-channel" };
 
@@ -192,6 +194,22 @@ export function scopedConversation(
 }
 
 /**
+ * Resolve one session's scoped conversation face, containing a throwing
+ * `sessions.scope` (the host's context proxy can throw at the property read)
+ * as the honest absence of a channel. Never throws.
+ */
+function scopedConversationFor(
+  sessions: ClientSessionsLike,
+  sessionId: string,
+): ScopedConversationLike | undefined {
+  try {
+    return scopedConversation(sessions.scope(sessionId));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * The real transport over the verified seams (ticket 36 §2), composed once
  * in `src/client/index.ts` and injectable for tests via fake sources.
  * Every method reports `no-channel` rather than throwing when the service
@@ -219,8 +237,16 @@ export function bindCommandTransport(sources: TransportSources): CommandTranspor
       }
       // The composer's exact transaction: empty attachments, verbatim line.
       const result = await remote.commands.execute(sessionId, line, []);
-      // The host returns `undefined` when the line parses to no command —
-      // honest "nothing ran", not a transport failure.
+      // The installed host resolves `{ok, value}`: `ok: false` means the
+      // command did not run, and an accepted execution with an undefined
+      // `value` means the line parsed to no command. The legacy bare
+      // `undefined` answer is the same "nothing ran" fact.
+      if (typeof result === "object" && result !== null) {
+        const reply = result as { readonly ok?: unknown; readonly value?: unknown };
+        if (reply.ok === false) return { kind: "failed" };
+        if (reply.value === undefined) return { kind: "unresolved" };
+        return { kind: "executed" };
+      }
       return result === undefined
         ? { kind: "unresolved" }
         : { kind: "executed" };
@@ -228,7 +254,7 @@ export function bindCommandTransport(sources: TransportSources): CommandTranspor
     async sendPrompt(sessionId, text) {
       const sessions = sources.sessions();
       if (sessions === undefined) return { kind: "no-channel" };
-      const sink = scopedConversation(sessions.scope(sessionId));
+      const sink = scopedConversationFor(sessions, sessionId);
       if (sink === undefined || typeof sink.send !== "function") {
         return { kind: "no-channel" };
       }
@@ -256,12 +282,19 @@ export const ROSTER_STEER_COPY_FALLBACK_KEY = "roster.steer.copy-fallback";
 
 /**
  * Lazy sources for the steer prefill's verified seam (ticket 36 §3): the
- * sessions service (current selection + scope) and the conversation input
- * resolver. Getters, so the faces resolve at click time.
+ * sessions service (scope) and the conversation input resolver, plus the
+ * current session id.
+ *
+ * 0.2.x removed the feed's `current` selection (`SessionListState` carries no
+ * such field; selection is view-owned). The caller therefore supplies the
+ * session the user is looking at — the shell mount passes its own selection
+ * store — instead of reading a selection the host no longer tracks.
  */
 export interface SteerPrefillSources {
   sessions(): ClientSessionsLike | undefined;
   conversation(): ClientConversationLike | undefined;
+  /** The selected session id (the view owner's selection), if any. */
+  currentSessionId?(): string | undefined;
 }
 
 /**
@@ -270,7 +303,7 @@ export interface SteerPrefillSources {
  * `ctx.conversation.input.for(actx).setDraft(text)`. Focus is NOT part of
  * the seam (package-internal to the composer) — the caller pairs a
  * `prefilled` result with the locale hint; `unavailable` (no session, no
- * scope, no resolver, or a throwing write) degrades to the copy-only
+ * scope, no resolver, or a throwing read) degrades to the copy-only
  * fallback. Never touches the host-side steer transport.
  */
 export function tryPrefillSteer(
@@ -282,11 +315,16 @@ export function tryPrefillSteer(
   if (sessions === undefined || conversation === undefined) {
     return { kind: "unavailable" };
   }
-  const sessionId = sessions.list.getSnapshot().current;
-  if (sessionId === undefined) return { kind: "unavailable" };
-  const actx = sessions.scope(sessionId);
-  if (actx == null) return { kind: "unavailable" };
+  const sessionId = sources.currentSessionId?.();
+  if (typeof sessionId !== "string" || sessionId.length === 0) {
+    return { kind: "unavailable" };
+  }
   try {
+    // Inside the try: `sessions.scope` is a host service call and a
+    // host-shaped scope can throw at the read. A throw is the honest
+    // "prefill unreachable", never a crash out of a click handler.
+    const actx = sessions.scope(sessionId);
+    if (actx == null) return { kind: "unavailable" };
     conversation.input.for(actx).setDraft(steerCommandPrefill(workerId));
     return { kind: "prefilled" };
   } catch {

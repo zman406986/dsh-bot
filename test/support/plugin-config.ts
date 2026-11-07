@@ -50,6 +50,8 @@ export interface TestConfigValues {
   inboxRescanIntervalMs?: number;
   /** Ticket 124: deterministic microcompact (default off). */
   microcompactEnabled?: boolean;
+  /** Owner ruling 2026-11-05: racoons mount (default off, manual test only). */
+  racoonsEnabled?: boolean;
   /** Ticket 145: racoons record-only mode (default off → enforcement `apply`). */
   racoonsRecordOnly?: boolean;
   /** Ticket 145: durable racoons root; defaults to {@link TEST_RACOONS_STORAGE_ROOT}. */
@@ -67,6 +69,7 @@ export interface TestPluginConfig {
   inboxDir: VolatileRef<string | undefined>;
   inboxRescanIntervalMs: VolatileRef<number | undefined>;
   microcompactEnabled: VolatileRef<boolean | undefined>;
+  racoonsEnabled: VolatileRef<boolean | undefined>;
   racoonsRecordOnly: VolatileRef<boolean | undefined>;
   racoonsStorageRoot: VolatileRef<string | undefined>;
   racoonsContextWindowTokens: VolatileRef<number | undefined>;
@@ -82,6 +85,7 @@ export function volatileConfig(values: TestConfigValues): TestPluginConfig {
     inboxDir: mutableRef(values.inboxDir),
     inboxRescanIntervalMs: mutableRef(values.inboxRescanIntervalMs),
     microcompactEnabled: mutableRef(values.microcompactEnabled),
+    racoonsEnabled: mutableRef(values.racoonsEnabled),
     racoonsRecordOnly: mutableRef(values.racoonsRecordOnly),
     racoonsStorageRoot: mutableRef(
       values.racoonsStorageRoot === undefined

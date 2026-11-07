@@ -23,7 +23,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import {applySessionKindProjection, dispatcherClassOf, DISPATCHER_SESSION_KIND, initSessionKindProjection, INITIAL_SESSION_KIND_STATE, parseDispatcherSessionKind, parseSessionKindProjectionState, LEGACY_DISPATCHER_STOP_COMMAND, registerSessionKindProjection, SESSION_KIND_PROJECTION_DEFINITION, TEAM_LEADER_SESSION_KIND, viewSessionKind, type SessionKindProjectionState, type SessionProjectionChildLike, type SessionProjectionDefinitionLike, type SessionProjectionEventLike, type SessionProjectionsRegistryLike} from "../src/adapter/session-kind-projection.js";
+import {applySessionKindProjection, dispatcherClassOf, DISPATCHER_SESSION_KIND, initSessionKindProjection, INITIAL_SESSION_KIND_STATE, parseDispatcherSessionKind, parseSessionKindProjectionState, LEGACY_DISPATCHER_STOP_COMMAND, registerSessionKindProjection, sessionKindOf, SESSION_KIND_PROJECTION_DEFINITION, TEAM_LEADER_SESSION_KIND, viewSessionKind, type ProjectionHandleLike, type SessionKindProjectionState, type SessionProjectionChildLike, type SessionProjectionDefinitionLike, type SessionProjectionEventLike, type SessionProjectionsRegistryLike} from "../src/adapter/session-kind-projection.js";
 import {DISPATCHER_START_COMMAND} from "../src/adapter/activation-command.js";
 
 /** One declared host event as the log carries it (only fields we read). */
@@ -60,9 +60,9 @@ function fold(
 // initializes a cell per session; `session/event` drives only that session).
 
 interface FakeRegistry extends SessionProjectionsRegistryLike {
-  readonly definition: SessionProjectionDefinitionLike<SessionKindProjectionState> | null;
+  definition: SessionProjectionDefinitionLike<SessionKindProjectionState> | null;
   readonly states: Map<string, SessionKindProjectionState>;
-  readonly registers: number;
+  registers: number;
   append(sessionId: string, event: SessionProjectionEventLike): void;
   snapshot(sessionId: string): unknown;
 }
@@ -278,6 +278,255 @@ describe("session-kind projection — registration", () => {
 });
 
 /**
+ * dsh 0.2.2 marks `registry.stateOf(session, key)` deprecated and resolves
+ * `register` to a `ProjectionHandle` instead. The unit must therefore await
+ * its registration, remember the handle per key, and read through
+ * `handle.stateOf(session)` — with the old overload left as a guarded
+ * fallback for hosts whose `register` still answers with a disposer.
+ */
+describe("session-kind projection — awaited registration handle (dsh 0.2.2)", () => {
+  /** Flush the registration's microtask handoff. */
+  function tick(): Promise<void> {
+    return new Promise((resolve) => setImmediate(resolve));
+  }
+
+  interface HandleRegistry {
+    readonly calls: { register: number; stateOf: number; dispose: number };
+    register(
+      definition: SessionProjectionDefinitionLike<SessionKindProjectionState>,
+    ): Promise<ProjectionHandleLike<SessionKindProjectionState>>;
+    /** Never called on the migrated path; throws to make a regression loud. */
+    stateOf(): never;
+  }
+
+  function handleRegistry(
+    valueFor: (session: unknown) => unknown,
+    options?: { readonly throwOnHandleRead?: boolean },
+  ): HandleRegistry {
+    const calls = { register: 0, stateOf: 0, dispose: 0 };
+    return {
+      calls,
+      register(_definition) {
+        calls.register += 1;
+        return Promise.resolve({
+          stateOf(session: unknown): SessionKindProjectionState {
+            if (options?.throwOnHandleRead === true) {
+              throw new Error("projection fold exploded");
+            }
+            return valueFor(session) as SessionKindProjectionState;
+          },
+          dispose() {
+            calls.dispose += 1;
+            return Promise.resolve();
+          },
+        });
+      },
+      stateOf() {
+        calls.stateOf += 1;
+        throw new Error("deprecated registry.stateOf must not be read");
+      },
+    };
+  }
+
+  const DISPATCHER_STATE: SessionKindProjectionState = {
+    active: true,
+    pendingStarts: [],
+    pendingStops: [],
+    dispatcherClass: "spawned",
+  };
+
+  it("awaits register and reads through handle.stateOf, never the deprecated overload", async () => {
+    const registry = handleRegistry(() => DISPATCHER_STATE);
+    const dispose = registerSessionKindProjection({
+      sessionProjections: registry,
+    });
+    assert.ok(dispose, "the registry accepted the unit synchronously");
+    await tick();
+
+    assert.equal(registry.calls.register, 1);
+    assert.equal(
+      sessionKindOf(registry, { id: "s1" }),
+      DISPATCHER_SESSION_KIND,
+    );
+    assert.equal(dispatcherClassOf(registry, { id: "s1" }), "spawned");
+    assert.equal(
+      registry.calls.stateOf,
+      0,
+      "the deprecated registry-level read is not used",
+    );
+  });
+
+  it("treats the host's callable-thenable registration as awaitable, not as an old disposer", async () => {
+    // dsh 0.2.2 returns `Object.assign(dispose, { then, catch, finally })`:
+    // callable AND awaitable. The awaitable check must win, or the handle is
+    // lost and every read falls back to the deprecated overload.
+    let callableCalls = 0;
+    let disposed = 0;
+    const handle: ProjectionHandleLike<SessionKindProjectionState> = {
+      stateOf: () => DISPATCHER_STATE,
+      dispose: () => {
+        disposed += 1;
+        return Promise.resolve();
+      },
+    };
+    const settled = Promise.resolve(handle);
+    const callableThenable = Object.assign(
+      () => {
+        callableCalls += 1;
+      },
+      {
+        then<
+          TResult1 = ProjectionHandleLike<SessionKindProjectionState>,
+          TResult2 = never,
+        >(
+          onFulfilled?:
+            | ((
+                value: ProjectionHandleLike<SessionKindProjectionState>,
+              ) => TResult1 | PromiseLike<TResult1>)
+            | null,
+          onRejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+        ): Promise<TResult1 | TResult2> {
+          return settled.then(onFulfilled, onRejected);
+        },
+      },
+    );
+    const registry = {
+      stateOf(): never {
+        throw new Error("deprecated registry.stateOf must not be read");
+      },
+      register(): PromiseLike<ProjectionHandleLike<SessionKindProjectionState>> {
+        return callableThenable;
+      },
+    };
+    registerSessionKindProjection({ sessionProjections: registry });
+    await tick();
+
+    assert.equal(callableCalls, 0, "the deprecated callable is never invoked");
+    assert.equal(sessionKindOf(registry, {}), DISPATCHER_SESSION_KIND);
+    assert.equal(dispatcherClassOf(registry, {}), "spawned");
+
+    const dispose = registerSessionKindProjection({
+      sessionProjections: registry,
+    });
+    await tick();
+    assert.ok(dispose);
+    dispose();
+    assert.equal(disposed, 1, "the awaited handle owns release");
+  });
+
+  it("finds the handle through a cordis traceable proxy (fresh identity per read)", async () => {
+    // `ctx.get` / service property reads wrap the service in a NEW proxy each
+    // time, so the read side cannot key on the proxy identity. The proxy
+    // answers Symbol.for("cordis.original") with the raw service.
+    const raw = handleRegistry(() => DISPATCHER_STATE);
+    registerSessionKindProjection({ sessionProjections: raw });
+    await tick();
+    const proxy = new Proxy(raw, {
+      get(target, prop) {
+        if (prop === Symbol.for("cordis.original")) return target;
+        return Reflect.get(target, prop, target);
+      },
+    });
+    assert.equal(sessionKindOf(proxy, {}), DISPATCHER_SESSION_KIND);
+    assert.equal(dispatcherClassOf(proxy, {}), "spawned");
+    assert.equal(raw.calls.stateOf, 0);
+  });
+
+  it("releases the awaited handle, including a release requested before it settles", async () => {
+    const registry = handleRegistry(() => DISPATCHER_STATE);
+    const dispose = registerSessionKindProjection({
+      sessionProjections: registry,
+    });
+    assert.ok(dispose);
+    dispose();
+    await tick();
+    assert.equal(registry.calls.dispose, 1);
+    // Released: the handle is forgotten, so a later read uses the guarded
+    // fallback rather than a stale live unit. Here that fallback throws.
+    assert.equal(sessionKindOf(registry, { id: "s1" }), null);
+  });
+
+  it("fails closed when the handle read throws", async () => {
+    const registry = handleRegistry(() => DISPATCHER_STATE, {
+      throwOnHandleRead: true,
+    });
+    registerSessionKindProjection({ sessionProjections: registry });
+    await tick();
+    assert.equal(sessionKindOf(registry, { id: "s1" }), null);
+    assert.equal(dispatcherClassOf(registry, { id: "s1" }), null);
+  });
+
+  it("rejects malformed cells instead of returning a truthy wrong kind", async () => {
+    const malformed: unknown[] = [
+      { active: "yes", pendingStarts: [], pendingStops: [] },
+      { active: true, pendingStarts: "nope", pendingStops: [] },
+      { active: true, pendingStarts: [], pendingStops: [1] },
+      { active: true, pendingStarts: [], pendingStops: [], resolved: "no" },
+      { active: true, pendingStarts: [], pendingStops: [], sessionId: 7 },
+      {
+        active: true,
+        pendingStarts: [],
+        pendingStops: [],
+        dispatcherClass: "admiral",
+      },
+    ];
+    for (const state of malformed) {
+      const registry = handleRegistry(() => state);
+      registerSessionKindProjection({ sessionProjections: registry });
+      await tick();
+      assert.equal(sessionKindOf(registry, { id: "s1" }), null, String(state));
+      assert.equal(dispatcherClassOf(registry, { id: "s1" }), null, String(state));
+    }
+  });
+
+  it("keeps the guarded deprecated fallback for hosts whose register returns a disposer", async () => {
+    let disposed = 0;
+    const registry = {
+      stateOf(_session: unknown, key: string): SessionKindProjectionState {
+        assert.equal(key, "sessionKind");
+        return DISPATCHER_STATE;
+      },
+      register(): () => void {
+        return () => {
+          disposed += 1;
+        };
+      },
+    };
+    const dispose = registerSessionKindProjection({
+      sessionProjections: registry,
+    });
+    await tick();
+    assert.equal(sessionKindOf(registry, { id: "s1" }), DISPATCHER_SESSION_KIND);
+    assert.equal(dispatcherClassOf(registry, { id: "s1" }), "spawned");
+    assert.ok(dispose);
+    dispose();
+    assert.equal(disposed, 1);
+  });
+
+  it("an async registration rejection warns and stays fail-closed", async () => {
+    const warnings: unknown[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args);
+    };
+    try {
+      const registry = {
+        register(): Promise<ProjectionHandleLike<SessionKindProjectionState>> {
+          return Promise.reject(new Error("stateVersion conflict"));
+        },
+      };
+      assert.doesNotThrow(() =>
+        registerSessionKindProjection({ sessionProjections: registry }),
+      );
+      await tick();
+    } finally {
+      console.warn = original;
+    }
+    assert.equal(warnings.length, 1);
+  });
+});
+
+/**
  * Ticket 177 — the two dispatcher classes ride this one projection.
  *
  * The owner wants a different sidebar icon for a dispatcher the human started
@@ -448,6 +697,34 @@ describe("session-kind projection — dispatching classes (ticket 177)", () => {
         ),
         "user",
       );
+    });
+
+    it("a legacy ACTIVE cell with no class answers null — never a fabricated user", () => {
+      // Pre-177 rows for spawned children are `active: true` with no
+      // `dispatcherClass`. Reading those as `"user"` resumed a legacy team
+      // leader as the chief of staff (ticket 173's defect, reopened). Null
+      // means "cannot say", so the caller consults its durable mark source.
+      const legacy: SessionKindProjectionState = {
+        active: true,
+        pendingStarts: [],
+        pendingStops: [],
+      };
+      assert.equal(dispatcherClassOf(registryAnswering(legacy), {}), null);
+      // The class reader abstained, but the SIDEBAR glyph is unchanged: a
+      // genuine user chat with no class still renders as user.
+      assert.equal(viewSessionKind(legacy), DISPATCHER_SESSION_KIND);
+      assert.equal(sessionKindOf(registryAnswering(legacy), {}), DISPATCHER_SESSION_KIND);
+    });
+
+    it("a genuine user row still answers user", () => {
+      const userRow: SessionKindProjectionState = {
+        active: true,
+        pendingStarts: [],
+        pendingStops: [],
+        dispatcherClass: "user",
+      };
+      assert.equal(dispatcherClassOf(registryAnswering(userRow), {}), "user");
+      assert.equal(viewSessionKind(userRow), DISPATCHER_SESSION_KIND);
     });
 
     it("fails closed to null — never invents a class", () => {

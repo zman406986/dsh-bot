@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import {formatCheckRowLine, formatCheckSummary, toCheckRow} from "../src/core/tool-results.js";
+import {formatAwaitNote, formatCheckRowLine, formatCheckSummary, toAwaitAgentToolResult, toCheckRow} from "../src/core/tool-results.js";
+import { abortedReportBody, emptyErrorReportBody, emptyReportPlaceholder } from "../src/core/report-clamp.js";
 import type { WorkerSummary } from "../src/core/types.js";
 
 function summary(overrides: Partial<WorkerSummary> = {}): WorkerSummary {
@@ -33,6 +34,135 @@ describe("check row formatting", () => {
     assert.equal(row.recent_activity, null);
   });
 
+});
+
+describe("await note — status-aware settlement", () => {
+  it("an aborted settle never reads as a finished worker", () => {
+    const note = formatAwaitNote("w-1", {
+      status: "settled",
+      workerStatus: "aborted",
+      result: emptyReportPlaceholder(),
+    });
+    assert.ok(note.includes("settled: aborted"));
+    assert.ok(!note.toLowerCase().includes("finished"));
+    assert.ok(!note.includes("See the transcript"), "no unnamed transcript pointer");
+    assert.ok(!note.includes(emptyReportPlaceholder()));
+  });
+
+  it("maps an aborted settle onto the bookkeeping body, not the completed placeholder", () => {
+    const mapped = toAwaitAgentToolResult("w-1", {
+      ok: true,
+      status: "settled",
+      workerStatus: "aborted",
+      result: emptyReportPlaceholder(),
+      settledAtMs: 1,
+      waitedMs: 2,
+    });
+    assert.ok(mapped.ok);
+    if (!mapped.ok || mapped.status !== "settled") return;
+    assert.equal(mapped.worker_status, "aborted");
+    assert.equal(mapped.result, abortedReportBody());
+    assert.ok(!mapped.summary.includes(emptyReportPlaceholder()));
+    assert.ok(!mapped.summary.toLowerCase().includes("finished"));
+  });
+
+  it("an aborted settle with real partial findings keeps them, labelled partial", () => {
+    const mapped = toAwaitAgentToolResult("w-1", {
+      ok: true,
+      status: "settled",
+      workerStatus: "aborted",
+      result: "half of the migration is staged",
+      settledAtMs: 1,
+      waitedMs: 2,
+    });
+    assert.ok(mapped.ok);
+    if (!mapped.ok || mapped.status !== "settled") return;
+    assert.equal(mapped.worker_status, "aborted");
+    assert.equal(
+      mapped.result,
+      "Worker stopped before completion. Partial report:\nhalf of the migration is staged",
+    );
+    assert.ok(mapped.summary.includes("half of the migration is staged"));
+    assert.match(mapped.summary, /partial/);
+    assert.ok(!mapped.summary.includes(abortedReportBody()));
+    assert.ok(!mapped.summary.includes(emptyReportPlaceholder()));
+  });
+
+  it("an aborted settle with only the completed placeholder still gets the no-report body", () => {
+    const mapped = toAwaitAgentToolResult("w-1", {
+      ok: true,
+      status: "settled",
+      workerStatus: "aborted",
+      result: emptyReportPlaceholder(),
+      settledAtMs: 1,
+      waitedMs: 2,
+    });
+    assert.ok(mapped.ok);
+    if (!mapped.ok || mapped.status !== "settled") return;
+    assert.equal(mapped.result, abortedReportBody());
+    assert.ok(!mapped.summary.includes(emptyReportPlaceholder()));
+  });
+
+  it("keeps a completed settle's real result untouched", () => {
+    const note = formatAwaitNote("w-1", {
+      status: "settled",
+      workerStatus: "completed",
+      result: "The docs are rewritten.",
+    });
+    assert.ok(note.includes("Result:\nThe docs are rewritten."));
+    assert.ok(note.includes("Continue from this result."));
+  });
+
+  it("an error settle stored as the completed placeholder reads as an error", () => {
+    const mapped = toAwaitAgentToolResult("w-1", {
+      ok: true,
+      status: "settled",
+      workerStatus: "error",
+      // The settle path clamps every report through the completed-report path.
+      result: emptyReportPlaceholder(),
+      settledAtMs: 1,
+      waitedMs: 2,
+    });
+    assert.ok(mapped.ok);
+    if (!mapped.ok || mapped.status !== "settled") return;
+    assert.equal(mapped.worker_status, "error");
+    assert.equal(mapped.result, emptyErrorReportBody());
+    assert.ok(!mapped.summary.includes(emptyReportPlaceholder()));
+    assert.ok(!mapped.summary.includes("produced no text"));
+    assert.match(mapped.summary, /No error message was recorded/);
+    assert.ok(mapped.summary.includes("not a successful finish"));
+  });
+
+  it("the adapter's empty-error sentinel is never echoed as a result", () => {
+    const mapped = toAwaitAgentToolResult("w-1", {
+      ok: true,
+      status: "settled",
+      workerStatus: "error",
+      result: "worker failed with no message",
+      settledAtMs: 1,
+      waitedMs: 2,
+    });
+    assert.ok(mapped.ok);
+    if (!mapped.ok || mapped.status !== "settled") return;
+    assert.equal(mapped.result, emptyErrorReportBody());
+    assert.ok(!mapped.summary.includes("worker failed with no message"));
+  });
+
+  it("an error settle with real text is prefixed as a failure, not a result", () => {
+    const mapped = toAwaitAgentToolResult("w-1", {
+      ok: true,
+      status: "settled",
+      workerStatus: "error",
+      result: "it broke",
+      settledAtMs: 1,
+      waitedMs: 2,
+    });
+    assert.ok(mapped.ok);
+    if (!mapped.ok || mapped.status !== "settled") return;
+    assert.equal(mapped.result, "Worker failed:\nit broke");
+    assert.ok(mapped.summary.includes("Worker failed:\nit broke"));
+    assert.ok(!mapped.summary.includes(emptyReportPlaceholder()));
+  });
 });
 
 describe("check row stage segment (ticket 171)", () => {

@@ -1,5 +1,5 @@
 /**
- * Per-tool call views (ticket 24; design-16 §2/§4.2/§5).
+ * Per-tool call views (ticket 24; readable-status-display anatomy).
  *
  * The shipped `tool.call.toolview` slot is KEYED by wire tool name (Finding 5,
  * `dsh-client-ui-tool` contract/slots.d.ts:9-23): a key the shipped
@@ -7,28 +7,35 @@
  * back to the generic tool row. The dispatcher tool names (eight since
  * ticket 118; nine keys claimed here with the retained historical
  * `send_peer`) have been plugin-owned and none is claimed by any shipped
- * `dsh-client-ui-*` package (shipped claims per the 0.1.5-rc.1 catalog:
- * `cordis_define` / `cordis_run` only), so claiming them is additive-safe.
+ * `dsh-client-ui-*` package, so claiming them is additive-safe.
  *
- * Keys are EXACTLY the core wire tool names from
- * `src/core/policy/prompts.ts` — nothing invented (design-16 §5). Ids/labels
- * live under the `multitask-dispatcher` locale namespace.
+ * Every row has THREE levels and no more:
+ *
+ * 1. **One primary sentence** — what happened, with no field label and no
+ *    UUID (`Started "Rewrite auth docs"`, `Delivered to you`,
+ *    `Couldn't steer worker …7f3a — no worker with that id in this chat.`).
+ * 2. **At most two self-describing facts**, separated by ` · `, with
+ *    false/zero/null/duplicate facts omitted (`2m 5s`, `7 tool calls`,
+ *    `todo 7 completed`). Booleans are NEVER rendered as `true`/`false`:
+ *    `ok` selects the primary sentence, `delivered` becomes a sentence or an
+ *    honest refusal, `priority:false` is omitted, `todo_completed:null` is
+ *    omitted.
+ * 3. **A nested Details area** (`<details><summary>Details</summary><dl>`) —
+ *    the only place full ids, stream keys, transcript refs, message ids, raw
+ *    reason codes and times live.
+ *
+ * Subject resolution is title → kind + short ref. The full id is details
+ * only; the visible line never leads with `session-` or a UUID. Rows from
+ * older transcripts (no adapter `display` projection) degrade to short refs.
  *
  * This module is pure registration data + pure payload parsing: no React,
  * no DOM, no Cordis. Tests assert it directly (offline, S8). The component
- * factory that consumes these view models lives in `toolview-panel.tsx`;
- * the row's stylesheet (the layout that keeps each label, its value and the
- * next field apart) lives in `toolview-styles.ts`.
+ * factory that consumes these models lives in `toolview-panel.tsx`; the
+ * row's stylesheet lives in `toolview-styles.ts`.
  *
- * A `fields` entry is one label/value pair and nothing more — no separator
- * text, no trailing punctuation. Separation is the renderer's job and is
- * structural: a flex row per field, a `gap`, and a separator element between
- * fields (ticket 169). Keep it that way: baking a space or a dot into a
- * `value` here would leak presentation into the parsed data and would be
- * lost again the moment a second renderer consumed the same model.
- *
- * Views are read-only presentation (design-16 §3.4): they render only what
- * the tool call already carries — no fetches, no actions, no authority.
+ * All copy is locale-keyed. Parsers never build an English sentence; a fact
+ * is either raw text (an instruction the model wrote, a short ref, a
+ * duration) or a locale key plus values resolved by the renderer.
  */
 
 import {
@@ -44,6 +51,12 @@ import {
   STOP_WORKER_TOOL,
 } from "../core/policy/prompts.js";
 import { LOCALE_NAMESPACE } from "./overlay.js";
+import {
+  displaySubject,
+  formatDuration,
+  shortRef,
+  statusWordKey
+} from "./status-format.js";
 
 /**
  * The shipped keyed slot for per-tool call renderings. dsh-owned; never an
@@ -54,16 +67,6 @@ export const TOOL_CALL_TOOLVIEW_SLOT = "tool.call.toolview";
 /**
  * The wire tool names this face claims, in registration order — the eight
  * dispatcher tools plus the retained historical `send_peer` key (ticket 152).
- * `deliver_result` is included because its call row benefits from an
- * at-a-glance delivered/todo outcome on wake turns (ticket 24 "if it
- * benefits"); `send_peer` (ticket 70) because its row is the user-visible
- * trace of peer traffic on the conversation surface.
- *
- * `message_agent` (ticket 116), `await_agent` (ticket 117) and
- * `spawn_dispatcher` (ticket 118) had no row renderer here — the deliberate
- * lag ticket 152 closes: each now has its own parser below, so the dispatcher
- * surface is covered key for key. `send_peer` stays claimed because
- * transcripts from before ticket 116 still carry those rows.
  */
 export const TOOLVIEW_TOOL_NAMES: readonly string[] = [
   SPAWN_WORKER_TOOL,
@@ -79,8 +82,7 @@ export const TOOLVIEW_TOOL_NAMES: readonly string[] = [
 
 /**
  * Toolview keys claimed by the shipped composition per the 0.1.5-rc.1
- * catalog (research Finding 5). We must never claim one of these — claiming
- * a covered key is a shadowing election against shipped UI.
+ * catalog (research Finding 5). We must never claim one of these.
  */
 export const SHIPPED_CLAIMED_TOOLVIEW_KEYS: readonly string[] = [
   "cordis_define",
@@ -108,28 +110,37 @@ export function toolviewRegistration(
   };
 }
 
-/** Locale keys for the field labels rendered by the toolview rows. */
-export const TOOLVIEW_FIELD_KEYS = {
-  worker: "toolview.field.worker",
-  title: "toolview.field.title",
-  stream: "toolview.field.stream",
-  todo: "toolview.field.todo",
-  outcome: "toolview.field.outcome",
-  steer: "toolview.field.steer",
-  delivered: "toolview.field.delivered",
-  attachments: "toolview.field.attachments",
-  peer: "toolview.field.peer",
-  priority: "toolview.field.priority",
-  // Ticket 152: labels for the message_agent / await_agent /
-  // spawn_dispatcher rows.
-  agent: "toolview.field.agent",
-  status: "toolview.field.status",
-  deliveredAs: "toolview.field.delivered-as",
-  dispatcher: "toolview.field.dispatcher",
+/** Locale keys for the labels inside the nested Details area. */
+export const TOOLVIEW_DETAIL_KEYS = {
+  worker: "toolview.detail.worker",
+  dispatcher: "toolview.detail.dispatcher",
+  target: "toolview.detail.target",
+  todo: "toolview.detail.todo",
+  stream: "toolview.detail.stream",
+  transcript: "toolview.detail.transcript",
+  message: "toolview.detail.message",
+  status: "toolview.detail.status",
+  reason: "toolview.detail.reason",
+  elapsed: "toolview.detail.elapsed",
+  settled: "toolview.detail.settled",
+  waited: "toolview.detail.waited",
+  mode: "toolview.detail.mode",
+  call: "toolview.detail.call",
 } as const;
 
 /** Locale key for the degraded row copy. */
 export const TOOLVIEW_DEGRADED_KEY = "toolview.degraded";
+
+/** Locale key for the Details summary. */
+export const TOOLVIEW_DETAILS_KEY = "toolview.details";
+
+/** Locale keys for the generic subject nouns used by refusal sentences. */
+export const TOOLVIEW_SUBJECT_KEYS = {
+  worker: "toolview.subject.worker",
+  agent: "toolview.subject.agent",
+  dispatcher: "toolview.subject.dispatcher",
+  todo: "toolview.subject.todo",
+} as const;
 
 /**
  * The props a toolview entry is handed by the renderer. The exact prop face
@@ -141,36 +152,77 @@ export interface ToolCallPayload {
   readonly result: unknown;
 }
 
-/** One label/value pair; `labelKey` resolves through the locale seat. */
-export interface ToolviewField {
+/** One label/value pair inside the nested Details area. */
+export interface ToolviewDetail {
   readonly labelKey: string;
   readonly value: string;
 }
 
 /**
- * One `check_workers` roster row. `statusLabel` reuses the core FSM
- * vocabulary VERBATIM (identity contract, same as the roster panel); null
- * when the payload carries no readable status. `activity` is the row's
- * recent-activity phrase when the core recorded one (ticket 29) — clamped,
- * whitespace-collapsed; null when absent so the line is omitted entirely.
+ * One localized fact. Parsers stay locale-free: `text` is a raw value the
+ * model wrote (an instruction, a short ref, a duration), while `copy` and
+ * `count` carry locale keys the renderer resolves through its `t` seat.
+ */
+export type ToolviewFact =
+  | { readonly kind: "text"; readonly text: string }
+  | {
+      readonly kind: "copy";
+      readonly key: string;
+      readonly values: Readonly<Record<string, string>>;
+    }
+  | { readonly kind: "count"; readonly keyBase: string; readonly count: number };
+
+/**
+ * One `check_workers` roster row, ordered the readable way: title first, one
+ * human status word, facts (elapsed, tool calls), an optional activity line,
+ * and the short ref last. `statusLabel` stays the raw core FSM vocabulary for
+ * `data-status`; `statusWordKey` is the ONE visible word.
  */
 export interface ToolviewStatusRow {
   readonly workerId: string;
   readonly title: string;
   readonly statusLabel: string | null;
+  readonly statusWordKey: string | null;
+  readonly facts: readonly ToolviewFact[];
   readonly activity: string | null;
+  readonly shortRef: string;
 }
+
+/** The row's human state; also the raw `data-status` value on the row. */
+export type ToolviewState =
+  | "starting"
+  | "working"
+  | "adjusting"
+  | "done"
+  | "failed"
+  | "stopped";
 
 /**
  * Parsed view outcome: `degraded` renders the safe degraded row (malformed,
- * partial, or foreign payload); `detail` renders the parsed fields plus any
- * status rows.
+ * partial, or foreign payload); `detail` renders the three-level row.
  */
 export type ToolviewModel =
   | { readonly kind: "degraded" }
   | {
       readonly kind: "detail";
-      readonly fields: readonly ToolviewField[];
+      readonly state: ToolviewState;
+      /** Locale key for the one primary sentence. */
+      readonly primaryKey: string;
+      /** Values substituted into `primaryKey` (lowercase placeholders only). */
+      readonly primaryValues: Readonly<Record<string, string>>;
+      /**
+       * Locale key for the refusal cause. The renderer resolves it and
+       * substitutes `{cause}`; raw reason enums never render outside details.
+       */
+      readonly causeKey: string | null;
+      /** Title, or kind + short ref; never a full id. */
+      readonly subject: string | null;
+      /** Generic subject noun key when no id/title produced a subject. */
+      readonly subjectKey: string | null;
+      /** At most two self-describing facts. */
+      readonly facts: readonly ToolviewFact[];
+      /** Full ids/streams/transcripts/reasons/times — details only. */
+      readonly details: readonly ToolviewDetail[];
       readonly statusRows: readonly ToolviewStatusRow[];
     };
 
@@ -192,14 +244,23 @@ function asString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-/** Boolean or null — booleans render verbatim ("true"/"false"). */
+/** Boolean or null. Booleans select copy; they never render as text. */
 function asBool(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null;
 }
 
+/** Finite non-negative number or null. */
+function asCount(value: unknown): number | null {
+  return typeof value === "number" &&
+    Number.isFinite(value) &&
+    value >= 0
+    ? value
+    : null;
+}
+
 /**
  * Collapse whitespace and clamp to the compact-row budget. Null for
- * missing/empty values so the field is omitted entirely.
+ * missing/empty values so the fact is omitted entirely.
  */
 function clampText(value: unknown): string | null {
   const raw = asString(value);
@@ -210,294 +271,1061 @@ function clampText(value: unknown): string | null {
   return `${flat.slice(0, TOOLVIEW_TEXT_CLAMP_CHARS)}…`;
 }
 
-/** Outcome field from a tool result: "ok" or the verbatim failure reason. */
-function outcomeField(
+/** A raw-text fact (model-written instruction, short ref, duration). */
+function textFact(text: string | null | undefined): ToolviewFact | null {
+  if (typeof text !== "string" || text.length === 0) return null;
+  return { kind: "text", text };
+}
+
+/** A localized fact copied from the dictionary. */
+function copyFact(
+  key: string,
+  values: Readonly<Record<string, string>> = {},
+): ToolviewFact {
+  return { kind: "copy", key, values };
+}
+
+/** A pluralized count fact (`.one` / `.other`). */
+function countFact(keyBase: string, count: number): ToolviewFact {
+  return { kind: "count", keyBase, count };
+}
+
+/** Stable identity for de-duplicating facts (never user-visible). */
+function factIdentity(fact: ToolviewFact): string {
+  switch (fact.kind) {
+    case "text":
+      return `text:${fact.text}`;
+    case "copy":
+      return `copy:${fact.key}:${JSON.stringify(fact.values)}`;
+    case "count":
+      return `count:${fact.keyBase}:${fact.count}`;
+  }
+}
+
+/** Keep at most two distinct facts, in order. */
+function capFacts(facts: readonly (ToolviewFact | null)[]): ToolviewFact[] {
+  const out: ToolviewFact[] = [];
+  const seen = new Set<string>();
+  for (const fact of facts) {
+    if (out.length >= 2) break;
+    if (fact === null) continue;
+    const identity = factIdentity(fact);
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    out.push(fact);
+  }
+  return out;
+}
+
+/** Build the Details list, omitting empty values and exact duplicates. */
+function detailsOf(
+  entries: readonly (readonly [string, string | null | undefined])[],
+): ToolviewDetail[] {
+  const out: ToolviewDetail[] = [];
+  const seen = new Set<string>();
+  for (const [labelKey, raw] of entries) {
+    if (typeof raw !== "string" || raw.length === 0) continue;
+    const identity = `${labelKey}\u0000${raw}`;
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    out.push({ labelKey, value: raw });
+  }
+  return out;
+}
+
+/** One resolved display subject: text plus the raw id for details. */
+interface ResolvedSubject {
+  readonly text: string | null;
+  readonly id: string | null;
+  readonly kind: string | null;
+  /** True when the visible text is a title (not a short ref). */
+  readonly titled: boolean;
+}
+
+interface SubjectInput {
+  readonly result?: Record<string, unknown> | null;
+  readonly args?: Record<string, unknown> | null;
+  readonly id?: string | null;
+  readonly title?: string | null;
+  readonly kind: string;
+}
+
+/** The adapter's `display` projection (JSON-only: id/kind/title). */
+function displaySubjectOf(
   result: Record<string, unknown> | null,
-): ToolviewField | null {
-  if (result === null) return null;
-  const ok = asBool(result.ok);
-  if (ok === null) return null;
-  if (ok) return { labelKey: TOOLVIEW_FIELD_KEYS.outcome, value: "ok" };
-  const reason = asString(result.reason);
+): { readonly id: string | null; readonly kind: string | null; readonly title: string | null } | null {
+  const display = asRecord(result?.display);
+  const subject = asRecord(display?.subject);
+  if (subject === null) return null;
   return {
-    labelKey: TOOLVIEW_FIELD_KEYS.outcome,
-    value: reason ?? "failed",
+    id: asString(subject.id),
+    kind: asString(subject.kind),
+    title: asString(subject.title),
   };
 }
 
-/** Degrade only when nothing at all parsed. */
-function detailOrDegraded(
-  fields: readonly ToolviewField[],
-  statusRows: readonly ToolviewStatusRow[],
-): ToolviewModel {
-  if (fields.length === 0 && statusRows.length === 0) return DEGRADED;
-  return { kind: "detail", fields, statusRows };
+/**
+ * Resolve a row subject: adapter display title → result title → argument
+ * title → kind + short ref. Never a full id.
+ */
+function resolveSubject(input: SubjectInput): ResolvedSubject {
+  const display = displaySubjectOf(input.result ?? null);
+  const id =
+    asString(input.id) ??
+    asString(display?.id) ??
+    null;
+  const kind =
+    asString(display?.kind) ??
+    input.kind;
+  const title =
+    asString(display?.title) ??
+    asString(input.title) ??
+    null;
+  const text = displaySubject({ title, id, kind });
+  return {
+    text,
+    id,
+    kind,
+    titled: title !== null && text !== null && text === title.trim(),
+  };
+}
+
+/** Refusal cause mapping: every reason enum → one human phrase key. */
+const REFUSAL_CAUSES: Readonly<
+  Record<string, Readonly<Record<string, string>>>
+> = {
+  [SPAWN_WORKER_TOOL]: {
+    "duplicate-stream-key": "toolview.cause.duplicate-stream-key",
+    "unknown-todo-id": "toolview.cause.unknown-todo-id",
+    "todo-already-linked": "toolview.cause.todo-already-linked",
+  },
+  [CHECK_WORKERS_TOOL]: {
+    "unknown-worker": "toolview.cause.unknown-worker",
+  },
+  [STEER_WORKER_TOOL]: {
+    "unknown-worker": "toolview.cause.unknown-worker",
+    "not-running": "toolview.cause.not-running",
+  },
+  [STOP_WORKER_TOOL]: {
+    "already-settled": "toolview.cause.already-settled",
+  },
+  [DELIVER_RESULT_TOOL]: {
+    "unknown-target": "toolview.cause.unknown-todo",
+    "no-delivery-channel": "toolview.cause.no-delivery-channel",
+    "send-failed": "toolview.cause.send-failed",
+  },
+  [MESSAGE_AGENT_TOOL]: {
+    "unknown-target": "toolview.cause.unknown-agent",
+    "self-target": "toolview.cause.self-target",
+    "not-running": "toolview.cause.not-running",
+    "inbox-full": "toolview.cause.inbox-full",
+    "rate-limited": "toolview.cause.rate-limited",
+    "invalid-envelope": "toolview.cause.invalid-envelope",
+  },
+  [AWAIT_AGENT_TOOL]: {
+    "unknown-target": "toolview.cause.unknown-worker",
+    "self-target": "toolview.cause.self-target",
+    "not-awaitable": "toolview.cause.not-awaitable",
+    "too-many-waits": "toolview.cause.too-many-waits",
+    "invalid-timeout": "toolview.cause.invalid-timeout",
+  },
+  [SPAWN_DISPATCHER_TOOL]: {
+    "invalid-args": "toolview.cause.invalid-args",
+    "host-refused": "toolview.cause.host-refused",
+  },
+  [SEND_PEER_TOOL]: {
+    "unknown-target": "toolview.cause.unknown-dispatcher",
+    "self-target": "toolview.cause.self-target",
+    "inbox-full": "toolview.cause.inbox-full",
+    "message-id-reuse": "toolview.cause.message-id-reuse",
+    "invalid-envelope": "toolview.cause.invalid-envelope",
+  },
+};
+
+/** Primary-sentence key per tool's refusal shape. */
+const REFUSAL_PRIMARY: Readonly<Record<string, string>> = {
+  [SPAWN_WORKER_TOOL]: "toolview.spawn.refused",
+  [CHECK_WORKERS_TOOL]: "toolview.check.refused",
+  [STEER_WORKER_TOOL]: "toolview.steer.refused",
+  [STOP_WORKER_TOOL]: "toolview.stop.refused",
+  [DELIVER_RESULT_TOOL]: "toolview.deliver.refused",
+  [MESSAGE_AGENT_TOOL]: "toolview.message.refused",
+  [AWAIT_AGENT_TOOL]: "toolview.await.refused",
+  [SPAWN_DISPATCHER_TOOL]: "toolview.dispatcher.refused",
+  [SEND_PEER_TOOL]: "toolview.peer.refused",
+};
+
+/**
+ * Map one tool's refusal reason onto its human cause key. Unknown reasons
+ * still get the honest generic phrase; the raw enum is added to details by
+ * the caller. Null/empty reasons answer null so the caller can choose its
+ * own honest default.
+ */
+export function refusalCauseKey(
+  toolName: string,
+  reason: string | null | undefined,
+): string | null {
+  if (typeof reason !== "string" || reason.length === 0) return null;
+  return (
+    REFUSAL_CAUSES[toolName]?.[reason] ?? "toolview.cause.failed"
+  );
+}
+
+/** Build a refusal row with one sentence, no boolean fields, raw reason in details. */
+function refusalModel(input: {
+  readonly toolName: string;
+  readonly reason: string | null;
+  readonly subject: ResolvedSubject;
+  readonly fallbackSubjectKey: string;
+  readonly details: readonly ToolviewDetail[];
+  /** Titled tools override the generic refusal sentence. */
+  readonly primaryKey?: string;
+  readonly primaryValues?: Readonly<Record<string, string>>;
+}): ToolviewModel {
+  return {
+    kind: "detail",
+    state: "failed",
+    primaryKey:
+      input.primaryKey ??
+      REFUSAL_PRIMARY[input.toolName] ??
+      "toolview.cause.failed",
+    primaryValues:
+      input.primaryValues ??
+      (input.subject.text !== null ? { subject: input.subject.text } : {}),
+    causeKey:
+      refusalCauseKey(input.toolName, input.reason) ?? "toolview.cause.failed",
+    subject: input.subject.text,
+    subjectKey:
+      input.subject.text === null ? input.fallbackSubjectKey : null,
+    facts: [],
+    details: input.details,
+    statusRows: [],
+  };
+}
+
+/** Build a parsed detail row. */
+function detailModel(input: {
+  readonly state: ToolviewState;
+  readonly primaryKey: string;
+  readonly primaryValues?: Readonly<Record<string, string>>;
+  readonly subject: ResolvedSubject;
+  readonly fallbackSubjectKey: string | null;
+  readonly facts?: readonly (ToolviewFact | null)[];
+  readonly details?: readonly ToolviewDetail[];
+  readonly statusRows?: readonly ToolviewStatusRow[];
+}): ToolviewModel {
+  return {
+    kind: "detail",
+    state: input.state,
+    primaryKey: input.primaryKey,
+    primaryValues: input.primaryValues ?? {},
+    causeKey: null,
+    subject: input.subject.text,
+    subjectKey:
+      input.subject.text === null ? input.fallbackSubjectKey : null,
+    facts: capFacts(input.facts ?? []),
+    details: input.details ?? [],
+    statusRows: input.statusRows ?? [],
+  };
+}
+
+/** Whether a payload carries anything a row may honestly render. */
+function hasPayload(
+  args: Record<string, unknown> | null,
+  result: Record<string, unknown> | null,
+): boolean {
+  if (result !== null) return true;
+  return args !== null && Object.keys(args).length > 0;
+}
+
+/** The raw reason text of a failed result, when it has one. */
+function reasonOf(result: Record<string, unknown> | null): string | null {
+  return result === null ? null : asString(result.reason);
 }
 
 function describeSpawn(payload: ToolCallPayload): ToolviewModel {
   const args = asRecord(payload.args);
   const result = asRecord(payload.result);
-  const fields: ToolviewField[] = [];
+  if (!hasPayload(args, result)) return DEGRADED;
 
   const workerId = asString(result?.worker_id);
-  if (workerId !== null) {
-    fields.push({ labelKey: TOOLVIEW_FIELD_KEYS.worker, value: workerId });
-  }
   const title = asString(result?.title) ?? asString(args?.title);
-  if (title !== null) {
-    fields.push({ labelKey: TOOLVIEW_FIELD_KEYS.title, value: title });
-  }
-  const stream = asString(result?.stream_key) ?? asString(args?.stream_key);
-  if (stream !== null) {
-    fields.push({ labelKey: TOOLVIEW_FIELD_KEYS.stream, value: stream });
-  }
-  const todo = asString(args?.todo_id);
-  if (todo !== null) {
-    fields.push({ labelKey: TOOLVIEW_FIELD_KEYS.todo, value: todo });
-  }
-  const outcome = outcomeField(result);
-  if (outcome !== null) fields.push(outcome);
+  const subject = resolveSubject({
+    result,
+    args,
+    id: workerId,
+    title,
+    kind: "worker",
+  });
+  const streamKey = asString(result?.stream_key) ?? asString(args?.stream_key);
+  const todoId = asString(args?.todo_id);
+  const details = detailsOf([
+    [TOOLVIEW_DETAIL_KEYS.worker, workerId],
+    [TOOLVIEW_DETAIL_KEYS.stream, streamKey],
+    [TOOLVIEW_DETAIL_KEYS.todo, todoId],
+    [TOOLVIEW_DETAIL_KEYS.reason, reasonOf(result)],
+  ]);
 
-  return detailOrDegraded(fields, []);
+  const ok = asBool(result?.ok);
+  if (result !== null && ok === false) {
+    return refusalModel({
+      toolName: SPAWN_WORKER_TOOL,
+      reason: reasonOf(result),
+      subject,
+      fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.worker,
+      details,
+      ...(subject.titled
+        ? {
+            primaryKey: "toolview.spawn.refused",
+            primaryValues: { title: subject.text ?? "" },
+          }
+        : {
+            primaryKey: "toolview.spawn.refused-generic",
+            primaryValues: {},
+          }),
+    });
+  }
+  if (result !== null && ok !== true) {
+    // A readable result whose `ok` is not boolean tells no honest story.
+    return details.length > 0 || subject.text !== null
+      ? detailModel({
+          state: "working",
+          primaryKey: subject.titled
+            ? "toolview.spawn.pending"
+            : "toolview.spawn.pending-generic",
+          primaryValues: subject.titled
+            ? { title: subject.text ?? "" }
+            : subject.text !== null
+              ? { subject: subject.text }
+              : {},
+          subject,
+          fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.worker,
+          details,
+        })
+      : DEGRADED;
+  }
+
+  const pending = result === null;
+  const primaryKey = pending
+    ? subject.titled
+      ? "toolview.spawn.pending"
+      : "toolview.spawn.pending-generic"
+    : subject.titled
+      ? "toolview.spawn.started"
+      : "toolview.spawn.started-generic";
+  const primaryValues = subject.titled
+    ? { title: subject.text ?? "" }
+    : subject.text !== null
+      ? { subject: subject.text }
+      : {};
+  const facts = [
+    // The title is the subject; the short worker ref is the useful fact.
+    !subject.titled ? null : textFact(shortRef(workerId ?? subject.id ?? "", "worker")),
+    todoId === null ? null : textFact(shortRef(todoId, "todo")),
+  ];
+  return detailModel({
+    state: "starting",
+    primaryKey,
+    primaryValues,
+    subject,
+    fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.worker,
+    facts,
+    details,
+  });
+}
+
+/** Parse one check row into the readable row shape. */
+function parseCheckRow(record: Record<string, unknown>): ToolviewStatusRow | null {
+  const workerId = asString(record.worker_id);
+  if (workerId === null) return null;
+  const ref = shortRef(workerId, "worker");
+  const title = asString(record.title) ?? ref;
+  const elapsedMs = asCount(record.elapsed_ms);
+  const toolCalls = asCount(record.tool_call_count);
+  return {
+    workerId,
+    title,
+    statusLabel: asString(record.status),
+    statusWordKey: statusWordKey(asString(record.status)),
+    facts: capFacts([
+      elapsedMs === null
+        ? null
+        : textFact(formatDuration(elapsedMs)),
+      toolCalls === null || toolCalls === 0
+        ? null
+        : countFact("roster.activity.toolcalls", toolCalls),
+    ]),
+    activity: clampText(record.recent_activity),
+    shortRef: ref,
+  };
 }
 
 function describeCheck(payload: ToolCallPayload): ToolviewModel {
   const args = asRecord(payload.args);
   const result = asRecord(payload.result);
-  const fields: ToolviewField[] = [];
+  if (!hasPayload(args, result)) return DEGRADED;
+
+  const targetId = asString(args?.worker_id);
+  const subject = resolveSubject({
+    result,
+    args,
+    id: targetId,
+    kind: "worker",
+  });
+  const ok = result === null ? null : asBool(result.ok);
+
+  if (result !== null && ok === false) {
+    return refusalModel({
+      toolName: CHECK_WORKERS_TOOL,
+      reason: reasonOf(result),
+      subject,
+      fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.worker,
+      details: detailsOf([
+        [TOOLVIEW_DETAIL_KEYS.worker, targetId],
+        [TOOLVIEW_DETAIL_KEYS.reason, reasonOf(result)],
+      ]),
+    });
+  }
+  if (result !== null && ok !== true) return DEGRADED;
+
+  if (result === null) {
+    return detailModel({
+      state: "working",
+      primaryKey: "toolview.check.pending",
+      subject,
+      fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.worker,
+      details: detailsOf([[TOOLVIEW_DETAIL_KEYS.worker, targetId]]),
+    });
+  }
+
+  const rows = result.rows;
+  if (!Array.isArray(rows)) return DEGRADED;
   const statusRows: ToolviewStatusRow[] = [];
-
-  const target = asString(args?.worker_id);
-  if (target !== null) {
-    fields.push({ labelKey: TOOLVIEW_FIELD_KEYS.worker, value: target });
-  }
-  const outcome = outcomeField(result);
-  if (outcome !== null) fields.push(outcome);
-
-  // Status rows only from a well-formed success result; a success carrying
-  // a non-array `rows` is malformed → degraded.
-  if (result !== null && asBool(result.ok) === true) {
-    const rows = result.rows;
-    if (!Array.isArray(rows)) return DEGRADED;
-    for (const row of rows) {
-      const record = asRecord(row);
-      if (record === null) continue;
-      const rowWorker = asString(record.worker_id);
-      if (rowWorker === null) continue;
-      statusRows.push({
-        workerId: rowWorker,
-        title: asString(record.title) ?? rowWorker,
-        // Core FSM vocabulary verbatim; unreadable status → null (omitted).
-        statusLabel: asString(record.status),
-        // Ticket 29: the core clamps `recent_activity` to
-        // CHECK_ACTIVITY_CHARS (120); this second clamp keeps a malformed
-        // or oversized wire value inside the compact-row budget too.
-        activity: clampText(record.recent_activity),
-      });
-    }
+  const details: ToolviewDetail[] = [];
+  for (const row of rows) {
+    const record = asRecord(row);
+    if (record === null) continue;
+    const parsed = parseCheckRow(record);
+    if (parsed === null) continue;
+    statusRows.push(parsed);
+    details.push(
+      ...detailsOf([
+        [TOOLVIEW_DETAIL_KEYS.worker, parsed.workerId],
+        [TOOLVIEW_DETAIL_KEYS.stream, asString(record.stream_key)],
+        [TOOLVIEW_DETAIL_KEYS.transcript, asString(record.transcript_ref)],
+        [TOOLVIEW_DETAIL_KEYS.todo, asString(record.todo_id)],
+      ]),
+    );
   }
 
-  return detailOrDegraded(fields, statusRows);
+  const count = statusRows.length;
+  const primaryKey =
+    count === 0
+      ? "toolview.check.summary.none"
+      : `toolview.check.summary.${count === 1 ? "one" : "other"}`;
+  return detailModel({
+    state: "done",
+    primaryKey,
+    primaryValues: count === 0 ? {} : { count: String(count) },
+    subject,
+    fallbackSubjectKey: null,
+    details,
+    statusRows,
+  });
 }
 
 function describeSteer(payload: ToolCallPayload): ToolviewModel {
   const args = asRecord(payload.args);
   const result = asRecord(payload.result);
-  const fields: ToolviewField[] = [];
+  if (!hasPayload(args, result)) return DEGRADED;
 
-  const workerId = asString(args?.worker_id);
-  if (workerId !== null) {
-    fields.push({ labelKey: TOOLVIEW_FIELD_KEYS.worker, value: workerId });
-  }
-  const steer = clampText(args?.message);
-  if (steer !== null) {
-    fields.push({ labelKey: TOOLVIEW_FIELD_KEYS.steer, value: steer });
-  }
-  const outcome = outcomeField(result);
-  if (outcome !== null) fields.push(outcome);
+  const workerId =
+    asString(result?.worker_id) ?? asString(args?.worker_id);
+  const subject = resolveSubject({
+    result,
+    args,
+    id: workerId,
+    title: asString(result?.title),
+    kind: "worker",
+  });
+  const instruction = clampText(args?.message);
+  const ok = result === null ? null : asBool(result.ok);
+  const details = detailsOf([
+    [TOOLVIEW_DETAIL_KEYS.worker, workerId],
+    [TOOLVIEW_DETAIL_KEYS.reason, reasonOf(result)],
+  ]);
 
-  return detailOrDegraded(fields, []);
+  if (result !== null && ok === false) {
+    return refusalModel({
+      toolName: STEER_WORKER_TOOL,
+      reason: reasonOf(result),
+      subject,
+      fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.worker,
+      details,
+    });
+  }
+  if (result !== null && ok !== true) {
+    return details.length > 0 || subject.text !== null
+      ? detailModel({
+          state: "working",
+          primaryKey: "toolview.steer.pending",
+          primaryValues:
+            subject.text !== null ? { subject: subject.text } : {},
+          subject,
+          fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.worker,
+          facts: [textFact(instruction)],
+          details,
+        })
+      : DEGRADED;
+  }
+
+  const pending = result === null;
+  return detailModel({
+    state: pending ? "working" : "adjusting",
+    primaryKey: pending ? "toolview.steer.pending" : "toolview.steer.sent",
+    primaryValues: subject.text !== null ? { subject: subject.text } : {},
+    subject,
+    fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.worker,
+    facts: [
+      textFact(instruction),
+      result?.dormant === true
+        ? copyFact("toolview.fact.dormant")
+        : null,
+    ],
+    details,
+  });
 }
 
 function describeStop(payload: ToolCallPayload): ToolviewModel {
   const args = asRecord(payload.args);
   const result = asRecord(payload.result);
-  const fields: ToolviewField[] = [];
+  if (!hasPayload(args, result)) return DEGRADED;
 
-  const workerId = asString(args?.worker_id);
-  if (workerId !== null) {
-    fields.push({ labelKey: TOOLVIEW_FIELD_KEYS.worker, value: workerId });
+  const workerId =
+    asString(result?.worker_id) ?? asString(args?.worker_id);
+  const subject = resolveSubject({
+    result,
+    args,
+    id: workerId,
+    title: asString(result?.title),
+    kind: "worker",
+  });
+  const mode = asString(result?.mode);
+  const details = detailsOf([
+    [TOOLVIEW_DETAIL_KEYS.worker, workerId],
+    [TOOLVIEW_DETAIL_KEYS.mode, mode],
+    [TOOLVIEW_DETAIL_KEYS.reason, reasonOf(result)],
+  ]);
+  const ok = result === null ? null : asBool(result.ok);
+
+  if (result !== null && ok === false) {
+    return refusalModel({
+      toolName: STOP_WORKER_TOOL,
+      reason: reasonOf(result),
+      subject,
+      fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.worker,
+      details,
+    });
   }
-  const outcome = outcomeField(result);
-  if (outcome !== null) fields.push(outcome);
+  if (result !== null && ok !== true) {
+    return details.length > 0 || subject.text !== null
+      ? detailModel({
+          state: "working",
+          primaryKey: "toolview.stop.pending",
+          primaryValues:
+            subject.text !== null ? { subject: subject.text } : {},
+          subject,
+          fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.worker,
+          details,
+        })
+      : DEGRADED;
+  }
 
-  return detailOrDegraded(fields, []);
+  const released = mode === "released-hold";
+  return detailModel({
+    state: result === null ? "working" : "stopped",
+    primaryKey:
+      result === null
+        ? "toolview.stop.pending"
+        : released
+          ? "toolview.stop.released"
+          : "toolview.stop.stopped",
+    primaryValues: subject.text !== null ? { subject: subject.text } : {},
+    subject,
+    fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.worker,
+    details,
+  });
 }
 
 function describeDeliver(payload: ToolCallPayload): ToolviewModel {
   const args = asRecord(payload.args);
   const result = asRecord(payload.result);
-  const fields: ToolviewField[] = [];
+  if (!hasPayload(args, result)) return DEGRADED;
 
-  const delivered = asBool(result?.delivered);
-  if (delivered !== null) {
-    fields.push({
-      labelKey: TOOLVIEW_FIELD_KEYS.delivered,
-      value: delivered ? "true" : "false",
-    });
-  }
-  const todo =
+  const todoId =
     asString(result?.todo_completed) ?? asString(args?.todo_id);
-  if (todo !== null) {
-    fields.push({ labelKey: TOOLVIEW_FIELD_KEYS.todo, value: todo });
-  }
-  const attachments = args?.attachment_paths;
-  if (Array.isArray(attachments)) {
-    fields.push({
-      labelKey: TOOLVIEW_FIELD_KEYS.attachments,
-      value: String(attachments.length),
+  const subject = resolveSubject({
+    result,
+    args,
+    id: todoId,
+    title: asString(result?.todo_title),
+    kind: "todo",
+  });
+  const attachmentPaths = Array.isArray(args?.attachment_paths)
+    ? args.attachment_paths
+    : [];
+  const details = detailsOf([
+    [TOOLVIEW_DETAIL_KEYS.todo, todoId],
+    [TOOLVIEW_DETAIL_KEYS.reason, reasonOf(result)],
+  ]);
+
+  if (result === null) {
+    return detailModel({
+      state: "working",
+      primaryKey: "toolview.deliver.pending",
+      subject,
+      fallbackSubjectKey: null,
+      facts: [
+        attachmentPaths.length === 0
+          ? null
+          : countFact(
+              "toolview.fact.attachments",
+              attachmentPaths.length,
+            ),
+      ],
+      details,
     });
   }
-  const outcome = outcomeField(result);
-  if (outcome !== null) fields.push(outcome);
 
-  return detailOrDegraded(fields, []);
+  const delivered = asBool(result.delivered);
+  if (delivered !== true) {
+    // `delivered:false` becomes an honest refusal, never the word "false".
+    // A result with no readable `delivered` flag has no deliver story.
+    if (delivered === null && asBool(result.ok) !== false) return DEGRADED;
+    const reason = reasonOf(result) ?? "send-failed";
+    return refusalModel({
+      toolName: DELIVER_RESULT_TOOL,
+      reason,
+      subject,
+      fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.todo,
+      details: detailsOf([
+        [TOOLVIEW_DETAIL_KEYS.todo, todoId],
+        [TOOLVIEW_DETAIL_KEYS.reason, reason],
+      ]),
+    });
+  }
+
+  const completedTodo = asString(result.todo_completed);
+  // ADR-0009: with no wired send channel the dispatcher's own reply is the
+  // channel (`channel: "reply"`). The obligation is recorded, but the user has
+  // not read anything yet — never render this as "Delivered to you".
+  const replyChannel = asString(result.channel) === "reply";
+  const todoFact =
+    completedTodo === null
+      ? null
+      : replyChannel
+        ? subject.titled
+          ? copyFact("toolview.fact.todo-marked-done", {
+              title: subject.text ?? "",
+            })
+          : copyFact("toolview.fact.todo-marked-done-ref", {
+              ref: shortRef(completedTodo, "todo"),
+            })
+        : copyFact("toolview.fact.todo-completed", {
+            ref: shortRef(completedTodo, "todo"),
+          });
+  return detailModel({
+    state: "done",
+    primaryKey: replyChannel
+      ? "toolview.deliver.recorded"
+      : "toolview.deliver.done",
+    subject,
+    fallbackSubjectKey: null,
+    facts: [
+      todoFact,
+      attachmentPaths.length === 0
+        ? null
+        : countFact("toolview.fact.attachments", attachmentPaths.length),
+    ],
+    details,
+  });
 }
 
 /**
  * Ticket 70: the send_peer row — the conversation-visible trace of peer
- * traffic. Read-only fields from the call's own record: the target session,
- * the priority flag, and the acceptance outcome. The message BODY is never
- * rendered here (the row stays a compact at-a-glance line; the body lives
- * in the dispatcher's turns, not the tool row).
+ * traffic. The message BODY is never rendered here.
  */
 function describeSendPeer(payload: ToolCallPayload): ToolviewModel {
   const args = asRecord(payload.args);
   const result = asRecord(payload.result);
-  const fields: ToolviewField[] = [];
+  if (!hasPayload(args, result)) return DEGRADED;
 
-  const toSession = asString(result?.to_session) ?? asString(args?.to_session);
-  if (toSession !== null) {
-    fields.push({ labelKey: TOOLVIEW_FIELD_KEYS.peer, value: toSession });
-  }
-  const priority = asBool(args?.priority);
-  if (priority !== null) {
-    fields.push({
-      labelKey: TOOLVIEW_FIELD_KEYS.priority,
-      value: priority ? "true" : "false",
+  const toSession =
+    asString(result?.to_session) ?? asString(args?.to_session);
+  const subject = resolveSubject({
+    result,
+    args,
+    id: toSession,
+    kind: "dispatcher",
+  });
+  const details = detailsOf([
+    [TOOLVIEW_DETAIL_KEYS.target, toSession],
+    [TOOLVIEW_DETAIL_KEYS.message, asString(result?.message_id)],
+    [TOOLVIEW_DETAIL_KEYS.reason, reasonOf(result)],
+  ]);
+  const ok = result === null ? null : asBool(result.ok);
+
+  if (result !== null && ok === false) {
+    return refusalModel({
+      toolName: SEND_PEER_TOOL,
+      reason: reasonOf(result),
+      subject,
+      fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.dispatcher,
+      details,
     });
   }
-  const outcome = outcomeField(result);
-  if (outcome !== null) fields.push(outcome);
+  if (result !== null && ok !== true) {
+    return details.length > 0 || subject.text !== null
+      ? detailModel({
+          state: "working",
+          primaryKey: "toolview.peer.pending",
+          primaryValues:
+            subject.text !== null ? { subject: subject.text } : {},
+          subject,
+          fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.dispatcher,
+          details,
+        })
+      : DEGRADED;
+  }
 
-  return detailOrDegraded(fields, []);
+  const pending = result === null;
+  return detailModel({
+    state: pending ? "working" : "done",
+    primaryKey: pending ? "toolview.peer.pending" : "toolview.peer.sent",
+    primaryValues: subject.text !== null ? { subject: subject.text } : {},
+    subject,
+    fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.dispatcher,
+    facts: [
+      args?.priority === true ? copyFact("toolview.fact.priority") : null,
+    ],
+    details,
+  });
 }
 
 /**
  * Ticket 152: the message_agent row (ticket 116's one messaging verb). The
  * target is the thing the user cares about, and `delivered_as` says which
  * lane accepted it ("steer" = your worker, "peer" = another dispatcher). The
- * message BODY never renders here, same rule as `send_peer`; the call's text
- * stays in the dispatcher's turns.
+ * message BODY never renders here.
  */
 function describeMessageAgent(payload: ToolCallPayload): ToolviewModel {
   const args = asRecord(payload.args);
   const result = asRecord(payload.result);
-  const fields: ToolviewField[] = [];
+  if (!hasPayload(args, result)) return DEGRADED;
 
   const target = asString(result?.target) ?? asString(args?.target);
-  if (target !== null) {
-    fields.push({ labelKey: TOOLVIEW_FIELD_KEYS.agent, value: target });
-  }
   const deliveredAs = asString(result?.delivered_as);
-  if (deliveredAs !== null) {
-    fields.push({ labelKey: TOOLVIEW_FIELD_KEYS.deliveredAs, value: deliveredAs });
-  }
-  const priority = asBool(args?.priority);
-  if (priority !== null) {
-    fields.push({
-      labelKey: TOOLVIEW_FIELD_KEYS.priority,
-      value: priority ? "true" : "false",
+  const subject = resolveSubject({
+    result,
+    args,
+    id: target,
+    kind:
+      deliveredAs === "peer"
+        ? "dispatcher"
+        : deliveredAs === "steer"
+          ? "worker"
+          : "agent",
+  });
+  const details = detailsOf([
+    [TOOLVIEW_DETAIL_KEYS.target, target],
+    [TOOLVIEW_DETAIL_KEYS.message, asString(result?.message_id)],
+    [TOOLVIEW_DETAIL_KEYS.mode, deliveredAs],
+    [TOOLVIEW_DETAIL_KEYS.reason, reasonOf(result)],
+  ]);
+  const ok = result === null ? null : asBool(result.ok);
+
+  if (result !== null && ok === false) {
+    return refusalModel({
+      toolName: MESSAGE_AGENT_TOOL,
+      reason: reasonOf(result),
+      subject,
+      fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.agent,
+      details,
     });
   }
-  const outcome = outcomeField(result);
-  if (outcome !== null) fields.push(outcome);
+  if (result !== null && ok !== true) {
+    return details.length > 0 || subject.text !== null
+      ? detailModel({
+          state: "working",
+          primaryKey: "toolview.message.pending",
+          primaryValues:
+            subject.text !== null ? { subject: subject.text } : {},
+          subject,
+          fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.agent,
+          details,
+        })
+      : DEGRADED;
+  }
 
-  return detailOrDegraded(fields, []);
+  const pending = result === null;
+  const laneFact =
+    deliveredAs === "steer"
+      ? copyFact("toolview.fact.via-steer")
+      : deliveredAs === "peer"
+        ? copyFact("toolview.fact.via-peer")
+        : null;
+  return detailModel({
+    state: pending ? "working" : "done",
+    primaryKey: pending ? "toolview.message.pending" : "toolview.message.sent",
+    primaryValues: subject.text !== null ? { subject: subject.text } : {},
+    subject,
+    fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.agent,
+    facts: [
+      laneFact,
+      args?.priority === true ? copyFact("toolview.fact.priority") : null,
+      result?.dormant === true ? copyFact("toolview.fact.dormant") : null,
+    ],
+    details,
+  });
 }
 
 /**
- * Ticket 152: the await_agent row (ticket 117's one bounded wait). The
- * worker id plus the outcome status is the whole story: `settled` carries
- * the worker's terminal status after it, and a `released` wait names which
- * racer cut it short. A timeout is a normal outcome, so no "Outcome" field
- * on the success path — only a refusal renders its reason.
+ * Ticket 152: the await_agent row (ticket 117's one bounded wait). The row
+ * is about WAIT STATE only — it never echoes a result excerpt.
  */
 function describeAwaitAgent(payload: ToolCallPayload): ToolviewModel {
   const args = asRecord(payload.args);
   const result = asRecord(payload.result);
-  const fields: ToolviewField[] = [];
+  if (!hasPayload(args, result)) return DEGRADED;
 
   const target = asString(result?.target) ?? asString(args?.target);
-  if (target !== null) {
-    fields.push({ labelKey: TOOLVIEW_FIELD_KEYS.worker, value: target });
+  const subject = resolveSubject({
+    result,
+    args,
+    id: target,
+    kind: "worker",
+  });
+  const waitedMs = asCount(result?.waited_ms);
+  const settledAtMs = asCount(result?.settled_at_ms);
+  const details = detailsOf([
+    [TOOLVIEW_DETAIL_KEYS.target, target],
+    [TOOLVIEW_DETAIL_KEYS.status, asString(result?.status)],
+    [TOOLVIEW_DETAIL_KEYS.mode, asString(result?.worker_status)],
+    [TOOLVIEW_DETAIL_KEYS.reason, reasonOf(result)],
+    [
+      TOOLVIEW_DETAIL_KEYS.waited,
+      waitedMs === null ? null : `${waitedMs} ms`,
+    ],
+    [
+      TOOLVIEW_DETAIL_KEYS.settled,
+      settledAtMs === null ? null : String(settledAtMs),
+    ],
+  ]);
+  const ok = result === null ? null : asBool(result.ok);
+
+  if (result !== null && ok === false) {
+    return refusalModel({
+      toolName: AWAIT_AGENT_TOOL,
+      reason: reasonOf(result),
+      subject,
+      fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.worker,
+      details,
+    });
   }
-  const status = asString(result?.status);
-  if (status !== null) {
-    const workerStatus = asString(result?.worker_status);
-    const reason = asString(result?.reason);
-    const detail =
-      status === "settled" && workerStatus !== null
-        ? `${status} · ${workerStatus}`
-        : status === "released" && reason !== null
-          ? `${status} · ${reason}`
-          : status;
-    fields.push({ labelKey: TOOLVIEW_FIELD_KEYS.status, value: detail });
-  }
-  if (result !== null && asBool(result.ok) === false) {
-    const outcome = outcomeField(result);
-    if (outcome !== null) fields.push(outcome);
+  if (result !== null && ok !== true) return DEGRADED;
+
+  if (result === null) {
+    return detailModel({
+      state: "working",
+      primaryKey: "toolview.await.pending",
+      primaryValues: subject.text !== null ? { subject: subject.text } : {},
+      subject,
+      fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.worker,
+      details,
+    });
   }
 
-  return detailOrDegraded(fields, []);
+  const status = asString(result.status);
+  const waitedFact =
+    waitedMs === null
+      ? null
+      : copyFact("toolview.fact.waited", {
+          duration: formatDuration(waitedMs),
+        });
+
+  if (status === "settled") {
+    const workerStatus = asString(result.worker_status);
+    if (workerStatus === "completed") {
+      return detailModel({
+        state: "done",
+        primaryKey: "toolview.await.done",
+        primaryValues:
+          subject.text !== null ? { subject: subject.text } : {},
+        subject,
+        fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.worker,
+        facts: [waitedFact],
+        details,
+      });
+    }
+    if (workerStatus === "error") {
+      return detailModel({
+        state: "failed",
+        primaryKey: "toolview.await.failed",
+        primaryValues:
+          subject.text !== null ? { subject: subject.text } : {},
+        subject,
+        fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.worker,
+        facts: [waitedFact],
+        details,
+      });
+    }
+    if (workerStatus === "aborted") {
+      return detailModel({
+        state: "stopped",
+        primaryKey: "toolview.await.stopped",
+        primaryValues:
+          subject.text !== null ? { subject: subject.text } : {},
+        subject,
+        fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.worker,
+        facts: [waitedFact],
+        details,
+      });
+    }
+    return DEGRADED;
+  }
+  if (status === "still-running") {
+    return detailModel({
+      state: "working",
+      primaryKey: "toolview.await.working",
+      primaryValues: subject.text !== null ? { subject: subject.text } : {},
+      subject,
+      fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.worker,
+      facts: [waitedFact],
+      details,
+    });
+  }
+  if (status === "gone") {
+    return detailModel({
+      state: "failed",
+      primaryKey: "toolview.await.gone",
+      primaryValues: subject.text !== null ? { subject: subject.text } : {},
+      subject,
+      fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.worker,
+      facts: [waitedFact],
+      details,
+    });
+  }
+  if (status === "released") {
+    const reason = asString(result.reason);
+    return detailModel({
+      state: "stopped",
+      primaryKey: "toolview.await.released",
+      primaryValues: subject.text !== null ? { subject: subject.text } : {},
+      subject,
+      fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.worker,
+      facts: [
+        reason === "user-message"
+          ? copyFact("toolview.fact.user-spoke")
+          : reason === "stopped"
+            ? copyFact("toolview.fact.turn-stopped")
+            : null,
+        copyFact("toolview.fact.keeps-running"),
+      ],
+      details,
+    });
+  }
+  return DEGRADED;
 }
 
 /**
- * Ticket 152: the spawn_dispatcher row (ticket 118's mitosis). The child
- * session id is what the dispatcher messages later, so it leads; the title
- * names what was summoned. The handoff prompt never renders here.
+ * Ticket 152: the spawn_dispatcher row (ticket 118's mitosis). The title
+ * names what was summoned; the handoff prompt never renders here.
  */
 function describeSpawnDispatcher(payload: ToolCallPayload): ToolviewModel {
   const args = asRecord(payload.args);
   const result = asRecord(payload.result);
-  const fields: ToolviewField[] = [];
+  if (!hasPayload(args, result)) return DEGRADED;
 
   const dispatcherId = asString(result?.dispatcher_id);
-  if (dispatcherId !== null) {
-    fields.push({
-      labelKey: TOOLVIEW_FIELD_KEYS.dispatcher,
-      value: dispatcherId,
+  const title = asString(result?.title) ?? asString(args?.title);
+  const subject = resolveSubject({
+    result,
+    args,
+    id: dispatcherId,
+    title,
+    kind: "dispatcher",
+  });
+  const details = detailsOf([
+    [TOOLVIEW_DETAIL_KEYS.dispatcher, dispatcherId],
+    [TOOLVIEW_DETAIL_KEYS.reason, reasonOf(result)],
+  ]);
+  const ok = result === null ? null : asBool(result.ok);
+
+  if (result !== null && ok === false) {
+    return refusalModel({
+      toolName: SPAWN_DISPATCHER_TOOL,
+      reason: reasonOf(result),
+      subject,
+      fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.dispatcher,
+      details,
+      ...(subject.titled
+        ? {
+            primaryKey: "toolview.dispatcher.refused",
+            primaryValues: { title: subject.text ?? "" },
+          }
+        : {
+            primaryKey: "toolview.dispatcher.refused-generic",
+            primaryValues: {},
+          }),
     });
   }
-  const title = clampText(result?.title) ?? clampText(args?.title);
-  if (title !== null) {
-    fields.push({ labelKey: TOOLVIEW_FIELD_KEYS.title, value: title });
+  if (result !== null && ok !== true) {
+    return details.length > 0 || subject.text !== null
+      ? detailModel({
+          state: "starting",
+          primaryKey: subject.titled
+            ? "toolview.dispatcher.pending"
+            : "toolview.dispatcher.pending-generic",
+          primaryValues: subject.titled
+            ? { title: subject.text ?? "" }
+            : subject.text !== null
+              ? { subject: subject.text }
+              : {},
+          subject,
+          fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.dispatcher,
+          details,
+        })
+      : DEGRADED;
   }
-  const outcome = outcomeField(result);
-  if (outcome !== null) fields.push(outcome);
 
-  return detailOrDegraded(fields, []);
+  const pending = result === null;
+  return detailModel({
+    state: "starting",
+    primaryKey: pending
+      ? subject.titled
+        ? "toolview.dispatcher.pending"
+        : "toolview.dispatcher.pending-generic"
+      : subject.titled
+        ? "toolview.dispatcher.summoned"
+        : "toolview.dispatcher.summoned-generic",
+    primaryValues: subject.titled
+      ? { title: subject.text ?? "" }
+      : subject.text !== null
+        ? { subject: subject.text }
+        : {},
+    subject,
+    fallbackSubjectKey: TOOLVIEW_SUBJECT_KEYS.dispatcher,
+    facts: [
+      !subject.titled
+        ? null
+        : textFact(shortRef(dispatcherId ?? "", "dispatcher")),
+    ],
+    details,
+  });
 }
 
 //#region stock props → parser payload (the boundary adapter)
 
-/**
- * The structural face this adapter reads off the shipped `PartialArguments`
- * reader (`dsh-util-values/lib/types/partial-json.d.ts:24-123`): keys seen so
- * far, a streaming string prefix, and a completed non-string value. All three
- * readers are total — absent or differently typed fields answer `undefined`,
- * never throw (`:20-22`).
- */
 interface PartialArgumentsReader {
   keys(): readonly string[];
   text(key: string): string | undefined;
@@ -514,14 +1342,6 @@ function isPartialArguments(value: unknown): value is PartialArgumentsReader {
   );
 }
 
-/**
- * Materialize the lazy argument reader into the plain record the parsers
- * already consume. Reads whatever has arrived: a completed non-string answers
- * `value()`, a string answers its `text()` prefix (complete or still
- * streaming), so a half-streamed argument object renders the fields it has
- * instead of degrading. A reader over a still-open object simply yields the
- * fields whose delimiters have landed.
- */
 function readArguments(args: unknown): Record<string, unknown> | null {
   if (isPartialArguments(args)) {
     const out: Record<string, unknown> = {};
@@ -535,15 +1355,11 @@ function readArguments(args: unknown): Record<string, unknown> | null {
       const text = args.text(key);
       if (typeof text === "string") out[key] = text;
     }
-    // An empty reading falls back to the raw text the caller may still hold
-    // (a result whose `tool/call` left the loaded window has an empty view,
-    // `records.d.ts:279-281`).
     return Object.keys(out).length === 0 ? null : out;
   }
   return asRecord(args);
 }
 
-/** Parse one raw argument JSON text; junk and non-objects narrow to null. */
 function parseArgumentsText(raw: unknown): Record<string, unknown> | null {
   if (typeof raw !== "string" || raw.length === 0) return null;
   try {
@@ -553,14 +1369,6 @@ function parseArgumentsText(raw: unknown): Record<string, unknown> | null {
   }
 }
 
-/**
- * The structured result record for the parsers, read off a settled
- * `ToolResultNode` (`records.d.ts:157-185`): the tool's own `meta` when it
- * attached one, else the first text block's JSON (where the harness
- * serializes a tool's structured payload), mirroring the store's reader.
- * A failed call with no readable payload still reports the failure
- * (`isError` + `error.code`/`error.reason`, `:177-182`), never a false "ok".
- */
 function readResult(block: Record<string, unknown>): Record<string, unknown> | null {
   const meta = asRecord(block.meta);
   if (meta !== null) return meta;
@@ -576,12 +1384,6 @@ function readResult(block: Record<string, unknown>): Record<string, unknown> | n
   return null;
 }
 
-/**
- * First JSON text block of a result's content as a record. A `tool-result`
- * block carries its payload one nesting level deeper; a bare text block sits
- * at the message level. The first text block decides — JSON is the structured
- * record, any other text is prose and yields null.
- */
 function recordedPayload(content: unknown): Record<string, unknown> | null {
   if (!Array.isArray(content)) return null;
   const firstTextRecord = (blocks: readonly unknown[]) => {
@@ -607,17 +1409,9 @@ function recordedPayload(content: unknown): Record<string, unknown> | null {
 
 /**
  * Adapt the props the shipped renderer actually passes into the record the
- * parsers below were written against.
- *
- * Stock dsh hands the keyed `tool.call.toolview` slot
- * `ToolCallCommonProps & ToolCallPhaseProps` — only `phase` plus `block`
- * (`dsh-client-ui-tool/lib/types/client/contract/slots.d.ts:54-84`, composed
- * at `dsh-client-ui-tool/lib/client.js:1936-1947`) — while the argument view
- * is lazy (`records.d.ts:270,282`). The parsers want `{args, result}`, so the
- * real data is lifted here, at the boundary; the parser shape is unchanged.
- *
- * A props record without `phase` keeps the plain `{args, result}` reading
- * (the store's own rows and the pinned parser tests use that shape).
+ * parsers below were written against. A props record without `phase` keeps
+ * the plain `{args, result}` reading (the store's own rows and the pinned
+ * parser tests use that shape).
  */
 export function adaptToolviewProps(props: unknown): ToolCallPayload {
   const record = asRecord(props);
@@ -629,9 +1423,6 @@ export function adaptToolviewProps(props: unknown): ToolCallPayload {
   const block = asRecord(record.block);
   if (block === null) return { args: null, result: null };
 
-  // Arguments: `block.args` (all three stages, `records.d.ts:270`) with the
-  // raw-text fallbacks — `argsRaw` once dispatched (`:288-291`), `call.argsRaw`
-  // on a settled result whose call is still in-window (`:170-173`).
   const call = asRecord(block.call);
   const args =
     readArguments(block.args) ??

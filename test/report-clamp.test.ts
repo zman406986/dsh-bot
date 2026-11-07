@@ -80,14 +80,73 @@ describe("report clamp — error body", () => {
     assert.notEqual(clampError(""), emptyReportPlaceholder());
     assert.ok(clampError("").length > 0);
   });
+
+  it("an empty error settle is phrased honestly and names the transcript only when it has one", () => {
+    const withRef = formatWakeReportBody("error", "", "child-9");
+    assert.equal(
+      withRef,
+      "Worker failed. No error message was recorded. Full transcript: child-9",
+    );
+    assert.ok(!withRef.includes("worker failed with no message"));
+    assert.ok(!withRef.toLowerCase().includes("finished"));
+
+    const bare = formatWakeReportBody("error", undefined);
+    assert.equal(bare, "Worker failed. No error message was recorded.");
+
+    // A restored row may carry the completed-report placeholder by mistake;
+    // for an error status it must not be echoed as the failure text.
+    const placeholder = formatWakeReportBody(
+      "error",
+      emptyReportPlaceholder(),
+      null,
+    );
+    assert.equal(placeholder, "Worker failed. No error message was recorded.");
+
+    // The adapter's normalizer uses this sentinel when an error settle had no
+    // text. It must not be echoed back as if the worker had said it.
+    assert.equal(
+      formatWakeReportBody("error", "worker failed with no message", null),
+      "Worker failed. No error message was recorded.",
+    );
+  });
 });
 
 describe("report clamp — aborted and activity", () => {
-  it("an aborted worker's body is bookkeeping only, never its report text", () => {
+  it("an aborted worker with real partial findings keeps them, labelled as partial", () => {
+    const body = formatWakeReportBody(
+      "aborted",
+      "Found 3 of 5 defects: auth, retry, timeout.",
+      "child-1",
+    );
+    assert.ok(
+      body.includes("Found 3 of 5 defects: auth, retry, timeout."),
+      "partial findings are the dispatcher's only reportable answer",
+    );
+    assert.ok(body.includes("Partial report"), "the text is labelled as partial");
+    assert.ok(!body.toLowerCase().includes("no report"));
+  });
+
+  it("an aborted worker with no stored text still gets the no-report placeholder", () => {
     assert.ok(abortedReportBody().length > 0);
-    const rendered = formatWakeReportBody("aborted", "secret work product");
-    assert.ok(rendered.length > 0);
-    assert.ok(!rendered.includes("secret work product"), "an aborted report leaked");
+    assert.equal(
+      formatWakeReportBody("aborted", "", null),
+      abortedReportBody(),
+    );
+    assert.equal(
+      formatWakeReportBody("aborted", "   ", null),
+      abortedReportBody(),
+    );
+    // The completed-report placeholder is what a normalized empty settle
+    // stores; for an abort it must not read as partial findings.
+    assert.equal(
+      formatWakeReportBody("aborted", emptyReportPlaceholder(), null),
+      abortedReportBody(),
+    );
+    // An already-placeholdered result is not wrapped a second time.
+    assert.equal(
+      formatWakeReportBody("aborted", abortedReportBody(), null),
+      abortedReportBody(),
+    );
   });
 
   it("activity clamp keeps null for missing lines", () => {

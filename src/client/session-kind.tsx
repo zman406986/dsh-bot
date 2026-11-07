@@ -9,17 +9,22 @@
  *
  * - **One seat is licensed and composed.** ADR-0024's 2026-10-18 rider permits
  *   "exactly one additional additive registration, and it is this one ... no
- *   other slot is licensed by this rider" — the SIDEBAR cell
- *   `sidebar.session.row.leading`. The ticket-140 (2026-10-28) extension that
- *   had added a second seat, the child's own conversation header, was REMOVED
- *   under the owner's 2026-10-28 mitosis change: a summoned dispatcher is now a
- *   real top-level session with its own sidebar row, so that row's cell is the
- *   mark. The seat count is back to the rider's one.
+ *   other slot is licensed by this rider". The owner's 2026-11-06 ruling moved
+ *   that one licence from the SIDEBAR cell `sidebar.session.row.leading` to
+ *   `sidebar.session.row.trailing`: the leading cell is mutually exclusive with
+ *   the row's own running status dot by product design (the host unmounts the
+ *   occupant there while the row is not idle), while the trailing seat is not
+ *   status-gated, so the mark and the dot are visible at the same time. The
+ *   ticket-140 (2026-10-28) extension that had added a second seat, the child's
+ *   own conversation header, was REMOVED under the owner's 2026-10-28 mitosis
+ *   change: a summoned dispatcher is now a real top-level session with its own
+ *   sidebar row, so that row's cell is the mark. The seat count stays at the
+ *   rider's one — the seat moved, it was not duplicated.
  * - **Workers are not sidebar rows.** Subagent sessions carry the durable
  *   header flag `origin: 'subagent'` (`dsh-subagent/lib/index.js:354`) and
  *   the stock sidebar drops them (`dsh-client-ui-workspace/lib/client.js:965`).
- *   `sidebar.session.row.leading` therefore never mounts for a worker, so the
- *   worker half of the owner's three-way request has no licensed seat.
+ *   No row seat therefore ever mounts for a worker, so the worker half of the
+ *   owner's three-way request has no licensed seat.
  * - **The worker marker is still NOT composed.** Ticket 123 recorded the
  *   worker half as declined (2026-10-22), and no seat composes it now. The
  *   generic glyph factory below still supports the `worker` kind so a later
@@ -32,11 +37,15 @@
  *   The shipped SlotCore throws on a same-priority second registration and
  *   renders the LOWEST priority first, so a second entry would either throw
  *   or displace the stock breadcrumb renderer.
- * - **`sidebar.session.row.leading`** is a `list` slot, root scope, owner
- *   `{sessionId}` (`dsh-client-ui-workspace/lib/types/client/contract/slots.d.ts:123`,
- *   rendered `:2306`). The stock schedule plugin occupies it at order 10
- *   (`dsh-client-ui-schedule/lib/client.js:7528`), so the dispatcher entry
- *   belongs at a HIGHER order and never shadows it.
+ * - **`sidebar.session.row.trailing`** is a `list` slot, root scope, owner
+ *   `{sessionId}`, rendered AFTER the row's time label and before its pin
+ *   marker (`dsh-client-ui-workspace/lib/types/client/contract/slots.d.ts:148-161`,
+ *   `dsh-client-ui-workspace/lib/client.js:2634`). It is drawn for `!row.blank`
+ *   inside `span.rowResting` and is NOT replaced by any status dot, so it
+ *   renders beside the leading status dot. Installed 0.2.2-rc.1 precedent:
+ *   `dsh-experimental-client-ui-forge` registers `forge-panel.row` there at
+ *   order 10 (`dsh-experimental-client-ui-forge/lib/client.js:11745-11751`), so
+ *   this module's entry belongs at a HIGHER order and never shadows it.
  *
  * ## How each kind is identified
  *
@@ -74,22 +83,31 @@
  * Motion is CSS `@keyframes` emitted by the component through a `<style>`
  * element (the roster panel's idiom, `panel.tsx:303`): a slow bob and a
  * quicker blink. Both are disabled under `prefers-reduced-motion: reduce`,
- * leaving the static portrait. The seat is idle-only (the host unmounts the
- * leading cell while a session runs), so no running state is chased here.
+ * leaving the static portrait. The trailing seat is not status-gated (the host
+ * renders it beside the row's own status dot), so no running state is chased
+ * here; on hover-capable devices the host hides the whole resting group —
+ * timestamp and this mark — while the row is hovered.
  */
 
 import type { JSX } from "react";
 import { LOCALE_NAMESPACE, type TranslateFn } from "./overlay.js";
 
 /**
- * The 16px leading cell of a stock sidebar session row (dsh-owned LIST slot).
- * Only the RESTING cell renders it (idle, non-archived, non-blank).
+ * The trailing icon list of a stock sidebar session row (dsh-owned LIST slot).
+ * The host draws it AFTER the row's time label, inside `span.rowResting`, for
+ * every non-blank row — including a row that is running, pending, or archived —
+ * so the mark is visible at the same time as the row's leading status dot.
+ *
+ * Owner payload `{sessionId}`; `useSessions` is a standard prop on this seat
+ * exactly as it is on the leading one.
  */
-export const SIDEBAR_LEADING_SLOT = "sidebar.session.row.leading";
+export const SIDEBAR_TRAILING_SLOT = "sidebar.session.row.trailing";
 
 /**
- * Dispatcher cell order: ABOVE the stock schedule mark (10) so the stock
- * occupant always renders first inside the 16px cell.
+ * Dispatcher cell order: ABOVE the installed trailing occupant
+ * (`experimental-client-ui-forge`'s `forge-panel.row` at 10,
+ * `dsh-experimental-client-ui-forge/lib/client.js:11745-11751`) so the stock
+ * occupant always renders first in the trailing cell.
  *
  * Composed by `apply` — the adapter's `sessionKind` projection gives the
  * glyph a durable dispatcher identity to key on.
@@ -116,9 +134,8 @@ export const WORKER_GLYPH = "↳";
  * `prefers-reduced-motion: reduce`, leaving the static portrait.
  *
  * Motion is a slow vertical bob of the whole portrait plus a rarer blink of
- * the two eyes. Nothing is state-driven: the leading cell is idle-only (the
- * host unmounts it while a session runs), so the portrait only has to look
- * alive while at rest.
+ * the two eyes. Nothing is state-driven: the trailing seat renders whether the
+ * row is idle or working, and motion is not a status signal.
  */
 export const SESSION_KIND_GLYPH_CSS = `
 .multitask-dispatcher-kind-glyph{display:inline-flex;align-items:center;justify-content:center;width:16px;height:20px;line-height:0;overflow:hidden}
@@ -405,13 +422,16 @@ export interface SessionKindGlyphRegistrationOptions {
 /**
  * The dispatcher cell's sidebar registration — the ONE additive registration
  * ADR-0024's rider licenses, and again the only seat composed since the
- * ticket-140 header chip was removed (2026-10-28). Composed by `apply`: the
+ * ticket-140 header chip was removed (2026-10-28). The seat is the row's
+ * trailing icon list: the 2026-11-06 human ruling moved the rider's single
+ * licence there from the leading cell, which the host blanks out with its own
+ * status dot whenever the row is not idle. Composed by `apply`: the
  * `sessionKind` projection marks an activated dispatcher session durably, so
  * the glyph has a real identity to key on.
  */
 export function dispatcherGlyphRegistration(): SessionKindGlyphRegistrationOptions {
   return {
-    name: SIDEBAR_LEADING_SLOT,
+    name: SIDEBAR_TRAILING_SLOT,
     id: DISPATCHER_GLYPH_ENTRY_ID,
     order: DISPATCHER_GLYPH_ORDER,
     locale: LOCALE_NAMESPACE,
@@ -425,7 +445,7 @@ export type UseSessionsLike = (
 
 /** Props a rendered glyph receives: the slot owner payload + standard hooks. */
 export interface SessionKindGlyphProps {
-  /** The row/session this cell belongs to (`sidebar.session.row.leading` owner). */
+  /** The row/session this cell belongs to (`sidebar.session.row.trailing` owner). */
   readonly sessionId?: string;
   /** Root standard hook over the session list (`dsh-client-ui-session`). */
   readonly useSessions?: UseSessionsLike;
@@ -473,7 +493,6 @@ function SessionKindMark(props: {
       data-session-kind={props.kind}
       role="img"
       aria-label={label}
-      title={label}
     >
       {drawn}
     </span>
@@ -540,8 +559,9 @@ export function createSessionKindGlyph(
  * for the class the row actually is.
  *
  * Why one component instead of two registrations: ADR-0024's rider licenses
- * exactly one additive entry in `sidebar.session.row.leading`. A second entry
- * would spend that rider on an icon.
+ * exactly one additive entry, and the 2026-11-06 ruling places it in
+ * `sidebar.session.row.trailing`. A second entry would spend that rider on an
+ * icon.
  */
 export function createDispatcherClassGlyph(
   t: TranslateFn,

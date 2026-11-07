@@ -89,9 +89,19 @@ function assertValidToolSchema(node: unknown, path: string): void {
   }
 }
 
-function createCaptureCtx(): AdapterContext & {
+/**
+ * The capture context only needs `tools`, and the capture registry always
+ * implements `register` (the real `ToolsLike.register` is optional for stub
+ * hosts). Returning the narrow shape keeps the assertions below non-optional.
+ */
+interface CaptureCtx {
+  tools: NonNullable<AdapterContext["tools"]> & {
+    register(definition: unknown): () => void;
+  };
   registered: RegisterableTool[];
-} {
+}
+
+function createCaptureCtx(): CaptureCtx {
   const registered: RegisterableTool[] = [];
   return {
     registered,
@@ -116,7 +126,7 @@ function createCaptureCtx(): AdapterContext & {
         };
       },
     },
-  } as AdapterContext & { registered: RegisterableTool[] };
+  };
 }
 
 function registerAllDispatcherTools(): RegisterableTool[] {

@@ -1,6 +1,7 @@
 import type { DshHost } from "./dsh-host.js";
 import {
   isTerminalStatus,
+  type SettledEvent,
   type SpawnRequest,
   type SpawnResult,
   type SteerResult,
@@ -119,6 +120,20 @@ export type EnqueueExternalJobResult =
   | { readonly ok: false; readonly reason: "duplicate-job" };
 
 /**
+ * Why an unknown-state hold release did or did not happen. `not-held` is the
+ * ordinary "this id holds no stream" answer; `hold-release-failed` is a real
+ * store failure and deliberately distinct — reporting it as an unknown worker
+ * would hide that the hold (and its stream key) is still occupied.
+ */
+export type UnknownStateReleaseOutcome =
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      readonly reason: "not-held" | "hold-release-failed";
+      readonly detail: string;
+    };
+
+/**
  * What one delivery-redrive pass did (ticket 58, register D-5).
  * `redriven` items were re-offered to the dispatcher; `lost` items hit the
  * bound and are now terminal. Both are empty when nothing was owed — which is
@@ -144,7 +159,11 @@ export interface MultitaskWakeOptions {
   readonly schedule?: (fn: () => void, ms: number) => () => void;
   /** Consecutive coalesced-drain failures before degraded immediate mode. */
   readonly coalesceFailBudget?: number;
-  /** Called once when the bus degrades to immediate mode. */
+  /**
+   * Called once when the bus degrades to immediate mode. Observer code: a
+   * throw is swallowed, and a returned promise (accepted by the `void` return
+   * type) is observed — telemetry can never break the bus.
+   */
   readonly onDegraded?: (info: WakeBusDegradedInfo) => void;
 }
 
@@ -154,6 +173,25 @@ export interface MultitaskWakeOptions {
 export interface MultitaskAwaitOptions {
   /** Injectable clock for tests. */
   readonly now?: () => number;
+  /** Injectable one-shot scheduler for tests. Returns a cancel function. */
+  readonly schedule?: (fn: () => void, ms: number) => () => void;
+}
+
+/**
+ * Step-boundary steer delivery knobs.
+ *
+ * A failed `sendMessage` leaves the correction parked (it was peeked, not
+ * popped) and the worker in `steering`. The next step boundary retries it, but
+ * a worker that has gone idle emits no further boundary — so the core also
+ * schedules a small bounded retry of its own. Bounded on purpose: a dead host
+ * seam must not become an endless timer loop, and the next boundary still
+ * retries after the bound is spent.
+ */
+export interface MultitaskSteerOptions {
+  /** Delay before one retry attempt, in ms. Default 100. */
+  readonly retryDelayMs?: number;
+  /** Retry attempts per failure burst. Default 2 (the next boundary still retries). */
+  readonly maxRetries?: number;
   /** Injectable one-shot scheduler for tests. Returns a cancel function. */
   readonly schedule?: (fn: () => void, ms: number) => () => void;
 }
@@ -176,12 +214,15 @@ export interface MultitaskOptions {
    * (turn/steer/abort/settle), durability restore, todo reconcile, and a
    * todo flipping to delivered (the delivered flag) — with the affected
    * parent session id. Fire-and-forget: observer errors are swallowed so
-   * telemetry can never break core flow. The observer only READS the core
-   * back to project a snapshot; the core keeps no snapshot state (no second
-   * store) and no presence state (design-17 §5 conflict 8: presence is a
-   * projection of existing truth).
+   * telemetry can never break core flow. An async observer is accepted too;
+   * its rejection is swallowed for the same reason. The observer only READS
+   * the core back to project a snapshot; the core keeps no snapshot state (no
+   * second store) and no presence state (design-17 §5 conflict 8: presence is
+   * a projection of existing truth).
    */
-  readonly onRosterChanged?: (parentSessionId: string) => void;
+  readonly onRosterChanged?: (
+    parentSessionId: string,
+  ) => void | Promise<void>;
   /**
    * Redrives allowed before an undelivered obligation escalates to `lost`
    * (ticket 58, D-5). Defaults to {@link MAX_DELIVERY_REDRIVES}. Exposed so
@@ -236,13 +277,18 @@ export interface MultitaskOptions {
    * `markDelivered`), `failed` (worker error, delivery or not), or
    * `cancelled` (abort, delivery or not). The hook is injected like
    * `onRosterChanged` so the core never touches the filesystem; a throwing
-   * hook is swallowed — it must never break the settle path. The plugin's
-   * implementation writes `reply.md`/`status.json` atomically and surfaces
-   * its own write failures honestly.
+   * hook is swallowed — it must never break the settle path. It may return a
+   * promise (the plugin's fs write is async); a rejection is swallowed the
+   * same way. The plugin's implementation writes `reply.md`/`status.json`
+   * atomically and surfaces its own write failures honestly.
    */
-  readonly onInboxJobResolved?: (resolution: InboxJobResolution) => void;
+  readonly onInboxJobResolved?: (
+    resolution: InboxJobResolution,
+  ) => void | Promise<void>;
   /** Await-waiter configuration (ticket 115; test seams). */
   readonly awaits?: MultitaskAwaitOptions;
+  /** Step-boundary steer delivery configuration (bounded failed-send retry). */
+  readonly steer?: MultitaskSteerOptions;
   /**
    * Ticket 115: adapter-side liveness probe for await timeouts, wired to
    * `ctx.agents.get(id) !== undefined`. It is checked ONCE, at timeout, when
@@ -353,6 +399,10 @@ export interface Multitask {
    * successful user-facing send — completed means delivered (S4).
    * `replyText` (ticket 113) carries the delivered text for inbox-origin
    * items so the plugin's reply writer can land it in the job dir.
+   *
+   * Idempotent: a repeat call on an already-delivered item returns true and
+   * changes nothing — one obligation must not fire the roster projection or
+   * the inbox `replied` resolution twice.
    */
   markDelivered(todoId: string, replyText?: string): boolean;
   /**
@@ -399,13 +449,26 @@ export interface Multitask {
    * the worker is gone, or accepts the risk, so the stream key is released for
    * re-dispatch. Also drops the durable marker — otherwise the hold would come
    * straight back on the next activation, which is the loop this exists to
-   * avoid. Returns false when nothing was held under that id.
+   * avoid. Returns false when nothing was held under that id, and also when
+   * the marker could not be dropped: the hold then stays in place so memory
+   * and disk agree rather than reporting a release the next activation undoes.
    *
    * Async because the marker deletion is: resolving the hold but leaving the
    * marker behind would resurrect it on the next activation, so "released"
    * must not be reported before the marker is actually gone.
    */
   releaseUnknownStateHold(workerId: string): Promise<boolean>;
+  /**
+   * The same release, with the reason attached. `releaseUnknownStateHold`
+   * collapses "nothing was held" and "the store refused the drop" into
+   * `false`; a caller that wants to report the failure truthfully (rather
+   * than as an unknown worker) needs them distinguished. `hold-release-failed`
+   * means the hold is still in place: memory and disk agree, and a later call
+   * can retry.
+   */
+  releaseUnknownStateHoldOutcome(
+    workerId: string,
+  ): Promise<UnknownStateReleaseOutcome>;
   /**
    * Wake bus this core enqueues settles through. Settles are batched per
    * parent session; a mid-turn dispatcher queues rather than receiving an
@@ -479,6 +542,11 @@ export interface Multitask {
    * when the `isAgentAlive` port reports the worker's agent dead (consulted
    * once, at the timeout, never on a timer).
    *
+   * A roster record already terminal with no settle record (a stopped worker,
+   * a rebuild-restored terminal row) resolves `settled` immediately with an
+   * empty result — waiting the timeout would report a live worker that is
+   * provably not live.
+   *
    * Refusals (never throw): `invalid-timeout` (outside 0–120,000 or
    * non-finite), `self-target` (the target is the calling session itself),
    * `not-awaitable` (the target is a live dispatcher session — dispatchers
@@ -546,6 +614,35 @@ export function createMultitask(
    * key forever.
    */
   const adoptedAwaitingMarker = new Map<string, string>();
+  /**
+   * Settles that arrived after the host adopted a worker back but before
+   * `rebuildFromDurability` restored its record. The settle callback finds no
+   * roster record, and dropping the event would leave the rebuilt worker live
+   * with its terminal result (and stream key) lost. First settle wins, exactly
+   * like the normal path (a duplicate settle is ignored by `transition`).
+   * Only ids in {@link adoptedAwaitingMarker} are buffered: a settle for a
+   * genuinely unknown id is not ours to invent a record for.
+   */
+  const pendingSettles = new Map<string, SettledEvent>();
+  /**
+   * Worker ids with a step-boundary steer send in flight. Two boundaries can
+   * arrive inside one send window; the second must not send the same parked
+   * correction again.
+   */
+  const steerSendInFlight = new Set<string>();
+  /** Armed bounded retry for a failed steer send, keyed by worker id. */
+  const steerRetryTimers = new Map<string, () => void>();
+  /** Retries already spent in the current failure burst. */
+  const steerRetryAttempts = new Map<string, number>();
+  const steerOptions = options?.steer;
+  const steerRetryDelayMs = steerOptions?.retryDelayMs ?? 100;
+  const steerMaxRetries = steerOptions?.maxRetries ?? 2;
+  const steerSchedule =
+    steerOptions?.schedule ??
+    ((fn: () => void, ms: number): (() => void) => {
+      const handle = setTimeout(fn, ms);
+      return () => clearTimeout(handle);
+    });
   const steerQueue: SteerQueue = createSteerQueue();
   const todoLedger: TodoLedger = createTodoLedger();
   const peerInbox: PeerInbox = createPeerInbox(options?.peer);
@@ -569,13 +666,17 @@ export function createMultitask(
       // Ticket 116: a peer wake carries structured provenance, so the host
       // stamps an `agent-message` source on the follow-up instead of the
       // plugin kind. Absent origin → the shipped plugin source, unchanged.
-      void host.requestDispatcherWakeup(sessionId, origin);
+      //
+      // Return the host promise: the bus owns the rejection (and counts it
+      // toward its degrade budget). A discarded `void` here made a failed
+      // host wake an unhandled rejection that dsh treats as fatal.
+      return host.requestDispatcherWakeup(sessionId, origin);
     },
     onInterrupt: (sessionId) => {
       // Soft-fallback hosts may omit the seam — priority still becomes
       // the ready wake and wins the next flush.
       if (typeof host.requestDispatcherInterrupt === "function") {
-        void host.requestDispatcherInterrupt(sessionId);
+        return host.requestDispatcherInterrupt(sessionId);
       }
     },
     onDrain: (event) => {
@@ -597,12 +698,56 @@ export function createMultitask(
       ? { isAgentAlive: options.isAgentAlive }
       : {}),
   });
+  /**
+   * Log one best-effort failure. The core has already committed its state
+   * when these run (a spawn was accepted, a worker settled), so the failure
+   * is reported and owned here; it is never rethrown and never becomes an
+   * unhandled rejection.
+   */
+  function warnBestEffort(what: string, error: unknown): void {
+    try {
+      console.warn(`[multitask-dispatcher] ${what}:`, error);
+    } catch {
+      // A broken console must not break the core path either.
+    }
+  }
+
+  /**
+   * Run one best-effort durability write/drop and own its failure. The
+   * marker store is external I/O whose methods are `void | Promise<void>`,
+   * so both a synchronous throw and a rejected promise are possible. A
+   * discarded rejection is an unhandled rejection, which dsh treats as
+   * fatal — bookkeeping must never take the process (or the settle path)
+   * down with it.
+   */
+  function durabilityBestEffort(
+    what: string,
+    run: () => void | Promise<void>,
+  ): void {
+    try {
+      const result = run();
+      if (result === undefined) return;
+      void Promise.resolve(result).catch((error: unknown) => {
+        warnBestEffort(what, error);
+      });
+    } catch (error) {
+      warnBestEffort(what, error);
+    }
+  }
+
   /** Fire the roster observer (ticket 21); never lets it break core flow. */
   function notifyRosterChanged(parentSessionId: string): void {
     const observer = options?.onRosterChanged;
     if (observer === undefined) return;
     try {
-      observer(parentSessionId);
+      const result = observer(parentSessionId);
+      if (result !== undefined) {
+        // An async observer is observed, not discarded: a rejection must not
+        // surface as an unhandled rejection either.
+        void Promise.resolve(result).catch(() => {
+          // Telemetry must never break the core.
+        });
+      }
     } catch {
       // Telemetry must never break the core.
     }
@@ -623,30 +768,27 @@ export function createMultitask(
       // A host mirror failure must not break the settle path.
     }
     if (durability === undefined) return;
-    void Promise.resolve(durability.deleteWorkerSession?.(workerId)).catch(
-      (error) => {
-        try {
-          console.warn(
-            `[multitask-dispatcher] worker session row for ${workerId} could not be dropped:`,
-            error,
-          );
-        } catch {
-          // A broken console must not break the settle path either.
-        }
-      },
+    durabilityBestEffort(
+      `worker session row for ${workerId} could not be dropped`,
+      () => durability.deleteWorkerSession?.(workerId),
     );
   }
 
   /**
    * Ticket 113: fire the inbox resolution hook. Same swallow discipline as
-   * the roster observer — a throwing hook (the plugin's own fs writes live
-   * behind it) must never break the settle or delivery path.
+   * the roster observer — a throwing (or rejecting) hook (the plugin's own
+   * fs writes live behind it) must never break the settle or delivery path.
    */
   function fireInboxHook(resolution: InboxJobResolution): void {
     const hook = options?.onInboxJobResolved;
     if (hook === undefined) return;
     try {
-      hook(resolution);
+      const result = hook(resolution);
+      if (result !== undefined) {
+        void Promise.resolve(result).catch(() => {
+          // The plugin surfaces its own failures; the core stays unaffected.
+        });
+      }
     } catch {
       // The plugin surfaces its own failures; the core stays unaffected.
     }
@@ -658,6 +800,21 @@ export function createMultitask(
   ): TodoExternalOrigin | undefined {
     if (todoId === null) return undefined;
     return todoLedger.get(todoId)?.external ?? undefined;
+  }
+
+  /**
+   * Best-effort drop of a worker's durable obligation marker after delivery.
+   * Dropping a marker that is already absent is a no-op, so this is safe to
+   * repeat — which is what lets `markDelivered` retry a transient store
+   * failure on an already-delivered item without re-firing its one-shot side
+   * effects.
+   */
+  function dropObligationMarker(workerId: string | null): void {
+    if (durability === undefined || workerId === null) return;
+    durabilityBestEffort(
+      `worker marker for ${workerId} could not be dropped`,
+      () => durability.deleteWorkerMarker(workerId),
+    );
   }
 
   /**
@@ -713,6 +870,46 @@ export function createMultitask(
     }
   }
 
+  /**
+   * Recreate the dispatcher ledger link for a worker restored from durable
+   * state (ticket 59 / 142). The roster record alone is not enough: without
+   * the item the ledger forgets what the worker was doing, so reconcile can
+   * neither notice an undelivered result (S4) nor continue the item's redrive
+   * budget (D-5). An existing item is never duplicated, and `aborted` workers
+   * owe nothing — callers skip those before calling.
+   */
+  function restoreLedgerLink(args: {
+    readonly workerId: string;
+    readonly sessionId: string;
+    readonly title: string;
+    readonly streamKey: string;
+    readonly todoId: string | null;
+    /**
+     * `pending` when the worker had not taken its first turn yet; every other
+     * restored live state was already in progress.
+     */
+    readonly status: "pending" | "in_progress";
+    readonly redriveAttempts: number;
+    readonly external?: TodoExternalOrigin;
+    readonly nowMs?: number;
+  }): void {
+    if (args.todoId === null) return;
+    if (todoLedger.get(args.todoId) !== undefined) return;
+    todoLedger.create({
+      sessionId: args.sessionId,
+      id: args.todoId,
+      title: args.title,
+      status: args.status,
+      streamKey: args.streamKey,
+      // Continue the same budget across the restart (D-5); a missing durable
+      // value reads as 0.
+      redriveAttempts: args.redriveAttempts,
+      ...(args.external !== undefined ? { external: args.external } : {}),
+      ...(args.nowMs !== undefined ? { nowMs: args.nowMs } : {}),
+    });
+    todoLedger.linkWorker(args.todoId, args.workerId, args.streamKey);
+  }
+
   /** Pure-reconcile against the session roster. Does not apply mutations. */
   /**
    * The unknown-state hold on a stream key, if any (ticket 59). Scoped to the
@@ -761,23 +958,42 @@ export function createMultitask(
     });
   }
 
-  host.onWorkerSettled((event) => {
+  /**
+   * Apply one host settle to a live roster record: the FSM transition plus
+   * every side effect the terminal path owns (todo close, durable marker, wake
+   * row, settle record, wake enqueue). Extracted from the host callback so the
+   * rebuild path can replay a settle buffered during the adopt-before-rebuild
+   * window through the exact same code.
+   *
+   * Returns false when the transition was illegal (double settle, post-abort
+   * settle), which is also what makes a replay idempotent.
+   */
+  function applySettle(event: SettledEvent): boolean {
     const next = transition(event.workerId, {
       type: "settled",
       status: event.status,
     });
     // Double settle and post-abort settles are ignored — never revive, never re-wake.
-    if (next === undefined) return;
+    if (next === undefined) return false;
     const record = workers.get(event.workerId);
-    if (record === undefined) return;
+    if (record === undefined) return false;
     if (event.transcriptRef !== undefined) {
       record.transcriptRef = event.transcriptRef;
     }
+    // A settled worker has no delivery point left for a parked correction;
+    // a retry timer for it must not fire against a terminal record.
+    steerQueue.clear(event.workerId);
+    clearSteerRetry(event.workerId);
     // Aborted via settle: close the todo here; the wake still informs the dispatcher.
     // The marker obligation is closed too — nothing to reconstruct or deliver.
     if (event.status === "aborted") {
       cancelLinkedTodo(record);
-      void durability?.deleteWorkerMarker(record.workerId);
+      if (durability !== undefined) {
+        durabilityBestEffort(
+          `worker marker for ${record.workerId} could not be dropped`,
+          () => durability.deleteWorkerMarker(record.workerId),
+        );
+      }
     } else {
       // Ticket 113: an inbox-origin worker's ERROR maps to a `failed` job
       // status. The todo itself stays open (the dispatcher still reports and
@@ -801,10 +1017,20 @@ export function createMultitask(
         // user delivery still lets a restart notice the undelivered result.
         // Ticket 113: the marker carries the inbox origin so a rebuild
         // re-creates the ledger link with it intact.
-        void Promise.resolve(
-          durability.writeWorkerMarker(
-            toDurableMarker(record, todoExternalOf(record.todoId)),
-          ),
+        //
+        // Deliberately fire-and-forget, not awaited: `onWorkerSettled` is a
+        // SYNCHRONOUS host callback, and the settle wake (enqueued below)
+        // must keep its current ordering relative to other settles. The
+        // catch keeps a store failure from becoming an unhandled rejection;
+        // the remaining window is a crash between a failed write and the
+        // wake, which delivery redrive covers like any other undelivered
+        // result.
+        durabilityBestEffort(
+          `worker marker for ${record.workerId} could not be written`,
+          () =>
+            durability.writeWorkerMarker(
+              toDurableMarker(record, todoExternalOf(record.todoId)),
+            ),
         );
       }
     }
@@ -834,20 +1060,204 @@ export function createMultitask(
       title: record.title,
       resultText: event.report,
     });
+    return true;
+  }
+
+  host.onWorkerSettled((event) => {
+    // Ticket 142 race: the host adopted this worker back (a send landed
+    // before the activation chain's rebuild finished), so the id is known but
+    // its roster record does not exist yet. Losing the settle here would
+    // rebuild the worker as live and keep its stream key occupied forever
+    // even though it is provably done. Buffer it; the rebuild replays it as
+    // soon as the record exists.
+    if (
+      workers.get(event.workerId) === undefined &&
+      adoptedAwaitingMarker.has(event.workerId)
+    ) {
+      if (!pendingSettles.has(event.workerId)) {
+        pendingSettles.set(event.workerId, event);
+      }
+      return;
+    }
+    applySettle(event);
   });
 
-  // Step boundary: pop the latest parked steer, wrap it as a parent correction,
-  // and deliver it into the same worker. Last-wins — earlier steers were already
-  // overwritten in the single slot and are never delivered.
-  host.onStepBoundary((workerId) => {
+  /** Cancel a pending retry timer without touching the burst counter. */
+  function cancelSteerRetryTimer(workerId: string): void {
+    const cancel = steerRetryTimers.get(workerId);
+    if (cancel === undefined) return;
+    steerRetryTimers.delete(workerId);
+    try {
+      cancel();
+    } catch {
+      // A scheduler cancel failure must not break the delivery path.
+    }
+  }
+
+  /** Cancel a pending retry timer and clear the burst counter for one worker. */
+  function clearSteerRetry(workerId: string): void {
+    cancelSteerRetryTimer(workerId);
+    steerRetryAttempts.delete(workerId);
+  }
+
+  /**
+   * Arm one bounded retry for a failed send. A worker that has gone idle emits
+   * no further step boundary, so without this an accepted correction would
+   * sit parked in `steering` forever. The bound is per failure burst; the next
+   * real boundary is still a fresh opportunity after it is spent.
+   */
+  function scheduleSteerRetry(workerId: string): void {
+    if (steerRetryTimers.has(workerId)) return;
+    const spent = steerRetryAttempts.get(workerId) ?? 0;
+    if (spent >= steerMaxRetries) return;
+    steerRetryAttempts.set(workerId, spent + 1);
+    const cancel = steerSchedule(() => {
+      steerRetryTimers.delete(workerId);
+      // `attemptSteerSend` owns its failure handling (no rejection escapes).
+      // `fromRetry` keeps the burst counter: resetting it here would make the
+      // bound infinite.
+      void attemptSteerSend(workerId, true);
+    }, steerRetryDelayMs);
+    steerRetryTimers.set(workerId, cancel);
+  }
+
+  /**
+   * Deliver the latest parked steer at a step boundary (or on a retry).
+   * PEEK + send + conditional pop: the correction survives until the send
+   * resolves, so a rejected send never leaves the worker stuck in `steering`
+   * with the accepted correction gone. On success only OUR message is popped —
+   * a newer steer that replaced the slot mid-send stays parked and the worker
+   * stays `steering` for the next boundary.
+   *
+   * Re-entrant boundaries are skipped while a send is in flight: two
+   * boundaries inside one send window are one delivery point, and sending
+   * twice would deliver the same correction twice.
+   */
+  function attemptSteerSend(
+    workerId: string,
+    fromRetry = false,
+  ): Promise<void> | undefined {
     const record = workers.get(workerId);
-    if (record === undefined || record.status !== "steering") return;
-    const latest = steerQueue.pop(workerId);
-    if (latest === undefined) return;
-    return host.sendMessage(workerId, wrapParentCorrection(latest)).then(() => {
-      transition(workerId, { type: "steer-injected" });
-    });
-  });
+    if (record === undefined || record.status !== "steering") {
+      clearSteerRetry(workerId);
+      steerSendInFlight.delete(workerId);
+      return undefined;
+    }
+    const pending = steerQueue.peek(workerId);
+    if (pending === undefined) {
+      clearSteerRetry(workerId);
+      steerSendInFlight.delete(workerId);
+      return undefined;
+    }
+    if (steerSendInFlight.has(workerId)) return undefined;
+    // A real boundary supersedes an armed retry and starts a fresh burst; a
+    // timer-driven retry keeps the burst counter so the bound is finite.
+    if (fromRetry) {
+      cancelSteerRetryTimer(workerId);
+    } else {
+      clearSteerRetry(workerId);
+    }
+    steerSendInFlight.add(workerId);
+    const onFailure = (error: unknown): void => {
+      steerSendInFlight.delete(workerId);
+      // The correction was never delivered, so it remains parked (or was
+      // already replaced by a newer one — last-wins). The worker stays
+      // `steering`; the retry below (and the next boundary) try again. Never
+      // reject out of the callback: the host's boundary hook must not see an
+      // unhandled rejection.
+      warnBestEffort(
+        `steer for ${workerId} could not be delivered; it stays parked`,
+        error,
+      );
+      scheduleSteerRetry(workerId);
+    };
+    let result: void | Promise<void>;
+    try {
+      result = host.sendMessage(workerId, wrapParentCorrection(pending));
+    } catch (error) {
+      onFailure(error);
+      return undefined;
+    }
+    return Promise.resolve(result).then(
+      () => {
+        steerSendInFlight.delete(workerId);
+        clearSteerRetry(workerId);
+        const replaced = steerQueue.peek(workerId) !== pending;
+        if (!replaced) steerQueue.pop(workerId);
+        // A newer correction arrived while this send was in flight: stay in
+        // `steering` and let the next step boundary deliver it.
+        if (steerQueue.peek(workerId) === undefined) {
+          transition(workerId, { type: "steer-injected" });
+        }
+      },
+      onFailure,
+    );
+  }
+
+  host.onStepBoundary((workerId) => attemptSteerSend(workerId));
+
+  /**
+   * The one release implementation behind both public shapes. The boolean
+   * shape cannot distinguish "nothing was held" from "the store refused the
+   * drop"; that distinction is what lets `stop_worker` report a real store
+   * failure instead of claiming the worker is unknown.
+   */
+  async function releaseHold(
+    workerId: string,
+  ): Promise<UnknownStateReleaseOutcome> {
+    const hold = unknownStateHolds.get(workerId);
+    if (hold === undefined) {
+      return {
+        ok: false,
+        reason: "not-held",
+        detail: `no unknown-state hold for worker ${workerId}`,
+      };
+    }
+    // Drop the marker FIRST, while the in-memory hold still exists. The
+    // in-memory release alone would unblock this boot but the marker would
+    // rebuild the hold on the next activation — an unresolvable-remedy
+    // loop, which is worse than the block it fixes. Deleting memory first
+    // made a store failure leave exactly that disagreement (memory says
+    // released, disk says held); on failure the hold is kept and
+    // `hold-release-failed` reports that nothing was released.
+    if (durability !== undefined) {
+      try {
+        await Promise.resolve(durability.deleteWorkerMarker(workerId));
+      } catch (error) {
+        warnBestEffort(
+          `worker marker for ${workerId} could not be dropped; the hold was not released`,
+          error,
+        );
+        return {
+          ok: false,
+          reason: "hold-release-failed",
+          detail:
+            `the durable marker for ${workerId} could not be dropped; ` +
+            `the stream key is still held and the release can be retried`,
+        };
+      }
+      // Ticket 142: the marker deletion answers "no delivery is owed"; the
+      // wake row answers "this id is a worker we can wake" and must go too,
+      // or the hold would be released while a send could still resurrect the
+      // worker the dispatcher just abandoned.
+      try {
+        await Promise.resolve(durability.deleteWorkerSession?.(workerId));
+      } catch (error) {
+        warnBestEffort(
+          `worker session row for ${workerId} could not be dropped`,
+          error,
+        );
+      }
+    }
+    unknownStateHolds.delete(workerId);
+    // The adapter's mirror goes with it, for the same reason.
+    try {
+      host.forgetWorkerWake?.(workerId);
+    } catch {
+      // Mirror failures never break the release.
+    }
+    return { ok: true };
+  }
 
   return {
     async spawnWorker(request: SpawnRequest): Promise<SpawnResult> {
@@ -1008,18 +1418,34 @@ export function createMultitask(
         }
         // Obligation marker (ADR-0006): minimum-to-reconstruct, written at
         // spawn through the host storage seam. Awaited so the marker exists
-        // before the spawn resolves. Ticket 113: the inbox origin rides the
-        // marker so a rebuild can re-create the ledger link with it.
+        // before the spawn resolves — but BEST-EFFORT: the host already
+        // accepted the spawn, so a store failure is logged, never rethrown
+        // as a failed spawn (which would also report a dead spawn for a live
+        // child and hold the stream key). Ticket 113: the inbox origin rides
+        // the marker so a rebuild can re-create the ledger link with it.
+        //
+        // A worker that already SETTLED while the spawn was in flight is
+        // skipped: its settle path wrote the terminal marker, and rewriting
+        // a live snapshot here would be a stale overwrite.
         //
         // The status comes from the CURRENT record: an early `running` edge
         // may already have advanced it while the spawn was in flight, and a
         // live snapshot still holds the stream key across a restart.
         if (durability !== undefined) {
-          await Promise.resolve(
-            durability.writeWorkerMarker(
-              toDurableMarker(record, todoExternalOf(record.todoId)),
-            ),
-          );
+          if (!isTerminalStatus(record.status)) {
+            try {
+              await Promise.resolve(
+                durability.writeWorkerMarker(
+                  toDurableMarker(record, todoExternalOf(record.todoId)),
+                ),
+              );
+            } catch (error) {
+              warnBestEffort(
+                `worker marker for ${workerId} could not be written`,
+                error,
+              );
+            }
+          }
           // Ticket 142: the durable WAKE identity, beside the obligation
           // marker but a separate row with a separate lifecycle. Written at
           // the same moment (after the spawn resolved — there is no id to key
@@ -1097,17 +1523,31 @@ export function createMultitask(
       }
       // Drop any parked steer — nothing is kept for a later revival.
       steerQueue.clear(workerId);
+      clearSteerRetry(workerId);
       // Aborted → cancelled on the ledger (and pruned; dsh has no cancelled).
       cancelLinkedTodo(record);
       // Marker obligation closed: nothing to deliver after a restart.
-      void durability?.deleteWorkerMarker(workerId);
+      if (durability !== undefined) {
+        durabilityBestEffort(
+          `worker marker for ${workerId} could not be dropped`,
+          () => durability.deleteWorkerMarker(workerId),
+        );
+      }
       // Ticket 142: and the wake identity goes with it — a stopped worker is
       // not wake-able (ticket 04). Done BEFORE the interrupt so a settle that
       // races the stop cannot leave a row behind either.
       forgetWorkerWake(workerId);
       // Mark first, then interrupt: a late host settle must not revive the worker.
       // The stop path never sends a user-facing message.
-      await host.interruptWorker(workerId);
+      try {
+        await host.interruptWorker(workerId);
+      } catch (error) {
+        // The abort is already COMMITTED (terminal status, parked steer
+        // dropped, markers closed). A host interrupt failure cannot undo
+        // that, and reporting a failed stop would be a lie about the state
+        // the core now holds; it is logged instead.
+        warnBestEffort(`interrupt for stopped worker ${workerId} failed`, error);
+      }
       return { ok: true };
     },
 
@@ -1153,11 +1593,28 @@ export function createMultitask(
 
       if (record.status === "running") {
         transition(workerId, { type: "steer-received" });
-        await host.interruptWorker(workerId);
-        // A settle may have raced the interrupt — do not leave a steer parked
-        // for a worker that is no longer steering.
-        if (workers.get(workerId)?.status !== "steering") {
+        try {
+          await host.interruptWorker(workerId);
+        } catch (error) {
+          // The steer is already ACCEPTED (parked, `steering`): the interrupt
+          // only makes the delivery point arrive sooner, and the host's own
+          // step boundary still delivers it. A rejected stop never turns an
+          // accepted correction into a failed steer.
+          warnBestEffort(
+            `interrupt for steered worker ${workerId} failed; the correction stays parked`,
+            error,
+          );
+        }
+        // A settle may have raced the interrupt — a terminal worker keeps no
+        // parked steer. A worker back in `running` is NOT terminal: that is a
+        // successful delivery of an EARLIER steer, and this call's newer
+        // correction must stay parked for the next boundary. Clearing on
+        // "not steering" would drop that newer correction (the bug this
+        // guard replaces).
+        const current = workers.get(workerId);
+        if (current !== undefined && isTerminalStatus(current.status)) {
           steerQueue.clear(workerId);
+          clearSteerRetry(workerId);
         }
       }
       // Already steering: a delivery is pending; it will pick up this message.
@@ -1209,7 +1666,26 @@ export function createMultitask(
         toolCallCount: 0,
         transcriptRef: hold.transcriptRef,
         todoId: hold.todoId,
-        redriveAttempts: 0,
+        // The durable marker's spent budget rides the hold (D-5): a reclaim
+        // must not hand the same obligation a fresh set of redrives.
+        redriveAttempts: hold.redriveAttempts ?? 0,
+      });
+      // The roster is back but the ledger is not: recreate the item the
+      // marker links to, exactly like the terminal rebuild path. A worker
+      // the hold reports as not-yet-started has a pending item; anything
+      // later was already in progress.
+      restoreLedgerLink({
+        workerId,
+        sessionId: parentSessionId,
+        title: hold.title,
+        streamKey: hold.streamKey,
+        todoId: hold.todoId,
+        status:
+          hold.lastKnownStatus === "spawned" ? "pending" : "in_progress",
+        redriveAttempts: hold.redriveAttempts ?? 0,
+        // Ticket 113: the hold carried the marker's inbox origin, so the
+        // reclaimed item keeps its delivery routing and re-present dedupe.
+        ...(hold.external !== undefined ? { external: hold.external } : {}),
       });
       // The stream key is held again by a LIVE worker — the same invariant a
       // fresh spawn establishes, and the reason ticket 59 exists.
@@ -1309,18 +1785,31 @@ export function createMultitask(
     },
 
     markDelivered(todoId: string, replyText?: string): boolean {
+      const before = todoLedger.get(todoId);
+      if (before === undefined) return false;
+      // A repeat call must be a no-op, not a second delivery: the ledger's
+      // own markDelivered is not one-shot (it would log another delivered
+      // event), and the side effects below (roster re-projection, the inbox
+      // `replied` resolution) answer "this obligation just closed". Firing
+      // them again for one obligation would publish a duplicate completion.
+      // `true` because the item IS delivered — the second call changed
+      // nothing and lost nothing.
+      if (before.delivered) {
+        // The marker drop IS idempotent and may have failed on the first call
+        // (a transient store failure). Retrying it here is the difference
+        // between a recoverable bookkeeping failure and an obligation that
+        // resurrects on the next activation. No roster event and no second
+        // `replied` resolution — those answer the close, not the cleanup.
+        dropObligationMarker(before.workerId);
+        return true;
+      }
       const ok = todoLedger.markDelivered(todoId);
       if (!ok) return false;
       // Ticket 27: the delivered flag flipped — presence must re-project.
       const todo = todoLedger.get(todoId);
       if (todo !== undefined) notifyRosterChanged(todo.sessionId);
       // Delivery obligation closed — drop the durable marker for its worker.
-      if (durability !== undefined) {
-        const workerId = todoLedger.get(todoId)?.workerId;
-        if (workerId != null) {
-          void durability.deleteWorkerMarker(workerId);
-        }
-      }
+      dropObligationMarker(todo?.workerId ?? null);
       // Ticket 113: an inbox-origin item's delivered completion is the
       // `replied` resolution — the settle AND delivery conditions are both
       // met exactly here.
@@ -1406,10 +1895,12 @@ export function createMultitask(
         if (record === undefined) continue;
         record.redriveAttempts = todo.redriveAttempts;
         if (durability !== undefined) {
-          void Promise.resolve(
-            durability.writeWorkerMarker(
-              toDurableMarker(record, todoExternalOf(record.todoId)),
-            ),
+          durabilityBestEffort(
+            `worker marker for ${record.workerId} could not be written`,
+            () =>
+              durability.writeWorkerMarker(
+                toDurableMarker(record, todoExternalOf(record.todoId)),
+              ),
           );
         }
       }
@@ -1475,6 +1966,34 @@ export function createMultitask(
             liveStreamKeyId(marker.parentSessionId, marker.streamKey),
             recovered.workerId,
           );
+          // The roster is back but the ledger is not: recreate the linked
+          // item so reconcile sees the work and keeps the inbox origin, and
+          // carry the spent redrive budget like the terminal path does.
+          restoreLedgerLink({
+            workerId: marker.workerId,
+            sessionId: marker.parentSessionId,
+            title: marker.title,
+            streamKey: marker.streamKey,
+            todoId: marker.todoId,
+            status: marker.status === "spawned" ? "pending" : "in_progress",
+            redriveAttempts: marker.redriveAttempts ?? 0,
+            ...(marker.external !== undefined
+              ? { external: marker.external }
+              : {}),
+            nowMs: marker.updatedAtMs,
+          });
+          // A settle that landed inside the adopt-before-rebuild window was
+          // buffered because no roster record existed yet. The record exists
+          // now, so replay it through the normal terminal path: status,
+          // marker, wake identity, settle record and wake all land exactly
+          // once. The stream key set above is freed by the terminal
+          // transition, which is the point: a provably finished worker must
+          // not keep its stream occupied.
+          const buffered = pendingSettles.get(marker.workerId);
+          if (buffered !== undefined) {
+            pendingSettles.delete(marker.workerId);
+            applySettle(buffered);
+          }
           restored.push(recovered);
           continue;
         }
@@ -1495,6 +2014,15 @@ export function createMultitask(
             lastKnownStatus: marker.status,
             transcriptRef: marker.transcriptRef ?? marker.workerId,
             todoId: marker.todoId,
+            // The hold must carry the spent budget so a later reclaim of
+            // this id continues the same lifetime bound (D-5).
+            redriveAttempts: marker.redriveAttempts ?? 0,
+            // Ticket 113: and the inbox origin, or a reclaim would recreate
+            // the ledger item with no delivery routing and let the same job
+            // be presented again as a new one.
+            ...(marker.external !== undefined
+              ? { external: marker.external }
+              : {}),
           };
           unknownState.push(hold);
           unknownStateHolds.set(hold.workerId, hold);
@@ -1520,32 +2048,32 @@ export function createMultitask(
         // Recreate the dispatcher ledger link so reconcile can notice an
         // undelivered result and finish delivery (S4). Aborted workers
         // owe nothing — skip.
-        if (
-          marker.status !== "aborted" &&
-          marker.todoId !== null &&
-          todoLedger.get(marker.todoId) === undefined
-        ) {
-          todoLedger.create({
+        if (marker.status !== "aborted") {
+          restoreLedgerLink({
+            workerId: marker.workerId,
             sessionId: marker.parentSessionId,
-            id: marker.todoId,
             title: marker.title,
-            status: "in_progress",
             streamKey: marker.streamKey,
+            todoId: marker.todoId,
+            status: "in_progress",
             // Restore the spent budget too — otherwise every restart would
             // hand the obligation a fresh set of redrives (D-5).
             redriveAttempts: marker.redriveAttempts ?? 0,
             // Ticket 113: the inbox origin rides the marker so the rebuilt
             // item keeps its delivery routing (and re-present dedupe works).
-            ...(marker.external ? { external: marker.external } : {}),
+            ...(marker.external !== undefined
+              ? { external: marker.external }
+              : {}),
             nowMs: marker.updatedAtMs,
           });
-          todoLedger.linkWorker(
-            marker.todoId,
-            marker.workerId,
-            marker.streamKey,
-          );
         }
         restored.push(record);
+      }
+      // Nothing restored means there is no record to replay a buffered settle
+      // into; holding it would leak an event for a worker this boot cannot
+      // represent.
+      for (const workerId of [...pendingSettles.keys()]) {
+        if (!workers.has(workerId)) pendingSettles.delete(workerId);
       }
       // Restored entries re-join the visible roster (ticket 21 observer);
       // unknown-state rows never land on the roster, so no notification.
@@ -1565,38 +2093,14 @@ export function createMultitask(
     },
 
     async releaseUnknownStateHold(workerId: string): Promise<boolean> {
-      const hold = unknownStateHolds.get(workerId);
-      if (hold === undefined) return false;
-      unknownStateHolds.delete(workerId);
-      // Drop the marker too. The in-memory release alone would unblock this
-      // boot but the marker would rebuild the hold on the next activation —
-      // an unresolvable-remedy loop, which is worse than the block it fixes.
-      if (durability !== undefined) {
-        await Promise.resolve(durability.deleteWorkerMarker(workerId));
-        // Ticket 142: the marker deletion answers "no delivery is owed"; the
-        // wake row answers "this id is a worker we can wake" and must go too,
-        // or the hold would be released while a send could still resurrect the
-        // worker the dispatcher just abandoned.
-        try {
-          await Promise.resolve(durability.deleteWorkerSession?.(workerId));
-        } catch (error) {
-          try {
-            console.warn(
-              `[multitask-dispatcher] worker session row for ${workerId} could not be dropped:`,
-              error,
-            );
-          } catch {
-            // A broken console must not break the release either.
-          }
-        }
-      }
-      // The adapter's mirror goes with it, for the same reason.
-      try {
-        host.forgetWorkerWake?.(workerId);
-      } catch {
-        // Mirror failures never break the release.
-      }
-      return true;
+      const outcome = await releaseHold(workerId);
+      return outcome.ok;
+    },
+
+    releaseUnknownStateHoldOutcome(
+      workerId: string,
+    ): Promise<UnknownStateReleaseOutcome> {
+      return releaseHold(workerId);
     },
 
     wakeBus,
@@ -1605,6 +2109,10 @@ export function createMultitask(
       // can never open a turn on a host that is going away. Idempotent, so a
       // repeated teardown is safe.
       wakeBus.dispose();
+      // No steer retry may outlive the core either.
+      for (const workerId of [...steerRetryTimers.keys()]) {
+        clearSteerRetry(workerId);
+      }
     },
     todos: todoLedger,
     sendPeer(sessionId: string, envelope: PeerEnvelope): PeerSendAck {
@@ -1690,6 +2198,29 @@ export function createMultitask(
           : {}),
       });
       if (target.kind === "refused") return target.outcome;
+      // A terminal roster record with no settle record is a known outcome, not
+      // a pending wait: the worker settled before the ring existed (a stop
+      // that dropped its late settle, a rebuild-restored terminal row) and
+      // blocking the full timeout would end in a false `still-running`.
+      // Report the terminal status with no result text — the honest answer:
+      // the result, if any, was never captured here.
+      const record = workers.get(workerId);
+      if (
+        record !== undefined &&
+        isTerminalStatus(record.status) &&
+        settleRecords.lookup(parentSessionId, workerId) === undefined
+      ) {
+        return {
+          ok: true,
+          status: "settled",
+          workerStatus: record.status,
+          result: "",
+          // No record survived, so the settle instant is unknown; the wait
+          // observed it now and spent no time waiting.
+          settledAtMs: Date.now(),
+          waitedMs: 0,
+        };
+      }
       return settleRecords.wait(
         parentSessionId,
         workerId,

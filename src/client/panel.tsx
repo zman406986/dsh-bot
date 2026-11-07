@@ -38,9 +38,11 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import type { JSX } from "react";
 import {
+  FACT_SEPARATOR,
   ROSTER_FINISHED_COUNT_KEY,
   ROSTER_STALE_RECHECK_MS,
   describeRosterPanel,
+  formatCount,
   formatTemplate,
   type RosterRowView,
   type RosterSectionView,
@@ -92,10 +94,8 @@ export const ROSTER_PANEL_CSS = `
 @media (prefers-reduced-motion: reduce){.multitask-dispatcher-roster-panel__dot[data-visual="working"]::after{animation:none;transform:none;opacity:.35}}
 .multitask-dispatcher-roster-panel__row-body{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
 .multitask-dispatcher-roster-panel__row-title{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.multitask-dispatcher-roster-panel__row-detail{opacity:.55}
 .multitask-dispatcher-roster-panel__row-status{opacity:.75}
 .multitask-dispatcher-roster-panel__row-activity{opacity:.55}
-.multitask-dispatcher-roster-panel__row-todo{opacity:.45;font-size:11px;max-width:16ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .multitask-dispatcher-roster-panel__row-marker{align-self:flex-start;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 6px;border-radius:8px;border:1px solid currentColor}
 .multitask-dispatcher-roster-panel__row-marker--landed{color:var(--dsw-alias-state-success-primary)}
 .multitask-dispatcher-roster-panel__row-steer{display:flex;align-items:center;gap:6px;margin-top:2px;flex-wrap:wrap}
@@ -106,20 +106,22 @@ export const ROSTER_PANEL_CSS = `
 .multitask-dispatcher-roster-panel__finished-count > summary{opacity:1;cursor:default}
 `;
 
-/** The activity line: `{status} · {elapsed} · {n} tool calls`. */
-function activityLine(t: TranslateFn, row: RosterRowView): string {
-  const toolCalls = formatTemplate(t("roster.activity.toolcalls"), {
-    count: String(row.toolCallCount),
-  });
-  return `${row.statusLabel} · ${row.elapsedText} · ${toolCalls}`;
-}
-
 /**
- * The detail line: start time (client clock) + the kind-typed generic label,
- * e.g. `09:07 · worker` (design-17 §4.2 "start time, detail line").
+ * The facts line: `{elapsed} · {n} tool calls · started {time}`. Zero tool
+ * calls are omitted, and the raw status never repeats here (it has its own
+ * localized word).
  */
-function detailLine(row: RosterRowView): string {
-  return `${row.startText} · ${row.kindLabel}`;
+function factsLine(t: TranslateFn, row: RosterRowView): string {
+  const facts = [row.elapsedText];
+  if (row.toolCallCount > 0) {
+    facts.push(
+      formatCount(t, "roster.activity.toolcalls", row.toolCallCount),
+    );
+  }
+  facts.push(
+    formatTemplate(t("roster.fact.started"), { time: row.startText }),
+  );
+  return facts.join(FACT_SEPARATOR);
 }
 
 /**
@@ -151,6 +153,10 @@ function RosterRow(props: {
       data-marker={row.marker?.kind ?? ""}
       data-section={row.section}
       data-finished={row.finished ? "true" : "false"}
+      data-worker-id={row.workerId}
+      data-todo-id={row.todoId ?? undefined}
+      data-start={row.startText}
+      data-tool-calls={String(row.toolCallCount)}
     >
       {/* Status dot / running ring: `data-status` keys the verbatim
           core vocabulary; the ring animates only for working rows. */}
@@ -170,15 +176,11 @@ function RosterRow(props: {
           </span>
         ) : null}
         <span className={`${PANEL_CLASS}__row-status`}>
-          {row.statusLabel}
+          {t(row.statusWordKey)}
         </span>
-        <span className={`${PANEL_CLASS}__row-detail`}>{detailLine(row)}</span>
         <span className={`${PANEL_CLASS}__row-activity`}>
-          {activityLine(t, row)}
+          {factsLine(t, row)}
         </span>
-        {row.todoId !== null ? (
-          <span className={`${PANEL_CLASS}__row-todo`}>{row.todoId}</span>
-        ) : null}
         {onSteer !== undefined && row.finished === false ? (
           <span className={`${PANEL_CLASS}__row-steer`}>
             <button
@@ -198,7 +200,7 @@ function RosterRow(props: {
             </button>
             {steerCopyKey !== null ? (
               <span className={`${PANEL_CLASS}__steer-hint`}>
-                {formatTemplate(t(steerCopyKey), { workerId: row.workerId })}
+                {formatTemplate(t(steerCopyKey), { worker: row.workerId })}
               </span>
             ) : null}
           </span>
@@ -242,9 +244,7 @@ function rosterSection(
       {collapsed.length > 0 ? (
         <details className={`${PANEL_CLASS}__finished-count`}>
           <summary>
-            {formatTemplate(t(ROSTER_FINISHED_COUNT_KEY), {
-              count: String(collapsed.length),
-            })}
+            {formatCount(t, ROSTER_FINISHED_COUNT_KEY, collapsed.length)}
           </summary>
           {list(collapsed)}
         </details>

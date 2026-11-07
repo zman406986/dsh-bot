@@ -62,6 +62,10 @@ export interface WorkerCompositionContext {
  * while a preset's model-facing tools live on the agent plane. Passing the
  * child agent reads the surface it actually inherits. Restriction names are
  * validated against that same set, so an unscoped read would deny nothing.
+ *
+ * This helper deliberately degrades to an empty set: it is a read-only
+ * convenience. The SPAWN path uses {@link readScopedToolNames}, which keeps
+ * the failure mode distinguishable so an unreadable surface can fail closed.
  */
 export function globalToolNames(
   ctx: WorkerCompositionContext,
@@ -74,11 +78,77 @@ export function globalToolNames(
   }
 }
 
+type ScopedToolsRead =
+  | { readonly ok: true; readonly names: ReadonlySet<string> }
+  | { readonly ok: false; readonly reason: "unavailable" | "threw" | "empty" };
+
+/**
+ * Strict read of the scoped tool set. Unlike {@link globalToolNames}, an
+ * absent surface, a throwing `schemas()`, or an empty answer is reported as a
+ * failure instead of silently becoming "nothing to deny".
+ */
+function readScopedToolNames(
+  ctx: WorkerCompositionContext,
+  scope: unknown,
+): ScopedToolsRead {
+  const tools = ctx.tools;
+  if (tools === undefined) return { ok: false, reason: "unavailable" };
+  let schemas: ReadonlyArray<{ readonly name: string }>;
+  try {
+    schemas = tools.schemas(scope);
+  } catch {
+    return { ok: false, reason: "threw" };
+  }
+  if (!Array.isArray(schemas) || schemas.length === 0) {
+    return { ok: false, reason: "empty" };
+  }
+  const names = new Set<string>();
+  for (const schema of schemas) {
+    if (schema !== null && typeof schema === "object" && typeof schema.name === "string") {
+      names.add(schema.name);
+    }
+  }
+  return names.size > 0
+    ? { ok: true, names }
+    : { ok: false, reason: "empty" };
+}
+
+/** The failure text for an unreadable scoped surface. */
+function unreadableSurfaceError(
+  reason: "unavailable" | "threw" | "empty",
+): Error {
+  if (reason === "threw") {
+    return new Error(
+      "worker composition: tools.schemas() failed; refusing to spawn a worker without the tool barrier",
+    );
+  }
+  if (reason === "unavailable") {
+    return new Error(
+      "worker composition: the context exposes no scoped tools surface; refusing to spawn an unrestricted worker",
+    );
+  }
+  return new Error(
+    "worker composition: the scoped tool set is empty; refusing to spawn a worker whose barrier cannot be applied",
+  );
+}
+
 /**
  * Register the worker contract and tool barrier on one child's scoped context.
  * `scope` must be the child agent itself, for the reason on `globalToolNames`.
- * Returns the number of registrations made: 0 when the context exposes
- * neither surface (a stub host), so callers never treat absence as success.
+ * Returns the number of registrations made.
+ *
+ * FAIL-CLOSED (second-round audit): the old code intersected the deny
+ * candidates with `schemas()`, and a throwing/empty read produced an EMPTY
+ * deny list — `restrict` was then skipped and the worker kept the dispatcher
+ * surface. Now an unreadable surface, an empty surface on a context that CAN
+ * restrict, or a deny list that would deny nothing throws, so the spawn fails
+ * instead of shipping an unrestricted worker.
+ *
+ * Stub-host carve-out: a context that exposes `schemas()` but NO `restrict()`
+ * cannot enforce a barrier at all (the live dsh host always has one). Those
+ * minimal test stubs keep the historical "nothing to apply" behavior rather
+ * than failing a host that has no restriction capability to apply; the real
+ * defect (a host that CAN restrict while the read yields nothing) throws.
  */
 export function applyWorkerComposition(
   ctx: WorkerCompositionContext,
@@ -99,21 +169,38 @@ export function applyWorkerComposition(
     applied += 1;
   }
   const tools = ctx.tools;
-  if (tools !== undefined) {
-    const known = globalToolNames(ctx, scope);
-    const deny = def.resolveToolFilter(known).deny;
-    // `tools.restrict({})` is a no-op that throws; an empty deny needs none.
-    if (deny.length > 0) {
-      tools.restrict({ deny });
-      applied += 1;
+  if (tools === undefined) {
+    throw unreadableSurfaceError("unavailable");
+  }
+  const read = readScopedToolNames(ctx, scope);
+  if (!read.ok) {
+    if (read.reason === "empty" && typeof tools.restrict !== "function") {
+      // No restriction capability to apply on this context (a minimal stub).
+      // Nothing is silently half-applied: there is no barrier seam at all.
+    } else {
+      throw unreadableSurfaceError(read.reason);
     }
-    // Worker-local tools land on the child's scope only, so the dispatcher's
-    // surface never lists them (ticket 122).
-    if (tools.register !== undefined) {
-      for (const definition of workerTools ?? []) {
-        tools.register(definition);
-        applied += 1;
-      }
+  } else {
+    const deny = def.resolveToolFilter(read.names).deny;
+    if (deny.length === 0) {
+      throw new Error(
+        "worker composition: no denied verb is present on the scoped tool surface; refusing to spawn without a tool barrier",
+      );
+    }
+    if (typeof tools.restrict !== "function") {
+      throw new Error(
+        "worker composition: tools.restrict() is unavailable; refusing to spawn a worker without the tool barrier",
+      );
+    }
+    tools.restrict({ deny });
+    applied += 1;
+  }
+  // Worker-local tools land on the child's scope only, so the dispatcher's
+  // surface never lists them (ticket 122).
+  if (tools.register !== undefined) {
+    for (const definition of workerTools ?? []) {
+      tools.register(definition);
+      applied += 1;
     }
   }
   return applied;

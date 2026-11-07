@@ -52,10 +52,270 @@ function tryInject(agent: AgentLike, text: string): void {
   if (typeof agent.inject !== "function") return;
   if (text.length === 0) return;
   try {
-    agent.inject(pluginContextMessage(text));
+    // A live driver may return a rejected promise rather than throw
+    // synchronously; dsh treats an unhandled rejection as fatal, so both
+    // failure shapes are owned here.
+    void Promise.resolve(agent.inject(pluginContextMessage(text))).catch(() => {
+      // Injection is best-effort; never break activation on it.
+    });
   } catch {
     // Injection is best-effort; never break activation on it.
   }
+}
+
+/** Structural view of one committed session-log event. */
+interface TranscriptEventLike {
+  readonly type?: unknown;
+  readonly seq?: unknown;
+  readonly data?: unknown;
+}
+
+/**
+ * The event type the host commits for an injected `user` message
+ * (`dsh-agent-loop` pre-step). Only a COMMITTED user message proves the policy
+ * is in context; a queued inject does not.
+ */
+const COMMITTED_USER_MESSAGE_EVENT = "user/message";
+
+/** A synchronous `sessionQuery` listing seam, when the adapter exposes one. */
+interface SessionQueryLike {
+  listEvents(sessionId: string): unknown;
+}
+
+/**
+ * Read the supported session-log listing service (`ctx.get("sessionQuery")`),
+ * guarded — the same two-step rule the plugin uses for every optional host
+ * service. A live cordis context THROWS at property access for a service it
+ * never injected, and the query service itself may throw while its store is
+ * closed; both mean "cannot establish", never a policy-less dispatcher.
+ */
+function readSessionQuery(ctx: AdapterContext): SessionQueryLike | undefined {
+  if (typeof ctx.get !== "function") return undefined;
+  try {
+    const service = ctx.get("sessionQuery");
+    if (typeof service !== "object" || service === null) return undefined;
+    const candidate = service as Partial<SessionQueryLike>;
+    if (typeof candidate.listEvents !== "function") return undefined;
+    return service as SessionQueryLike;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Join a committed message's text blocks; empty when unreadable. */
+function messageText(content: unknown): string {
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((block) =>
+      typeof block === "object" && block !== null
+        ? (block as { readonly text?: unknown }).text
+        : undefined,
+    )
+    .filter((part): part is string => typeof part === "string")
+    .join("");
+}
+
+/** Whether one event is a committed user message from THIS producer. */
+function isCommittedProducerMessage(event: TranscriptEventLike): boolean {
+  if (event.type !== COMMITTED_USER_MESSAGE_EVENT) return false;
+  const data = event.data;
+  if (typeof data !== "object" || data === null) return false;
+  const record = data as {
+    readonly role?: unknown;
+    readonly source?: { readonly kind?: unknown } | null;
+  };
+  if (record.role !== "user") return false;
+  if (typeof record.source !== "object" || record.source === null) {
+    return false;
+  }
+  return record.source.kind === WAKE_SOURCE_KIND;
+}
+
+/**
+ * Whether a compaction/shadowing event after `seq` could have removed the
+ * policy node at `seq` from the LIVE context.
+ *
+ * Conservative by construction: any `compaction/*` event after the match, any
+ * `shadowedSeqs` entry for it, any shadow range covering it, or any later
+ * `surfaceOp` replacement of its span makes the match unprovable. Positions
+ * come from the listing's numeric seqs when every event has one; otherwise
+ * the listing's array order is the established position. A listing that
+ * cannot be read at all makes the caller inject again rather than risk a
+ * dispatcher without its policy.
+ */
+function policyNodeSurvives(
+  positions: readonly { readonly event: TranscriptEventLike; readonly seq: number }[],
+  seq: number,
+): boolean {
+  for (const { event, seq: eventSeq } of positions) {
+    const data =
+      typeof event.data === "object" && event.data !== null
+        ? (event.data as Record<string, unknown>)
+        : undefined;
+    const type = typeof event.type === "string" ? event.type : "";
+    if (type.startsWith("compaction/")) {
+      // A compaction at or before the match cannot have removed it; one that
+      // happens after may have.
+      if (eventSeq > seq) return false;
+    }
+    if (data === undefined) continue;
+    const shadowedSeqs = data["shadowedSeqs"];
+    if (
+      Array.isArray(shadowedSeqs) &&
+      shadowedSeqs.some((shadowed) => shadowed === seq)
+    ) {
+      return false;
+    }
+    const shadowedRange = data["shadowedRange"];
+    if (typeof shadowedRange === "object" && shadowedRange !== null) {
+      const range = shadowedRange as {
+        readonly start?: unknown;
+        readonly end?: unknown;
+      };
+      if (
+        typeof range.start === "number" &&
+        typeof range.end === "number" &&
+        seq >= range.start &&
+        seq <= range.end
+      ) {
+        return false;
+      }
+    }
+    const surfaceOp = data["surfaceOp"];
+    if (typeof surfaceOp === "object" && surfaceOp !== null) {
+      const op = surfaceOp as {
+        readonly op?: unknown;
+        readonly startSeq?: unknown;
+        readonly endSeq?: unknown;
+      };
+      if (
+        op.op === "replace" &&
+        typeof op.startSeq === "number" &&
+        typeof op.endSeq === "number" &&
+        seq >= op.startSeq &&
+        seq <= op.endSeq &&
+        eventSeq > seq
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+/**
+ * Read one session's committed events, preferring the supported listing.
+ *
+ * 1. `ctx.get("sessionQuery").listEvents(sessionId)` — the non-deprecated
+ *    exact-read service.
+ * 2. `session.snapshotEvents()` — deprecated, and consulted ONLY as a
+ *    last-resort local read when the service is absent. It keeps a stub/older
+ *    host from re-injecting on every re-activation and is still subjected to
+ *    every conservative check below.
+ * 3. Neither readable → undefined, which the caller treats as "cannot
+ *    establish" and therefore injects.
+ *
+ * A promise from either source is not decidable at this synchronous point;
+ * activation must stay synchronous, so it fails open (inject) rather than
+ * blocking on a read.
+ */
+function readTranscriptEvents(
+  ctx: AdapterContext,
+  agent: AgentLike,
+): readonly unknown[] | undefined {
+  const query = readSessionQuery(ctx);
+  if (query !== undefined) {
+    let listed: unknown;
+    try {
+      listed = query.listEvents(String(agent.session.id));
+    } catch {
+      return undefined;
+    }
+    if (
+      listed !== null &&
+      typeof listed === "object" &&
+      typeof (listed as { then?: unknown }).then !== "function" &&
+      Array.isArray(listed)
+    ) {
+      return listed;
+    }
+    return undefined;
+  }
+  const session = agent.session as unknown as {
+    snapshotEvents?: () => unknown;
+  };
+  if (typeof session.snapshotEvents !== "function") return undefined;
+  try {
+    const listed = session.snapshotEvents();
+    return Array.isArray(listed) ? listed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether this session's LIVE context already carries the exact session-policy
+ * text.
+ *
+ * WHY: the session policy is injected once per ACTIVATION, but a session can
+ * be activated again — a re-announcement after disposal (ticket 163 defect 3)
+ * or a restart resume. `agent.inject` queues context, which the loop commits
+ * as a `user/message` in the session log, so the previous activation's copy is
+ * still in the transcript. Injecting again on every re-activation doubles the
+ * block in context each time; this check makes the inject idempotent.
+ *
+ * CONSERVATIVE (second-round audit): the old probe scanned every persisted
+ * event body for the text, including compacted/shadowed copies and assistant
+ * echoes, and could skip a needed inject when the live context no longer
+ * carried the policy. A skip now requires ALL of:
+ * - a COMMITTED `user/message`;
+ * - from this producer (`WAKE_SOURCE_KIND`), so an assistant echo or another
+ *   plugin's copy does not count;
+ * - an exact text match; and
+ * - the event's seq, with no later compaction/shadowing/replacement covering
+ *   it.
+ * Anything else injects again — never leave a dispatcher without its policy.
+ *
+ * Source: the supported `ctx.get("sessionQuery")` listing is preferred. The
+ * deprecated `Session.snapshotEvents()` is only a last-resort local read when
+ * that service is absent, and it gets the SAME conservative checks (its array
+ * order establishes the compaction position). When neither source can answer
+ * synchronously, this fails OPEN and re-injects; the recorded cost is a
+ * duplicate policy block on such a host after a re-activation. That is
+ * preferred to a missing policy, and it disappears once the supported service
+ * is present.
+ */
+function transcriptCarriesPolicy(
+  ctx: AdapterContext,
+  agent: AgentLike,
+  policy: string,
+): boolean {
+  const listed = readTranscriptEvents(ctx, agent);
+  if (listed === undefined) return false;
+  const events = listed.filter(
+    (event): event is TranscriptEventLike =>
+      typeof event === "object" && event !== null,
+  );
+  if (events.length === 0) return false;
+  // Ordering: use the committed seq when the listing carries one for EVERY
+  // event. A listing without seqs (the deprecated snapshot, a structural stub)
+  // still has an order — array position — and compaction is detected by the
+  // events in that same order, so it is enough to establish invalidation.
+  const allHaveSeq = events.every(
+    (event) =>
+      typeof event.seq === "number" && Number.isFinite(event.seq),
+  );
+  const positions = events.map((event, index) => ({
+    event,
+    seq: allHaveSeq ? (event.seq as number) : index,
+  }));
+  for (const { event, seq } of positions) {
+    if (!isCommittedProducerMessage(event)) continue;
+    const data = event.data as { readonly content?: unknown };
+    if (!messageText(data.content).includes(policy)) continue;
+    if (policyNodeSurvives(positions, seq)) return true;
+  }
+  return false;
 }
 
 /**
@@ -75,7 +335,12 @@ function tryInject(agent: AgentLike, text: string): void {
 function tryWake(agent: AgentLike, text: string): void {
   if (text.length === 0) return;
   try {
-    agent.followup(wakeUserMessage(text));
+    // `followup` is typed void, but a live driver can return a rejected
+    // promise; leaving that unowned would surface as an unhandled rejection
+    // (fatal in dsh) for a wake that is documented as best-effort.
+    void Promise.resolve(agent.followup(wakeUserMessage(text))).catch(() => {
+      // Waking is best-effort; never break activation on it.
+    });
   } catch {
     // Waking is best-effort; never break activation on it.
   }
@@ -365,8 +630,17 @@ export function bindDispatcherLifecycle(
   function deactivateSession(sessionId: string): void {
     if (!sessions.has(sessionId)) return;
     sessions.delete(sessionId);
-    spawnTitles.delete(sessionId);
+    // Ticket 155: `spawnTitles` is NOT dropped here — the title is a property
+    // of the session ID, exactly like `generations`, so a peer that is
+    // deactivated and later re-activated keeps the label its peers render.
+    // (Only `origins` belongs to one activation: ADR-0034 decision 1.)
     origins.delete(sessionId);
+    // Defect fix (a disposed dispatcher stayed busy): an activation also ends
+    // any turn it owned. `cancelTurn`, not `noteTurnEnded`: the latter flushes
+    // pending work and can open a wake turn into the session being destroyed
+    // (for a marked dispatcher, even a cold resume). Teardown must not
+    // address the session it is tearing down.
+    multitask.wakeBus.cancelTurn(sessionId);
     host.unbindParent(sessionId);
     onDeactivated?.(sessionId);
   }
@@ -538,11 +812,21 @@ export function bindDispatcherLifecycle(
     spawnGenerations.set(sessionId, generation);
     host.bindParent(agent, sessionId);
     // ADR-0005: policy is fixed for this session's lifetime.
+    //
+    // Defect fix (duplicate policy on re-activation): skip the inject when the
+    // persisted transcript already carries this exact section — the previous
+    // activation queued it, and it is still in context. Everything that cannot
+    // prove that injects, so a dispatcher never comes back policy-less.
     if (policyEnabled) {
-      tryInject(
-        agent,
-        assembleSessionPolicy(true, origin, generation, policyLanguage),
+      const policy = assembleSessionPolicy(
+        true,
+        origin,
+        generation,
+        policyLanguage,
       );
+      if (!transcriptCarriesPolicy(ctx, agent, policy)) {
+        tryInject(agent, policy);
+      }
     }
     onActivated?.(sessionId);
   }

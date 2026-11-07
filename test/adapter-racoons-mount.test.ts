@@ -60,6 +60,8 @@ import { after, describe, it } from "node:test";
 import { defaultStorageRoot } from "racoons-dsh/plugin";
 import { apply } from "../src/plugin.js";
 import {
+  createJournalSink,
+  RACOONS_JOURNAL_FULL_TEXT_ENV,
   registerRacoonsMount,
   type RacoonsMountHandle,
 } from "../src/adapter/racoons-mount.js";
@@ -628,6 +630,36 @@ function createApplyCtx(services: Record<string, unknown> = {}): ApplyCtx {
   return ctx;
 }
 
+/**
+ * ADR-0019: the live host mints a scoped tool surface per agent, and the
+ * plugin refuses the retired process-global fallback. `toolRegistrations` is
+ * the harness's recorder, so the scoped registrations are mirrored there for
+ * the existing assertions while the real duplicate/cleanup semantics live on
+ * this agent's own map.
+ */
+function scopedAgentTools(ctx: ApplyCtx) {
+  const scoped = new Map<string, unknown>();
+  return {
+    schemas: () => [...scoped.keys()].map((name) => ({ name })),
+    register(definition: unknown) {
+      const name = (definition as { name?: unknown }).name;
+      if (typeof name !== "string" || name.length === 0) {
+        throw new Error("tool definition needs a non-empty name");
+      }
+      if (scoped.has(name)) {
+        throw new Error(`tool "${name}" is already registered`);
+      }
+      scoped.set(name, definition);
+      ctx.toolRegistrations.push(definition);
+      return () => {
+        scoped.delete(name);
+        const at = ctx.toolRegistrations.indexOf(definition);
+        if (at >= 0) ctx.toolRegistrations.splice(at, 1);
+      };
+    },
+  };
+}
+
 /** Run the real plugin apply against the stub context. */
 function applyPlugin(
   ctx: ApplyCtx,
@@ -639,7 +671,11 @@ function applyPlugin(
       inject: ApplyCtx["inject"];
       get: ApplyCtx["get"];
     } as never,
-    volatileConfig(config),
+    // Owner ruling 2026-11-05: racoons is off unless a manual overlay turns
+    // it on. This harness is that overlay — every test in this file exercises
+    // the racoons-enabled path, so the switch is set here rather than
+    // defaulted on in the product.
+    volatileConfig({ ...config, racoonsEnabled: true }),
   );
   assert.ok(
     ctx.registeredCommands.some((command) => command.name === DISPATCHER_START_COMMAND),
@@ -844,6 +880,53 @@ function mountSession(
 // ── 1. full coverage: no session filter, no global recall ─────────────────
 
 describe("ticket 145 — the mount has no session filter", () => {
+  // Owner ruling 2026-11-05: racoons is an OPTIONAL test feature. This is the
+  // pin that keeps it out of the default product — no switch, no mount.
+  it("racoonsEnabled absent or false mounts nothing (default product)", async (t) => {
+    const journal = captureJournal();
+    t.after(journal.restore);
+
+    const ctx = createApplyCtx({ llm: cannedLlm(FORGET_ALL_ANSWER) });
+    // Raw apply, NOT `applyPlugin`: this is the one test that must run with
+    // the racoons switch absent, i.e. the shipped default.
+    apply(
+      ctx as unknown as AdapterContext & {
+        effect: ApplyCtx["effect"];
+        inject: ApplyCtx["inject"];
+        get: ApplyCtx["get"];
+      } as never,
+      volatileConfig({ enabled: true, racoonsStorageRoot: scratchRoot() }),
+    );
+    t.after(() => {
+      disposeAll(ctx);
+    });
+
+    // No mount listeners, no ledger traffic — the plugin behaves exactly as if
+    // racoons were not vendored.
+    assert.equal(ctx.listenerCount("agent/pre-step"), 0);
+    assert.equal(ctx.listenerCount("llm/stream"), 0);
+    assert.equal(ctx.listenerCount("agent/turn-stopping"), 0);
+    assert.equal(journal.records().length, 0, "no mount line, nothing ran");
+
+    // And no per-session recall tool rides an activated dispatcher's surface.
+    const agent: AgentLike = {
+      session: { id: "sess-off", header: { parentSession: null, delegationDepth: 0 } },
+      followup() {},
+      ctx: { tools: scopedAgentTools(ctx) },
+    };
+    const activation = ctx.runCommand(DISPATCHER_START_COMMAND, {
+      commandId: DISPATCHER_START_COMMAND,
+      agent,
+    }) as { kind: string };
+    assert.equal(activation.kind, "success");
+    await flush();
+    const names = ctx.toolRegistrations.map(
+      (tool) => (tool as { name?: string }).name,
+    );
+    assert.ok(names.includes("spawn_worker"), "the dispatcher surface still exists");
+    assert.ok(!names.includes("recall"), "no recall tool without racoons");
+  });
+
   it("a dispatcher activation adds exactly one per-session recall; other sessions add none", async (t) => {
     const root = scratchRoot();
     const journal = captureJournal();
@@ -888,11 +971,12 @@ describe("ticket 145 — the mount has no session filter", () => {
     }
 
     // Activate the dispatcher chat: the plugin registers the dispatcher tool
-    // surface on the plugin-level fallback (this agent has no scoped ctx), and
-    // the ticket-145 recall rides that same surface.
+    // surface on the agent's OWN scoped context (ADR-0019), and the ticket-145
+    // recall rides that same surface.
     const agent: AgentLike & { readonly injected: unknown[] } = {
       session: { id: dispatcherId, header: { parentSession: null, delegationDepth: 0 } },
       followup() {},
+      ctx: { tools: scopedAgentTools(ctx) },
       inject(message: unknown) {
         (this.injected as unknown[]).push(message);
       },
@@ -1264,5 +1348,93 @@ describe("ticket 145 — teardown", () => {
     for (const name of events) {
       assert.equal(ctx.listenerCount(name), baselines.get(name), `${name} released by remount`);
     }
+  });
+});
+
+// ── 6. journal privacy: metadata by default, full text only on opt-in ─────
+
+describe("ticket 145 — journal sink privacy (second-round audit)", () => {
+  const publishRecord = {
+    kind: "publish",
+    atMs: 10,
+    sessionId: "sess-journal",
+    replacements: [
+      { nodeId: "n-1", byteLength: 30, text: "REWRITTEN CONTEXT SECRET" },
+    ],
+    appendRecords: [
+      { recordId: "r-1", byteLength: 20, text: "APPENDED CONTEXT SECRET" },
+    ],
+    archives: [{ recallId: "recall:sha256:abc", title: "kept" }],
+  } as const;
+
+  const askRecord = {
+    kind: "entry-ask",
+    atMs: 11,
+    sessionId: "sess-journal",
+    action: "keepall",
+    raw: 'RAW MODEL ANSWER SECRET',
+    unitId: "u-1",
+  } as const;
+
+  it("the default sink emits metadata only: no rewritten text, no raw output", () => {
+    const lines: string[] = [];
+    const sink = createJournalSink((line) => lines.push(line));
+    sink(publishRecord as never);
+    sink(askRecord as never);
+    const joined = lines.join("\n");
+    assert.ok(lines.length === 2);
+    assert.ok(!joined.includes("REWRITTEN CONTEXT SECRET"));
+    assert.ok(!joined.includes("APPENDED CONTEXT SECRET"));
+    assert.ok(!joined.includes("RAW MODEL ANSWER SECRET"));
+    // Metadata that the live gate reads survives.
+    assert.ok(joined.includes("recall:sha256:abc"));
+    assert.ok(joined.includes("n-1"));
+    assert.ok(joined.includes("keepall"));
+    assert.ok(joined.includes("u-1"));
+  });
+
+  it("the shipped default console sink never logs prompt text", (t) => {
+    const lines: string[] = [];
+    const original = console.info;
+    console.info = (...args: unknown[]) => {
+      lines.push(args.map((value) => String(value)).join(" "));
+    };
+    t.after(() => {
+      console.info = original;
+    });
+    // Default sink AND default write function.
+    const sink = createJournalSink();
+    sink(publishRecord as never);
+    sink(askRecord as never);
+    const joined = lines.join("\n");
+    assert.ok(joined.startsWith("racoons: publish"));
+    assert.ok(!joined.includes("REWRITTEN CONTEXT SECRET"));
+    assert.ok(!joined.includes("APPENDED CONTEXT SECRET"));
+    assert.ok(!joined.includes("RAW MODEL ANSWER SECRET"));
+  });
+
+  it("full text is available behind an explicit debug opt-in", () => {
+    const lines: string[] = [];
+    const sink = createJournalSink((line) => lines.push(line), {
+      includeText: true,
+    });
+    sink(publishRecord as never);
+    sink(askRecord as never);
+    const joined = lines.join("\n");
+    assert.ok(joined.includes("REWRITTEN CONTEXT SECRET"));
+    assert.ok(joined.includes("APPENDED CONTEXT SECRET"));
+    assert.ok(joined.includes("RAW MODEL ANSWER SECRET"));
+  });
+
+  it("the environment variable is the explicit process-level opt-in", (t) => {
+    const previous = process.env[RACOONS_JOURNAL_FULL_TEXT_ENV];
+    process.env[RACOONS_JOURNAL_FULL_TEXT_ENV] = "1";
+    t.after(() => {
+      if (previous === undefined) delete process.env[RACOONS_JOURNAL_FULL_TEXT_ENV];
+      else process.env[RACOONS_JOURNAL_FULL_TEXT_ENV] = previous;
+    });
+    const lines: string[] = [];
+    createJournalSink((line) => lines.push(line))(askRecord as never);
+    assert.ok(lines.join("\n").includes("RAW MODEL ANSWER SECRET"));
   });
 });

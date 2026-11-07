@@ -361,7 +361,15 @@ export function createDispatcherShellStore(): DispatcherShellStore {
     state = next;
     version += 1;
     box = { state, version };
-    for (const listener of [...listeners]) listener();
+    // One subscriber must not silence the rest (or escape into the feed's
+    // notification loop): each call is isolated.
+    for (const listener of [...listeners]) {
+      try {
+        listener();
+      } catch {
+        // contained: the next subscriber still runs
+      }
+    }
   }
 
   function withRow(
@@ -458,13 +466,23 @@ export function createDispatcherShellStore(): DispatcherShellStore {
       if (kept.length === state.order.length) return;
       const rows = new Map(state.rows);
       for (const id of drop) rows.delete(id);
+      // A mirror for a removed session is stale by construction: leaving it
+      // would resurrect presence (and the dispatcher flag) if the id ever
+      // came back, and would grow the map without bound.
+      const mirrors = new Map(state.mirrors);
+      for (const id of drop) mirrors.delete(id);
       const selection =
         state.selection.kind === "session" && drop.has(state.selection.sessionId)
           ? ({ kind: "none" } as const)
           : state.selection;
-      emit({ rows, order: kept, selection, mirrors: state.mirrors });
+      emit({ rows, order: kept, selection, mirrors });
     },
     applyPresence(snapshot) {
+      // The feed publishes whatever the host hands it; a non-object must be
+      // refused here, not dereferenced into the publisher's listener loop.
+      if (typeof snapshot !== "object" || snapshot === null) {
+        return;
+      }
       if (
         typeof snapshot.dispatcherSessionId !== "string" ||
         snapshot.dispatcherSessionId.length === 0

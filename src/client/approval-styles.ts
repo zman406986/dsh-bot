@@ -24,4 +24,10 @@ export const APPROVAL_CARD_CSS = `
 .${APPROVAL_CARD_CLASS}__field-value{overflow-wrap:anywhere}
 .${APPROVAL_CARD_CLASS}__dispatch{display:flex;flex-direction:column;gap:2px;padding:6px 10px;border:1px solid var(--dsw-alias-border-l3);border-radius:8px;font-size:12px;min-width:0}
 .${APPROVAL_CARD_CLASS}__dispatch-title{font-weight:600;overflow-wrap:anywhere}
+.${APPROVAL_CARD_CLASS}__dispatch-primary{font-weight:500;min-width:0;overflow-wrap:anywhere}
+.${APPROVAL_CARD_CLASS}__dispatch-details{font-size:11px;opacity:.75;min-width:0}
+.${APPROVAL_CARD_CLASS}__dispatch-details > summary{cursor:pointer;color:var(--dsw-alias-label-tertiary)}
+.${APPROVAL_CARD_CLASS}__dispatch-details dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:2px 8px;margin:3px 0 0}
+.${APPROVAL_CARD_CLASS}__dispatch-details dt{color:var(--dsw-alias-label-tertiary);white-space:nowrap}
+.${APPROVAL_CARD_CLASS}__dispatch-details dd{margin:0;min-width:0;overflow-wrap:anywhere}
 `;

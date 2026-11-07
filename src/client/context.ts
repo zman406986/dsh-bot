@@ -128,8 +128,19 @@ export type SettingsPathOpLike =
  * failures reject).
  */
 export interface ConfigPageFormLike {
-  /** Accepted Host values, refreshed by the page owner. */
+  /**
+   * Accepted Host values as of the render that handed this form in. The page
+   * hands a plain object snapshot, so this is a PRE-SAVE view whenever a save
+   * is in flight; reconciliation must not treat it as the write's verdict.
+   */
   readonly state: ConfigFormSnapshotLike;
+  /**
+   * Optional live snapshot reader. The shipped page form is a plain object
+   * (`slot-contract.d.ts:203-208`), but a form that can read the document now
+   * lets the store verify a write without waiting for the next render. Read
+   * defensively: a throwing reader is not a verdict.
+   */
+  getSnapshot?(): ConfigFormSnapshotLike;
   /** Submit all field edits together with the revision the editor read. */
   mutate(
     ops: readonly SettingsPathOpLike[],
@@ -255,41 +266,75 @@ export interface ClientSessionSummaryLike {
 
 /**
  * The standard sessions-feed snapshot (`SessionListState`, structural
- * minimal — ticket 79). The sidebar projects its rows; `current` is the
- * selection the capsule actions already read. Fields stay optional so a
- * runtime serving an older face degrades instead of lying.
+ * minimal — ticket 79). The sidebar projects its rows. 0.2.x carries no
+ * `current` selection: selection is view-owned, and the shell keeps its own
+ * (`shell-store.ts`) — the sessions service no longer offers a selection
+ * verb (`ISessions`, dsh-api-session-controller
+ * `client/contract/sessions.d.ts:44-139`). Fields stay optional so a runtime
+ * serving an older face degrades instead of lying.
  */
 export interface ClientSessionsFeedSnapshotLike {
   readonly ids?: readonly string[];
   readonly byId?: Readonly<Record<string, ClientSessionSummaryLike>>;
-  readonly current?: string;
 }
 
 /**
- * The sessions service face the action wiring needs (ticket 36 seams 2/3):
- * the standard list snapshot (rows + current selection — widened to the
- * full feed face in ticket 79 for the wrapper sidebar's rows) and the
- * Agent-scoped context view (`undefined` for a session neither listed nor
- * already scoped). `open` (ticket 79) is the host's selection verb — the
- * shell sidebar rides it on row selection; optional because the shell
- * composition degrades to store-only selection without it. `binding`
- * (ticket 80) is the scope-addressed assembly feed whose `eventSource` is
- * the verified history-replay face (`wrapper-vehicle-seams.md` Finding 7;
- * `ISessions.binding`, dsh-api-session-controller
- * `client/contract/sessions.d.ts:118-123`); optional because a runtime
- * without it degrades the conversation pane to honest unavailability.
+ * One session's assembly feed (`SessionBinding`, dsh-api-session-controller
+ * `sessions/service.d.ts` `SessionBinding`): its contiguous `eventSource` is
+ * the verified history-replay face (`wrapper-vehicle-seams.md` Finding 7).
+ * Optional because a runtime without it degrades the conversation pane to
+ * honest unavailability.
  */
 export interface ClientSessionBindingLike {
   readonly eventSource?: ConversationSourceLike;
 }
 
+/**
+ * One owned session reference (`SessionReference`, dsh-api-session-controller
+ * `client/contract/sessions.d.ts:25-36`). `retain` returns this immediately;
+ * `ready` settles with the shared initial open, `binding` is the live
+ * assembly feed, and `release()` is the one release verb.
+ */
+export interface ClientSessionReferenceLike {
+  readonly sessionId?: string;
+  /** The live binding, when this runtime exposes it synchronously. */
+  readonly binding?: ClientSessionBindingLike;
+  /** Cancellable wait for the shared initial `Session.open()` attempt. */
+  readonly ready?: Promise<unknown>;
+  /** Release once; the final reference tears the local scope down. */
+  release?(): void;
+}
+
+/**
+ * The sessions service face the dormant shell needs (ticket 36 seams 2/3;
+ * shape re-based on the installed 0.2.x contract). The standard list snapshot
+ * (rows — widened to the full feed face in ticket 79 for the wrapper
+ * sidebar's rows), the Agent-scoped context view (`undefined` for a session
+ * that is not retained), and the current acquisition path:
+ *
+ * - `retain(target, {source})` acquires a reference, starts the shared
+ *   initial history opening, and is what an owned pane does to OPEN a
+ *   session (`ISessions.retain`, `client/contract/sessions.d.ts:48-57`);
+ * - `binding(id)` borrows an already-retained binding without extending its
+ *   lifetime (the read-only fallback, `:132-139`);
+ * - `scope(id)` similarly borrows an already-retained Agent scope (`:120-129`),
+ *   which is why a send needs the pane to hold a reference.
+ *
+ * 0.2.x has NO `open(id)` selection verb: selection belongs to the view
+ * owner, and our sidebar store is that owner. Keeping the old verb here
+ * would make the pane permanently unavailable (the drift this module now
+ * records), so the shape below names only what the installed host serves.
+ */
 export interface ClientSessionsLike {
   list: {
     getSnapshot(): ClientSessionsFeedSnapshotLike;
     subscribe?(listener: () => void): () => void;
   };
   scope(id: string): ScopedAgentContextLike | undefined;
-  open?(id: string): void;
+  retain?(
+    target: string,
+    options: { readonly source: string },
+  ): ClientSessionReferenceLike;
   binding?(id: string): ClientSessionBindingLike | undefined;
 }
 
@@ -307,8 +352,10 @@ export interface ClientConversationLike {
 
 /**
  * The remote command service face (ticket 36 seam 2): the composer's exact
- * command transaction — `execute(sessionId, line, attachments)` — resolving
- * to `undefined` when the line parses to no command.
+ * command transaction — `execute(sessionId, line, attachments)`. The
+ * installed host resolves `{ok, value}` (`ok: false` = did not run;
+ * `value: undefined` = the line parsed to no command); an older face may
+ * resolve a bare `undefined` for the same no-command fact.
  */
 export interface ClientRemoteLike {
   commands: {
@@ -322,20 +369,45 @@ export interface ClientRemoteLike {
 
 /**
  * The narrow client context this scaffold's `apply` needs. Ticket 84
- * corrected the access contract: the host's context proxy THROWS on any
+ * established the access contract: the host's context proxy THROWS on any
  * service property the module's Cordis inject list does not declare
  * (`cannot get property "X" without inject`), wherever the read happens —
- * eager or inside a lazy closure. `slots`, `locale`, `sessions`, `remote`,
- * `conversation`, and `configForms` are therefore DECLARED in
- * `src/client/index.ts`'s `inject` export; they stay optional in this
- * STRUCTURAL type only, so offline fakes can omit them and the honest-degrade
- * branches stay exercisable. (The launcher-era `layout` face and the
- * `settingsScope` bind both left with the native-dsh posture; the settings
- * card now takes its form from the `plugins.row.config` owner props.)
+ * eager or inside a lazy closure. The module inject therefore declares only
+ * the faces the LIVE entries read (`slots`, `locale`); the dormant shell's
+ * service faces are resolved at its mount point through
+ * {@link ClientContext.get} (with a guarded property read for structural
+ * fakes), never through a bare module-level property read. They stay
+ * optional in this STRUCTURAL type so offline fakes can omit them and the
+ * honest-degrade branches stay exercisable. (The launcher-era `layout` face
+ * and the `settingsScope` bind both left with the native-dsh posture; the
+ * settings card now takes its form from the `plugins.row.config` owner
+ * props.)
  */
 export interface ClientContext extends ClientEffectContext {
+  /** The slot registry (a live entry reads it). */
   slots: SlotsServiceLike;
+  /** The locale service (a live entry reads it). */
   locale: LocaleServiceLike;
+  /**
+   * The service-method boundary (`ctx.get(name)`; cordis `reflect.get`,
+   * `lib/index.js:762-764`): resolves through the isolate-keyed service store
+   * with no fiber walk, so a service outside this module's inject list can be
+   * read where it is actually used. Optional so structural fakes can expose
+   * their faces directly instead.
+   */
+  get?(name: string): unknown;
+  /**
+   * Cordis's dependency watch (`ctx.inject(deps, callback)`,
+   * `cordis/src/registry.ts`): runs the callback once every named service is
+   * available and re-runs it when one is replaced. The dormant shell uses it
+   * to bind a service that materializes AFTER the mount instead of capturing
+   * its absence forever. Optional: structural fakes without it keep the
+   * resolve-now path.
+   */
+  inject?(
+    deps: readonly string[],
+    callback: (ctx: ClientContext) => unknown,
+  ): unknown;
   remote?: ClientRemoteLike;
   sessions?: ClientSessionsLike;
   conversation?: ClientConversationLike;

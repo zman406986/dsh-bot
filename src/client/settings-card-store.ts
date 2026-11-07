@@ -25,8 +25,15 @@
  *   layer;
  * - a draft the field does not accept BLOCKS the save instead of being dropped;
  * - a save is ONE `mutate(ops, revision)` call; a `false` answer or a
- *   read-back that disagrees with what was staged keeps the drafts and says so,
- *   rather than reporting a success the document does not carry.
+ *   FRESH read-back (a new snapshot AND a changed Host revision) that
+ *   disagrees with what was staged keeps the drafts and says so, rather than
+ *   reporting a success the document does not carry. A republished snapshot
+ *   at the same revision is the same document and settles nothing;
+ * - an accepted write is never called "Not saved" on the strength of the
+ *   pre-save snapshot the page handed in at the last render. A plain-object
+ *   `form.state` cannot read the document now, so verification defers to the
+ *   next snapshot the page hands in (`attach`); a live `getSnapshot`, when a
+ *   form offers one, settles it immediately.
  *
  * Pure registration data + pure model: no React, no DOM, no Cordis (tests
  * assert this module directly, offline, S8). The component factory that
@@ -219,9 +226,10 @@ function stringFieldSpec(
 /**
  * The schema fields this card edits — EXACTLY the fields of the host half's
  * `Config` (`src/plugin.ts`: `enabled`,
- * `wakeCoalesceWindowMs`, `inboxEnabled`, `racoonsRecordOnly`,
- * `racoonsStorageRoot`, `racoonsContextWindowTokens`, `inboxDir`,
- * `inboxRescanIntervalMs`, `microcompactEnabled`), in schema order. The pair
+ * `wakeCoalesceWindowMs`, `inboxEnabled`, `racoonsEnabled`,
+ * `racoonsRecordOnly`, `racoonsStorageRoot`, `racoonsContextWindowTokens`,
+ * `inboxDir`, `inboxRescanIntervalMs`, `microcompactEnabled`), in schema
+ * order. The pair
  * is pinned offline against `Config.dict`, so a field added to the schema
  * without a control fails the suite instead of silently rendering an editable
  * card that hides part of the namespace.
@@ -244,6 +252,11 @@ export const SETTINGS_CARD_FIELDS: readonly SettingsCardFieldSpec[] = [
     "inboxEnabled",
     "settings.card.field.inboxEnabled.label",
     "settings.card.field.inboxEnabled.hint",
+  ),
+  booleanFieldSpec(
+    "racoonsEnabled",
+    "settings.card.field.racoonsEnabled.label",
+    "settings.card.field.racoonsEnabled.hint",
   ),
   booleanFieldSpec(
     "racoonsRecordOnly",
@@ -472,12 +485,106 @@ export interface SettingsCardStore {
   discard(): void;
   /**
    * Submit every staged draft as ONE atomic `mutate(ops, revision)`, then
-   * re-seed from what the form reads back.
+   * re-seed from what the form reads back. An accepted write whose fresh
+   * snapshot is not readable yet is verified on the next `attach` (the page's
+   * re-render), never against the pre-save snapshot.
    */
   save(): Promise<void>;
 }
 
 const IDLE_VIEW: SettingsCardView = UNAVAILABLE_VIEW;
+
+/**
+ * One accepted write set waiting for a FRESH snapshot before it can be
+ * verified. The shipped page hands `form.state` as a plain object captured at
+ * the render that produced it, so the object still in hand immediately after
+ * `mutate` resolves is the PRE-SAVE document; comparing against it reported a
+ * successful save as "Not saved" (the live defect). The drafts are parked
+ * here so a dropped write can put them back for correction when the page
+ * re-renders.
+ */
+interface PendingVerification {
+  readonly writes: readonly SettingsCardWrite[];
+  readonly stale: ConfigFormSnapshotLike;
+  readonly drafts: ReadonlyMap<string, string>;
+}
+
+/** A snapshot stand-in for a form whose state read is malformed or throws. */
+const UNAVAILABLE_SNAPSHOT: ConfigFormSnapshotLike = { status: "unavailable" };
+
+/** Narrow a value to a snapshot object (anything else is unreadable). */
+function asSnapshot(value: unknown): ConfigFormSnapshotLike | undefined {
+  return typeof value === "object" && value !== null
+    ? (value as ConfigFormSnapshotLike)
+    : undefined;
+}
+
+/**
+ * The freshest snapshot a handed-in form offers, and whether it is live.
+ * Both reads are guarded: a form whose `state` getter throws (or returns a
+ * non-object) is an unreadable document, never an escaped exception.
+ */
+function readFormState(candidate: ConfigPageFormLike): {
+  readonly snapshot: ConfigFormSnapshotLike;
+  readonly live: boolean;
+} {
+  const reader = (candidate as { getSnapshot?: unknown }).getSnapshot;
+  if (typeof reader === "function") {
+    try {
+      const snapshot = asSnapshot(
+        (reader as () => unknown).call(candidate),
+      );
+      if (snapshot !== undefined) {
+        return { snapshot, live: true };
+      }
+    } catch {
+      // A throwing reader is not a verdict: fall back to the handed snapshot.
+    }
+  }
+  let state: unknown;
+  try {
+    state = candidate.state;
+  } catch {
+    // A throwing state read is an unreadable document, not a crash.
+    state = undefined;
+  }
+  return { snapshot: asSnapshot(state) ?? UNAVAILABLE_SNAPSHOT, live: false };
+}
+
+/**
+ * Whether a read-back is newer than the snapshot a save was planned from.
+ * Freshness requires BOTH evidence axes: a new snapshot (a live reader, or a
+ * different object) AND a changed Host revision. A republished object at the
+ * same revision is the same document, and an absent revision cannot prove
+ * anything — neither may be read as a landed (or dropped) write.
+ */
+function isFreshReadBack(
+  readBack: { readonly snapshot: ConfigFormSnapshotLike; readonly live: boolean },
+  before: ConfigFormSnapshotLike,
+): boolean {
+  const identityFresh = readBack.live || readBack.snapshot !== before;
+  const beforeRevision = before.revision;
+  const nextRevision = readBack.snapshot.revision;
+  const revisionFresh =
+    beforeRevision !== undefined &&
+    nextRevision !== undefined &&
+    nextRevision !== beforeRevision;
+  return identityFresh && revisionFresh;
+}
+
+/** Whether an accepted write set is absent from the document `landed` read. */
+function writeSetMissing(
+  landed: ConfigFormSnapshotLike | undefined,
+  writes: readonly SettingsCardWrite[],
+): boolean {
+  const section = asRecord(landed?.value);
+  return writes.some((write) => {
+    if (write.kind === "set") {
+      return section === null ? false : section[write.field] !== write.value;
+    }
+    return carries(landed?.user, write.field);
+  });
+}
 
 /** The card's own store: drafts + the handed-in form, projected into one box. */
 export function createSettingsCardStore(): SettingsCardStore {
@@ -486,6 +593,15 @@ export function createSettingsCardStore(): SettingsCardStore {
   let view: SettingsCardView = IDLE_VIEW;
   let saving = false;
   let failed = false;
+  let pending: PendingVerification | null = null;
+  /**
+   * Bumped by every bind/unbind. A save captures the value it started under;
+   * a continuation from an older generation never touches the current form's
+   * drafts or failure flag, and may only release the `saving` flag it owns.
+   */
+  let generation = 0;
+  /** The generation whose save currently owns `saving` (null when idle). */
+  let savingOwner: number | null = null;
   let version = 0;
   let box: SettingsCardBox = {
     view,
@@ -499,20 +615,62 @@ export function createSettingsCardStore(): SettingsCardStore {
   function publish(): void {
     version += 1;
     box = { view, dirty: staged.size > 0, saving, failed, version };
+    // One subscriber must not be able to silence the others (or escape into
+    // the host's notify loop): each call is isolated.
     for (const listener of [...listeners]) {
-      listener();
+      try {
+        listener();
+      } catch {
+        // contained: the next subscriber still runs
+      }
+    }
+  }
+
+  /**
+   * Verify one accepted-but-unverifiable write set once the page hands a
+   * snapshot newer than the pre-save render. Matching writes settle quietly
+   * (the drafts are already cleared); a disagreement is the honest failure
+   * and restores the parked drafts so the user can correct them.
+   */
+  function reconcilePending(): void {
+    if (pending === null || form === null) return;
+    const readBack = readFormState(form);
+    if (!isFreshReadBack(readBack, pending.stale)) return;
+    const held = pending;
+    pending = null;
+    if (writeSetMissing(readBack.snapshot, held.writes)) {
+      failed = true;
+      for (const [field, draft] of held.drafts) staged.set(field, draft);
     }
   }
 
   function read(): void {
     if (form === null) return;
-    const next = describeSettingsCard(form.state, staged);
+    reconcilePending();
+    const next = describeSettingsCard(readFormState(form).snapshot, staged);
     // A form without a write verb cannot be written to even when the document
     // claims to accept writes: the capability, not the claim, is what counts.
     view =
       next.available && typeof form.mutate !== "function"
         ? { ...next, writable: false }
         : next;
+    publish();
+  }
+
+  /**
+   * No form binds: forget the drafts, the failure line, and any verification
+   * parked against the form that just disappeared. The next form is a fresh
+   * document and must not inherit a draft it never showed.
+   */
+  function unbind(): void {
+    generation += 1;
+    form = null;
+    pending = null;
+    staged.clear();
+    saving = false;
+    savingOwner = null;
+    failed = false;
+    view = UNAVAILABLE_VIEW;
     publish();
   }
 
@@ -527,38 +685,42 @@ export function createSettingsCardStore(): SettingsCardStore {
       };
     },
     attach(next: ConfigPageFormLike | undefined) {
-      form = next ?? null;
-      if (form === null) {
-        view = UNAVAILABLE_VIEW;
-        publish();
+      if (next === undefined) {
+        unbind();
         return;
       }
+      // A page refresh hands the SAME form object with a newer `state`. That
+      // is still the save's own document, so its continuation stays valid; a
+      // different form (or a detach/unavailable gap) is a rebind and bumps the
+      // generation. Drafts survive a refresh either way.
+      if (form === next) {
+        read();
+        return;
+      }
+      generation += 1;
+      form = next;
       read();
     },
     attachUnavailable() {
-      form = null;
-      view = UNAVAILABLE_VIEW;
-      publish();
+      unbind();
     },
     detach() {
-      form = null;
-      staged.clear();
-      saving = false;
-      failed = false;
-      view = UNAVAILABLE_VIEW;
-      publish();
+      unbind();
     },
     edit(field: string, text: string) {
+      pending = null; // a new edit supersedes any deferred read-back
       staged.set(field, text);
       failed = false;
       read();
     },
     reset(field: string) {
+      pending = null;
       staged.set(field, "");
       failed = false;
       read();
     },
     discard() {
+      pending = null;
       staged.clear();
       failed = false;
       read();
@@ -572,49 +734,69 @@ export function createSettingsCardStore(): SettingsCardStore {
       if (plan.kind === "invalid") return Promise.resolve();
       if (plan.writes.length === 0) return Promise.resolve();
       const writes = plan.writes;
-      const revision = bound.state.revision;
+      const before = readFormState(bound).snapshot;
+      const revision = before.revision;
+      const drafts = new Map(staged);
       const ops: SettingsPathOpLike[] = writes.map((write) =>
         write.kind === "set"
           ? { op: "set", path: [write.field], value: write.value }
           : { op: "unset", path: [write.field] },
       );
+      const token = generation;
 
       saving = true;
+      savingOwner = token;
       failed = false;
+      pending = null;
       publish();
       return (async () => {
         try {
           // One atomic mutation: every staged field shares one revision fence
           // and one Host validation, so a partial document cannot land.
           const accepted = await bound.mutate(ops, revision);
+          // The form this save belongs to has been unbound or replaced: the
+          // current drafts/failure belong to someone else. Never verdict them.
+          if (token !== generation || form !== bound) return;
           if (!accepted) {
             failed = true;
             return;
           }
-          // The Host is the only authority on whether a value was accepted,
-          // so the outcome is read back rather than assumed. A read-back that
-          // disagrees with what was staged keeps the drafts and reports the
-          // failure instead of claiming a success the document does not carry.
-          const landed = form === null ? null : form.state;
-          const section = asRecord(landed?.value);
-          const mismatch = writes.some((write) => {
-            if (write.kind === "set") {
-              return section === null
-                ? false
-                : section[write.field] !== write.value;
-            }
-            return carries(landed?.user, write.field);
-          });
-          if (mismatch) {
-            failed = true;
-          } else {
+          // The Host accepted, so the write is never reported as a failure on
+          // the strength of the PRE-SAVE snapshot. The outcome is still read
+          // back — from a FRESH snapshot only: a live reader, or the form the
+          // page handed in after this render, AND a changed Host revision.
+          // When neither is available yet (the shipped plain-object form),
+          // the drafts clear and verification defers to the next `attach`;
+          // claiming failure there was the live "Not saved" defect.
+          failed = false;
+          const readBack = readFormState(bound);
+          const fresh = isFreshReadBack(readBack, before);
+          if (!fresh) {
             staged.clear();
+            pending = { writes, stale: before, drafts };
+            return;
           }
+          // The fresh read-back disagrees with what was staged: keep the
+          // drafts (they still stand) and report the failure honestly.
+          if (writeSetMissing(readBack.snapshot, writes)) {
+            failed = true;
+            return;
+          }
+          staged.clear();
         } catch {
-          failed = true;
+          if (token === generation && form === bound) failed = true;
         } finally {
-          saving = false;
-          read();
+          if (token === generation) {
+            saving = false;
+            savingOwner = null;
+            read();
+          } else if (savingOwner === token) {
+            // Detached/replaced underneath us: release only our own flag;
+            // the current form's drafts and failure line stay untouched.
+            saving = false;
+            savingOwner = null;
+            publish();
+          }
         }
       })();
     },

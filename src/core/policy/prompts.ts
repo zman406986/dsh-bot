@@ -45,8 +45,10 @@ export const MESSAGE_AGENT_TOOL = "message_agent";
 export const AWAIT_AGENT_TOOL = "await_agent";
 /**
  * Ticket 118 / ADR-0025 mitosis: summon another DISPATCHER. The child is a
- * peer — full dispatcher tool surface, dispatcher policy, its own state —
- * not a worker: no stream key, no ledger entry, no worker composition.
+ * peer — a team-leader dispatcher with its own workers, ledger, inbox and
+ * user — not a worker: no stream key, no ledger entry, no worker composition.
+ * Ticket 176: it gets the team-leader policy and NOT `spawn_dispatcher`, so it
+ * cannot summon further dispatchers.
  * ADR-0032: it is a TOP-LEVEL session (the host's `spawnDispatcher` seam
  * calls `ctx.agents.create` with no parent), so the subagent runtime's
  * `maxDepth` ceiling and its live-child pool do not bound it, and we set no
@@ -66,6 +68,28 @@ export const SPAWN_DISPATCHER_TOOL = "spawn_dispatcher";
  * work, not who may speak.
  */
 export type DispatcherOrigin = "user" | "spawned";
+
+/**
+ * The handoff-prompt line that carries the summoning dispatcher's session id.
+ *
+ * A summoned team leader answers its own user, but it must report progress and
+ * blockers UPWARD to the dispatcher that summoned it. A top-level child does
+ * not inherit a parent session pointer, so the id has to travel in the handoff
+ * prompt — the child's first user turn. The summon path
+ * (`CordisDshHost.spawnDispatcher`, another owner's file) must prepend
+ * {@link formatSummoningDispatcherHandoffLine} to the prompt it delivers; the
+ * team-leader policy and wake steps below name this exact line as the address
+ * source, so the copy and the handoff cannot drift apart silently.
+ */
+export const SUMMONING_DISPATCHER_ID_HANDOFF_LABEL =
+  "Summoning dispatcher session id";
+
+/** The exact handoff-prompt line the summon path must prepend. */
+export function formatSummoningDispatcherHandoffLine(
+  dispatcherId: string,
+): string {
+  return `${SUMMONING_DISPATCHER_ID_HANDOFF_LABEL}: ${dispatcherId}`;
+}
 
 /**
  * Dispatcher tool names, in registration order — eight tools after ticket
@@ -90,17 +114,17 @@ export const TOOL_DESCRIPTIONS = {
   [CHECK_WORKERS_TOOL]:
     "List your running and recent workers, or inspect one by id: status, elapsed, tool count, transcript, recent activity. A snapshot — never a wait loop.",
   [STEER_WORKER_TOOL]:
-    "Send a correction into a running worker. Context is kept; only the latest undelivered correction applies. Refused when the worker is not running.",
+    "Send a correction into a running worker. Context is kept; only the latest undelivered correction applies. A dormant worker with a resumable session is accepted and resumed; a finished or never-started worker is refused.",
   [STOP_WORKER_TOOL]:
     "Stop a worker for good. Its later result and any parked correction are dropped. Nothing reaches the user from this tool. A worker that was live before a restart cannot be reached: stopping it releases the stream key it holds, and you are told so.",
   [DELIVER_RESULT_TOOL]:
-    "Send a result to the user. Use it on wake turns only when the work is new and relevant; otherwise stay silent. Lead with the concrete thing finished. Optionally mark the matching todo completed.",
+    "Send a result to the user. Use it on wake turns only when the work is new and relevant; otherwise stay silent. Start with the specific outcome, in plain terms. Optionally mark the matching todo completed.",
   [MESSAGE_AGENT_TOOL]:
     "Send text to a worker or another dispatcher, by id. A worker id parks it as that worker's next correction (latest wins; folds in at its next step). A dispatcher id drops it in that peer's inbox for its next turn; priority may interrupt only that peer's background work, never its user's turn. Fire-and-forget: you get an ack, and any reply arrives later on a fresh turn — never wait or hold a turn open. A refused send is reported and dropped.",
   [AWAIT_AGENT_TOOL]:
     "Wait once, bounded, for one worker to finish; return its terminal status and result. Use it only when your next step is blocked on that worker. timeout_ms 0–120000 (default 30000); 0 reads the current state. still-running and released are normal: the worker keeps going and its result still arrives. Workers only — a dispatcher is not awaitable.",
   [SPAWN_DISPATCHER_TOOL]:
-    "Summon another dispatcher: a peer with your tools and policy, its own workers, ledger and inbox — not a worker. Give it the problem and the wanted outcome; it cannot see this conversation. It has its own chat and user, and answers them directly. Returns its session id at once. Message it with message_agent; never wait on it. Being top-level, it is not bound by the subagent depth limit or the live-child pool.",
+    "Summon another dispatcher: a team-leader dispatcher with its own workers, ledger, inbox and user — not a worker. Give it the problem and the wanted outcome; it cannot see this conversation. It answers its own user directly and reports back to you. It cannot summon further dispatchers. Returns its session id at once. Message it with message_agent; never wait on it. Being top-level, it is not bound by the subagent depth limit or the live-child pool.",
 } as const;
 
 /**
@@ -117,7 +141,7 @@ export const TOOL_DESCRIPTIONS_ZH: Record<
   [CHECK_WORKERS_TOOL]:
     "列出在运行和最近的工作者，或按 id 查看其中一个：状态、已用时间、工具调用次数、记录、最近活动。这是快照，不是等待循环。",
   [STEER_WORKER_TOOL]:
-    "向仍在运行的工作者发一次修正。上下文保留；只有最新一条尚未送达的修正生效。工作者没有在运行时会拒绝。",
+    "向仍在运行的工作者发一次修正。上下文保留；只有最新一条尚未送达的修正生效。仍可恢复会话的休眠工作者会被接受并恢复；已结束或从未启动的工作者会被拒绝。",
   [STOP_WORKER_TOOL]:
     "永久停止一个工作者。它之后的结果和已停放的修正都会被丢弃。这个工具不会向用户发送任何东西。在上次重启时还活着的工作者联系不到：停止它会释放它占用的流键，并会明确告诉你。",
   [DELIVER_RESULT_TOOL]:
@@ -127,7 +151,7 @@ export const TOOL_DESCRIPTIONS_ZH: Record<
   [AWAIT_AGENT_TOOL]:
     "对一个工作者做一次有上限的等待，等它结束，返回最终状态和结果。只在你下一步卡在那个工作者上时使用。`timeout_ms` 为 0 到 120000（默认 30000）；0 表示只读当前状态。`still-running` 和 `released` 都是正常结果：工作者继续运行，结果之后仍会送到。只能等工作者——调度器不能被等待。",
   [SPAWN_DISPATCHER_TOOL]:
-    "召唤另一个调度器：一个拥有你的工具和策略的同伴，有自己的工作者、账本和收件箱——不是工作者。把问题和你要的结果交给它；它看不到这个对话。它有自己的聊天和用户，会直接答复他们。立即返回它的会话 id。用 `message_agent` 给它发消息；绝不要等它。它是顶层会话，不受子代理深度上限和存活子会话池的限制。",
+    "召唤另一个调度器：一个团队负责人调度器，有自己的工作者、账本、收件箱和用户——不是工作者。把问题和你要的结果交给它；它看不到这个对话。它直接答复自己的用户，并向你回报。它不能再次召唤调度器。立即返回它的会话 id。用 `message_agent` 给它发消息；绝不要等它。它是顶层会话，不受子代理深度上限和存活子会话池的限制。",
 };
 
 /**
@@ -295,10 +319,10 @@ function buildDispatcherPolicySectionEn(
  * Owner-directed copy, 2026-11-02. Two tool names in the source text are the
  * host's, not ours, and are mapped here rather than dropped:
  *
- * - "subagents you dispatch with the `subagent` tool" → `spawn_worker`. The
- *   host's raw `subagent` tool exists, but its children skip the worker
- *   contract, the tool barrier and the ledger entry (see
- *   `src/worker/preset.ts`), so a team leader using it would create children
+ * - "subagents you dispatch with the `subagent` tool" → a worker created with
+ *   `spawn_worker`. The host's raw spawn verbs exist, but their children skip
+ *   the worker contract, the tool barrier and the ledger entry (see
+ *   `src/worker/preset.ts`), so a team leader using them would create children
  *   this plugin cannot see. `spawn_worker` is the same call plus that
  *   composition.
  *
@@ -312,17 +336,17 @@ function buildSpawnedDispatcherSectionEn(): string {
     "",
     "Lead a team to tackle a massive job, likely too much code for your context window.",
     "",
-    "Take baby steps, chunk down tasks as small and as granular as you can. Do not let a subagent try one-shotting a single issue/feature or multiples, unless work is obviously trivial - separate diagnosing/planning/execution/testing, each can be broken down to smaller steps for sophisticated work. Parallelize whenever possible.",
+    "Take baby steps, chunk down tasks as small and as granular as you can. Do not let a worker try one-shotting a single issue/feature or multiples, unless work is obviously trivial - separate diagnosing/planning/execution/testing, each can be broken down to smaller steps for sophisticated work. Parallelize whenever possible.",
     "",
     "## Rules",
     "",
     "- Don't read or write files yourself unless trivially small.",
     "- Remember workers start blank, don't make them read the whole repo. Your prompt should carry context including file paths, prior findings, acceptance criteria, and what to report back.",
-    "- Tell subagents to not overcomplicate, do not invent a blockage for themselves, and do as little testing as possible.",
+    "- Tell workers to not overcomplicate, do not invent a blockage for themselves, and do as little testing as possible.",
     "- If any agent ran for more than 30min, you should consider whether to reduce its scope and rechunk remaining for parallel work.",
     "- Group tests; don't let every worker run a full suite.",
     "- Maintain a timed ledger to track both progress and team/worker state; update it after any dispatch you send or receive.",
-    "- You do not spawn other dispatchers. If the job needs more teams than you have, report back to the dispatcher that summoned you with what is needed — it spawns them.",
+    "- You do not spawn other dispatchers. If the job needs more teams than you have, report back to the dispatcher that summoned you — its session id is on the \"Summoning dispatcher session id\" line of your handoff prompt — with what is needed; it spawns them.",
   ].join("\n");
 }
 
@@ -336,17 +360,17 @@ function buildSpawnedDispatcherSectionZh(): string {
     "",
     "带领一个团队去攻一项庞大的工作，代码量很可能超出你的上下文窗口。",
     "",
-    "步子要小，把任务切得尽可能小、尽可能细。不要让一个下级代理试图一次做完一个或多个问题/功能，除非那件工作明显琐碎——把诊断、规划、执行、测试分开，复杂工作里的每一项都还能再往下拆。尽可能并行。",
+    "步子要小，把任务切得尽可能小、尽可能细。不要让一个工作者试图一次做完一个或多个问题/功能，除非那件工作明显琐碎——把诊断、规划、执行、测试分开，复杂工作里的每一项都还能再往下拆。尽可能并行。",
     "",
     "## 规则",
     "",
     "- 除非极其琐碎，不要自己读写文件。",
     "- 记住工作者是从空白开始的，不要让他们去读整个仓库。你的提示要带上背景，包括文件路径、已有发现、验收标准，以及要回报什么。",
-    "- 告诉下级代理不要把事情搞复杂，不要自己给自己发明阻碍，测试尽量少做。",
+    "- 告诉工作者不要把事情搞复杂，不要自己给自己发明阻碍，测试尽量少做。",
     "- 任何一个代理跑了超过 30 分钟，你都应该考虑缩小它的范围，把剩下的活重新切分以便并行。",
     "- 分组跑测试；不要让每个工作者都跑整套测试。",
     "- 维护一份带时间的账本，跟踪进度以及团队和工作者状态；每发出一件工作或收到一件工作之后都更新它。",
-    "- 你不召唤其他调度器。如果这项工作需要的团队比你现在多，就向召唤你的那个调度器回报需要什么——由它去召唤。",
+    "- 你不召唤其他调度器。如果这项工作需要的团队比你现在多，就向召唤你的那个调度器回报需要什么——它的会话 id 写在你的交接提示里——由它去召唤。",
   ].join("\n");
 }
 
@@ -417,7 +441,7 @@ function buildChiefOfStaffStandingRulesBlockEn(): string {
     "- Keep turns short: reply or act, then end or wait bounded (`await_agent`); never loop.",
     "- Tell the user what you are doing before you do it.",
     "- A correction is a steer (`message_agent`), not a cloned worker.",
-    "- Plain and concise language, no jargon. Lead with the concrete thing, not \"it worked\".",
+    "- Plain and concise language, no jargon. Name the actual outcome instead of a vague success claim.",
     "- Update the ledger and keep it lean.",
   ].join("\n");
 }
@@ -450,7 +474,7 @@ function buildChiefOfStaffStandingRulesBlockZh(): string {
     "- 回合要短：回答或动手，然后结束，或者做一次有上限的等待（`await_agent`）；绝不循环。",
     "- 在做之前先告诉用户你要做什么。",
     "- 修正就是纠偏（`message_agent`），不是复制一个工作者。",
-    "- 语言平实简洁，不用行话。开头先说具体做到了什么，不要说“它跑通了”。",
+    "- 语言平实简洁，不用行话。直接说实际结果，不要用笼统的成功说法。",
     "- 更新账本，并保持精简。",
   ].join("\n");
 }
@@ -506,8 +530,8 @@ function buildChiefOfStaffWakeInstructionsBlockEn(): string {
     "2. Decide, for each result, whether the user should hear about it:",
     "   - Tell them if the result is new, relevant, or they asked to be told.",
     "   - Stay silent and end the turn if it is stale or duplicate info for the user.",
-    "3. If you speak, lead with the concrete thing that finished — not \"done\", not \"it worked\".",
-    "4. Deliver through the user-facing send only. Then mark the matching todo `completed`.",
+    "3. If you speak, state the specific outcome. A vague claim that work finished tells the user nothing.",
+    "4. State the result in your reply to the user — that reply is the channel they read. Then mark the matching todo `completed`.",
     "5. If a result is an error, report the honest state and decide: retry as a new spawn, steer if still live (it will not be), or drop and say so.",
     "6. Silence is a valid outcome.",
   ].join("\n");
@@ -528,7 +552,7 @@ function buildTeamLeaderWakeInstructionsBlockEn(): string {
     "",
     "1. Match each settled worker to its ledger entry (`todo_id` on the worker record). A settle closes one part, not the job.",
     "2. Re-chunk what is left. A finished part usually changes the split: decide what can run in parallel now, and dispatch it before you answer anyone.",
-    "3. Report back to whoever gave you the task order. `message_agent` to your parent agent; use the user-facing send if the user directly ordered something from you.",
+    "3. Report back to whoever gave you the task order. `message_agent` to the dispatcher that summoned you, addressed to the session id on the \"Summoning dispatcher session id\" line of your handoff prompt; use the user-facing send if the user directly ordered something from you.",
     "4. Report failures early instead of exhausting save attempts. If the approach looks like a dead end, report at the first sign.",
     "5. Silence is a valid outcome only when nothing changed for anyone above you.",
   ].join("\n");
@@ -544,7 +568,7 @@ function buildChiefOfStaffWakeInstructionsBlockZh(): string {
     "   - 如果结果是新的、相关的，或用户要求被告知，就告诉他们。",
     "   - 如果对用户来说已经过时或属于重复信息，就保持沉默并结束回合。",
     "3. 如果要说话，开头先说清具体完成的是什么——不要说“已完成”，也不要说“它跑通了”。",
-    "4. 只通过面向用户的发送来送达。然后把对应的待办标为 `completed`。",
+    "4. 在给用户的回复里说明结果——用户读到的就是这条回复。然后把对应的待办标为 `completed`。",
     "5. 如果结果是错误，如实报告状态并做决定：作为新的启动重试、如果仍存活就发纠偏（它不会存活），还是丢弃并说明。",
     "6. 沉默是有效的结果。",
   ].join("\n");
@@ -557,7 +581,7 @@ function buildTeamLeaderWakeInstructionsBlockZh(): string {
     "",
     "1. 把每个已结束的工作者对应到它的账本条目（工作者记录上的 `todo_id`）。结束只是关掉其中一块，不是整个任务。",
     "2. 把剩下的重新切分。一块做完通常会改变切法：现在定下哪些可以并行，并在答复任何人之前把它们派发出去。",
-    "3. 向交给你这项任务的人回报。用 `message_agent` 发给你的上级代理；如果是用户直接向你下的令，就用面向用户的发送。",
+    "3. 向交给你这项任务的人回报。用 `message_agent` 发给召唤你的那个调度器，地址用你交接提示开头那一行给出的会话 id；如果是用户直接向你下的令，就用面向用户的发送。",
     "4. 失败要尽早报告，不要耗尽挽回的尝试。如果这条路看起来是死路，一有迹象就报告。",
     "5. 只有在上层没有任何人因此发生变化时，沉默才是有效的结果。",
   ].join("\n");
@@ -602,7 +626,7 @@ function buildChiefOfStaffPeerWakeInstructionsBlockEn(): string {
     "1. Treat every message above as coming from another assistant — not from the user.",
     "2. Decide whether this peer note changes work already in flight (steer), needs new work (spawn), or can be acknowledged and dropped.",
     "3. Do not paraphrase the peer note to the user on this turn unless the user asked to hear about peer traffic. Ending the turn in silence is valid.",
-    "4. If you must reply to the peer later, use message_agent addressed to the sender's session id (shown in parentheses next to the sender's name above) — never the user-facing send.",
+    "4. If you must reply to the peer later, use message_agent addressed to the sender's session id shown above — never the user-facing send.",
     "5. Never present peer text as if the user wrote it.",
   ].join("\n");
 }
@@ -653,16 +677,40 @@ function buildTeamLeaderPeerWakeInstructionsBlockZh(): string {
  * worker uses to report a dead end. The peer block's "stay silent" rule would
  * bury exactly the message that needs a decision, so this block replaces it
  * whenever every notice in the wake is a worker reply. New copy only.
+ *
+ * `origin` is trailing and defaults to `user`, so the chief-of-staff bytes are
+ * unchanged. A team leader gets the upward-reporting step 4: its worker reply
+ * belongs to the summoner's chain, not to the leader's own user.
  */
 export function buildWorkerReplyWakeInstructionsBlock(
   language: PolicyLanguage = "en",
+  origin: DispatcherOrigin = "user",
 ): string {
   return language === "zh"
-    ? buildWorkerReplyWakeInstructionsBlockZh()
-    : buildWorkerReplyWakeInstructionsBlockEn();
+    ? buildWorkerReplyWakeInstructionsBlockZh(origin)
+    : buildWorkerReplyWakeInstructionsBlockEn(origin);
 }
 
-function buildWorkerReplyWakeInstructionsBlockEn(): string {
+/** EN face selection for the worker-reply instructions. */
+function buildWorkerReplyWakeInstructionsBlockEn(
+  origin: DispatcherOrigin,
+): string {
+  return origin === "spawned"
+    ? buildTeamLeaderWorkerReplyWakeInstructionsBlockEn()
+    : buildChiefOfStaffWorkerReplyWakeInstructionsBlockEn();
+}
+
+/** ZH face selection for the worker-reply instructions. */
+function buildWorkerReplyWakeInstructionsBlockZh(
+  origin: DispatcherOrigin,
+): string {
+  return origin === "spawned"
+    ? buildTeamLeaderWorkerReplyWakeInstructionsBlockZh()
+    : buildChiefOfStaffWorkerReplyWakeInstructionsBlockZh();
+}
+
+/** Chief of staff: five steps, unchanged bytes. */
+function buildChiefOfStaffWorkerReplyWakeInstructionsBlockEn(): string {
   return [
     "## What to do now",
     "",
@@ -674,7 +722,26 @@ function buildWorkerReplyWakeInstructionsBlockEn(): string {
   ].join("\n");
 }
 
-function buildWorkerReplyWakeInstructionsBlockZh(): string {
+/**
+ * Team leader: same five steps, but the audience in step 4 is upward. A
+ * summoned dispatcher's workers report to it, and it reports to the dispatcher
+ * that summoned it — telling its own user would bypass the chain that gave the
+ * order. The handoff-prompt line is the only place the summoner id is stated.
+ */
+function buildTeamLeaderWorkerReplyWakeInstructionsBlockEn(): string {
+  return [
+    "## What to do now",
+    "",
+    "1. These come from your own workers, mid-task. They are not the user, and they are not another dispatcher.",
+    "2. Read the status word on each. `blocked` means the worker is telling you the method or the scope is a dead end — decide now: steer it with what you know, stop it, or spawn different work. Do not leave it running on a dead end.",
+    "3. `progress` and `note` usually need nothing. Act only if they change what you are doing.",
+    "4. If it changes what the dispatcher that summoned you is waiting for, report it upward with message_agent addressed to the session id on the \"Summoning dispatcher session id\" line of your handoff prompt — in plain language, without naming the machinery or quoting the worker. Otherwise end the turn in silence.",
+    "5. Reply to the worker with message_agent addressed to its id. Never the user-facing send.",
+  ].join("\n");
+}
+
+/** ZH face of the worker-reply instructions (ticket 153) — same five steps. */
+function buildChiefOfStaffWorkerReplyWakeInstructionsBlockZh(): string {
   return [
     "## 现在该做什么",
     "",
@@ -682,6 +749,19 @@ function buildWorkerReplyWakeInstructionsBlockZh(): string {
     "2. 逐条看状态词。`blocked` 表示工作者在告诉你方法或范围是死路——现在就决定：用你知道的信息纠正它、停掉它，还是换一件工作交给别人。不要让它继续跑在死路上。",
     "3. `progress` 和 `note` 通常不需要动作。只有当它们改变了你在做的事时才处理。",
     "4. 如果它改变了用户在等的结果，就用日常的话告诉用户，不要提背后的运行细节，也不要转述工作者。否则就沉默地结束回合。",
+    "5. 用 `message_agent` 按工作者的 id 回复它。绝不要用面向用户的发送。",
+  ].join("\n");
+}
+
+/** ZH face of the team-leader worker-reply steps — step 4 reports upward. */
+function buildTeamLeaderWorkerReplyWakeInstructionsBlockZh(): string {
+  return [
+    "## 现在该做什么",
+    "",
+    "1. 这些来自你自己的工作者，是在任务进行中发出的。它们不是用户，也不是另一个调度器。",
+    "2. 逐条看状态词。`blocked` 表示工作者在告诉你方法或范围是死路——现在就决定：用你知道的信息纠正它、停掉它，还是换一件工作交给别人。不要让它继续跑在死路上。",
+    "3. `progress` 和 `note` 通常不需要动作。只有当它们改变了你在做的事时才处理。",
+    "4. 如果它改变了召唤你的那个调度器在等的结果，就用 `message_agent` 向上回报，地址用你交接提示开头那一行给出的会话 id——用日常的话，不要提背后的运行细节，也不要转述工作者。否则就沉默地结束回合。",
     "5. 用 `message_agent` 按工作者的 id 回复它。绝不要用面向用户的发送。",
   ].join("\n");
 }

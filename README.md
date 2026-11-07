@@ -8,14 +8,14 @@ In dsh, one agent turn does the work, so a long job blocks the chat. This plugin
 
 The dispatcher has eight tools: `spawn_worker`, `check_workers`, `steer_worker`, `stop_worker`, `deliver_result`, `message_agent`, `await_agent`, and `spawn_dispatcher`.
 
-Workers are leaves. They never talk to you. A worker returns a final answer, can send the dispatcher a note with `reply_to_dispatcher`, and can ask for a permission or a named credential with `request_access`. That ask arrives as a prompt with Allow, Always allow (this session), or Deny. An unanswered ask is denied after a timeout.
+Workers are leaves. They never talk to you. A worker returns a final answer and can send the dispatcher a note with `reply_to_dispatcher`. When a worker needs access it does not have, it says so in its final answer and stops; there is no ask channel.
 
 Status: version 0.1.0. It is not published to npm. Install it from a checkout.
 
 ## What you need
 
-- Node.js 22.13 or newer. This is the `engines` floor in `package.json`.
-- A local dsh install that can load plugins. The plugin targets the dsh 0.2.x plugin API and was last run against dsh 0.2.1-rc.3.
+- Node.js 22.15 or newer. This is the `engines` floor in `package.json`; the e2e harness needs 22.15 for `zstdDecompressSync`.
+- A local dsh install that can load plugins. The plugin targets the dsh 0.2.x plugin API and was last run against dsh 0.2.2-rc.1.
 - npm. This repo uses npm workspaces, not pnpm.
 - The cordis framework is a peer dependency. `npm install` fetches it.
 
@@ -41,7 +41,7 @@ Select the bundle `dsh-multitask-dispatcher` in that profile's bundle list. Do n
 - `npm run build` compiles the vendored libraries and then the plugin, into `lib/`. It runs `build:vendor` first.
 - `npm run build:vendor` compiles only `vendor/racoons/core` and `vendor/racoons/adapter`.
 - `npm run build:client` bundles the browser module into the `client/` folder with esbuild. dsh serves that bundle to its web UI.
-- `npm run typecheck` builds the vendored libraries, then type-checks the plugin and the browser module. It writes no output.
+- `npm run typecheck` runs `build:vendor`, which emits the vendored libraries, then three no-emit passes: the plugin, the browser module, and the test tree.
 
 `lib/` and `client/` are build output. They are git-ignored.
 
@@ -61,10 +61,9 @@ The offline suite is the default lane. A second harness, `npm run e2e`, drives a
 2. Type `/dsh-bot`. That chat becomes the dispatcher.
 3. Ask for work. The dispatcher keeps answering and gives long jobs to workers.
 
-Two more commands:
+One more command:
 
 - `/dispatcher-steer <worker id> <instruction>` corrects a worker that is still running.
-- `/dispatcher-resolve <worker id> <allow|always-allow|deny>` answers a pending ask.
 
 To stop, close the chat or unload the plugin. There is no stop command.
 
@@ -77,7 +76,8 @@ The dispatcher can call `spawn_dispatcher` to summon another dispatcher.
 - It does not see the first chat. The prompt it was given is its first message.
 - The two talk with `message_agent`. Neither can wait on the other.
 - The sidebar glyph is the only mark on a dispatcher session. There is no header chip.
-- The plugin sets no spawn limit of its own. Because the new dispatcher is a top-level session, dsh's subagent depth limit and its live-child pool do not apply to it either. A tree of dispatchers is uncapped today. That is observed behaviour, not a promise.
+- Only the user-started dispatcher class may summon. A summoned dispatcher is a team leader: it is not given `spawn_dispatcher` at all (ticket 176), so there is no second level of dispatchers.
+- On the user-started class, the plugin sets no depth or count bound of its own. Because the new dispatcher is a top-level session, dsh's subagent depth limit and its live-child pool do not apply to it either. That is observed behaviour, not a promise.
 
 ## Configuration
 
@@ -86,17 +86,17 @@ Every field is a setting on the plugin's card on dsh's Plugins page. A saved cha
 | Field | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | Turns the plugin on. Off registers nothing. |
-| `accessRequestTimeoutMs` | `120000` | How long an unanswered ask waits before it is denied. |
 | `wakeCoalesceWindowMs` | `0` | Batches background wakes into one dispatcher turn per window. `0` wakes at once. |
 | `inboxEnabled` | `false` | Optional file inbox. Off starts nothing. |
 | `inboxDir` | `""` | Inbox folder. Empty disables intake even when enabled. |
 | `inboxRescanIntervalMs` | `5000` | Fallback rescan interval. Clamped to a 1000 ms floor. |
-| `racoonsRecordOnly` | `false` | Records context cleanup without applying the bulk prune. |
-| `racoonsStorageRoot` | `""` | Where the cleanup ledger is stored. Empty uses `<DSH_HOME>/storages/racoons`. |
-| `racoonsContextWindowTokens` | `0` | Context window for the automatic prune. `0` leaves it off. |
+| `racoonsEnabled` | `false` | Optional test feature. Off means racoons is not mounted at all. |
+| `racoonsRecordOnly` | `false` | Only used while racoons is enabled. Records context cleanup without applying the bulk prune. |
+| `racoonsStorageRoot` | `""` | Only used while racoons is enabled. Where the cleanup ledger is stored. Empty uses `<DSH_HOME>/storages/racoons`. |
+| `racoonsContextWindowTokens` | `0` | Only used while racoons is enabled. Context window for the automatic prune. `0` leaves it off. |
 | `microcompactEnabled` | `false` | Clears old tool results on dispatcher sessions. Off, and not yet checked live. |
 
-The context-cleanup library is always on while the plugin is on, and it covers every session in the dsh process. Removed content can be restored by its recall id. Originals are stored per session under the storage root.
+The context-cleanup library (racoons) is an optional test feature and is **off by default**. When it is on, it covers every session in the dsh process; removed content can be restored by its recall id, and originals are stored per session under the storage root. Turn it on with `racoonsEnabled: true` — the manual `dsh-bot-RACOONS.bat` launcher and `dev/cordis.racoons.patch.yml` are the supported ways.
 
 ## Project layout
 

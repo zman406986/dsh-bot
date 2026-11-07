@@ -5,7 +5,9 @@
  */
 
 import {
+  abortedReportBody,
   clampActivity,
+  formatWakeReportBody,
   TOOL_RESULT_SUMMARY_MAX_ROWS,
 } from "./report-clamp.js";
 import type { WorkerLiveness } from "./liveness.js";
@@ -76,7 +78,19 @@ export type CheckWorkersToolResult =
     };
 
 export type SteerWorkerToolResult =
-  | { readonly ok: true; readonly note: string }
+  | {
+      readonly ok: true;
+      readonly note: string;
+      /**
+       * Readable-status display fields (additive): the target worker's id and
+       * title, so a row can say `Steering Rewrite auth docs` instead of a
+       * UUID. Optional because a dormant target has no roster title.
+       */
+      readonly worker_id: string;
+      readonly title?: string;
+      /** Present only when the target had no roster record (dormant). */
+      readonly dormant?: true;
+    }
   | {
       readonly ok: false;
       readonly reason: "unknown-worker" | "not-running";
@@ -84,19 +98,125 @@ export type SteerWorkerToolResult =
     };
 
 export type StopWorkerToolResult =
-  | { readonly ok: true; readonly note: string }
+  | {
+      readonly ok: true;
+      readonly note: string;
+      /** Readable-status display fields (additive). */
+      readonly worker_id: string;
+      readonly title?: string;
+      /**
+       * Which stop path ran: the ordinary live abort, or releasing the stream
+       * a crash-time hold still owned. Display-only; the model-facing note
+       * already distinguishes them.
+       */
+      readonly mode: "stopped" | "released-hold";
+    }
   | {
       readonly ok: false;
-      readonly reason: "already-settled";
+      /**
+       * `hold-release-failed`: the worker is a known crash-time hold, but the
+       * store refused the marker drop, so nothing was released. Distinct from
+       * `already-settled`, which means the id was never a live worker or hold
+       * this session could see.
+       */
+      readonly reason: "already-settled" | "hold-release-failed";
       readonly detail: string;
     };
 
-export type DeliverResultToolResult = {
-  readonly ok: boolean;
-  readonly delivered: boolean;
-  readonly todo_completed: string | null;
-  readonly detail?: string;
-};
+/**
+ * `deliver_result`'s wire result.
+ *
+ * Delivery is conversational (ADR-0009): the shipped plugin wires no separate
+ * user-facing send, so the dispatcher's own reply IS the channel. In that mode
+ * `channel` is `"reply"` and `delivered` is true because the delivery
+ * obligation is discharged when the result is committed to that reply — not
+ * because the user has already read it. `channel: "send"` means the wired
+ * send seam carried the text itself.
+ *
+ * `ok` is false whenever the requested effect did not happen: a failed send, a
+ * todo id outside this session's ledger, or a ledger item that could not be
+ * closed. `delivered` and `todo_completed` stay explicit so a caller never has
+ * to infer the outcome from `ok`.
+ */
+export type DeliverResultToolResult =
+  | {
+      readonly ok: true;
+      readonly delivered: true;
+      /** How the text reaches the user: the wired send, or this reply. */
+      readonly channel: "send" | "reply";
+      readonly todo_completed: string | null;
+      /** Display-only title of the completed entry (never report text). */
+      readonly todo_title?: string;
+      /**
+       * Reply channel only: attachment paths that had no channel and were not
+       * sent. The text is still recorded for the reply; files are not.
+       */
+      readonly attachments_not_sent?: number;
+      readonly detail?: string;
+    }
+  | {
+      readonly ok: false;
+      readonly delivered: false;
+      readonly todo_completed: null;
+      readonly reason?: "unknown-target" | "send-failed";
+      readonly detail?: string;
+    };
+
+/**
+ * Honest success copy for a delivery whose channel is the dispatcher's own
+ * reply (no user-facing send is wired — ADR-0009). It never says the user has
+ * already seen the text: the reply has not happened yet when this is shown.
+ */
+export function formatDeliverResultRecorded(input: {
+  readonly todoId?: string | null;
+  readonly todoTitle?: string | null;
+  readonly attachmentsNotSent?: number;
+}): string {
+  const parts = [
+    "Result recorded — say it in your reply, which is how the user receives it.",
+  ];
+  const todoRef =
+    typeof input.todoTitle === "string" && input.todoTitle.length > 0
+      ? `"${input.todoTitle}"`
+      : typeof input.todoId === "string" && input.todoId.length > 0
+        ? deliverTodoDisplayRef(input.todoId)
+        : null;
+  if (todoRef !== null) {
+    parts.push(`todo ${todoRef} marked done.`);
+  }
+  const attachments = input.attachmentsNotSent ?? 0;
+  if (attachments > 0) {
+    const noun = attachments === 1 ? "attachment path" : "attachment paths";
+    const verb = attachments === 1 ? "was" : "were";
+    parts.push(
+      `${attachments} ${noun} ${verb} not sent — this build has no file channel.`,
+    );
+  }
+  return parts.join(" ");
+}
+
+/** `todo-7` reads as `7` in a row; any other id is shown verbatim. */
+export function deliverTodoDisplayRef(todoId: string): string {
+  const stripped = todoId.replace(/^todo[-_]/i, "");
+  return stripped.length > 0 ? stripped : todoId;
+}
+
+/**
+ * Silent ledger fence for `deliver_result` (the same shape `message_agent`
+ * uses for a foreign target): one line answers both a typo and another
+ * dispatcher's todo, so the refusal never reveals that a foreign entry exists.
+ */
+export function formatDeliverResultUnknownTarget(todoId: string): string {
+  return `No todo entry "${todoId}" in this session — nothing was delivered and nothing was marked completed.`;
+}
+
+/**
+ * Silent worker fence shared by the roster tools: one line answers both a
+ * typo and another dispatcher's worker, so existence never leaks.
+ */
+export function formatUnknownWorkerDetail(workerId: string): string {
+  return `unknown worker: ${workerId}`;
+}
 
 /**
  * Ticket 118 / ADR-0025 mitosis: `spawn_dispatcher`'s wire result.
@@ -133,8 +253,10 @@ export type SpawnDispatcherToolResult =
  * Ticket 118: the `spawn_dispatcher` success note.
  *
  * Every claim here is checked against the shipped surface:
- * - the child is a dispatcher peer with the dispatcher tool set and its own
- *   workers/ledger/inbox (ADR-0025 decision 4, ADR-0019 scoping);
+ * - the child is a team-leader dispatcher with its own workers/ledger/inbox
+ *   and its own user (ADR-0025 decision 4, ADR-0019 scoping, ticket 176);
+ * - it gets the team-leader policy, and `spawn_dispatcher` is withheld from
+ *   its surface, so it cannot summon further dispatchers (ticket 176);
  * - `message_agent` takes a dispatcher session id (ticket 116 routing);
  * - a dispatcher is NOT awaitable — `await_agent` refuses `not-awaitable`
  *   (ticket 117), so "do not wait on it" is a real constraint, not advice.
@@ -144,8 +266,8 @@ export function formatSpawnDispatcherNote(input: {
   dispatcherId: string;
 }): string {
   return [
-    `Summoned "${input.title}" as a peer dispatcher (session ${input.dispatcherId}).`,
-    "It runs with the same dispatcher tools and policy as you, its own workers, its own ledger, and its own inbox, and it works from the prompt it was given — it does not see this conversation.",
+    `Summoned "${input.title}" as a peer dispatcher — a team-leader dispatcher with its own workers, ledger, inbox and user, working from the prompt it was given; it does not see this conversation.`,
+    "It cannot summon further dispatchers.",
     `Message it with message_agent addressed to ${input.dispatcherId}; its answer arrives later as its own message on a fresh turn. It is a dispatcher in its own chat with its own user and answers that user directly; what it sends you answers what you asked.`,
     "Do not wait on it: a dispatcher is not awaitable (await_agent is workers-only). Tell the user what is underway if they need to know, then end the turn or move to other work.",
   ].join(" ");
@@ -166,6 +288,12 @@ export type MessageAgentToolResult =
       /** Which existing lane accepted it: the steer path or the peer inbox. */
       readonly delivered_as: "steer" | "peer";
       readonly message_id: string;
+      /**
+       * Readable-status display field (additive): true when the worker was
+       * dormant and its session is being resumed. Absent on the live path, so
+       * exact-shape callers are unaffected.
+       */
+      readonly dormant?: true;
       /** Model-facing fire-and-forget ack text. Not user-visible. */
       readonly note: string;
     }
@@ -285,6 +413,26 @@ export type AwaitAgentToolResult =
     };
 
 /**
+ * Status-aware settle body shared by the await wire result and its summary.
+ *
+ * The settle path clamps every report through the completed-report path, so an
+ * aborted or error settle with no text is stored as the "worker finished"
+ * placeholder — and the adapter's own empty-error sentinel
+ * ("worker failed with no message") can be stored verbatim. Neither is a
+ * result. Status is authoritative: `formatWakeReportBody` substitutes the
+ * honest body for that status, and a real partial report is kept but labelled
+ * partial. A completed report passes through untouched.
+ */
+function normalizeSettledResult(
+  status: TerminalWorkerStatus,
+  result: string,
+): string {
+  return status === "completed"
+    ? result
+    : formatWakeReportBody(status, result);
+}
+
+/**
  * Ticket 117: success copy per await outcome. Short and factual — the model
  * must know whether it now has the result, whether the worker is still alive,
  * or whether the wait was cut short (and that the worker was NOT stopped).
@@ -305,16 +453,33 @@ export function formatAwaitNote(
     | { readonly status: "released"; readonly reason: "user-message" | "stopped" },
 ): string {
   switch (outcome.status) {
-    case "settled":
+    case "settled": {
+      const body = normalizeSettledResult(outcome.workerStatus, outcome.result);
+      // An aborted settle is status-aware: the placeholder is right only when
+      // nothing real was stored. A worker stopped after producing findings
+      // keeps them, labelled partial — discarding them would leave the
+      // dispatcher with no answer to report.
+      if (outcome.workerStatus === "aborted") {
+        if (body === abortedReportBody()) {
+          return [
+            `Worker "${target}" settled: aborted.`,
+            "It was stopped before it produced a report, so there is no result text to read. That is not a successful finish; decide what the user needs to know.",
+          ].join("\n");
+        }
+        return [
+          `Worker "${target}" settled: aborted.`,
+          `Result:\n${body}`,
+          "That report is partial — the worker was stopped before finishing, so it is not a completed deliverable. Decide what the user needs to know.",
+        ].join("\n");
+      }
       return [
         `Worker "${target}" settled: ${outcome.workerStatus}.`,
-        outcome.result.length > 0
-          ? `Result:\n${outcome.result}`
-          : "It produced no report text.",
+        body.length > 0 ? `Result:\n${body}` : "It produced no report text.",
         outcome.workerStatus === "completed"
           ? "Continue from this result."
           : "That is not a successful finish; decide what the user needs to know.",
       ].join("\n");
+    }
     case "still-running":
       return `Worker "${target}" is still running — nothing is lost. Its result will arrive later on its own. Do not wait again in this turn; answer or end the turn.`;
     case "gone":
@@ -346,13 +511,22 @@ export function toAwaitAgentToolResult(
     return { ok: false, reason: outcome.reason, detail };
   }
   switch (outcome.status) {
-    case "settled":
+    case "settled": {
+      // Status is authoritative, never the stored text. The settle path clamps
+      // every report through the completed-report path, so an empty abort is
+      // stored as the "worker finished" placeholder and an empty error may be
+      // the adapter's own sentinel. The wire result carries the status-aware
+      // body; the summary gets the RAW stored text so it normalizes once.
+      const result = normalizeSettledResult(
+        outcome.workerStatus,
+        outcome.result,
+      );
       return {
         ok: true,
         status: "settled",
         target,
         worker_status: outcome.workerStatus,
-        result: outcome.result,
+        result,
         settled_at_ms: outcome.settledAtMs,
         waited_ms: outcome.waitedMs,
         summary: formatAwaitNote(target, {
@@ -361,6 +535,7 @@ export function toAwaitAgentToolResult(
           result: outcome.result,
         }),
       };
+    }
     case "still-running":
     case "gone":
       return {
@@ -518,6 +693,18 @@ export function formatStopUnknownStateNote(
   streamKey: string,
 ): string {
   return `Released the stream held by ${workerId}. That worker was never reachable — its state has been unknown since the restart and nothing was interrupted, so if it survived it is still running. Stream "${streamKey}" can be dispatched onto again, but only do that if you know that worker is gone; otherwise use a new stream key. Any result the old worker produces is dropped, and the user has not been told anything.`;
+}
+
+/**
+ * Stop copy for a known crash-time hold whose release the store refused.
+ *
+ * `releaseUnknownStateHold` used to collapse this with "nothing was held", so
+ * `stop_worker` reported the hold as an unknown worker while the stream key
+ * stayed occupied. The core now distinguishes the two; this copy reports the
+ * real state: the hold (and its stream key) is still in place.
+ */
+export function formatStopHoldReleaseFailedNote(workerId: string): string {
+  return `Could not release the hold — the store did not confirm. ${workerId} still holds its stream key; nothing was released, so retry when the store responds.`;
 }
 
 /**

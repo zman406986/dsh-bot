@@ -13,6 +13,11 @@ import {
   WORKER_DENIED_TOOL_CANDIDATES,
 } from "../src/worker/tool-barrier.js";
 import {
+  applyWorkerComposition,
+  type WorkerCompositionContext,
+} from "../src/worker/preset.js";
+import { HOST_SPAWN_TOOL_CANDIDATES } from "../src/core/tools.js";
+import {
   AWAIT_AGENT_TOOL,
   CHECK_WORKERS_TOOL,
   SPAWN_DISPATCHER_TOOL,
@@ -60,6 +65,7 @@ describe("worker tool barrier", () => {
       "send_message",
       "interrupt_agent",
       "subagent",
+      "subagent_fork",
       "list_subagent_models",
       "job_list",
       "job_output",
@@ -106,6 +112,22 @@ describe("worker tool barrier", () => {
     // visible on a worker surface.
     assert.ok(filter.deny.includes(SEND_PEER_TOOL));
     assert.ok(!filter.deny.includes("bash"));
+  });
+
+  // Ticket 179: the worker barrier shares the dispatcher-side candidate list,
+  // so every host spawn verb the dispatcher surface withholds (including
+  // `subagent_fork`) is denied on a worker too. A worker must never create an
+  // unaccounted child through a verb this plugin cannot see.
+  it("denies every host spawn verb candidate, subagent_fork included", () => {
+    const candidates = new Set(WORKER_DENIED_TOOL_CANDIDATES);
+    for (const name of HOST_SPAWN_TOOL_CANDIDATES) {
+      assert.ok(candidates.has(name), `missing worker deny candidate: ${name}`);
+    }
+    const known = new Set(HOST_SPAWN_TOOL_CANDIDATES);
+    const deny = new Set(buildWorkerToolFilter(known).deny);
+    for (const name of HOST_SPAWN_TOOL_CANDIDATES) {
+      assert.ok(deny.has(name), `worker filter leaks host spawn verb: ${name}`);
+    }
   });
 
   // Ticket 119: the durable form of the rule above. Derived from the declared
@@ -284,5 +306,140 @@ describe("createWorkerAgentDef", () => {
     assert.equal(workerSpawnMaxDepth(5), 6);
     // An explicit non-default budget stays derivable from the same formula.
     assert.equal(workerSpawnMaxDepth(0, 1), 2);
+  });
+});
+
+// ── second-round audit: optional verbs + fail-closed composition ──────────
+
+describe("worker tool barrier — audit hardening (second-round)", () => {
+  const OPTIONAL_AGENT_VERBS = [
+    "spawn_teammate",
+    "team_task_create",
+    "team_task_get",
+    "team_task_list",
+    "team_task_update",
+    "wait_agent",
+    "list_agents",
+    "request_access",
+  ] as const;
+
+  it("denies the optional agent/user-reach verbs when the host ships them", () => {
+    const known = new Set<string>([...OPTIONAL_AGENT_VERBS, "read"]);
+    const deny = new Set(buildWorkerToolFilter(known).deny);
+    for (const name of OPTIONAL_AGENT_VERBS) {
+      assert.ok(deny.has(name), `worker filter leaks optional verb: ${name}`);
+      assert.ok(
+        WORKER_DENIED_TOOL_CANDIDATES.includes(name),
+        `missing deny candidate: ${name}`,
+      );
+    }
+    assert.ok(!deny.has("read"), "work tools survive");
+  });
+
+  /** A context whose scoped read/restrict behavior each test controls. */
+  function compositionCtx(options: {
+    schemas?: () => ReadonlyArray<{ readonly name: string }>;
+    restrict?: (filter: { readonly deny: readonly string[] }) => () => void;
+    noTools?: boolean;
+  }): WorkerCompositionContext {
+    return {
+      systemPrompt: {
+        section() {
+          return () => {};
+        },
+        getSectionOrder() {
+          return 0;
+        },
+      },
+      ...(options.noTools === true
+        ? {}
+        : {
+            tools: {
+              schemas: options.schemas ?? (() => [{ name: "spawn_worker" }, { name: "read" }]),
+              restrict: options.restrict ?? (() => () => {}),
+            },
+          }),
+    } as WorkerCompositionContext;
+  }
+
+  it("throws when schemas() throws — never composes an unrestricted worker", () => {
+    const ctx = compositionCtx({
+      schemas: () => {
+        throw new Error("surface unavailable");
+      },
+    });
+    assert.throws(
+      () => applyWorkerComposition(ctx, createWorkerAgentDef(), {}),
+      /schemas\(\) failed/u,
+    );
+  });
+
+  it("throws when schemas() returns empty on a context that can restrict", () => {
+    const ctx = compositionCtx({ schemas: () => [] });
+    assert.throws(
+      () => applyWorkerComposition(ctx, createWorkerAgentDef(), {}),
+      /scoped tool set is empty/u,
+    );
+  });
+
+  it("throws when the deny list would deny nothing (barrier not applied)", () => {
+    const ctx = compositionCtx({
+      schemas: () => [{ name: "read" }, { name: "bash" }],
+    });
+    assert.throws(
+      () => applyWorkerComposition(ctx, createWorkerAgentDef(), {}),
+      /no denied verb/u,
+    );
+  });
+
+  it("throws when restrict() is unavailable on a surface with denied verbs", () => {
+    const ctx: WorkerCompositionContext = {
+      tools: {
+        schemas: () => [{ name: "spawn_worker" }],
+      } as never,
+    };
+    assert.throws(
+      () => applyWorkerComposition(ctx, createWorkerAgentDef(), {}),
+      /restrict\(\) is unavailable/u,
+    );
+  });
+
+  it("throws when the context exposes no scoped tools surface", () => {
+    const ctx = compositionCtx({ noTools: true });
+    assert.throws(
+      () => applyWorkerComposition(ctx, createWorkerAgentDef(), {}),
+      /no scoped tools surface/u,
+    );
+  });
+
+  it("keeps the minimal-stub contract when the context cannot restrict at all", () => {
+    // A stub with no `restrict` seam has nothing to enforce; the live host
+    // always has one. This is the documented carve-out, not a silent pass on
+    // a host that COULD restrict.
+    const ctx: WorkerCompositionContext = {
+      tools: {
+        schemas: () => [],
+      } as never,
+    };
+    assert.doesNotThrow(() => applyWorkerComposition(ctx, createWorkerAgentDef(), {}));
+  });
+
+  it("applies the extended deny list on a real scoped surface", () => {
+    const restrictions: Array<{ readonly deny: readonly string[] }> = [];
+    const ctx = compositionCtx({
+      schemas: () => [...OPTIONAL_AGENT_VERBS, "spawn_worker", "read"].map((name) => ({ name })),
+      restrict: (filter) => {
+        restrictions.push(filter);
+        return () => {};
+      },
+    });
+    const applied = applyWorkerComposition(ctx, createWorkerAgentDef(), {});
+    assert.equal(applied, 2, "contract section + tool restriction");
+    assert.equal(restrictions.length, 1);
+    const deny = new Set(restrictions[0]?.deny ?? []);
+    for (const name of [...OPTIONAL_AGENT_VERBS, "spawn_worker"]) {
+      assert.ok(deny.has(name), `missing from the applied deny list: ${name}`);
+    }
+    assert.ok(!deny.has("read"));
   });
 });

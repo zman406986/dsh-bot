@@ -1,12 +1,18 @@
 import type { DshHost } from "../core/dsh-host.js";
 import type {
+  DurableDispatcherMark,
   DurableDispatcherMarkAnswer,
   DurabilityPort,
 } from "../core/durability.js";
 import type { AgentMessageWakeOrigin } from "../core/peer-types.js";
 import { randomUUID } from "node:crypto";
 import { clampActivity, clampRecentResultExcerpt } from "../core/report-clamp.js";
-import type { SettledEvent, SpawnOptions, TerminalWorkerStatus } from "../core/types.js";
+import {
+  isTerminalStatus,
+  type SettledEvent,
+  type SpawnOptions,
+  type TerminalWorkerStatus,
+} from "../core/types.js";
 import type {
   DispatcherSpawnOptions,
   DispatcherSpawnResult,
@@ -30,7 +36,11 @@ import {
   wakeCueFor,
   wakeUserMessage,
 } from "./wake-copy.js";
-import type { DispatcherOrigin, PolicyLanguage } from "../core/policy/prompts.js";
+import {
+  formatSummoningDispatcherHandoffLine,
+  type DispatcherOrigin,
+  type PolicyLanguage,
+} from "../core/policy/prompts.js";
 
 export type { WorkerAgentDef };
 
@@ -45,6 +55,12 @@ export interface AgentLike {
       readonly parentSession?: unknown;
       readonly delegationDepth?: number;
       /**
+       * The host's ownership marker. `"subagent"` (with a `parentSession`) is
+       * the legacy subagent-child shape; a top-level session leaves it absent
+       * (ADR-0032). Read as evidence only in `resumeDormantDispatcher`.
+       */
+      readonly origin?: unknown;
+      /**
        * ADR-0032: the summoning dispatcher's working directory. A summoned
        * dispatcher session is created in the SAME cwd, because the host's
        * cross-session route (`sessionController.resolveAgent`) refuses a
@@ -54,6 +70,22 @@ export interface AgentLike {
        */
       readonly cwd?: unknown;
     };
+    /**
+     * The session's current request header, when the structural session view
+     * exposes it. `config` is the resolved route the next request uses
+     * (`provider`/`model`/`reasoningEffort`/`maxTokens`) — the fallback source
+     * for a summoned dispatcher's `agentOptions` when `Agent.model` is absent.
+     */
+    requestHeader?(): unknown;
+  };
+  /**
+   * The agent's live model selection, when the structural view exposes it.
+   * `current()` answers the route the NEXT request will use (a selection made
+   * in the UI is reflected here), which is what a summoned peer must inherit —
+   * `options` alone is only the initial/deployment route.
+   */
+  readonly model?: {
+    current(): unknown;
   };
   /**
    * ADR-0032: the provider/model route this agent's requests use
@@ -106,6 +138,14 @@ export interface ActivationLike {
 export interface AgentOptionsLike {
   readonly provider?: string;
   readonly model?: string;
+  /**
+   * Forwarded to a summoned peer when the summoner's live route carries them.
+   * Values stay `unknown`-compatible through the index signature; the reader
+   * below accepts only a string/number effort and a positive numeric
+   * `maxTokens`.
+   */
+  readonly reasoningEffort?: string | number;
+  readonly maxTokens?: number;
   readonly [key: string]: unknown;
 }
 
@@ -120,6 +160,22 @@ export interface AgentOptionsLike {
  */
 export interface TopLevelSessionMetaLike {
   readonly cwd?: string;
+  /**
+   * The agent preset this session JOINED — the same field, with the same
+   * meaning, that the host's own create route writes
+   * (`dsh-api-session-controller/lib/index.js:433-436`).
+   *
+   * It is the only durable record of that choice: the session header is seeded
+   * from it (`dsh-session/lib/index.js:1840`), the `agentPreset` projection
+   * inits from that header (`dsh-agent-preset-registry/lib/index.js:51`), and
+   * a cold resume composes whatever the projection still says
+   * (`dsh-api-session-controller/lib/index.js:305-308`). Omitted, the peer
+   * comes back on the deployment DEFAULT preset — a different tool surface
+   * from the one its summoner runs. Unlike `parentSession`/`origin`/
+   * `delegationDepth` this is not an ownership field: it does not
+   * re-classify the session.
+   */
+  readonly agentPreset?: string;
 }
 
 /** Structural view of `CreateAgentOptions` (`dsh-agent/lib/types/index.d.ts:53`). */
@@ -128,11 +184,12 @@ export interface CreateAgentOptionsLike {
   readonly meta?: TopLevelSessionMetaLike;
   readonly agentOptions?: AgentOptionsLike;
   /**
-   * Per-agent scoped-world composition. AWAITED BEFORE publication, so
-   * everything registered here exists before `session/created`,
-   * `agent/created` and the first prompt assembly
-   * (`dsh-agent/lib/types/index.d.ts:99-101`). Setup COMPOSES; it must never
-   * drive the agent.
+   * Per-agent scoped-world composition. ORDER (corrected): `setup` runs
+   * AFTER `session/created` and is awaited BEFORE `agent/created` and the
+   * first prompt assembly (`dsh-agent/lib/types/index.d.ts:99-101`), so
+   * everything registered here exists before the agent is announced and
+   * before its first request. It does NOT run before `session/created`.
+   * Setup COMPOSES; it must never drive the agent.
    */
   readonly setup?: (
     agentCtx: unknown,
@@ -199,9 +256,12 @@ export interface JobSnapshotLike {
 }
 
 /**
- * Structural view of `ctx.tools` for listing global tool names at spawn
- * and registering dispatcher tools.
- * `schemas()` with no scope is the global registry view (name per tool).
+ * Structural view of `ctx.tools` for listing an agent's tool names and
+ * registering dispatcher tools.
+ *
+ * `schemas(scope)` with NO scope answers the context-global layer only (on
+ * dsh 0.2.1 that is the two bookkeeping tools); pass the agent to read the
+ * surface it actually inherits. `listGlobalToolNames` requires that scope.
  */
 export interface ToolsLike {
   schemas(scope?: unknown): ReadonlyArray<{ readonly name: string }>;
@@ -284,8 +344,9 @@ export interface AdapterContext {
      * host's own "new conversation" makes
      * (`dsh-api-session-controller/lib/index.js:517-525`).
      *
-     * The summoned dispatcher is created with `meta: { cwd }` and NO
-     * `parentAgent`, NO `origin`, NO `parentSession`, NO `delegationDepth`.
+     * The summoned dispatcher is created with `meta: { cwd }` — plus
+     * `agentPreset` once it has joined one — and NO `parentAgent`, NO `origin`,
+     * NO `parentSession`, NO `delegationDepth`.
      * All three header fields must be omitted TOGETHER: the host's ownership
      * guard is an OR (`origin === 'subagent'` OR `parentSession` set and its
      * live parent owns the agent — `dsh-api-session-controller/lib/index.js`
@@ -345,6 +406,15 @@ export interface CordisDshHostOptions {
   markers?: DurabilityPort;
   /** Worker agent definition; T10 supplies the real one. */
   workerAgentDef?: WorkerAgentDef;
+  /**
+   * Upper bound on awaiting a successful spawn's POST-CREATE bookkeeping (the
+   * durable dispatcher mark, then the workspace attach) before the first turn
+   * is queued. The mark write still runs first for crash safety; this only
+   * bounds a stalled store so `followup` is never blocked forever. Default
+   * {@link DEFAULT_BOOKKEEPING_TIMEOUT_MS}. Exposed so tests can drive a
+   * never-resolving store without a long wait.
+   */
+  bookkeepingTimeoutMs?: number;
   /**
    * Ticket 153: the model-facing copy language, resolved once at apply from
    * the host locale preference. Omitted means EN — no cue or block changes
@@ -892,12 +962,23 @@ export function normalizeWorkerReport(
   return normalizeSettleReport("completed", lastAssistantMessage);
 }
 
-/** Live global tool names visible to the registry (empty when tools absent). */
-export function listGlobalToolNames(ctx: AdapterContext): ReadonlySet<string> {
+/**
+ * Live tool names visible to ONE agent scope (empty when tools are absent).
+ *
+ * The `scope` argument is REQUIRED and load-bearing: on dsh 0.2.1
+ * `tools.schemas()` with no scope answers only the context-global layer, which
+ * is the same two bookkeeping tools for every agent — not the surface the agent
+ * actually inherits. A caller that wants a meaningful set must pass the agent
+ * (the same rule `src/worker/preset.ts` documents).
+ */
+export function listGlobalToolNames(
+  ctx: AdapterContext,
+  scope: unknown,
+): ReadonlySet<string> {
   const tools = ctx.tools;
   if (tools === undefined) return new Set();
   try {
-    const schemas = tools.schemas();
+    const schemas = tools.schemas(scope);
     return new Set(schemas.map((schema) => schema.name));
   } catch {
     return new Set();
@@ -989,6 +1070,165 @@ type SessionControllerLike = {
 };
 
 /**
+ * Ticket 138: one wake turn parked for a session that was not live (or whose
+ * followup failed). `text` is the composed body WHEN one was already built —
+ * `composeWakeText` drains the wake bus, so a retry must reuse this exact text
+ * rather than compose (and lose) the report a second time. Absent means the
+ * activation hook still has to compose.
+ */
+interface PendingWakeTurn {
+  readonly origin: AgentMessageWakeOrigin | undefined;
+  readonly text?: string;
+}
+
+/**
+ * The agent-preset registry shape (`ctx.get("agentPresets")`,
+ * `@deepseek-ai/dsh-agent-preset-registry`), narrowed to the two reads a
+ * plugin-created session needs.
+ *
+ * WHY THIS EXISTS (defect: a summoned session came up with no work tools): the
+ * host mounts every model-facing work tool inside an AGENT PRESET — the
+ * `standard` preset composes `tool-fs`, `tool-fs-search`, `tool-pwsh`/`tool-bash`,
+ * `tool-web`, `tool-jobs`, `tool-todo`, `tool-subagent`, … on the agent's own
+ * isolated scope (`dsh-web-app/presets/standard.patch.yml:21-118`). Only
+ * host-plane rows such as `tool-working-directory`
+ * (`dsh-base/cordis.patch.yml:169-170`) sit outside a preset. A session created
+ * by `ctx.agents.create` therefore gets a scope with NO preset joined, and
+ * inherits nothing but the host-plane layer — which is exactly the reported
+ * surface: the plugin's seven dispatched tools plus `working_directory`.
+ *
+ * The host's own create route always mounts one: `composeAgent` resolves the
+ * requested or default preset and calls `presets.mount(agentCtx, id)` inside
+ * `setup`, which runs after `session/created` and before `agent/created` and
+ * the first prompt (`dsh-api-session-controller/lib/index.js:264-277`). A plugin that calls
+ * `ctx.agents.create` directly has to do the same, so this shape names the two
+ * calls: read the parent's joined preset, then join the child to it.
+ */
+type AgentPresetsLike = {
+  /**
+   * The preset id a live Agent is joined to, or null/undefined in a
+   * preset-free composition. Defect fix: the LIVE registry answers `null`
+   * while this type used to promise only `undefined`; the caller normalizes
+   * with `?? undefined` before it reaches `meta.agentPreset` or `mount`,
+   * either of which rejects a non-string ("session header agentPreset must
+   * be a string").
+   */
+  presetForSession(session: unknown): string | null | undefined;
+  /** Join a child Agent's scope to one preset; resolves after it is mounted. */
+  mount(
+    ctx: unknown,
+    id?: string,
+  ): Promise<{ readonly id?: string } | undefined>;
+};
+
+/**
+ * Read the agent-preset registry from a live context, guarded — same two-step
+ * rule as {@link readSessionController}, and for the same reason: a bare
+ * `ctx.agentPresets` property read THROWS on a live cordis context that never
+ * injected the service.
+ *
+ * Returns `undefined` when the deployment composes no preset roster (the
+ * documented preset-free case, `src/core/tools.ts:717`). That is NOT an error:
+ * a preset-free session is a valid session, it simply has no preset tools to
+ * inherit — and a stub host in a unit test has no registry either.
+ */
+function readAgentPresets(
+  ctx: AdapterContext,
+): AgentPresetsLike | undefined {
+  if (typeof ctx.get !== "function") return undefined;
+  try {
+    const service = ctx.get("agentPresets");
+    if (typeof service !== "object" || service === null) return undefined;
+    const candidate = service as Partial<AgentPresetsLike>;
+    if (
+      typeof candidate.presetForSession !== "function" ||
+      typeof candidate.mount !== "function"
+    ) {
+      return undefined;
+    }
+    return service as AgentPresetsLike;
+  } catch {
+    // Absent, or not yet active: the caller simply mounts nothing.
+    return undefined;
+  }
+}
+
+/**
+ * One Workspace, narrowed to the only two members a plugin-created session
+ * needs to FILE ITSELF under its summoner's project:
+ * the ordered `sessionIds` account it reads and the `attachSession` write.
+ *
+ * The account is the membership: `sessionIds` is the ordered ownership list on
+ * the durable workspace record (`dsh-workspace/lib/index.js:102-104`, field
+ * `sessionIds` in `workspaceRecord` at `:212`), and `attachSession` prepends
+ * one id to it (`:111-129`, the write at `:125-128`). It is not a cwd: the
+ * getter filters every id through `candidateMatches`, i.e. a session belongs
+ * to a workspace only while its stored cwd still canonicalizes to that
+ * workspace's path (`:367`, `:875-895`).
+ */
+type WorkspaceEntityLike = {
+  /** Sessions this Workspace accounts, display order, already cwd-filtered. */
+  readonly sessionIds: readonly string[];
+  /** Add one session to the account; idempotent, validates its stored cwd. */
+  attachSession(sessionId: string): Promise<void>;
+};
+
+/**
+ * The Workspace REGISTRY shape (`ctx.get("workspaceRegistry")`,
+ * `@deepseek-ai/dsh-workspace`), narrowed to durable display order.
+ *
+ * WHY THIS EXISTS (defect: a summoned session appeared in the sidebar's
+ * "Ungrouped" section instead of its summoner's project): the sidebar groups
+ * by Workspace MEMBERSHIP, never by folder —
+ * `groupByWorkspace` walks each workspace's `sessionIds` and pushes every
+ * session no workspace met into one empty-key group
+ * (`dsh-client-ui-workspace/lib/client.js:1027-1044`). A session created
+ * through `ctx.agents.create` carries `meta.cwd` and no membership, so it has
+ * no group to land in. The registry only re-buckets such sessions by canonical
+ * cwd at STARTUP (`dsh-workspace/lib/index.js:758-813`), which is why the
+ * defect healed itself one restart later.
+ */
+type WorkspaceRegistryLike = {
+  /** Workspaces in durable registry order (`dsh-workspace/lib/index.js:454-460`). */
+  list(): readonly WorkspaceEntityLike[];
+};
+
+/**
+ * Resolve the Workspace that ACCOUNTS `sessionId`, guarded — the same
+ * two-step rule as {@link readAgentPresets}, and for the same reason: a bare
+ * `ctx.workspaceRegistry` property read THROWS on a live cordis context that
+ * never injected the service.
+ *
+ * The lookup is membership, exactly as the sidebar computes it
+ * (`dsh-client-ui-workspace/lib/client.js:20505`), NOT a path guess: a session
+ * no Workspace accounts has no workspace id to inherit, and inventing one from
+ * its cwd would file the child under a project its summoner is not in.
+ *
+ * Returns `undefined` when the deployment mounts no registry (a stub host, or
+ * a headless composition) and when the session belongs to no Workspace. Both
+ * are valid: the caller simply attaches nothing.
+ */
+function readWorkspaceOfSession(
+  ctx: AdapterContext,
+  sessionId: string,
+): WorkspaceEntityLike | undefined {
+  if (typeof ctx.get !== "function") return undefined;
+  try {
+    const service = ctx.get("workspaceRegistry");
+    if (typeof service !== "object" || service === null) return undefined;
+    const registry = service as Partial<WorkspaceRegistryLike>;
+    if (typeof registry.list !== "function") return undefined;
+    for (const workspace of registry.list()) {
+      if (workspace.sessionIds.includes(sessionId)) return workspace;
+    }
+    return undefined;
+  } catch {
+    // Absent, not yet started, or a broken registry read: file nothing.
+    return undefined;
+  }
+}
+
+/**
  * Ticket 157 (ADR-0032): read the cross-session delivery facade from a live
  * context, guarded.
  *
@@ -1061,11 +1301,155 @@ function readDispatcherClass(
   return answer === "user" || answer === "spawned" ? answer : null;
 }
 
+/**
+ * Ticket 177: read a resumed session's durable dispatcher KIND through the
+ * same guard as {@link readDispatcherClass}. The plugin supplies the reader,
+ * and a throwing projection must read as "not answered", never as a session
+ * the resume path refuses to touch with a throw of its own.
+ */
+function readSessionKind(
+  reader: ((session: unknown) => "dispatcher" | null) | undefined,
+  session: unknown,
+): "dispatcher" | null {
+  if (reader === undefined) return null;
+  try {
+    return reader(session) === "dispatcher" ? "dispatcher" : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Second-round audit: one route-shaped value reduced to the four fields a
+ * summoned dispatcher's `agentOptions` may carry. Anything unreadable is
+ * omitted; a partial answer is merged with lower-priority sources by the
+ * caller, never invented here.
+ */
+function readRouteFields(value: unknown): Partial<AgentOptionsLike> {
+  if (typeof value !== "object" || value === null) return {};
+  const outer = value as Record<string, unknown>;
+  // `requestHeader()` nests the route under `config`; a model selection may
+  // answer it directly (or under `config`/`options` on some host builds).
+  const candidates = [
+    value,
+    outer["config"],
+    outer["options"],
+    outer["route"],
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "object" || candidate === null) continue;
+    const record = candidate as Record<string, unknown>;
+    const provider = record["provider"];
+    const model = record["model"];
+    if (
+      typeof provider === "string" &&
+      provider !== "" &&
+      typeof model === "string" &&
+      model !== ""
+    ) {
+      const reasoningEffort = record["reasoningEffort"];
+      const maxTokens = record["maxTokens"];
+      return {
+        provider,
+        model,
+        ...(typeof reasoningEffort === "string" ||
+        typeof reasoningEffort === "number"
+          ? { reasoningEffort }
+          : {}),
+        ...(typeof maxTokens === "number" &&
+        Number.isFinite(maxTokens) &&
+        maxTokens > 0
+          ? { maxTokens }
+          : {}),
+      };
+    }
+  }
+  return {};
+}
+
+/**
+ * The summoner's LIVE route, most specific source first:
+ * 1. `agent.model.current()` — the selection the next request will use (a UI
+ *    model switch is reflected here), which is what the peer must inherit;
+ * 2. `session.requestHeader()?.config` — the resolved header of the current
+ *    request, when the structural Agent view exposes it.
+ *
+ * `parent.options` is NOT read here: it is the fallback in `spawnDispatcher`,
+ * because it may be the deployment default rather than the live selection.
+ */
+function liveSummonerRoute(agent: AgentLike): Partial<AgentOptionsLike> {
+  const fromHeader: Partial<AgentOptionsLike> = (() => {
+    const requestHeader = agent.session.requestHeader;
+    if (typeof requestHeader !== "function") return {};
+    try {
+      return readRouteFields(requestHeader.call(agent.session));
+    } catch {
+      return {};
+    }
+  })();
+  const modelApi = agent.model;
+  if (modelApi !== undefined && typeof modelApi.current === "function") {
+    try {
+      const fields = readRouteFields(modelApi.current());
+      if (fields.provider !== undefined && fields.model !== undefined) {
+        // The live selection wins per field; a field it does not carry (say
+        // `maxTokens`) is still forwarded from the request header.
+        return { ...fromHeader, ...fields };
+      }
+    } catch {
+      // A model facade that cannot answer falls through to the header.
+    }
+  }
+  return fromHeader;
+}
+
+/**
+ * Defect fix (a terminal worker was woken back): the durable `worker_sessions`
+ * rows are deleted when a worker settles or is stopped, but that delete is
+ * asynchronous and best-effort, so an orphan row can survive a crash or a
+ * failing store. The durable WORKER MARKER is the cross-check: a marker whose
+ * snapshot is terminal proves the worker finished, and "stop is for good".
+ *
+ * Grouped by parent because `readWorkerMarkers` is keyed by parent session.
+ * A read that throws proves nothing and contributes no tombstones — the
+ * caller then keeps the row, which is the pre-fix behaviour.
+ */
+async function terminalWorkerIdsByParent(
+  store: DurabilityPort,
+  parentSessionIds: readonly string[],
+): Promise<Map<string, Set<string>>> {
+  const terminal = new Map<string, Set<string>>();
+  for (const parentSessionId of new Set(parentSessionIds)) {
+    try {
+      const markers = await store.readWorkerMarkers(parentSessionId);
+      const ids = new Set(
+        markers
+          .filter((marker) => isTerminalStatus(marker.status))
+          .map((marker) => marker.workerId),
+      );
+      if (ids.size > 0) terminal.set(parentSessionId, ids);
+    } catch {
+      // Unreadable table: no tombstone, so the caller keeps its row.
+    }
+  }
+  return terminal;
+}
+
+/**
+ * Default bound on post-create bookkeeping that runs BEFORE a summoned
+ * dispatcher's first turn. The mark write must stay ahead of the turn (a crash
+ * between the create and the write would lose the session's dispatcher
+ * identity), but a stalled store must not suppress the first turn forever.
+ */
+export const DEFAULT_BOOKKEEPING_TIMEOUT_MS = 2_000;
+
 export function createCordisDshHost(
   ctx: AdapterContext,
   options?: CordisDshHostOptions,
 ): CordisDshHost {
   const workerAgentDef = options?.workerAgentDef;
+  const bookkeepingTimeoutMs =
+    options?.bookkeepingTimeoutMs ?? DEFAULT_BOOKKEEPING_TIMEOUT_MS;
   /** Ticket 153: the cue faces this host renders (EN unless exactly "zh"). */
   const hostLanguage: PolicyLanguage = options?.language ?? "en";
   const resumeWakeCue = resumeWakeCueFor(hostLanguage);
@@ -1119,6 +1503,15 @@ export function createCordisDshHost(
    */
   const parents = new Map<string, AgentLike>();
   const workers = new Map<string, WorkerEntry>();
+  /**
+   * Every worker id this host ever reserved in THIS process. Unlike `workers`
+   * (pruned on dispose) and `workerSessions` (absent on a host with no durable
+   * store), this is the in-process settle proof: a `subagent/end` for one of
+   * these ids is accepted even after the live entry was pruned, so a
+   * disposal-before-settle cannot drop the terminal event. Cleared only on
+   * host dispose.
+   */
+  const spawnedWorkerIds = new Set<string>();
   const spawnControllers = new Map<string, AbortController>();
   /**
    * Live activations keyed by worker id. `startActivation`'s signal owns
@@ -1149,16 +1542,23 @@ export function createCordisDshHost(
    *   match a reserved id, so it still takes the normal `pendingSpawns` path.
    *
    * Entries are removed in `spawnDispatcher`'s `finally`, so a stale id can
-   * never mislabel a later child. `dispatcherActivated` is the durable half of
-   * the same answer — every child this host ever activated as a dispatcher —
-   * so an announcement that arrives AFTER the spawn resolved still cannot be
-   * composed as a worker. Its cardinality matches the `workers` map (which
-   * also lives for the process). ADR-0032: a summoned dispatcher is a top-level
-   * session, so neither set is bounded by a subagent live-child pool — both grow
+   * never mislabel a later child. Classification of an announcement that
+   * arrives AFTER the spawn resolved does NOT come from this set: the durable
+   * `dispatcherMarks` mirror (seeded before the create, written after)
+   * already answers it. ADR-0032: a summoned dispatcher is a top-level
+   * session, so neither is bounded by a subagent live-child pool — they grow
    * with the sessions that were really created, which is not a cap of ours.
    */
   const reservedDispatcherIds = new Set<string>();
-  const dispatcherActivated = new Set<string>();
+  /**
+   * PER-ACTIVATION dedupe for `activateSummonedDispatcher`: the id of a
+   * dispatcher this host has already activated IN THIS ACTIVATION. It is NOT
+   * a classification source (the durable marks and the spawn reservation
+   * answer that) and it is DELETED on `agent/disposed`, so a session that is
+   * disposed and re-announced activates again — with its parent binding,
+   * scoped tool surface and policy — exactly once.
+   */
+  const dispatcherActivations = new Set<string>();
   /**
    * Ticket 138: in-memory mirror of the durable `dispatcher_sessions` table,
    * keyed by session id → the spawner recorded on the row (undefined for a
@@ -1236,8 +1636,15 @@ export function createCordisDshHost(
    * durably marked targets are parked; an unmarked id keeps today's silent
    * no-op (the core fence refuses those sends before a wake is ever asked
    * for).
+   *
+   * The composed TEXT is parked with the origin when one was already built.
+   * `composeWakeText` drains the wake bus, so a followup that fails after
+   * composition must not fall back to composing a second time: the drained
+   * worker report / inbox text would be gone and the retry would deliver the
+   * generic cue instead. Retrying the exact text is also what keeps the wake
+   * from being delivered twice.
    */
-  const pendingWakeTurns = new Map<string, AgentMessageWakeOrigin | undefined>();
+  const pendingWakeTurns = new Map<string, PendingWakeTurn>();
   /**
    * Ticket 142: in-memory mirror of the durable `worker_sessions` table,
    * keyed by worker id → the spawner recorded on the row. Same discipline as
@@ -1254,6 +1661,12 @@ export function createCordisDshHost(
    * its text here until the next activation, which is the honest place for it.
    */
   const parkedWorkerWakes = new Map<string, string>();
+  /**
+   * Defect fix companion: a correction is cleared only AFTER its send
+   * resolves, so a repeat announcement during the flight must not queue a
+   * second copy. One in-flight delivery per worker.
+   */
+  const workerWakeDeliveries = new Set<string>();
   const settledCallbacks: Array<(event: SettledEvent) => void> = [];
   const stepBoundaryCallbacks: Array<(workerId: string) => void | Promise<void>> = [];
   // Ticket 75: firehose-observed tool calls on owned workers, fanned out to
@@ -1284,6 +1697,13 @@ export function createCordisDshHost(
   // the check row shows the terminal status — so the single-entry
   // accessors read null for these ids even though the ring retains the
   // breadcrumb for the wake digest.
+  //
+  // Defect fix: this is also the TOMBSTONE set. `forgetWorkerWake` adds every
+  // terminal/abandoned worker id here (the core calls it on settle, abort and
+  // hold release), and the dormancy paths (`refreshWorkerSessionMarks`,
+  // `reattachMarkedWorker`) refuse to resurrect a tombstoned worker — an
+  // orphan `worker_sessions` row whose async delete was lost must never make
+  // "stop is for good" false.
   const settledWorkerIds = new Set<string>();
   // Ticket 41: latest bounded settle-report excerpt per settled worker,
   // clamped once at observation. Same subscription discipline as
@@ -1303,21 +1723,181 @@ export function createCordisDshHost(
   let wakeMissingLogged = false;
   /** Say the no-facade resume gap once, not once per send. */
   let resumeDegradedLogged = false;
+  /**
+   * ADR-0032 defect fix: say "this peer cannot be reached at all" once, on a
+   * facade refusal with no live spawner to fall back to.
+   */
+  let resumeUndeliverableLogged = false;
+  /**
+   * The `resumeRequested` short-circuit is logged once per session instead of
+   * returning silently; a repeat send before the resume lands is otherwise
+   * indistinguishable from a lost request.
+   */
+  const resumeShortCircuitLogged = new Set<string>();
   /** Same once-only rule for the worker half (`requestDormantWorkerWake`). */
   let workerResumeDegradedLogged = false;
+
+  /**
+   * The host's live Agent for one session, guarded.
+   *
+   * A stub context (and a live cordis context whose service was never
+   * injected) may throw at the call rather than answer `undefined`; a wake
+   * must degrade to "not live" instead of escaping into the host listener
+   * that asked for it.
+   */
+  function liveAgentOf(sessionId: string): AgentLike | undefined {
+    try {
+      return ctx.agents.get(sessionId);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Second-round audit (resume fallback): the durable dispatcher row carries
+   * its SHAPE as an extra `origin` field on rows this build writes —
+   * `"top-level"` for a summoned peer (ADR-0032), `"subagent"` for a legacy
+   * parented child. Old rows written before the field existed are read by
+   * shape: a pre-141 row (no `generation`) with a spawner predates ADR-0032,
+   * so it is a legacy child. Anything else without the field is NOT provably
+   * legacy, which keeps a top-level peer off the subagent route.
+   */
+  function dispatcherMarkOrigin(mark: unknown): "subagent" | "top-level" | null {
+    if (typeof mark !== "object" || mark === null) return null;
+    const value = (mark as { readonly origin?: unknown }).origin;
+    return value === "subagent" || value === "top-level" ? value : null;
+  }
+
+  /** Header evidence for the legacy SUBAGENT shape; null when unreadable. */
+  function headerDispatcherShape(
+    session: unknown,
+  ): "subagent" | "top-level" | null {
+    if (typeof session !== "object" || session === null) return null;
+    const header = (session as {
+      readonly header?: {
+        readonly origin?: unknown;
+        readonly parentSession?: unknown;
+        readonly delegationDepth?: unknown;
+      };
+    }).header;
+    if (typeof header !== "object" || header === null) return null;
+    if (header.origin === "subagent") return "subagent";
+    if (
+      header.parentSession !== undefined &&
+      header.parentSession !== null &&
+      String(header.parentSession).length > 0
+    ) {
+      return "subagent";
+    }
+    if (
+      header.delegationDepth === undefined ||
+      header.delegationDepth === null ||
+      Number(header.delegationDepth) === 0
+    ) {
+      return "top-level";
+    }
+    return null;
+  }
+
+  /**
+   * Whether a dormant dispatcher target is a LEGACY parented (subagent-owned)
+   * child — the only shape `ctx.subagents.sendMessage` can reach. Evidence is
+   * the live session header when readable, else the durable row: an explicit
+   * `origin`, or the pre-141 shape (spawner recorded, no generation) that
+   * predates ADR-0032. No evidence means NO subagent fallback: a top-level
+   * peer must stay parked rather than be sent through a route the host refuses.
+   */
+  async function isLegacyParentedDispatcher(sessionId: string): Promise<boolean> {
+    const live = liveAgentOf(sessionId);
+    if (live !== undefined) {
+      const shape = headerDispatcherShape(live.session);
+      if (shape !== null) return shape === "subagent";
+    }
+    const store = markers;
+    if (store !== undefined && store.readDispatcherMark !== undefined) {
+      let mark: unknown;
+      try {
+        mark = await store.readDispatcherMark(sessionId);
+      } catch {
+        return false;
+      }
+      if (mark !== undefined) {
+        const origin = dispatcherMarkOrigin(mark);
+        if (origin !== null) return origin === "subagent";
+        const record = mark as {
+          readonly generation?: unknown;
+          readonly parentSessionId?: unknown;
+        };
+        return (
+          record.generation === undefined &&
+          typeof record.parentSessionId === "string" &&
+          record.parentSessionId.length > 0
+        );
+      }
+    }
+    const mirroredParent = dispatcherMarks.get(sessionId);
+    if (mirroredParent !== undefined && !dispatcherGenerations.has(sessionId)) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Ticket 138: park one wake turn for a later activation. Last-wins — a
+   * newer wake already parked for this session is newer than the one that
+   * just failed, so it is kept instead of being overwritten by stale text.
+   */
+  function parkWakeTurn(
+    sessionId: string,
+    origin: AgentMessageWakeOrigin | undefined,
+    text?: string,
+  ): void {
+    if (pendingWakeTurns.has(sessionId)) return;
+    pendingWakeTurns.set(
+      sessionId,
+      text === undefined ? { origin } : { origin, text },
+    );
+  }
+
+  /** Say a wake could not be opened without escaping into the host listener. */
+  function warnWakeFailure(sessionId: string, error: unknown): void {
+    try {
+      console.warn(
+        `[multitask-dispatcher] wake turn for ${sessionId} could not be opened:`,
+        error,
+      );
+    } catch {
+      // A broken console must not break the wake path either.
+    }
+  }
 
   /**
    * Shared wake-turn mechanics (ticket 116). `origin` is the optional
    * structured source override: a peer wake passes the `agent-message`
    * shape, everything else keeps the producer-owned plugin kind. The
    * composed text is never consulted for origin.
+   *
+   * `followup` is GUARDED — synchronously AND as a promise. This runs from
+   * two places that must not throw outward: the synchronous `agent/created`
+   * listener (through `flushPendingWakeTurn`) and the asynchronous wake
+   * request (`requestDispatcherWakeup`, reached from a settle callback). A
+   * throwing driver would escape a host listener, and the pending wake would
+   * already have been popped by its caller — so a failed wake is re-parked
+   * (last-wins) for the next activation instead of being lost.
+   *
+   * The composed text is re-parked WITH the origin. `composeWakeText` drains
+   * the wake bus, so composing again on the retry would deliver the generic
+   * cue and lose the worker report / inbox job text that was already drained.
+   * `parkedText` (supplied by `flushPendingWakeTurn`) makes the retry deliver
+   * that exact body, exactly once.
    */
   function openWakeTurn(
     sessionId: string,
     origin?: AgentMessageWakeOrigin,
     liveAgent?: AgentLike,
+    parkedText?: string,
   ): void {
-    const agent = liveAgent ?? ctx.agents.get(sessionId);
+    const agent = liveAgent ?? liveAgentOf(sessionId);
     if (agent === undefined) {
       // Ticket 138: a marked dispatcher that is not live is exactly the
       // wake-on-send case. Park the turn (latest send wins — one turn
@@ -1326,7 +1906,7 @@ export function createCordisDshHost(
       // no-op: nothing can resume it, and the core fence refuses such sends
       // before a wake is ever requested.
       if (dispatcherMarks.has(sessionId)) {
-        pendingWakeTurns.set(sessionId, origin);
+        parkWakeTurn(sessionId, origin, parkedText);
         resumeDormantDispatcher(sessionId);
         return;
       }
@@ -1336,15 +1916,39 @@ export function createCordisDshHost(
       }
       return;
     }
-    let text: string | null = null;
-    if (composeWakeText !== undefined) {
+    let text: string | null = parkedText ?? null;
+    if (text === null && composeWakeText !== undefined) {
       try {
         text = composeWakeText(sessionId);
       } catch {
         text = null;
       }
     }
-    agent.followup(wakeUserMessage(text ?? settleWakeCue, origin));
+    const failed = (error: unknown): void => {
+      // The caller already removed any parked copy (`flushPendingWakeTurn`
+      // pops before calling), so re-park it — last-wins, with the composed
+      // body — or the wake/report is lost.
+      parkWakeTurn(sessionId, origin, text ?? undefined);
+      warnWakeFailure(sessionId, error);
+    };
+    try {
+      const result = agent.followup(
+        wakeUserMessage(text ?? settleWakeCue, origin),
+      );
+      // The live turn was accepted. Any SLOT parked for this id is now stale:
+      // its body exists only to retry a turn that FAILED (or was opened before
+      // the session was live). Leaving it would let a later activation open a
+      // SECOND, generic wake turn for work this followup already delivered.
+      // A rejection below re-parks the exact body through `failed`, so this is
+      // not a loss path.
+      pendingWakeTurns.delete(sessionId);
+      // A live driver can also return a rejected promise; the synchronous
+      // try/catch above cannot see that, and dsh treats an unhandled
+      // rejection as fatal. Own both failure shapes the same way.
+      void Promise.resolve(result).catch(failed);
+    } catch (error) {
+      failed(error);
+    }
   }
 
   /**
@@ -1382,35 +1986,131 @@ export function createCordisDshHost(
    * no facade, no bound parent Agent, a host refusal — leaves the message in
    * the peer inbox for the next activation to deliver. Nothing is thrown into
    * the wake bus, and no refusal class is invented.
+   *
+   * Defect fix (a legacy row could never be resumed): a facade REFUSAL is not
+   * terminal. `dispatcher_sessions` rows are never deleted, so pre-ADR-0032
+   * rows point at subagent-owned sessions the facade refuses forever with
+   * `session/agent-busy`; those fall through to `ctx.subagents.sendMessage`
+   * from the recorded spawner. Only when neither route can be issued does the
+   * wake stay parked, with one distinct "undeliverable" line — never a claimed
+   * resume.
+   *
+   * Defect fix (a followup failure double-sent the cue): a facade REFUSAL and
+   * a followup FAILURE are different outcomes and must not share a catch.
+   * Only a refusal — `resolveAgent` throwing/rejecting or answering
+   * `{error}` — falls back to the spawner route, because no agent was
+   * resumed. Once `resolveAgent` SUCCEEDED that route alone owns the wake: a
+   * throwing (or rejecting) `followup` is logged and the parked turn is kept
+   * for the activation hook, never re-sent through `subagents.sendMessage`.
    */
   function resumeDormantDispatcher(sessionId: string): void {
-    if (resumeRequested.has(sessionId)) return;
+    if (resumeRequested.has(sessionId)) {
+      // Ticket 138: one resume covers every send that arrives before the
+      // resumed child is announced. Say it ONCE rather than returning
+      // silently — a caller otherwise cannot tell this from a lost request.
+      if (!resumeShortCircuitLogged.has(sessionId)) {
+        resumeShortCircuitLogged.add(sessionId);
+        try {
+          console.warn(
+            `[multitask-dispatcher] dispatcher ${sessionId} already has a resume in flight; ` +
+              `the wake stays queued until it activates.`,
+          );
+        } catch {
+          // A broken console must not break the wake path either.
+        }
+      }
+      return;
+    }
     resumeRequested.add(sessionId);
     void Promise.resolve()
       .then(async () => {
+        let facadeRefused = false;
         const facade = readSessionController(ctx);
         if (facade !== undefined) {
-          const found = await facade.resolveAgent(sessionId);
-          if ("error" in found) throw found.error;
-          // Resume alone runs nothing: this followup is what opens the turn.
-          found.agent.followup(wakeUserMessage(resumeWakeCue));
-          return;
+          let found:
+            | { readonly agent: AgentLike }
+            | { readonly error: unknown }
+            | undefined;
+          try {
+            found = await facade.resolveAgent(sessionId);
+          } catch {
+            // A resolve refusal is the only failure that may fall through to
+            // the recorded-spawner route: no agent was resumed, so the other
+            // route is still allowed to try.
+            facadeRefused = true;
+          }
+          if (found !== undefined) {
+            if ("error" in found) {
+              // ADR-0032: `dispatcher_sessions` rows are never deleted, so
+              // rows written before a summon became a TOP-LEVEL session point
+              // at subagent-owned sessions the facade refuses forever
+              // (`session/agent-busy`). A facade refusal is therefore not
+              // terminal — it falls through to the recorded-spawner route
+              // below.
+              facadeRefused = true;
+            } else {
+              // Resume alone runs nothing: this followup is what opens the
+              // turn. The resume ALREADY SUCCEEDED, so a followup failure is
+              // mine to own — never a second cue through `subagents`, which
+              // would deliver the same wake twice. Keep it parked instead;
+              // the activation hook (`agent/created`) discharges the parked
+              // turn when the resumed session is announced.
+              try {
+                const result = found.agent.followup(
+                  wakeUserMessage(resumeWakeCue),
+                );
+                // A live driver may return a rejected promise; the
+                // synchronous try/catch cannot see that, and an unhandled
+                // rejection is fatal in dsh.
+                await Promise.resolve(result).catch((error: unknown) => {
+                  try {
+                    console.warn(
+                      `[multitask-dispatcher] dispatcher ${sessionId} was resumed but its followup failed; ` +
+                        `the wake stays parked until the next activation:`,
+                      error,
+                    );
+                  } catch {
+                    // A broken console must not break the wake path either.
+                  }
+                });
+              } catch (error) {
+                try {
+                  console.warn(
+                    `[multitask-dispatcher] dispatcher ${sessionId} was resumed but its followup failed; ` +
+                      `the wake stays parked until the next activation:`,
+                    error,
+                  );
+                } catch {
+                  // A broken console must not break the wake path either.
+                }
+              }
+              return;
+            }
+          }
         }
         const parentSessionId = dispatcherMarks.get(sessionId);
         const sender =
           parentSessionId === undefined || parentSessionId === ""
             ? undefined
             : parents.get(parentSessionId);
-        if (sender === undefined) {
-          // Degraded host: nothing was issued, so the next send may try again.
-          resumeRequested.delete(sessionId);
-          if (!resumeDegradedLogged) {
-            resumeDegradedLogged = true;
+        // Second-round audit: the recorded spawner exists for a TOP-LEVEL peer
+        // too (the summoned dispatcher's row names its summoner), so a sender
+        // alone proves nothing. Only a LEGACY parented child may ride
+        // `subagents.sendMessage`; a top-level peer has no route without the
+        // facade and must stay parked instead of being sent through a route
+        // the host refuses.
+        const legacyParented = await isLegacyParentedDispatcher(sessionId);
+        if (!legacyParented) {
+          // No evidence of the subagent shape. The facade either is absent or
+          // refused — both mean a top-level peer is unreachable from here.
+          // Say it once; the parked turn is still discharged on activation.
+          if (!resumeUndeliverableLogged) {
+            resumeUndeliverableLogged = true;
             try {
               console.warn(
-                `[multitask-dispatcher] dispatcher ${sessionId} cannot be cold-resumed: ` +
-                  `no ctx.sessionController and no live spawner bound; the peer ` +
-                  `message waits in its inbox until it activates.`,
+                `[multitask-dispatcher] dispatcher ${sessionId} is undeliverable: ` +
+                  `it is not a legacy subagent child and no session facade resumed it; ` +
+                  `the wake stays parked until the session activates.`,
               );
             } catch {
               // A broken console must not break the wake path either.
@@ -1418,12 +2118,53 @@ export function createCordisDshHost(
           }
           return;
         }
-        await ctx.subagents.sendMessage(
-          sender,
-          sessionId,
-          textBlocks(resumeWakeCue),
-          { signal: new AbortController().signal },
-        );
+        if (sender !== undefined) {
+          // The pre-ADR-0032 route: subagent delivery from the recorded
+          // spawner cold-resumes a child that the facade refuses. Same cue,
+          // same "resume must open a turn" rule.
+          await ctx.subagents.sendMessage(
+            sender,
+            sessionId,
+            textBlocks(resumeWakeCue),
+            { signal: new AbortController().signal },
+          );
+          return;
+        }
+        if (facadeRefused) {
+          // The facade refused AND no recorded spawner is bound. Nothing ran,
+          // so do not claim a resume: keep the wake parked (the peer inbox
+          // still owes it) and say it once. `resumeRequested` stays set so a
+          // later send cannot start a resume storm; the lifecycle listeners
+          // (`agent/created` / `agent/disposed`) clear it when the session
+          // comes back.
+          if (!resumeUndeliverableLogged) {
+            resumeUndeliverableLogged = true;
+            try {
+              console.warn(
+                `[multitask-dispatcher] dispatcher ${sessionId} is undeliverable: ` +
+                  `the session facade refused the resume and no recorded spawner is bound; ` +
+                  `the wake stays parked until the session activates.`,
+              );
+            } catch {
+              // A broken console must not break the wake path either.
+            }
+          }
+          return;
+        }
+        // Degraded host: nothing was issued, so the next send may try again.
+        resumeRequested.delete(sessionId);
+        if (!resumeDegradedLogged) {
+          resumeDegradedLogged = true;
+          try {
+            console.warn(
+              `[multitask-dispatcher] dispatcher ${sessionId} cannot be cold-resumed: ` +
+                `no ctx.sessionController and no live spawner bound; the peer ` +
+                `message waits in its inbox until it activates.`,
+            );
+          } catch {
+            // A broken console must not break the wake path either.
+          }
+        }
       })
       .catch((error) => {
         // Retry on the NEXT send: the resume never reached the host.
@@ -1454,62 +2195,56 @@ export function createCordisDshHost(
    * The correction itself is delivered by `deliverParkedWorkerWake` once the
    * resumed child is announced, so it is never sent twice.
    *
-   * Resume route: the `sessionController` facade first — `resolveAgent` gives
-   * an Agent for a session whose spawner is not live in this process, which
-   * the parent→child route cannot do. ADR-0003 still stands (workers are
-   * leaves spawned through the subagent runtime), so the recorded spawner
-   * stays as the fallback on a host with no facade.
+   * Resume route: `ctx.subagents.sendMessage` from the SPAWNER recorded on the
+   * row. ADR-0032's `sessionController` facade is NOT a substitute here: it
+   * serves top-level dispatcher peers, and the host's ownership guard refuses
+   * a subagent-owned child on that route by design
+   * (`dsh-api-session-controller/lib/index.js:128-134`). The subagent route
+   * does cold-resume an absent direct child
+   * (`dsh-subagent/lib/types/index.d.ts:151-168`), which is exactly the
+   * dormant case; without a bound spawner there is no sender, so the text
+   * waits.
    *
    * Failure is honest and quiet, same rule as the dispatcher half: the send
    * was already ACCEPTED by the core, so a wake that cannot be issued — no
-   * facade and no bound spawner, a host refusal — logs, and the text stays
-   * parked for the next activation. Nothing is thrown into the caller and no
-   * refusal class is invented.
+   * bound spawner, a host refusal — logs, and the text stays parked for the
+   * next activation. Nothing is thrown into the caller and no refusal class
+   * is invented.
    */
   function requestDormantWorkerWake(workerId: string, message: string): void {
     parkedWorkerWakes.set(workerId, message);
     if (resumeRequested.has(workerId)) return;
+    const parentSessionId = workerSessions.get(workerId);
+    const sender =
+      parentSessionId === undefined ? undefined : parents.get(parentSessionId);
+    if (sender === undefined) {
+      // The spawner is not bound in this process (it never activated this
+      // boot): the text waits here for when it does. Nothing was issued, so
+      // the next send may try again.
+      if (!workerResumeDegradedLogged) {
+        workerResumeDegradedLogged = true;
+        try {
+          console.warn(
+            `[multitask-dispatcher] worker ${workerId} cannot be cold-resumed: ` +
+              `no live spawner bound; the parked wake waits until it activates.`,
+          );
+        } catch {
+          // A broken console must not break the wake path either.
+        }
+      }
+      return;
+    }
     resumeRequested.add(workerId);
     const controller = new AbortController();
     void Promise.resolve()
-      .then(async () => {
-        const facade = readSessionController(ctx);
-        if (facade !== undefined) {
-          const found = await facade.resolveAgent(workerId);
-          if ("error" in found) throw found.error;
-          // Resume alone runs nothing: this followup is what opens the turn.
-          found.agent.followup(wakeUserMessage(resumeWakeCue));
-          return;
-        }
-        const parentSessionId = workerSessions.get(workerId);
-        const sender =
-          parentSessionId === undefined
-            ? undefined
-            : parents.get(parentSessionId);
-        if (sender === undefined) {
-          // Degraded host: nothing was issued, so the next send may try again.
-          resumeRequested.delete(workerId);
-          if (!workerResumeDegradedLogged) {
-            workerResumeDegradedLogged = true;
-            try {
-              console.warn(
-                `[multitask-dispatcher] worker ${workerId} cannot be cold-resumed: ` +
-                  `no ctx.sessionController and no live spawner bound; the parked ` +
-                  `wake waits until it activates.`,
-              );
-            } catch {
-              // A broken console must not break the wake path either.
-            }
-          }
-          return;
-        }
-        await ctx.subagents.sendMessage(
+      .then(() =>
+        ctx.subagents.sendMessage(
           sender,
           workerId,
           textBlocks(resumeWakeCue),
           { signal: controller.signal },
-        );
-      })
+        ),
+      )
       .catch((error) => {
         // Retry on the NEXT send: the resume never reached the host. The
         // parked text stays, so nothing was lost.
@@ -1527,32 +2262,50 @@ export function createCordisDshHost(
 
   /**
    * Ticket 142: hand a parked correction to a worker the host just brought
-   * back. The slot is cleared BEFORE the send, so a repeat announcement of the
-   * same session delivers nothing a second time; a failing send is logged and
-   * not retried (the send was already accepted — see `wakeDormantWorker`).
+   * back. The slot is cleared only AFTER the send resolves: a failed delivery
+   * (no bound sender, or a refused `sendMessage`) re-parks the text
+   * last-wins, so the correction is never lost. A newer correction parked
+   * while the send was in flight wins — it is not overwritten by this one.
+   *
+   * Second-round audit fixes:
+   * - a FALLING delivery must not re-park text for a worker that settled in
+   *   the meantime (the tombstone means stop was for good);
+   * - when a newer correction is parked while this send is in flight, the
+   *   in-flight guard must not strand it: after the guard clears, delivery is
+   *   started again for the newer text.
    */
   function deliverParkedWorkerWake(workerId: string): void {
     resumeRequested.delete(workerId);
+    // A terminal worker gets nothing delivered. This also covers a send that
+    // resolves after the worker settled.
+    if (settledWorkerIds.has(workerId)) {
+      parkedWorkerWakes.delete(workerId);
+      return;
+    }
     const text = parkedWorkerWakes.get(workerId);
     if (text === undefined) return;
-    parkedWorkerWakes.delete(workerId);
     const entry = workers.get(workerId);
-    const parentSessionId = entry?.parentSessionId ?? workerSessions.get(workerId);
+    const parentSessionId =
+      entry?.parentSessionId ?? workerSessions.get(workerId);
     const sender =
       parentSessionId !== undefined ? parents.get(parentSessionId) : undefined;
     if (sender === undefined) {
-      // Nothing to send WITH (the spawner is gone): drop the text rather than
-      // hold it against a worker that is now live and would receive it on top
-      // of whatever it did meanwhile. Logged, never silently swallowed.
+      // Nothing to send WITH (the spawner is not bound): keep the text parked
+      // so the spawner's activation can still deliver it. The slot was never
+      // popped, so this is a no-op on the map; logged, not silently dropped.
       try {
         console.warn(
-          `[multitask-dispatcher] worker ${workerId} was resumed but its spawner is not bound; the parked correction was dropped`,
+          `[multitask-dispatcher] worker ${workerId} was resumed but its spawner is not bound; the parked correction stays queued`,
         );
       } catch {
         // A broken console must not break the create path either.
       }
       return;
     }
+    // One delivery per worker at a time: the slot now survives until the send
+    // resolves, so a repeat announcement must not queue the same text twice.
+    if (workerWakeDeliveries.has(workerId)) return;
+    workerWakeDeliveries.add(workerId);
     const controller = new AbortController();
     void Promise.resolve()
       .then(() =>
@@ -1560,14 +2313,45 @@ export function createCordisDshHost(
           signal: controller.signal,
         }),
       )
+      .then(() => {
+        // Last-wins: a correction parked while this send was in flight is
+        // newer and must survive (the `finally` below starts its delivery).
+        if (parkedWorkerWakes.get(workerId) === text) {
+          parkedWorkerWakes.delete(workerId);
+        }
+      })
       .catch((error) => {
+        // A settled worker is done: never re-park a correction for it.
+        if (settledWorkerIds.has(workerId)) {
+          parkedWorkerWakes.delete(workerId);
+          return;
+        }
+        // Re-park last-wins: keep a newer correction if one arrived.
+        if (!parkedWorkerWakes.has(workerId)) {
+          parkedWorkerWakes.set(workerId, text);
+        }
         try {
           console.warn(
-            `[multitask-dispatcher] correction for resumed worker ${workerId} could not be delivered:`,
+            `[multitask-dispatcher] correction for resumed worker ${workerId} could not be delivered; it stays queued:`,
             error,
           );
         } catch {
           // A broken console must not break the create path either.
+        }
+      })
+      .finally(() => {
+        workerWakeDeliveries.delete(workerId);
+        // The guard that just cleared may have hidden a NEWER correction
+        // parked during the flight. Deliver exactly that newer text; when the
+        // slot holds the text just sent (or the send failed and re-parked it),
+        // nothing is started here.
+        const parked = parkedWorkerWakes.get(workerId);
+        if (
+          parked !== undefined &&
+          parked !== text &&
+          !settledWorkerIds.has(workerId)
+        ) {
+          deliverParkedWorkerWake(workerId);
         }
       });
   }
@@ -1578,7 +2362,21 @@ export function createCordisDshHost(
       lastAssistantMessage?: ContentBlock[];
     };
     const workerId = String(end.id);
-    if (!workers.has(workerId)) return;
+    // A late duplicate after the first terminal event is not a new settle.
+    if (settledWorkerIds.has(workerId)) return;
+    // A settled worker is still OURS even after its live registry entry was
+    // pruned (`agent/disposed` does that): the durable wake identity — or,
+    // when the deployment has no durable store at all, the in-process spawn
+    // proof — is what proves ownership here, so the settle is never dropped
+    // and the core cannot be left with a running worker that will never
+    // finish.
+    if (
+      !workers.has(workerId) &&
+      !workerSessions.has(workerId) &&
+      !spawnedWorkerIds.has(workerId)
+    ) {
+      return;
+    }
     // A settled worker has no live activity; the check row shows the
     // terminal status instead (ticket 29 honesty rule). Ticket 110 phase 2:
     // the ring itself is retained — the wake digest composes after this
@@ -1605,6 +2403,35 @@ export function createCordisDshHost(
     }
     for (const cb of [...settledCallbacks]) {
       cb(event);
+    }
+    // Defect fix (leaked per-worker state): a terminal worker's live entries
+    // are dead weight — the registry entry kept it wake-able and `owns()` true
+    // for the rest of the process, and the abort controller + activation were
+    // only released on host dispose. Prune them HERE. What the late settle /
+    // wake paths still need lives elsewhere: the settle record (`workerResults`)
+    // and the activity breadcrumb (`activityRing`) are retained, the tombstone
+    // (`settledWorkerIds`) blocks resurrection, and `workerSessions` is dropped
+    // by the core's own `forgetWorkerWake` on this same event.
+    const finished = workerActivations.get(workerId);
+    workerActivations.delete(workerId);
+    spawnControllers.delete(workerId);
+    workers.delete(workerId);
+    // The settle has been accepted; the in-process ownership proof has no
+    // further job (the tombstone above blocks a duplicate/resurrection).
+    spawnedWorkerIds.delete(workerId);
+    if (finished !== undefined) {
+      // Release exactly this activation (never a later cold resume); a failing
+      // dispose is logged, never thrown into the settle path.
+      void Promise.resolve(finished.dispose()).catch((error) => {
+        try {
+          console.warn(
+            `[multitask-dispatcher] settled worker ${workerId} could not be released:`,
+            error,
+          );
+        } catch {
+          // A broken console must not break the settle path either.
+        }
+      });
     }
   });
 
@@ -1669,7 +2496,7 @@ export function createCordisDshHost(
    * surface, policy, lifecycle, rebuild) and must not turn a spawn the host
    * already accepted into a host refusal — the model would be told nothing
    * started while a live child exists. A throw is therefore logged honestly
-   * and the child stays live but inert; `dispatcherActivated` still records
+   * and the child stays live but inert; `dispatcherActivations` still records
    * the attempt so neither path retries it.
    *
    * `generation` (ticket 141) is resolved by the caller from the map/mark and
@@ -1707,15 +2534,16 @@ export function createCordisDshHost(
       if (flushWake) flushPendingWakeTurn(sessionId, childAgent);
       return;
     }
-    if (dispatcherActivated.has(sessionId)) {
+    if (dispatcherActivations.has(sessionId)) {
       // Ticket 130: a repeat resume does nothing twice. Ticket 138: a wake a
       // send parked for this id is still discharged — for a child that is
       // live again it lands normally, and there is no second activation to
-      // wait for.
+      // wait for. This is per-activation state: `agent/disposed` deletes it,
+      // so a re-announced session activates again.
       if (flushWake) flushPendingWakeTurn(sessionId, childAgent);
       return;
     }
-    dispatcherActivated.add(sessionId);
+    dispatcherActivations.add(sessionId);
     try {
       onDispatcherSpawned(childAgent, sessionId, generation, title);
     } catch (error) {
@@ -1751,10 +2579,27 @@ export function createCordisDshHost(
     childAgent: AgentLike,
   ): void {
     resumeRequested.delete(sessionId);
-    if (!pendingWakeTurns.has(sessionId)) return;
-    const origin = pendingWakeTurns.get(sessionId);
-    pendingWakeTurns.delete(sessionId);
-    openWakeTurn(sessionId, origin, childAgent);
+    // Never escape a listener: the callers are the synchronous
+    // `agent/created` path and the post-create spawn path, and a throw here
+    // would abort a listener that owns no failure handling.
+    try {
+      if (!pendingWakeTurns.has(sessionId)) return;
+      const parked = pendingWakeTurns.get(sessionId);
+      pendingWakeTurns.delete(sessionId);
+      // Deliver the parked body when one was composed; `openWakeTurn` only
+      // composes when the text is absent (the not-live case), so a report
+      // drained before a failed followup is never replaced by the generic cue.
+      openWakeTurn(sessionId, parked?.origin, childAgent, parked?.text);
+    } catch (error) {
+      try {
+        console.warn(
+          `[multitask-dispatcher] parked wake for ${sessionId} could not be discharged:`,
+          error,
+        );
+      } catch {
+        // A broken console must not break the create path either.
+      }
+    }
   }
 
   /**
@@ -1770,6 +2615,56 @@ export function createCordisDshHost(
    * the spawn, so a marker problem must never read as a host refusal. The
    * lost mark is the accepted crash window, one step wider.
    */
+  /**
+   * SECOND-ROUND AUDIT (first-turn ordering): bound one POST-CREATE
+   * bookkeeping step. The mark write still runs BEFORE the first turn for
+   * crash safety, but a store that never settles must not block `followup`
+   * forever. The wrapped promise's outcome is always observed (no unhandled
+   * rejection), and a timeout is logged, never thrown: the child already
+   * exists, so bookkeeping failure is not a spawn refusal.
+   */
+  function boundedBookkeeping(
+    work: Promise<unknown> | void,
+    description: string,
+  ): Promise<void> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        if (settled) return;
+        try {
+          console.warn(
+            `[multitask-dispatcher] ${description} did not settle within ${bookkeepingTimeoutMs}ms; continuing so the first turn is not blocked`,
+          );
+        } catch {
+          // A broken console must not block the turn either.
+        }
+        finish();
+      }, bookkeepingTimeoutMs);
+      // Node's timer must not keep the process alive on its own.
+      (timer as { unref?: () => void }).unref?.();
+      void Promise.resolve(work).then(
+        () => finish(),
+        (error: unknown) => {
+          try {
+            console.warn(
+              `[multitask-dispatcher] ${description} failed; continuing so the first turn is not blocked:`,
+              error,
+            );
+          } catch {
+            // A broken console must not block the turn either.
+          }
+          finish();
+        },
+      );
+    });
+  }
+
   async function writeDispatcherMark(
     sessionId: string,
     parentSessionId?: string,
@@ -1788,11 +2683,18 @@ export function createCordisDshHost(
     const store = markers;
     if (store === undefined || store.writeDispatcherMark === undefined) return;
     try {
+      // Second-round audit: the row also records the session SHAPE. Every row
+      // this build writes comes from the top-level summon path (ADR-0032), so
+      // `origin: "top-level"` lets the dormant-resume fallback keep this peer
+      // off the legacy `subagents.sendMessage` route. Older rows omit it and
+      // are classified by header/shape instead. The durable schema preserves
+      // unknown fields, so this rides the existing row without a version bump.
       await store.writeDispatcherMark({
         sessionId,
         ...(parentSessionId !== undefined ? { parentSessionId } : {}),
         ...(generation !== undefined ? { generation } : {}),
-      });
+        origin: "top-level",
+      } as DurableDispatcherMark);
     } catch (error) {
       try {
         console.warn(
@@ -1817,9 +2719,11 @@ export function createCordisDshHost(
    * The store read may be asynchronous while this listener must return
    * synchronously, so the activation lands as soon as the read resolves —
    * the same residual limit the no-announcement fallback already documents.
-   * Idempotency is the activation helper's: `dispatcherActivated` is checked
+   * Idempotency is the activation helper's: `dispatcherActivations` is checked
    * synchronously, so a second resume never double-registers tools or
-   * double-injects policy.
+   * double-injects policy. The guard ends with the activation
+   * (`agent/disposed` deletes it), so a later re-announcement activates
+   * again.
    *
    * Residual limit, stated: if the SAME parent has a worker spawn in flight
    * when a marked child is announced, the worker composition can land in the
@@ -1838,11 +2742,27 @@ export function createCordisDshHost(
   ): void {
     const store = markers;
     if (store === undefined || store.readDispatcherMark === undefined) return;
-    if (dispatcherActivated.has(sessionId)) return;
+    if (dispatcherActivations.has(sessionId)) return;
     void Promise.resolve()
       .then(() => store.readDispatcherMark?.(sessionId))
       .then((mark) => {
         if (mark === undefined) return;
+        // Defect fix (a DISPOSED Agent was installed): the store round-trip
+        // can outlive the announcement. Binding a dead Agent would leave the
+        // session without a working parent and the durable mark uncorrected.
+        // Only the SAME live agent may be activated; a later announcement
+        // runs this path again with a fresh store read.
+        const current = liveAgentOf(sessionId);
+        if (current !== childAgent) {
+          try {
+            console.warn(
+              `[multitask-dispatcher] dispatcher ${sessionId} was disposed before its mark resolved; activation skipped`,
+            );
+          } catch {
+            // A broken console must not break the create path either.
+          }
+          return;
+        }
         // Ticket 141: the resumed child keeps the number it was spawned with.
         // A pre-141 row has no field — every such row came from a spawn, so
         // its honest reading is generation 2 (a direct child of a
@@ -1886,6 +2806,11 @@ export function createCordisDshHost(
    * branch is skipped (the existing composition path handles it).
    */
   function reattachMarkedWorker(childAgent: AgentLike, workerId: string): boolean {
+    // Defect fix (a terminal worker was resurrected): a settled/aborted id
+    // never comes back. The core records the tombstone on every terminal path
+    // (`forgetWorkerWake`), so a late announcement cannot adopt a worker whose
+    // stop was already delivered.
+    if (settledWorkerIds.has(workerId)) return false;
     // Fast path: an in-process spawn reserved this id before `startActivation`
     // (ticket 120), so it is already registered and the caller's normal
     // composition path handles it — return false so the listener falls
@@ -1896,6 +2821,9 @@ export function createCordisDshHost(
       return false;
     }
     const adopt = (parentSessionId: string): boolean => {
+      // Same tombstone rule at the adoption itself — a settle can land
+      // between the entry check and the store round-trip below.
+      if (settledWorkerIds.has(workerId)) return false;
       if (workers.has(workerId)) {
         // Lost a race with a spawn that registered in the meantime — the
         // parked correction still has to reach it exactly once, and the
@@ -1948,8 +2876,42 @@ export function createCordisDshHost(
     }
     void Promise.resolve()
       .then(() => store.readWorkerSession?.(workerId))
-      .then((row) => {
+      .then(async (row) => {
         if (row === undefined) return;
+        if (settledWorkerIds.has(workerId)) return;
+        // Defect fix (a terminal worker was woken back): the durable row can
+        // be an orphan whose async delete was lost. A terminal worker-marker
+        // snapshot is the proof that stop was for good, so the row must not
+        // re-arm the wake identity or the adoption.
+        try {
+          const parentMarkers = await store.readWorkerMarkers(
+            row.parentSessionId,
+          );
+          if (
+            parentMarkers.some(
+              (marker) =>
+                marker.workerId === workerId &&
+                isTerminalStatus(marker.status),
+            )
+          ) {
+            return;
+          }
+        } catch {
+          // An unreadable table proves nothing; keep the pre-fix behaviour.
+        }
+        // Defect fix (a DISPOSED Agent was installed): after the store
+        // round-trip the announcement may already be stale. Adopt only the
+        // live agent for this id; a re-announcement runs this path again.
+        if (liveAgentOf(workerId) !== childAgent) {
+          try {
+            console.warn(
+              `[multitask-dispatcher] worker ${workerId} was disposed before its session row resolved; adoption skipped`,
+            );
+          } catch {
+            // A broken console must not break the create path either.
+          }
+          return;
+        }
         workerSessions.set(row.sessionId, row.parentSessionId);
         adopt(row.parentSessionId);
       })
@@ -2028,6 +2990,25 @@ export function createCordisDshHost(
   }
 
   /**
+   * Ticket 176: the ONE write path for a session's policy class.
+   *
+   * The class of a session id cannot change (ADR-0034 decision 1), so
+   * `"spawned"` is permanent: a later caller that carries the `"user"`
+   * default — a cold resume whose projection could not answer, the plugin's
+   * `/dsh-bot` path, an explicit `recordDispatcherClass` call — must never
+   * downgrade a team leader and unlock `spawn_dispatcher` for it.
+   *
+   * Both the public seam and the resume path write through here.
+   */
+  function recordDispatcherClassValue(
+    sessionId: string,
+    origin: DispatcherOrigin,
+  ): void {
+    if (dispatcherClasses.get(sessionId) === "spawned") return;
+    dispatcherClasses.set(sessionId, origin);
+  }
+
+  /**
    * Ticket 147: re-activate a USER-STARTED dispatcher whose chat the host has
    * resumed after a restart.
    *
@@ -2060,21 +3041,38 @@ export function createCordisDshHost(
     agent: AgentLike,
     sessionId: string,
   ): void {
-    if (onUserDispatcherResumed === undefined) return;
-    if (sessionKindOfSession === undefined) return;
-    if (sessionKindOfSession(session) !== "dispatcher") return;
+    // ADR-0032 defect fix: a wake a peer send parked for this id must be
+    // discharged on EVERY exit, not only on the activation path. A host with
+    // no activation hook (or a session whose durable kind cannot be answered)
+    // otherwise dropped the obligation forever. The session is live either
+    // way, so opening its turn is honest delivery — not a fake activation.
+    if (onUserDispatcherResumed === undefined) {
+      flushPendingWakeTurn(sessionId, agent);
+      return;
+    }
+    // Ticket 177: guarded exactly like `readDispatcherClass` — a throwing or
+    // absent plugin reader answers "not a dispatcher", never an escaping
+    // throw out of the host listener.
+    if (readSessionKind(sessionKindOfSession, session) !== "dispatcher") {
+      flushPendingWakeTurn(sessionId, agent);
+      return;
+    }
     // Ticket 177: ADR-0032 made a summoned dispatcher top-level, so IT also
     // arrives here — the branch name is historical and this is the seam where
     // ticket 173's "the class falls back to chief-of-staff after a restart"
     // limitation is closed. The class comes from the same durable projection
-    // the glyph reads, and an unreadable answer stays `"user"` (pre-175).
+    // the glyph reads; when that projection cannot settle an answer, the
+    // durable mark is the fallback — NEVER the `"user"` default, which would
+    // silently let a summoned team leader summon again.
     const origin: DispatcherOrigin =
-      readDispatcherClass(dispatcherClassOfSession, session) ?? "user";
-    // Ticket 176: record the class before activating. `"spawned"` here is a
-    // summoned dispatcher resuming top-level (ADR-0032), and it keeps the
-    // no-summon rule across a restart — the durable `dispatcher_sessions` row
-    // is what makes the projection answer `"spawned"` at all.
-    dispatcherClasses.set(sessionId, origin);
+      readDispatcherClass(dispatcherClassOfSession, session) ??
+      dispatcherClassForSummon(sessionId);
+    // Ticket 176: record the class before activating, through the one
+    // no-downgrade write path. `"spawned"` here is a summoned dispatcher
+    // resuming top-level (ADR-0032), and it keeps the no-summon rule across a
+    // restart — the durable `dispatcher_sessions` row is what makes the
+    // projection answer `"spawned"` at all.
+    recordDispatcherClassValue(sessionId, origin);
     if (!resumedUserDispatchers.has(sessionId)) {
       resumedUserDispatchers.add(sessionId);
       try {
@@ -2141,6 +3139,14 @@ export function createCordisDshHost(
     if (child === undefined) return;
     const parentSessionId = String(child.session?.header?.parentSession ?? "");
     const childSessionId = String(child.session?.id ?? "");
+    if (childSessionId !== "") {
+      // Defect fix (a resume stranded forever): the session has been
+      // announced, so a resume marker for it has done its job. Clearing HERE
+      // — a lifecycle event, not every send — means a failed cold resume
+      // cannot block every later attempt, while a second send before the
+      // announcement still reuses the one in flight.
+      resumeRequested.delete(childSessionId);
+    }
     if (parentSessionId === "") {
       // Ticket 147: a session with NO parent is never a subagent, so none of
       // the child paths below apply — but it CAN be a user-started dispatcher
@@ -2170,7 +3176,11 @@ export function createCordisDshHost(
     if (
       childSessionId !== "" &&
       (reservedDispatcherIds.has(childSessionId) ||
-        dispatcherActivated.has(childSessionId))
+        // DURABLE classification: the mark mirror is seeded before the create
+        // and written after it, so it answers for an announcement that lands
+        // after the reservation is gone. `dispatcherActivations` is only the
+        // per-activation dedupe and must never classify an id.
+        dispatcherMarks.has(childSessionId))
     ) {
       // Ticket 118: the child of our `spawnDispatcher` call — a dispatcher
       // peer, never a worker. No composition, no barrier, no registry entry.
@@ -2197,14 +3207,30 @@ export function createCordisDshHost(
     if (workerAgentDef === undefined) return;
     if ((pendingSpawns.get(parentSessionId) ?? 0) === 0) return;
     if (typeof child.ctx !== "object" || child.ctx === null) return;
-    applyWorkerComposition(
-      child.ctx as Parameters<typeof applyWorkerComposition>[0],
-      workerAgentDef,
-      child,
-      // The mid-task reply channel (ticket 122). Registered on the child's own
-      // scope, so the dispatcher's surface never lists it.
-      buildWorkerLocalTools(child.session?.id),
-    );
+    // Second-round audit: this listener is SYNCHRONOUS and runs inside the
+    // host's create call. A section/tool registration throw must not reject
+    // child creation (the child already exists), so it is logged exactly like
+    // the resume path's composition failure. The surface stays inherited; the
+    // spawn still succeeds.
+    try {
+      applyWorkerComposition(
+        child.ctx as Parameters<typeof applyWorkerComposition>[0],
+        workerAgentDef,
+        child,
+        // The mid-task reply channel (ticket 122). Registered on the child's
+        // own scope, so the dispatcher's surface never lists it.
+        buildWorkerLocalTools(child.session?.id),
+      );
+    } catch (error) {
+      try {
+        console.warn(
+          `[multitask-dispatcher] worker ${childSessionId} could not be composed; it keeps its inherited surface:`,
+          error,
+        );
+      } catch {
+        // A broken console must not break the create path either.
+      }
+    }
   });
 
   /**
@@ -2226,14 +3252,72 @@ export function createCordisDshHost(
     const record = payload as {
       agent?: { session?: { id?: unknown } };
     } | null;
-    const sessionId = record?.agent?.session?.id;
+    const disposedAgent = record?.agent;
+    const sessionId = disposedAgent?.session?.id;
     if (sessionId === undefined || sessionId === null) return;
-    resumedUserDispatchers.delete(String(sessionId));
+    const id = String(sessionId);
+    // SECOND-ROUND AUDIT (identity-blind pruning): a re-adopted session can
+    // be announced BEFORE a stale disposal event for its PREVIOUS Agent
+    // arrives. Pruning or disposing the new activation then would kill a live
+    // worker/dispatcher. Only act when the disposed object still answers this
+    // id — or when no live agent answers at all (the ordinary dispose).
+    const current = liveAgentOf(id);
+    if (
+      current !== undefined &&
+      disposedAgent !== undefined &&
+      current !== disposedAgent
+    ) {
+      return;
+    }
+    // Per-activation dispatcher dedupe ends with the activation. Kept past
+    // disposal it silently suppressed a legitimate re-activation (the
+    // re-announced session came back without parent binding, tools or
+    // policy).
+    dispatcherActivations.delete(id);
+    resumedUserDispatchers.delete(id);
+    // Defect fix (a resume stranded forever): a cold resume that never reached
+    // an activation (kind projection unresolved, activation early-return) left
+    // this flag set for the process lifetime. The session is gone now, so the
+    // next send may ask again.
+    resumeRequested.delete(id);
+    // Defect fix (leaked per-worker state): a disposed worker agent's live
+    // entries go with it. The wake identity (`workerSessions`), the tombstone
+    // and the settle record stay elsewhere, so a later dormancy wake can still
+    // resolve its spawner.
+    const activation = workerActivations.get(id);
+    workerActivations.delete(id);
+    spawnControllers.delete(id);
+    workers.delete(id);
+    if (activation !== undefined) {
+      void Promise.resolve(activation.dispose()).catch((error) => {
+        try {
+          console.warn(
+            `[multitask-dispatcher] disposed worker ${id} could not be released:`,
+            error,
+          );
+        } catch {
+          // A broken console must not break the dispose path either.
+        }
+      });
+    }
   });
 
   const host: CordisDshHost = {
     bindParent(agent: AgentLike, sessionId: string): void {
       parents.set(sessionId, agent);
+      // Ticket 142 (second-round audit): a correction parked while this
+      // spawner was NOT bound has no sender until now. Binding the spawner is
+      // exactly the moment it becomes deliverable, so discharge every parked
+      // worker wake recorded against this session here — the activation hook
+      // is not guaranteed to announce those workers again.
+      for (const workerId of [...parkedWorkerWakes.keys()]) {
+        const entry = workers.get(workerId);
+        const parentSessionId =
+          entry?.parentSessionId ?? workerSessions.get(workerId);
+        if (parentSessionId === sessionId) {
+          deliverParkedWorkerWake(workerId);
+        }
+      }
     },
 
     unbindParent(sessionId?: string): void {
@@ -2265,12 +3349,9 @@ export function createCordisDshHost(
     },
 
     recordDispatcherClass(sessionId: string, origin: DispatcherOrigin): void {
-      // Ticket 176: never downgrade a known `"spawned"` to `"user"`. The class
-      // of a session id cannot change (ADR-0034 decision 1: fixed for the life
-      // of the activation), and a later caller passing the default must not
-      // unlock a team leader.
-      if (dispatcherClasses.get(sessionId) === "spawned") return;
-      dispatcherClasses.set(sessionId, origin);
+      // Ticket 176: never downgrade a known `"spawned"` to `"user"` — one
+      // write path for every caller, including the cold-resume class route.
+      recordDispatcherClassValue(sessionId, origin);
     },
 
     dispatcherMarkAnswer(
@@ -2352,7 +3433,24 @@ export function createCordisDshHost(
       }
       try {
         const rows = await store.listWorkerSessions();
+        // Defect fix (a settled worker was woken back): `worker_sessions` rows
+        // are deleted on settle/stop, but the delete is async and best-effort.
+        // A surviving row re-armed this mirror and made the worker wake-able
+        // again. Skip every row with a terminal tombstone — the in-process
+        // settle set, or a terminal snapshot in the durable worker-marker
+        // table (the crash case, where the process-local set is gone).
+        const terminalByParent = await terminalWorkerIdsByParent(
+          store,
+          rows.map((row) => row.parentSessionId),
+        );
         for (const row of rows) {
+          if (settledWorkerIds.has(row.sessionId)) continue;
+          if (
+            terminalByParent.get(row.parentSessionId)?.has(row.sessionId) ===
+            true
+          ) {
+            continue;
+          }
           // Same discipline as the dispatcher mirror: an in-process write is
           // authoritative, so a store row never overrides it. A row ABSENT
           // from the store but present here is kept — the settle path that
@@ -2379,11 +3477,19 @@ export function createCordisDshHost(
     },
 
     forgetWorkerWake(workerId: string): void {
+      // Defect fix (a settled worker was woken back): the core calls this on
+      // every terminal outcome (settle, abort, hold release), so it is the
+      // tombstone's one write point. A row whose async delete was lost must
+      // never re-arm the mirror — `refreshWorkerSessionMarks` and
+      // `reattachMarkedWorker` both consult this set.
+      settledWorkerIds.add(workerId);
+      spawnedWorkerIds.delete(workerId);
       workerSessions.delete(workerId);
       // A worker that is terminal or abandoned gets nothing delivered: the
       // parked slot is a delivery obligation to a session that no longer
       // exists.
       parkedWorkerWakes.delete(workerId);
+      workerWakeDeliveries.delete(workerId);
       resumeRequested.delete(workerId);
     },
 
@@ -2392,8 +3498,37 @@ export function createCordisDshHost(
     },
 
     listLiveJobs(callerSessionId?: string): readonly JobSnapshotLike[] {
+      // SECOND-ROUND AUDIT: read the service through `ctx.get("jobs")`, the
+      // guarded route a live cordis context requires. A bare `ctx.jobs`
+      // property read THROWS when the service was not injected; the guarded
+      // `ctx.get` answer is the real one. The property remains only as the
+      // fallback for a structural stub context that supplies it directly.
+      let jobs: { list(callerSessionId?: unknown): readonly JobSnapshotLike[] } | undefined;
+      if (typeof ctx.get === "function") {
+        try {
+          const service = ctx.get("jobs");
+          if (
+            typeof service === "object" &&
+            service !== null &&
+            typeof (service as { list?: unknown }).list === "function"
+          ) {
+            jobs = service as {
+              list(callerSessionId?: unknown): readonly JobSnapshotLike[];
+            };
+          }
+        } catch {
+          // Absent/not injected: fall through to the declared seam.
+        }
+      }
+      if (jobs === undefined) {
+        try {
+          jobs = ctx.jobs;
+        } catch {
+          return [];
+        }
+      }
       try {
-        return ctx.jobs.list(callerSessionId) ?? [];
+        return jobs?.list(callerSessionId) ?? [];
       } catch {
         return [];
       }
@@ -2466,7 +3601,31 @@ export function createCordisDshHost(
 
     emitStepBoundary(workerId: string): void {
       for (const cb of [...stepBoundaryCallbacks]) {
-        void cb(workerId);
+        // A subscriber's delivery is asynchronous, and this host treats an
+        // unhandled rejection as fatal. A failed steer is neither: it leaves a
+        // worker that will settle through its normal path, so it is logged and
+        // the process stays up.
+        try {
+          void Promise.resolve(cb(workerId)).catch((error) => {
+            try {
+              console.warn(
+                `[multitask-dispatcher] step-boundary delivery for worker ${workerId} failed:`,
+                error,
+              );
+            } catch {
+              // A broken console must not break the host either.
+            }
+          });
+        } catch (error) {
+          try {
+            console.warn(
+              `[multitask-dispatcher] step-boundary callback for worker ${workerId} threw:`,
+              error,
+            );
+          } catch {
+            // A broken console must not break the host either.
+          }
+        }
       }
     },
 
@@ -2554,6 +3713,7 @@ export function createCordisDshHost(
         parentSessionId: opts.parentSessionId,
         agentSessionId: reservedChildId,
       });
+      spawnedWorkerIds.add(reservedChildId);
       // Mark the in-flight spawn BEFORE it starts: `agent/created` fires
       // inside `startActivation`, and that listener is what composes the child.
       pendingSpawns.set(
@@ -2578,6 +3738,7 @@ export function createCordisDshHost(
         // The spawn was refused or aborted before publication: no child
         // exists, so neither registry may keep the reservation.
         workers.delete(reservedChildId);
+        spawnedWorkerIds.delete(reservedChildId);
         throw error;
       } finally {
         const remaining = (pendingSpawns.get(opts.parentSessionId) ?? 1) - 1;
@@ -2586,11 +3747,34 @@ export function createCordisDshHost(
       }
       // workerId === child SessionId. Brand erased at the boundary.
       const workerId = String(activation.childId);
+      // SECOND-ROUND AUDIT (post-settle re-insertion): the child can settle
+      // DURING `startActivation`. `subagent/end` then pruned its live entries
+      // and tombstoned the id; re-inserting here would resurrect a finished
+      // worker for the life of the process. Release exactly this activation
+      // instead (the settle path could not see it yet).
+      if (settledWorkerIds.has(workerId)) {
+        workers.delete(reservedChildId);
+        spawnedWorkerIds.delete(reservedChildId);
+        if (workerId !== reservedChildId) spawnedWorkerIds.delete(workerId);
+        void Promise.resolve(activation.dispose()).catch((error) => {
+          try {
+            console.warn(
+              `[multitask-dispatcher] settled worker ${workerId} could not be released:`,
+              error,
+            );
+          } catch {
+            // A broken console must not break the spawn path either.
+          }
+        });
+        return workerId;
+      }
       if (workerId !== reservedChildId) {
         // The host minted its own id despite the reservation. Keep the
         // registry truthful: move the entry, never leave the reservation
         // behind as a phantom worker.
         workers.delete(reservedChildId);
+        spawnedWorkerIds.delete(reservedChildId);
+        spawnedWorkerIds.add(workerId);
         workers.set(workerId, {
           parentSessionId: opts.parentSessionId,
           agentSessionId: workerId,
@@ -2697,13 +3881,31 @@ export function createCordisDshHost(
           `CordisDshHost: session ${opts.parentSessionId} has no cwd, so a dispatcher summoned from it could never be cold-resumed (the host's cross-session route refuses a session without one). Nothing was created. Start the summoning chat in a directory and summon again.`,
         );
       }
-      const route = parent.options;
+      // Route inheritance (second-round audit): the LIVE selection wins over
+      // the static options. A summoner that switched models in the UI has that
+      // selection in `parent.model.current()` / the request header, while
+      // `parent.options` may still describe the deployment default — copying
+      // only the latter gave the peer a different route from its summoner.
+      // `options` remains the fallback for a host that exposes neither, and
+      // effort/maxTokens ride along whenever any source carries them.
+      const optionsRoute = parent.options ?? {};
+      const liveRoute = liveSummonerRoute(parent);
+      const provider = liveRoute.provider ?? optionsRoute.provider;
+      const model = liveRoute.model ?? optionsRoute.model;
+      const reasoningEffort =
+        liveRoute.reasoningEffort ?? optionsRoute.reasoningEffort;
+      const maxTokens = liveRoute.maxTokens ?? optionsRoute.maxTokens;
       const agentOptions: AgentOptionsLike | undefined =
-        typeof route?.provider === "string" &&
-        typeof route.model === "string" &&
-        route.provider !== "" &&
-        route.model !== ""
-          ? { provider: route.provider, model: route.model }
+        typeof provider === "string" &&
+        provider !== "" &&
+        typeof model === "string" &&
+        model !== ""
+          ? {
+              provider,
+              model,
+              ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+              ...(maxTokens !== undefined ? { maxTokens } : {}),
+            }
           : undefined;
       // Ticket 118 chunk 3: the child id is still RESERVED here — identity is
       // what lets `agent/created` recognise the summoning session as ours
@@ -2713,7 +3915,71 @@ export function createCordisDshHost(
       const reservedChildId = randomUUID();
       /** The id the host actually gave the child, or null if it refused. */
       let spawnedId: string | null = null;
+      /**
+       * The id `setup` activated under when the host assigned its own session
+       * id — cleaned up with the reservation if the create still fails.
+       */
+      let activationChildId: string | null = null;
+      // DEFECT FIX (summoned session came up with no work tools): the child is
+      // a TOP-LEVEL session, so it inherits nothing implicitly — the host only
+      // registers a preset's work tools on a scope that JOINED that preset
+      // (`dsh-agent-preset-registry/lib/index.js` `mount`/`bind`). Read the
+      // summoner's joined preset HERE, before the create, so a registry/lookup
+      // failure refuses the summon instead of producing a tool-less peer; the
+      // mount itself has to happen inside `setup`, because that is the only
+      // moment the child's own scope exists.
+      //
+      // Undefined (no roster, or a preset-free summoner) mounts nothing: that
+      // is a valid composition, not an error — `readAgentPresets` says why.
+      //
+      // Defect fix: the live registry answers `null` for a preset-free
+      // session, and `null` is NOT a preset id — written into `meta.agentPreset`
+      // it makes the create throw "session header agentPreset must be a
+      // string", and passed to `mount` it would join nothing. Normalize once,
+      // here, so both consumers see the same `string | undefined`.
+      const presetRegistry = readAgentPresets(ctx);
+      /**
+       * Second-round audit: the preset READ happens inside the guarded create
+       * path below and is normalized there. A throwing registry read is "no
+       * preset" (logged), never a raw error escaping the summon; a failed
+       * MOUNT is the loud, named refusal.
+       */
+      let summonerPreset: string | undefined;
+      // DEFECT FIX (a summoned session showed up under "Ungrouped" instead of
+      // its summoner's project): read the Workspace that ACCOUNTS the
+      // summoner HERE, before the create, so the peer can be filed under it the
+      // moment it exists. Membership, not a cwd comparison — a Workspace owns
+      // sessions through its ordered `sessionIds` account, and the sidebar
+      // groups on exactly that list (`dsh-client-ui-workspace/lib/client.js:1027-1044`).
+      //
+      // Undefined when no registry is mounted OR when the summoner belongs to
+      // no Workspace. Both file nothing: a session opened outside every project
+      // has no workspace id to hand down, and there is none to invent — a peer
+      // summoned from it stays ungrouped, which is the correct answer, not a
+      // second defect.
+      const summonerWorkspace = readWorkspaceOfSession(ctx, opts.parentSessionId);
       try {
+        // Second-round audit: the preset READ belongs inside this guarded path
+        // and is normalized. A throwing lookup means "this summoner joined no
+        // readable preset" — the peer is still a valid session, so it is
+        // logged and the summon proceeds without one. `null` is normalized the
+        // same way (the live registry's "preset-free" answer is not an id).
+        if (presetRegistry !== undefined) {
+          try {
+            summonerPreset =
+              presetRegistry.presetForSession(parent.session) ?? undefined;
+          } catch (error) {
+            summonerPreset = undefined;
+            try {
+              console.warn(
+                `[multitask-dispatcher] preset lookup for summoner ${opts.parentSessionId} failed; summoning without a preset:`,
+                error,
+              );
+            } catch {
+              // A broken console must not break the summon either.
+            }
+          }
+        }
         // Every seed below is INSIDE the try (review fix): the generation
         // callback is plugin-supplied and can throw, and a seed written
         // outside the try would then outlive the failed spawn — a phantom
@@ -2770,28 +4036,82 @@ export function createCordisDshHost(
         }
         const handle = await create.call(ctx.agents, {
           sessionId: reservedChildId,
-          meta: { cwd: summonerCwd },
+          // DEFECT FIX (cold resume): record the preset the child joined, the
+          // same way the host's own create route does
+          // (`dsh-api-session-controller/lib/index.js:433-436`). The mount in
+          // `setup` below only fixes THIS process; the header is what survives
+          // a restart — `dsh-session` seeds it from this field
+          // (`lib/index.js:1840`) and the resume composes from the resulting
+          // `agentPreset` projection
+          // (`dsh-agent-preset-registry/lib/index.js:51`,
+          // `dsh-api-session-controller/lib/index.js:305-308`). Omitted, the
+          // peer comes back on the DEFAULT preset with a different tool
+          // surface, which is the same defect one restart later.
+          meta: {
+            cwd: summonerCwd,
+            ...(summonerPreset === undefined
+              ? {}
+              : { agentPreset: summonerPreset }),
+          },
           ...(agentOptions === undefined ? {} : { agentOptions }),
-          setup: (agentCtx, agent) => {
+          setup: async (agentCtx, agent) => {
             // ADR-0019: the child's own scope takes its scoped tools and
-            // policy HERE rather than from `agent/created` — `setup` is
-            // awaited BEFORE publication, so nothing sees a half-configured
-            // dispatcher. This is the same seam the host's own session
-            // creation uses; it replaces the subagent composition the old
-            // path inherited.
-            void agentCtx;
+            // policy HERE rather than from `agent/created`. ORDER: `setup`
+            // runs AFTER `session/created` and is awaited BEFORE the child's
+            // `agent/created` and first prompt, so nothing drives a
+            // half-configured dispatcher. This is the same seam the host's own
+            // session creation uses; it replaces the subagent composition the
+            // old path inherited.
+            //
+            // DEFECT FIX (order matters): the summoner's preset is mounted
+            // FIRST, before our dispatcher surface is registered on the same
+            // scope. Two reasons, both load-bearing:
+            // 1. the preset's tools (`tool-fs`, `tool-pwsh`, `tool-web`, …)
+            //    only exist on a scope that joined the preset, so a mount
+            //    after activation would still leave the first prompt — and
+            //    the surface snapshot taken at registration — tool-less;
+            // 2. `withholdHostSpawnTools` runs inside the activation and reads
+            //    the INHERITED surface, so it must already be able to see the
+            //    preset's `subagent`/`subagent_fork` verbs to remove them.
+            // A mount failure refuses the summon: a peer without its preset
+            // has no filesystem, shell or web tools at all, and publishing
+            // that session would be the worse failure. Second-round audit:
+            // surface a NAMED refusal (this file's prefix + the preset id +
+            // the underlying message), never the raw registry error.
+            if (presetRegistry !== undefined && summonerPreset !== undefined) {
+              try {
+                await presetRegistry.mount(agentCtx, summonerPreset);
+              } catch (error) {
+                const detail =
+                  error instanceof Error ? error.message : String(error);
+                throw new Error(
+                  `CordisDshHost: summoned dispatcher could not join agent preset "${summonerPreset}": ${detail}`,
+                );
+              }
+            }
             // Ticket 118/140: the activation itself still runs through the
             // single deduplicated helper. `setup` COMPOSES, never drives, so
             // the parked-wake discharge is deferred to the caller below and
             // the first turn is opened after creation resolves.
             //
-            // Ticket 159: `opts.title` rides THIS call. The child's id is
-            // already fixed (it is the reservation passed as the session id),
-            // so the label and the session it belongs to travel together and
-            // no queue can pair them wrongly.
+            // Defect fix (activate under the CREATED id): the session `setup`
+            // is handed is the one the host actually created. A reservation
+            // normally IS that id, but if the host assigns its own the
+            // activation and the mark must follow the live agent, not the
+            // stale reservation.
+            //
+            // Ticket 159: `opts.title` rides THIS call. The label and the
+            // session it belongs to travel together and no queue can pair
+            // them wrongly.
+            const activationId = String(agent.session?.id ?? reservedChildId);
+            activationChildId = activationId;
+            if (activationId !== reservedChildId) {
+              dispatcherMarks.set(activationId, opts.parentSessionId);
+              dispatcherGenerations.set(activationId, childGeneration);
+            }
             activateSummonedDispatcher(
               agent,
-              reservedChildId,
+              activationId,
               childGeneration,
               false,
               opts.title,
@@ -2802,8 +4122,95 @@ export function createCordisDshHost(
         // The session id IS the dispatcher identity the activation path binds.
         // `create` was handed the reservation, so this is normally the same
         // string; erased at the boundary for the same reason as before.
-        const dispatcherId = String(handle.agent.session.id ?? reservedChildId);
+        //
+        // Defect fix (activate under the CREATED id): a host that assigns its
+        // own id is a contract violation — `setup` already activated under the
+        // agent's own id, and the result/mark must agree with it. Fail LOUDLY
+        // but keep the spawn: the child exists, and reporting `host-refused`
+        // for a live session is the very misreport this fix removes.
+        const createdId = handle.agent.session?.id;
+        const dispatcherId =
+          createdId === undefined || createdId === null || String(createdId) === ""
+            ? reservedChildId
+            : String(createdId);
+        if (dispatcherId !== reservedChildId) {
+          try {
+            console.warn(
+              `[multitask-dispatcher] host created session ${dispatcherId} instead of the reserved id ${reservedChildId}; the dispatcher continues under the host-assigned id`,
+            );
+          } catch {
+            // A broken console must not break the spawn either.
+          }
+        }
         spawnedId = dispatcherId;
+        // Ticket 130: the child is durable from here on. Written IMMEDIATELY
+        // after the create and BEFORE the first `followup` (defect fix), so a
+        // crash between the two cannot lose the identity of a session that
+        // already exists. Never deleted: deactivation also runs on plugin
+        // unload, so a delete would wipe every mark at each restart. The table
+        // grows; accepted. A marker-store failure is logged and swallowed —
+        // the host already accepted the spawn, so it must never read as a host
+        // refusal. Ticket 141: the row carries the generation, so a
+        // cold-resumed child comes back with the same number.
+        // SECOND-ROUND AUDIT (first-turn ordering): the mark write stays
+        // BEFORE the first turn for crash safety, but it is BOUNDED. The
+        // in-memory mirror is already updated synchronously inside
+        // `writeDispatcherMark`, so a stalled store only delays durability —
+        // it must never delay the turn forever.
+        await boundedBookkeeping(
+          writeDispatcherMark(
+            dispatcherId,
+            opts.parentSessionId,
+            childGeneration,
+          ),
+          `dispatcher mark for ${dispatcherId}`,
+        );
+        // DEFECT FIX (a summoned session landed under "Ungrouped"): file the
+        // peer under its summoner's project NOW, in this process, so the
+        // sidebar draws it in that group the first time it appears.
+        //
+        // `create` above writes `meta.cwd` and nothing else — `CreateAgentOptions`
+        // has no workspace field at all (`dsh-agent/lib/types/index.d.ts:49-83`)
+        // — so a peer created here is unaccounted until the registry's next
+        // STARTUP re-buckets sessions by canonical cwd
+        // (`dsh-workspace/lib/index.js:758-813`). That one-restart delay is the
+        // whole defect.
+        //
+        // `attachSession` is the write the host's own create route makes for a
+        // session it starts inside a Workspace
+        // (`dsh-api-session-controller/lib/index.js:686-693`), and it validates
+        // the child's STORED cwd against the workspace path before writing
+        // (`dsh-workspace/lib/index.js:113-122`), so a peer cannot be filed
+        // under a project it is not actually in.
+        //
+        // Before `followup`, deliberately: a blank session is hidden from the
+        // sidebar until its first turn lands (see the note on `followup`
+        // below), so filing first is what makes the group correct at first
+        // paint rather than a repaint later.
+        //
+        // A failure is logged and swallowed, exactly like the dispatcher-mark
+        // write below: the host already accepted the spawn and the session is
+        // live, so a bookkeeping problem must never read as a host refusal. The
+        // peer keeps working, ungrouped.
+        if (summonerWorkspace !== undefined) {
+          // Same bound as the mark write: a stalled workspace write must not
+          // suppress the first turn.
+          await boundedBookkeeping(
+            Promise.resolve()
+              .then(() => summonerWorkspace.attachSession(dispatcherId))
+              .catch((error: unknown) => {
+                try {
+                  console.warn(
+                    `[multitask-dispatcher] summoned session ${dispatcherId} could not be filed under its summoner's workspace:`,
+                    error,
+                  );
+                } catch {
+                  // A broken console must not break the spawn either.
+                }
+              }),
+            `workspace attach for ${dispatcherId}`,
+          );
+        }
         // The handoff prompt is the summoned dispatcher's FIRST user turn.
         // `followup` is the only call that both queues a whole turn and wakes
         // the driver (`dsh-agent-loop/lib/index.js:806-808`) — creating the
@@ -2811,30 +4218,42 @@ export function createCordisDshHost(
         // the sidebar until its first turn lands. The message carries a
         // producer-owned source kind because session format v4 rejects an
         // empty/`plugin` wrapper (`dsh-session-format-v3-to-v4/lib/index.js:126`).
-        handle.agent.followup({
-          id: `multitask-spawn-${randomUUID()}`,
-          role: "user",
-          content: textBlocks(opts.prompt),
-          source: { kind: WAKE_SOURCE_KIND },
-        });
+        //
+        // The summoner's session id travels as the first line. A summoned
+        // dispatcher is a TOP-LEVEL session (ADR-0032): it inherits no parent
+        // session pointer, yet it must report progress and blockers UPWARD.
+        // The team-leader policy and its wake steps name this exact line as
+        // the upward address source (`src/core/policy/prompts.ts`), so the
+        // line and the copy are one contract — the handoff line is the only
+        // place the id is stated.
+        //
+        // Defect fix: a failure HERE is post-create. The child exists, so it is
+        // logged and the call returns the created dispatcher — never surfaced
+        // as `host-refused`, which would tell the model nothing started.
+        const handoffPrompt = `${formatSummoningDispatcherHandoffLine(
+          opts.parentSessionId,
+        )}\n\n${opts.prompt}`;
+        try {
+          handle.agent.followup({
+            id: `multitask-spawn-${randomUUID()}`,
+            role: "user",
+            content: textBlocks(handoffPrompt),
+            source: { kind: WAKE_SOURCE_KIND },
+          });
+        } catch (error) {
+          try {
+            console.warn(
+              `[multitask-dispatcher] summoned dispatcher ${dispatcherId} could not be given its first turn:`,
+              error,
+            );
+          } catch {
+            // A broken console must not break the spawn either.
+          }
+        }
         // Ticket 138: a wake a send parked before this session existed is
         // discharged NOW — after activation (`setup`) and after the first turn
         // is queued, so the resumed turn sees tools and policy.
         flushPendingWakeTurn(dispatcherId, handle.agent);
-        // Ticket 130: the child is durable from here on. Written AFTER the
-        // spawn resolved — there is no session id to key on before that — and
-        // never deleted: deactivation also runs on plugin unload, so a delete
-        // would wipe every mark at each restart. The table grows; accepted. A
-        // crash between the spawn and this write simply loses the mark (the
-        // accepted window). A marker-store failure is logged and swallowed —
-        // the host already accepted the spawn, so it must never read as a
-        // host refusal. Ticket 141: the row carries the generation, so a
-        // cold-resumed child comes back with the same number.
-        await writeDispatcherMark(
-          dispatcherId,
-          opts.parentSessionId,
-          childGeneration,
-        );
         // Bounded memory: the reservation is dropped in `finally`, and the
         // activation record stays so a LATE `agent/created` for this child is
         // still recognised as a dispatcher instead of falling through to the
@@ -2842,19 +4261,23 @@ export function createCordisDshHost(
         return { dispatcherId };
       } finally {
         reservedDispatcherIds.delete(reservedChildId);
-        // A refused spawn leaves no generation behind. (The reservation itself
-        // is normally the child id; a host that minted its own id gets its
-        // seed moved under that id above.)
-        if (spawnedId === null) {
-          dispatcherGenerations.delete(reservedChildId);
-        }
-        // Ticket 140: the mirror never self-deletes and the peer fence
-        // (`src/core/multitask.ts`) reads it, so a failed spawn must not leave
-        // a phantom dispatcher mark. The same applies when the host minted its
-        // own id: the reservation never became a session, and the durable
-        // write above keyed the REAL child id instead.
-        if (spawnedId !== reservedChildId) {
-          dispatcherMarks.delete(reservedChildId);
+        // SECOND-ROUND AUDIT (host-assigned-id cleanup): every per-id seed
+        // must move or disappear TOGETHER. The old path deleted the reserved
+        // MARK but left its GENERATION behind, and a generation >= 2 makes
+        // `dispatcherClassForSummon` call the id a spawned team leader — a
+        // phantom that refused a later summon from a session reusing that id.
+        // Collect every id that did not become the live child (the
+        // reservation, and any id `setup` activated under), then clear all
+        // five seed maps for each.
+        const phantomIds = new Set<string>([reservedChildId]);
+        if (activationChildId !== null) phantomIds.add(activationChildId);
+        if (spawnedId !== null) phantomIds.delete(spawnedId);
+        for (const id of phantomIds) {
+          dispatcherMarks.delete(id);
+          dispatcherGenerations.delete(id);
+          dispatcherClasses.delete(id);
+          dispatcherActivations.delete(id);
+          reservedDispatcherIds.delete(id);
         }
       }
     },
@@ -2862,10 +4285,27 @@ export function createCordisDshHost(
     async interruptWorker(workerId: string): Promise<void> {
       // ADR-0019: interrupt authority resolves from the worker's recorded
       // parent — one dispatcher's unbinding never strands another's worker.
+      //
+      // Defect fix (a silent success that stopped nothing): the core has
+      // already committed `aborted` by the time it calls this, so returning
+      // silently when the recorded parent is not bound claimed a stop that
+      // never reached the host. Resolve the authority as the bound parent
+      // first, then the host's live registry for the same session id (a
+      // dispatcher whose binding was cleared but whose Agent is still live is
+      // still the child's ancestor). With neither, THROW: the core catches and
+      // reports the missing authority truthfully.
       const entry = workers.get(workerId);
+      const parentSessionId =
+        entry?.parentSessionId ?? workerSessions.get(workerId);
       const parent =
-        entry !== undefined ? parents.get(entry.parentSessionId) : undefined;
-      if (parent === undefined) return;
+        parentSessionId === undefined
+          ? undefined
+          : (parents.get(parentSessionId) ?? liveAgentOf(parentSessionId));
+      if (parent === undefined) {
+        throw new Error(
+          `CordisDshHost: no parent agent bound for worker ${workerId}; the interrupt was not issued`,
+        );
+      }
       // Fire-and-return: cancel signal issued before return.
       ctx.subagents.interrupt(workerId, {
         kind: "ancestor",
@@ -2874,23 +4314,29 @@ export function createCordisDshHost(
     },
 
     async sendMessage(workerId: string, message: string): Promise<void> {
-      // ADR-0032: the sessionController facade first — `resolveAgent` reaches
-      // the worker by its own id, so delivery no longer needs the spawner to
-      // be live in this process. Resume alone runs nothing, so the wake is an
-      // explicit `followup` carrying the caller's text.
-      const facade = readSessionController(ctx);
-      if (facade !== undefined) {
-        const found = await facade.resolveAgent(workerId);
-        if ("error" in found) throw found.error;
-        found.agent.followup(wakeUserMessage(message));
-        return;
-      }
-      // ADR-0019 fallback: with no facade, delivery authority still resolves
-      // from the worker's recorded parent — the answer reaches the worker
-      // through ITS dispatcher.
+      // ADR-0032's cross-session facade is for DISPATCHER PEERS, which are
+      // top-level sessions. A worker is still a subagent child (ADR-0003): its
+      // header carries `origin: "subagent"` and `parentSession`, so the host's
+      // ordinary session route refuses it by design
+      // (`hasApiSessionSubagentOwner`, `dsh-api-session-controller/lib/index.js`
+      // `:128-134`) with `session/agent-busy` — "use subagent delivery for this
+      // child session". Subagent delivery is therefore the ONLY route that can
+      // reach a worker, and it also cold-resumes an absent direct child
+      // (`dsh-subagent/lib/types/index.d.ts:151-168`).
+      //
+      // ADR-0019: delivery authority resolves from the worker's recorded
+      // parent — the answer reaches the worker through ITS dispatcher.
+      //
+      // Defect fix (disposal pruned the registry entry): an agent disposal
+      // removes the live `workers` entry, so the parent id also reads from the
+      // durable wake mirror — a dormant worker must stay reachable.
       const entry = workers.get(workerId);
+      const parentSessionId =
+        entry?.parentSessionId ?? workerSessions.get(workerId);
       const parent =
-        entry !== undefined ? parents.get(entry.parentSessionId) : undefined;
+        parentSessionId === undefined
+          ? undefined
+          : parents.get(parentSessionId);
       if (parent === undefined) {
         throw new Error("CordisDshHost: no parent agent bound; cannot send");
       }
@@ -2941,14 +4387,16 @@ export function createCordisDshHost(
       offAgentDisposed();
       pendingSpawns.clear();
       reservedDispatcherIds.clear();
-      dispatcherActivated.clear();
+      dispatcherActivations.clear();
       dispatcherMarks.clear();
       dispatcherGenerations.clear();
       resumeRequested.clear();
+      resumeShortCircuitLogged.clear();
       resumedUserDispatchers.clear();
       pendingWakeTurns.clear();
       workerSessions.clear();
       parkedWorkerWakes.clear();
+      workerWakeDeliveries.clear();
       // Abort covers spawns still pre-publication; a published worker ignores
       // its start signal, so it is released through its activation instead.
       for (const controller of spawnControllers.values()) {
@@ -2959,6 +4407,7 @@ export function createCordisDshHost(
       workerActivations.clear();
       void Promise.allSettled(activations.map((a) => a.dispose()));
       workers.clear();
+      spawnedWorkerIds.clear();
       activityRing.clearAll();
       settledWorkerIds.clear();
       workerResults.clear();

@@ -13,8 +13,9 @@
  * READS on `ctx` — the shipped idiom (dsh-client-ui-session exports
  * `inject = ["sessions", "slots"]`): the context proxy THROWS on any service
  * property the module's inject list does not declare, wherever the read
- * happens (`cannot get property "X" without inject` — ticket 84). So every
- * always-shipped face we read is declared here.
+ * happens (`cannot get property "X" without inject` — ticket 84). The live
+ * entries read only `slots`/`locale`, so those are the whole list; the
+ * dormant shell resolves its own faces at the mount point.
  *
  * What registers (design-16 §4.2/§5):
  * 1. the `multitask-dispatcher` locale namespace ({en, zh});
@@ -29,11 +30,11 @@
  *    the slot owner's props (0.2.1 replaced the removed `settings.plugin.item`
  *    slot and `ctx.settingsScope` service with this path);
  * 4. the session-kind indicators (ticket 123): the dispatcher glyph in the
- *    stock sidebar row's leading cell (the seat ADR-0024's rider licenses,
- *    and the only seat composed — ticket 140's header chip was removed on
- *    2026-10-28, since a summoned dispatcher is now a top-level session with
- *    its own sidebar row). The WORKER marker is still declined and not
- *    composed in any seat.
+ *    stock sidebar row's trailing icon list (the seat ADR-0024's rider
+ *    licenses, moved there by the owner's 2026-11-06 ruling, and the only seat
+ *    composed — ticket 140's header chip was removed on 2026-10-28, since a
+ *    summoned dispatcher is now a top-level session with its own sidebar row).
+ *    The WORKER marker is still declined and not composed in any seat.
  *
  * The roster/config watch and its feeds are NOT composed: no client service
  * serves that document on 0.2.1. `mountShellPage` and the shell-mount
@@ -49,16 +50,24 @@
  * over lazy service sources — the conversation pane and hosted roster panel
  * are their only consumers. `mountShellPage` is NOT composed by default (no
  * inject calls it); offline tests drive it directly.
- * The faces are read lazily so their VALUES are fresh at send/click time;
- * the services themselves are DECLARED in the module inject (ticket 84 — an
- * undeclared property read throws on the real host wherever it happens),
- * and a face that is absent still degrades to honest
- * `no-channel`/copy-fallback UX via `src/client/actions.ts`.
+ * The faces are resolved lazily so their VALUES are fresh at send/click time;
+ * they are resolved AT THE MOUNT POINT (`resolveShellService` — the
+ * service-method boundary plus a guarded property fallback), NOT declared in
+ * the module inject: the live entries read only `slots`/`locale`, and a
+ * module-level requirement on sessions/remote/conversation/configForms would
+ * disable them whenever one of those clients is absent. A face that is absent
+ * still degrades to honest `no-channel`/copy-fallback UX via
+ * `src/client/actions.ts`.
  */
 
 import { createElement } from "react";
 import type { JSX } from "react";
-import type { ClientContext } from "./context.js";
+import type {
+  ClientContext,
+  ClientConversationLike,
+  ClientRemoteLike,
+  ClientSessionsLike,
+} from "./context.js";
 import {
   LOCALE_NAMESPACE,
   localeDictionary,
@@ -123,23 +132,22 @@ import {
  * Client services this module READS on `ctx`, declared per the shipped
  * Cordis idiom (ticket 84): the context proxy throws `cannot get property
  * "X" without inject` on any undeclared service property — at read time,
- * wherever it happens — so every service face the module touches appears
- * here. Declared: `slots` ← ui-renderer, `locale` ← client-locale,
- * `sessions` ← ui-session, `remote` ← api-gateway, `remote.commands` (its
- * own nested entry — the resolver matches exact strings and never
- * dot-splits), `conversation` ← ui-conversation, and `configForms` ←
- * ui-settings (the settings page's shared form service; the Plugins page
- * itself requires it, `dsh-client-ui-plugin-manager/lib/client.js:4357-4367`).
+ * wherever it happens — so every service face a LIVE entry touches appears
+ * here. The live entries are exactly the ones composed below: the locale
+ * namespace, the nine tool views, the settings card, and the sidebar glyph.
+ * They read only `slots` ← ui-renderer and `locale` ← client-locale.
+ *
+ * The dormant shell vehicle's faces — `sessions` ← ui-session, `remote` /
+ * `remote.commands` ← api-gateway, `conversation` ← ui-conversation, and
+ * `configForms` ← ui-settings — are DELIBERATELY not declared here. They are
+ * needed only when `mountShellPage` runs, and demanding them at module load
+ * held the live surface hostage to clients that may be absent: a missing
+ * settings/sessions client silently disabled the glyph and the tool views.
+ * `mountShellPage` resolves them at its own mount point through the
+ * service-method boundary (`ctx.get(name)`) with a guarded property read as
+ * the offline-fake fallback — see `resolveShellService`.
  */
-export const inject: readonly string[] = [
-  "slots",
-  "locale",
-  "sessions",
-  "remote",
-  "conversation",
-  "remote.commands",
-  "configForms",
-];
+export const inject: readonly string[] = ["slots", "locale"];
 
 /**
  * Browser plugin entry. Every registration is an effect on this module's
@@ -276,15 +284,20 @@ export function applyClientModule(
   });
 
   // Session-kind indicator (ticket 123; ADR-0024 rider + addendum): the
-  // dispatcher glyph in the stock sidebar row's 16px leading cell
-  // (`sidebar.session.row.leading`).
+  // dispatcher glyph in the stock sidebar row's trailing icon list
+  // (`sidebar.session.row.trailing`).
   //
   // The ADR-0024 rider (2026-10-18) licenses "exactly one additional additive
   // registration, and it is this one ... no other slot is licensed by this
-  // rider". The ticket-140 header seat (2026-10-28) was a later dated ruling
-  // extending the rider; it was removed under the owner's 2026-10-28 mitosis
-  // change — a summoned dispatcher is now a real top-level session with its own
-  // sidebar row, so this cell is the mark again. Seat count is back to one.
+  // rider". The owner's 2026-11-06 ruling moved that one licence from
+  // `sidebar.session.row.leading` to the trailing seat: the leading cell is
+  // mutually exclusive with the row's own running status dot (the host
+  // unmounts its occupant there whenever the row is not idle), while the
+  // trailing seat is not status-gated, so the mark and the dot show together.
+  // The ticket-140 header seat (2026-10-28) was a later dated ruling extending
+  // the rider; it was removed under the owner's 2026-10-28 mitosis change — a
+  // summoned dispatcher is now a real top-level session with its own sidebar
+  // row. Seat count stays at one; the seat moved.
   //
   // Identity: dispatchers are identified by the `sessionKind` projection the
   // adapter registers, which folds the `command/run` + `command/done` pair
@@ -352,12 +365,15 @@ export function applyClientModule(
  * (HMR-safe; the ticket's "reverse every registration" constraint).
  *
  * - The sidebar rides `bindShellSessionsFeed` (ticket 79's projection) over
- *   `ctx.sessions` — a DECLARED read (ticket 84), so it cannot throw; an
- *   absent face (offline fakes) leaves the store empty and the shell renders
- *   its honest empty copy — the mount never blocks.
- * - Row selection re-routes through the binding's guarded `open`, which
- *   rides the host's `sessions.open(id)` verb after the store accepted the
- *   row (unknown ids are refused on both sides).
+ *   the sessions face resolved at the mount (`resolveShellService`, through
+ *   the service-method boundary — the module inject no longer carries it);
+ *   an absent face (offline fakes, or a deployment without the sessions
+ *   client) leaves the store empty and the shell renders its honest empty
+ *   copy — the mount never blocks.
+ * - Row selection is a store update; 0.2.x has no host `open(id)` verb. The
+ *   conversation binding retains the selected session (`sessions.retain` +
+ *   `reference.ready`), which is what opens its window and what a send's
+ *   scoped face needs.
  * - The right seat hosts the EXISTING `createRosterPanel` (ADR-0020: hosted,
  *   not rebuilt) with its store projected from the SELECTED session's
  *   per-session mirror (`shellSeatPanelState`): a session that is not one of
@@ -394,6 +410,37 @@ export interface ShellMirrorFeedWiring {
   readonly mirrorsFeed?: ShellMirrorFeed;
 }
 
+/**
+ * Resolve one service the DORMANT shell needs, at its mount point rather than
+ * in the module inject. The service-method boundary is `ctx.get(name)`
+ * (cordis `reflect.get`, `lib/index.js:762-764`): it resolves through the
+ * isolate-keyed service store with no fiber walk, so it works for a face the
+ * module's inject list does not declare (the same verified shape ticket 92
+ * uses for scoped conversation). A structural fake without `get` exposes its
+ * faces as plain properties, read defensively: an undeclared property read on
+ * the real host THROWS, which is an absent face here, never a crash.
+ */
+export function resolveShellService<T>(
+  ctx: ClientContext,
+  name: string,
+): T | undefined {
+  const get = (ctx as { get?: unknown }).get;
+  if (typeof get === "function") {
+    try {
+      const value = (get as (name: string) => unknown).call(ctx, name);
+      if (value !== undefined) return value as T;
+    } catch {
+      // Not resolvable on this context: fall through to the structural read.
+    }
+  }
+  try {
+    const value = (ctx as unknown as Record<string, unknown>)[name];
+    return value === undefined ? undefined : (value as T);
+  } catch {
+    return undefined;
+  }
+}
+
 export function mountShellPage(
   ctx: ClientContext,
   wiring?: ShellOnboardingWiring & ShellMirrorFeedWiring,
@@ -405,6 +452,56 @@ export function mountShellPage(
   const seat = createRosterStore();
   const conversation = createConversationStore();
   let binding: ShellFeedBinding | undefined;
+
+  /**
+   * Bind BOTH sessions-dependent feeds to one resolved face, returning the
+   * disposer that releases them together. Selection is view-owned, so the
+   * shell-feed binding is also what makes rows selectable; the conversation
+   * binding retains the selected session and follows its window.
+   */
+  const bindSessionFeeds = (sessions: ClientSessionsLike): (() => void) => {
+    const shellFeed = bindShellSessionsFeed(store, sessions);
+    binding = shellFeed;
+    const conversationFeed = bindConversationFeed(
+      conversation,
+      sessions,
+      store,
+    );
+    return () => {
+      conversationFeed.dispose();
+      shellFeed.dispose();
+      if (binding === shellFeed) binding = undefined;
+    };
+  };
+
+  // Dormant-vehicle service resolution (0.2.x posture): the module inject
+  // carries only what the live entries read, so the shell resolves its faces
+  // HERE. Getters, because a service can materialize (or be replaced) after
+  // the mount and the send paths must see the face that exists at send time.
+  const sessionsOf = (): ClientSessionsLike | undefined =>
+    resolveShellService<ClientSessionsLike>(ctx, "sessions");
+  const conversationServiceOf = (): ClientConversationLike | undefined =>
+    resolveShellService<ClientConversationLike>(ctx, "conversation");
+  /**
+   * The composer's command transaction (`remote.commands`). The nested face
+   * is its own service on 0.2.x (`remote.commands`, matched by exact string);
+   * a runtime that only exposes the parent returns its face and
+   * `bindCommandTransport` still guards the nested read.
+   */
+  const remoteOf = (): ClientRemoteLike | undefined => {
+    const commands = resolveShellService<ClientRemoteLike["commands"]>(
+      ctx,
+      "remote.commands",
+    );
+    if (
+      commands !== undefined &&
+      commands !== null &&
+      typeof commands.execute === "function"
+    ) {
+      return { commands };
+    }
+    return resolveShellService<ClientRemoteLike>(ctx, "remote");
+  };
 
   // Per-session mirror attach (ticket 94): this mount's shell store joins the
   // shared hub — replaying the last-known `roster.<sessionId>` mirrors
@@ -419,41 +516,79 @@ export function mountShellPage(
   }, "multitask-dispatcher: shell per-session mirror feed");
 
   // Feed binding (ticket 79's projection, wired at THIS composition point —
-  // the ticket-79 comment's "ticket 78's registration"). `sessions` is
-  // DECLARED in the module inject (ticket 84 — an undeclared read throws on
-  // the real host), so this guard reads only the face's VALUE: `undefined`
-  // means the face is absent (offline fakes) and the mount degrades to an
-  // empty store. The `onOpen` hook rides the host's selection verb; optional
-  // chaining keeps a runtime without `open` degrading to store-only
-  // selection.
-  ctx.effect(() => {
-    if (ctx.sessions === undefined) return () => {};
-    const bound = bindShellSessionsFeed(store, ctx.sessions, {
-      onOpen: (sessionId) => ctx.sessions?.open?.(sessionId),
-    });
-    binding = bound;
-    return bound.dispose;
-  }, "multitask-dispatcher: shell sessions feed binding");
+  // the ticket-79 comment's "ticket 78's registration"). The sessions face is
+  // resolved at the mount (see `sessionsOf`), because the module inject no
+  // longer carries it for the live entries; `undefined` means the face is
+  // absent (offline fakes or a deployment without the sessions client) and
+  // the mount degrades to an empty store. 0.2.x has NO host selection verb:
+  // the row click updates the store, and the conversation binding below
+  // retains the selected session (which is what opens its window).
+  //
+  // The face can materialize AFTER this mount (client-module composition
+  // order is not a promise). Capturing its absence forever left the shell
+  // permanently empty; instead watch the dependency with cordis
+  // `ctx.inject(["sessions"], …)`, which runs when the service appears and
+  // re-runs when it is replaced. A structural fake without `inject` keeps
+  // today's resolve-now behavior and re-checks on each shell store change, so
+  // a late face still binds on the next row/selection update.
+  const watchSessions = (): boolean => {
+    const inject = ctx.inject;
+    if (typeof inject !== "function") return false;
+    try {
+      ctx.effect(() => {
+        const fiber = inject.call(ctx, ["sessions"], (injected) => {
+          const sessions = resolveShellService<ClientSessionsLike>(
+            injected,
+            "sessions",
+          );
+          if (sessions === undefined) return () => {};
+          return bindSessionFeeds(sessions);
+        }) as { dispose?: unknown } | undefined;
+        return () => {
+          const dispose = fiber?.dispose;
+          if (typeof dispose === "function") void dispose.call(fiber);
+        };
+      }, "multitask-dispatcher: shell sessions dependency");
+      return true;
+    } catch {
+      return false; // a host-shaped ctx without a live registry: fall back
+    }
+  };
 
-  // Conversation window binding (ticket 80, Finding 7): the SELECTED
-  // session's event window feeds the conversation store; the window opens
-  // because the selection above stages the session via `open`. `sessions` is
-  // a declared read (ticket 84); `undefined` here is the offline absence of
-  // the face, and the pane degrades to honest unavailability — never a
-  // fabricated transcript.
-  ctx.effect(() => {
-    if (ctx.sessions === undefined) return () => {};
-    const bound = bindConversationFeed(conversation, ctx.sessions, store);
-    return bound.dispose;
-  }, "multitask-dispatcher: shell conversation window binding");
+  if (!watchSessions()) {
+    ctx.effect(() => {
+      let disposeFeeds: (() => void) | undefined;
+      // Re-entrancy guard: the feed's first sync can emit into the very
+      // subscription that is about to install it.
+      let bindingNow = false;
+      const bindIfReady = (): void => {
+        if (disposeFeeds !== undefined || bindingNow) return;
+        const sessions = sessionsOf();
+        if (sessions === undefined) return;
+        bindingNow = true;
+        try {
+          disposeFeeds = bindSessionFeeds(sessions);
+        } finally {
+          bindingNow = false;
+        }
+      };
+      bindIfReady();
+      const unsubscribe = store.subscribe(bindIfReady);
+      return () => {
+        unsubscribe();
+        disposeFeeds?.();
+        disposeFeeds = undefined;
+      };
+    }, "multitask-dispatcher: shell sessions feed binding");
+  }
 
   // The conversation send transport: ticket 40's verified plain-prompt sink
   // (the SAME one the capsule's stop ask uses), resolved lazily at send
   // time. One sink for the whole module — the composer never builds a
   // parallel channel (A4).
   const sendTransport = bindCommandTransport({
-    remote: () => ctx.remote,
-    sessions: () => ctx.sessions,
+    remote: remoteOf,
+    sessions: sessionsOf,
   });
 
   // The pane factory: bound once to the translate seat, the conversation
@@ -472,17 +607,24 @@ export function mountShellPage(
           return { kind: "failed" };
         }
       },
-      onLoadOlder: (sessionId) => requestOlder(ctx.sessions, sessionId),
+      onLoadOlder: (sessionId) => requestOlder(sessionsOf(), sessionId),
     },
   );
 
   // The hosted panel's per-row steer affordance uses the same verified
-  // prefill seam as the capsule (lazily resolved at click time).
+  // prefill seam as the capsule (lazily resolved at click time). 0.2.x has no
+  // feed `current` selection, so the CURRENT session is this shell's own
+  // selection — the view owns selection and the store is the view's state.
+  const currentSessionId = (): string | undefined => {
+    const selection = store.getBox().state.selection;
+    return selection.kind === "session" ? selection.sessionId : undefined;
+  };
   const onRowSteer = (workerId: string): SteerPrefillOutcome =>
     tryPrefillSteer(
       {
-        sessions: () => ctx.sessions,
-        conversation: () => ctx.conversation,
+        sessions: sessionsOf,
+        conversation: conversationServiceOf,
+        currentSessionId,
       },
       workerId,
     );

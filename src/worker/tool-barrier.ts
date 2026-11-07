@@ -6,6 +6,8 @@
  * registered as a global tool at spawn time.
  */
 
+import { HOST_SPAWN_TOOL_CANDIDATES } from "../core/tools.js";
+
 /**
  * Candidate names denied on every worker spawn.
  * Categories: user messaging, peer/agent messaging, spawn/nested agents,
@@ -18,9 +20,10 @@ export const WORKER_DENIED_TOOL_CANDIDATES: readonly string[] = [
   // Peer / agent messaging & management
   "send_message",
   "interrupt_agent",
-  // Spawn / nested agents
-  "subagent",
-  "list_subagent_models",
+  // Spawn / nested agents. Ticket 179: one candidate list for both barriers —
+  // the same host verbs the dispatcher surface withholds are denied here, so
+  // `subagent_fork` cannot slip a worker an unaccounted child either.
+  ...HOST_SPAWN_TOOL_CANDIDATES,
   // Worker-management / jobs
   "job_list",
   "job_output",
@@ -49,6 +52,24 @@ export const WORKER_DENIED_TOOL_CANDIDATES: readonly string[] = [
   // retained by ADR-0025) says a worker spawns no agent at all, so the
   // dispatcher-summoning verb must never reach a worker's scope either.
   "spawn_dispatcher",
+  // Second-round audit: optional host verbs that reach other agents or the
+  // user. They may be absent from a given host — `buildWorkerToolFilter`
+  // intersects with the live names, so an absent one is simply omitted, never
+  // passed to `tools.restrict()` (which throws on unknown names). On a host
+  // that DOES ship them, a worker must not see any of them:
+  //   - experimental agent-team tooling (spawn + shared task board),
+  //   - the agent-control surface (list/wait),
+  //   - the retired access-ask verb (ADR-0033 removed OUR tool, but a host
+  //     that still mounts its own `request_access` must not hand it to a
+  //     worker that has no relay behind it).
+  "spawn_teammate",
+  "team_task_create",
+  "team_task_get",
+  "team_task_list",
+  "team_task_update",
+  "wait_agent",
+  "list_agents",
+  "request_access",
 ] as const;
 
 /** Host-agnostic restriction shape (mirrors dsh ToolRestriction.deny). */

@@ -47,7 +47,7 @@ function settled(
 describe("wake bus — settle enqueues exactly one wake", () => {
   it("an idle parent session is woken once for a single settle", () => {
     const delivered: string[] = [];
-    const bus = createWakeBus({ onDeliver: (id) => delivered.push(id) });
+    const bus = createWakeBus({ onDeliver: (id) => { delivered.push(id); } });
 
     bus.enqueueWorkerSettled(settled("session-1", "w1"));
 
@@ -142,7 +142,7 @@ describe("wake bus — parent session routing", () => {
 describe("wake bus — mid-turn hold", () => {
   it("a settle while the dispatcher is mid-turn is queued, never injected into the running turn", () => {
     const delivered: string[] = [];
-    const bus = createWakeBus({ onDeliver: (id) => delivered.push(id) });
+    const bus = createWakeBus({ onDeliver: (id) => { delivered.push(id); } });
 
     bus.noteTurnStarted("session-1");
     bus.enqueueWorkerSettled(settled("session-1", "w1", "Mid-turn", "landed"));
@@ -154,7 +154,7 @@ describe("wake bus — mid-turn hold", () => {
 
   it("the queued wake flushes as its own turn when the current turn ends", () => {
     const delivered: string[] = [];
-    const bus = createWakeBus({ onDeliver: (id) => delivered.push(id) });
+    const bus = createWakeBus({ onDeliver: (id) => { delivered.push(id); } });
 
     bus.noteTurnStarted("session-1");
     bus.enqueueWorkerSettled(settled("session-1", "w1", "Mid-turn", "landed"));
@@ -172,7 +172,7 @@ describe("wake bus — mid-turn hold", () => {
 
   it("the mid-turn hold is per session — another dispatcher still flushes immediately", () => {
     const delivered: string[] = [];
-    const bus = createWakeBus({ onDeliver: (id) => delivered.push(id) });
+    const bus = createWakeBus({ onDeliver: (id) => { delivered.push(id); } });
 
     bus.noteTurnStarted("session-busy");
     bus.enqueueWorkerSettled(settled("session-busy", "w-busy"));
@@ -187,7 +187,7 @@ describe("wake bus — mid-turn hold", () => {
 describe("wake bus — pile-ups batch into one wake", () => {
   it("several mid-turn settles flush as a single batched wake with every worker", () => {
     const delivered: string[] = [];
-    const bus = createWakeBus({ onDeliver: (id) => delivered.push(id) });
+    const bus = createWakeBus({ onDeliver: (id) => { delivered.push(id); } });
 
     bus.noteTurnStarted("session-1");
     bus.enqueueWorkerSettled(settled("session-1", "w1", "First", "r1"));
@@ -208,7 +208,7 @@ describe("wake bus — pile-ups batch into one wake", () => {
 
   it("a settle that arrives before an undelivered ready batch is drained joins that batch", () => {
     const delivered: string[] = [];
-    const bus = createWakeBus({ onDeliver: (id) => delivered.push(id) });
+    const bus = createWakeBus({ onDeliver: (id) => { delivered.push(id); } });
 
     // Idle: first settle flushes immediately.
     bus.enqueueWorkerSettled(settled("session-1", "w1", "First", "r1"));
@@ -252,7 +252,7 @@ describe("wake bus — pile-ups batch into one wake", () => {
 describe("wake bus — user wake preempts background", () => {
   it("a user wake reclaims a ready background batch so the user turn goes first", () => {
     const delivered: string[] = [];
-    const bus = createWakeBus({ onDeliver: (id) => delivered.push(id) });
+    const bus = createWakeBus({ onDeliver: (id) => { delivered.push(id); } });
 
     // Idle settle: background ready + host notified.
     bus.enqueueWorkerSettled(settled("session-1", "w-bg", "Background", "bg result"));
@@ -278,7 +278,7 @@ describe("wake bus — user wake preempts background", () => {
 
   it("a user wake during a mid-turn settle becomes the next turn; background waits behind it", () => {
     const delivered: string[] = [];
-    const bus = createWakeBus({ onDeliver: (id) => delivered.push(id) });
+    const bus = createWakeBus({ onDeliver: (id) => { delivered.push(id); } });
 
     bus.noteTurnStarted("session-1");
     bus.enqueueWorkerSettled(settled("session-1", "w-bg", "Background", "bg"));
@@ -374,7 +374,7 @@ describe("wake bus — accepted wake sources", () => {
 
   it("user, worker-settled, and peer produce wakes; timer/external-event stay reserved", () => {
     const delivered: string[] = [];
-    const bus = createWakeBus({ onDeliver: (id) => delivered.push(id) });
+    const bus = createWakeBus({ onDeliver: (id) => { delivered.push(id); } });
 
     bus.enqueueWorkerSettled(settled("session-1", "w1"));
     assert.equal(bus.drain("session-1")?.source, "worker-settled");

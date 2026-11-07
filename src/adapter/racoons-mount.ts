@@ -129,18 +129,77 @@ function warnLine(message: string): void {
 }
 
 /**
+ * Environment switch for full-text journaling. Unset/anything but `"1"` keeps
+ * the default metadata-only sink; the explicit debug opt-in is either this
+ * variable or `createJournalSink(write, { includeText: true })`.
+ */
+export const RACOONS_JOURNAL_FULL_TEXT_ENV = "DSH_RACOONS_JOURNAL_FULL_TEXT";
+
+/** Options for {@link createJournalSink}. */
+export interface JournalSinkOptions {
+  /**
+   * Include the full rewritten context text (`publish` replacements /
+   * append records) and the raw `entry-ask` output. Default: false — the
+   * shipped sink is metadata-only, because that text is the session's own
+   * content and a console journal is not an access-controlled channel.
+   */
+  readonly includeText?: boolean;
+}
+
+/**
+ * Strip content-bearing fields from one journal record. The engine's
+ * `publish` record carries the replacement/append TEXT (what the session's
+ * context was rewritten to), and `entry-ask` carries the model's RAW answer;
+ * both are metadata-usable without the bodies.
+ */
+function metadataOnlyJournalFields(
+  record: RacoonsJournalRecord,
+): Record<string, unknown> {
+  const fields: Record<string, unknown> = { ...record };
+  delete fields["raw"];
+  for (const key of ["replacements", "appendRecords"]) {
+    const value = fields[key];
+    if (!Array.isArray(value)) continue;
+    fields[key] = value.map((entry) => {
+      if (entry === null || typeof entry !== "object") return entry;
+      const copy: Record<string, unknown> = { ...(entry as Record<string, unknown>) };
+      delete copy["text"];
+      return copy;
+    });
+  }
+  return fields;
+}
+
+/**
  * The journal sink: one line per record, prefixed `racoons:`. This is the
  * evidence trail the live gate reads. A sink must never alter an engine
  * outcome, so a record that cannot be rendered degrades to its kind alone.
+ *
+ * Default is METADATA ONLY (second-round audit): `publish`'s rewritten text
+ * and `entry-ask`'s raw model output are dropped before the line is written,
+ * so the console journal cannot leak the session's context. Full text is
+ * available only behind an explicit debug opt-in.
  */
 export function createJournalSink(
   write: (line: string) => void = (line) => {
     console.info(line);
   },
+  options: JournalSinkOptions = {},
 ): (record: RacoonsJournalRecord) => void {
+  const includeText =
+    options.includeText ??
+    (() => {
+      try {
+        return process.env[RACOONS_JOURNAL_FULL_TEXT_ENV] === "1";
+      } catch {
+        return false;
+      }
+    })();
   return (record) => {
     try {
-      const fields: Record<string, unknown> = { ...record };
+      const fields = includeText
+        ? { ...record }
+        : metadataOnlyJournalFields(record);
       delete fields["kind"];
       write(`racoons: ${record.kind} ${JSON.stringify(fields)}`);
     } catch {

@@ -214,7 +214,11 @@ describe("peer types — payload identity and notices", () => {
     assert.equal(
       samePeerPayload(
         a,
-        envelope({ to: { kind: "group", groupId: "g" } }),
+        envelope({
+          // The wire type admits only `agent`; a group target is exactly the
+          // malformed input this case must still distinguish by payload.
+          to: { kind: "group", groupId: "g" } as unknown as PeerEnvelope["to"],
+        }),
       ),
       false,
     );

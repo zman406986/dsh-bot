@@ -50,14 +50,21 @@ import { volatileConfig } from "./support/plugin-config.js";
 import {
   DISPATCHER_START_COMMAND,
   DISPATCHER_START_NOT_TOP_LEVEL,
+  RESUME_WAKE_CUE,
   type ActivationSpecLike,
   type AgentLike,
   type CommandDefinitionLike,
   type CommandResultLike,
   type SessionKindProjectionState,
+  type SessionProjectionChildLike,
   type SessionProjectionDefinitionLike,
   type ToolsLike,
 } from "../src/adapter/index.js";
+import type {
+  CreateAgentOptionsLike,
+  TopLevelSessionMetaLike,
+} from "../src/adapter/cordis-dsh-host.js";
+import type { DurableWorkerMarker } from "../src/core/durability.js";
 
 import { DISPATCHER_SESSION_TABLE_NAME, WORKER_SESSION_TABLE_NAME } from "../src/adapter/durable-marker.js";
 import {SPAWN_DISPATCHER_TOOL} from "../src/core/policy/prompts.js";
@@ -125,6 +132,9 @@ interface ScopedAgent extends AgentLike {
 interface RouteLike {
   readonly provider?: string;
   readonly model?: string;
+  // `AgentOptionsLike` carries an index signature; a bare interface without one
+  // is not assignable to it even when the known keys line up.
+  readonly [key: string]: unknown;
 }
 
 interface ScopedAgentOptions {
@@ -225,7 +235,7 @@ interface StubChild {
  */
 interface CreateCall {
   readonly sessionId: string;
-  readonly meta: Record<string, unknown>;
+  readonly meta: TopLevelSessionMetaLike;
   readonly agentOptions: unknown;
   readonly hasSetup: boolean;
   readonly signal: unknown;
@@ -296,6 +306,19 @@ function createActivationCtx(storage: StorageTables = new Map()) {
     targetId: string;
     text: string;
   }> = [];
+  /**
+   * Ticket 138 fidelity: every host send REFUSED by the adjacency rule,
+   * with the reason. The real `ctx.subagents.sendMessage` is exact live
+   * sender → direct continuable child (`docs/research/dsh-adapter-api-notes.md`
+   * §11); a top-level peer has no parent edge, so the degraded path must be
+   * observable instead of silently succeeding.
+   */
+  const sendMessageRefusals: Array<{
+    senderSessionId: string;
+    targetId: string;
+    text: string;
+    reason: string;
+  }> = [];
   let nextChild = 1;
   let heldGate: (() => void) | null = null;
   let holdNext = false;
@@ -323,32 +346,70 @@ function createActivationCtx(storage: StorageTables = new Map()) {
   /**
    * Ticket 138/142: the host's cold-resume of an absent session.
    *
-   * ADR-0032: a session the host re-creates keeps the shape it was created
-   * with. A DISPATCHER (durably marked) was created as a TOP-LEVEL session, so
-   * its resume is parentless at depth 0 — it lands in the host's parentless
-   * branch, exactly like a user chat coming back. A WORKER was created as a
-   * subagent child of its spawning dispatcher, so it resumes parented at
-   * parent depth + 1. The durable dispatcher mark is what tells them apart;
-   * nothing in memory survives the restart being modelled.
+   * The live seam is ADJACENCY-ONLY: exact live sender → direct continuable
+   * child (`docs/research/dsh-adapter-api-notes.md` §11). A WORKER was created
+   * as a subagent child of its spawning dispatcher, so it resumes parented at
+   * parent depth + 1. A summoned DISPATCHER is a top-level session with no
+   * parent edge (ADR-0032), so it is not addressable here at all — its resume
+   * route is `ctx.sessionController.resolveAgent`, and the caller must degrade
+   * honestly when that facade is absent. This helper therefore never invents
+   * a top-level target; the adjacency check runs before it is reached.
    */
   const resumeTarget = (sender: AgentLike, target: string): void => {
     if (agentsById.has(target)) return;
-    const durablyDispatcher =
-      storage.get(DISPATCHER_SESSION_TABLE_NAME)?.has(target) === true;
     const parentSessionId = String(sender.session.id);
     const parentDepth = sender.session.header?.delegationDepth ?? 0;
-    const resumed = durablyDispatcher
-      ? createScopedAgent(target, { topLevel: true })
-      : createScopedAgent(target, {
-          topLevel: false,
-          depth: parentDepth + 1,
-          parentSessionId,
-        });
+    const resumed = createScopedAgent(target, {
+      topLevel: false,
+      depth: parentDepth + 1,
+      parentSessionId,
+    });
     children.push({ id: target, agent: resumed });
     agentsById.set(target, resumed);
     // The host announces a cold resume under its own source value — the shape
     // tickets 130/142 handle.
     fire("agent/created", { agent: resumed, source: "resume" });
+  };
+
+  /**
+   * The installed host's parent/child adjacency fence. Returns the refusal
+   * reason, or undefined when the send is allowed.
+   *
+   * Verified against dsh-subagent 0.2.2-rc.1
+   * (`dsh-subagent/lib/index.js:1545`, `:1665-1668`):
+   * - The sender must be the EXACT live agent (`ctx.agents.get(sender.id)
+   *   === sender`); a stale Agent object is UNAUTHORIZED.
+   * - A cold resume authorizes the durable direct-parent lineage
+   *   (`source.header.parentSession === sender.id`); anything else is
+   *   "belongs to another parent session".
+   * - A live target must be a direct child of that sender.
+   * - An absent target is resumable only when the host knows it as the
+   *   sender's child. A durably marked DISPATCHER was created top-level and
+   *   has no parent edge; a durable WORKER row names its spawner. An id the
+   *   host knows nothing about is not a child either.
+   */
+  const sendMessageRefusal = (
+    sender: AgentLike,
+    target: string,
+  ): string | undefined => {
+    const senderSessionId = String(sender.session.id);
+    if (agentsById.get(senderSessionId) !== sender) return "sender-not-live";
+    const targetAgent = agentsById.get(target);
+    if (targetAgent !== undefined) {
+      return String(targetAgent.session.header?.parentSession ?? "") ===
+        senderSessionId
+        ? undefined
+        : "not-a-direct-child";
+    }
+    if (storage.get(DISPATCHER_SESSION_TABLE_NAME)?.has(target) === true) {
+      return "not-a-direct-child";
+    }
+    const workerRow = storage.get(WORKER_SESSION_TABLE_NAME)?.get(target) as
+      | { parentSessionId?: string }
+      | undefined;
+    return workerRow?.parentSessionId === senderSessionId
+      ? undefined
+      : "unknown-child";
   };
 
   const ctx = {
@@ -375,7 +436,10 @@ function createActivationCtx(storage: StorageTables = new Map()) {
     // seam: the plugin asks for it through `inject` and reads it back through
     // the guarded `get` (see `resolveSessionProjections`), so both routes are
     // provided here over ONE real registry + real fold.
-    inject(services: readonly string[], callback: (child: unknown) => void) {
+    inject(
+      services: readonly string[],
+      callback: (child: SessionProjectionChildLike) => void,
+    ) {
       void services;
       callback({ sessionProjections: projections });
     },
@@ -473,12 +537,12 @@ function createActivationCtx(storage: StorageTables = new Map()) {
       },
       interrupt() {},
       /**
-       * Ticket 138: the installed host's `sendMessage` cold-resumes an absent
-       * child (`docs/research/dsh-adapter-api-notes.md:83`: "steers nearest
-       * step if running; wakes if idle; cold-resumes absent child"). Modelled
-       * here so wake-on-send is measured against the real seam instead of a
-       * no-op: an absent target is re-created, announced with
-       * `source: "resume"`, and returned as live.
+       * Ticket 138: the installed host's `sendMessage` steers a running child,
+       * wakes an idle one, and cold-resumes an ABSENT DIRECT CHILD
+       * (`docs/research/dsh-adapter-api-notes.md:83`, §11). It is
+       * adjacency-only: a sibling or top-level peer is not a public path, and
+       * an exact live sender Agent is required. The double enforces both so a
+       * test can never mistake a fake success for a host capability.
        */
       async sendMessage(
         sender: AgentLike,
@@ -487,11 +551,19 @@ function createActivationCtx(storage: StorageTables = new Map()) {
       ) {
         const target = String(targetId);
         const text = content.map((block) => block.text ?? "").join("");
-        sendMessageCalls.push({
+        const call = {
           senderSessionId: String(sender.session.id),
           targetId: target,
           text,
-        });
+        };
+        sendMessageCalls.push(call);
+        const refusal = sendMessageRefusal(sender, target);
+        if (refusal !== undefined) {
+          sendMessageRefusals.push({ ...call, reason: refusal });
+          throw new Error(
+            `ctx.subagents.sendMessage refused ${target} from ${call.senderSessionId}: ${refusal}`,
+          );
+        }
         if (holdResumes) {
           parkedResumes.push({ sender, targetId: target, text });
           return `msg-${target}`;
@@ -511,13 +583,7 @@ function createActivationCtx(storage: StorageTables = new Map()) {
        * are absent, and the type admits only `cwd`), and `setup` runs BEFORE
        * publication, so the dispatcher surface exists before the first turn.
        */
-      async create(options: {
-        sessionId: string;
-        meta?: Record<string, unknown>;
-        agentOptions?: unknown;
-        setup?: (agentCtx: unknown, agent: AgentLike) => void | Promise<void>;
-        signal?: unknown;
-      }) {
+      async create(options: CreateAgentOptionsLike) {
         createCalls.push({
           sessionId: options.sessionId,
           meta: options.meta ?? {},
@@ -530,8 +596,8 @@ function createActivationCtx(storage: StorageTables = new Map()) {
         // comes from `meta.cwd`; the header is TOP-LEVEL (no parent, depth 0).
         const route = options.agentOptions as RouteLike | undefined;
         const cwd =
-          typeof options.meta?.["cwd"] === "string"
-            ? String(options.meta["cwd"])
+          typeof options.meta?.cwd === "string"
+            ? String(options.meta.cwd)
             : undefined;
         const child = createScopedAgent(childId, {
           topLevel: true,
@@ -587,9 +653,15 @@ function createActivationCtx(storage: StorageTables = new Map()) {
               tables.set(name, table);
             }
             const store = table;
+            // The stub stores opaque rows for several logical tables; the
+            // KvTableLike view only names the marker shape it is read through.
             return {
-              get: (key: string) => store.get(key) as unknown,
-              entries: () => store.entries() as unknown,
+              get: (key: string) =>
+                store.get(key) as DurableWorkerMarker | undefined,
+              entries: () =>
+                store.entries() as IterableIterator<
+                  [string, DurableWorkerMarker]
+                >,
               async put(key: string, value: unknown) {
                 store.set(key, value);
               },
@@ -611,6 +683,7 @@ function createActivationCtx(storage: StorageTables = new Map()) {
     children,
     agentsById,
     sendMessageCalls,
+    sendMessageRefusals,
     /** Park the NEXT `agent/created` announcement until `releaseHeld()`. */
     holdNextActivation() {
       holdNext = true;
@@ -694,15 +767,15 @@ async function spawnPeer(
   return callScoped(creator, SPAWN_DISPATCHER_TOOL, { title, prompt });
 }
 
-// The scoped dispatcher surface: the eight dispatcher tools plus the
-// ticket-145 per-session recall, which registers on the same agent scope.
-// This is the USER-STARTED (chief of staff) set — the human's own chat.
+// The scoped dispatcher surface: the eight dispatcher tools. Owner ruling
+// 2026-11-05: the ticket-145 per-session `recall` is absent — racoons is off
+// unless a manual overlay turns it on. This is the USER-STARTED (chief of
+// staff) set — the human's own chat.
 const DISPATCHER_TOOL_SET = [
   "await_agent",
   "check_workers",
   "deliver_result",
   "message_agent",
-  "recall",
   "spawn_dispatcher",
   "spawn_worker",
   "steer_worker",
@@ -750,7 +823,7 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     // now required, so the key set is exactly `["cwd"]` and its value is the
     // summoner's own directory.
     assert.deepEqual(Object.keys(call.meta), ["cwd"]);
-    assert.equal(call.meta["cwd"], "C:\\work");
+    assert.equal(call.meta.cwd, "C:\\work");
     for (const forbidden of [
       "parentSession",
       "parentAgent",
@@ -784,7 +857,7 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     );
     assert.ok(!child.agent.scopedTools.names().includes(SPAWN_DISPATCHER_TOOL));
     // …nothing leaked into the creator's scope or the global layer…
-    assert.equal(creator.scopedTools.names().length, 9);
+    assert.equal(creator.scopedTools.names().length, 8);
     // Ticket 174 / ADR-0033 removed `request_access`, the one global name.
     assert.deepEqual(ctx.globalToolNames(), []);
     // …and the dispatcher policy was injected (ADR-0025 decision 1-2).
@@ -962,7 +1035,7 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
 
     // That session's surface is gone; the creator's is untouched (ADR-0019).
     assert.deepEqual(child.agent.scopedTools.names(), []);
-    assert.equal(creator.scopedTools.names().length, 9);
+    assert.equal(creator.scopedTools.names().length, 8);
   });
 
   it("activates the child exactly once even when the host announces it (no double registration)", async () => {
@@ -977,8 +1050,9 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     // fallback also looked at `ctx.agents` — two candidate call sites, ONE
     // activation. A second one would throw on the scoped registry's duplicate
     // name rule (and would double-inject the policy). Ticket 176: the spawned
-    // class carries 8 scoped tools, not 9 — `spawn_dispatcher` is withheld.
-    assert.equal(child.agent.scopedTools.names().length, 8);
+    // class withholds `spawn_dispatcher`, and racoons is off by default, so
+    // the child carries 7 scoped tools.
+    assert.equal(child.agent.scopedTools.names().length, 7);
     assert.equal(child.agent.injected.length, 1);
   });
 
@@ -1108,14 +1182,25 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
    * Ticket 138 (owner ruling 2026-10-22: "bots should be wake-able, both
    * dispatchers and children" — the DISPATCHERS half).
    *
-   * A send to a marked dispatcher that is NOT live must be accepted and must
-   * wake it: the adapter cold-resumes the child through the host's own
-   * `subagents.sendMessage` (the documented resume seam), the host announces
-   * `agent/created` with `source: "resume"`, ticket 130's activation path
-   * brings the dispatcher surface back, and the parked wake turn delivers the
-   * peer message. A target with NO mark keeps the ticket-70 refusal.
+   * A send to a marked dispatcher that is NOT live is ACCEPTED (the durable
+   * mark is the whole permission), but a facade-less host cannot resume it.
+   * ADR-0032 made the summoned dispatcher a TOP-LEVEL session: it has no
+   * parent edge, so `ctx.subagents.sendMessage` cannot address it at all
+   * (adjacency-only: exact live sender → direct continuable child).
+   *
+   * SECOND-ROUND AUDIT: the old adapter still TRIED that route whenever the
+   * mark recorded a bound spawner, even though the mark's `origin: "top-level"`
+   * (and the absent parent edge) says the target is a peer. The host refused
+   * it, but the attempt was the bug. The corrected contract does not attempt
+   * it: the adapter logs `is undeliverable` and leaves the wake parked. The
+   * live web-app route is `ctx.sessionController.resolveAgent`, which only
+   * that profile mounts.
+   *
+   * The honest outcome is unchanged: the message waits in the peer inbox, no
+   * session is resumed, and a later announcement discharges the parked wake
+   * exactly once.
    */
-  it("a send to a marked dispatcher that is not live cold-resumes and wakes it (ticket 138)", async () => {
+  it("a send to a marked dispatcher without the sessionController facade is accepted but waits, never fake-resumed (ticket 138)", async () => {
     const storage: StorageTables = new Map();
     const first = createActivationCtx(storage);
     apply(first, volatileConfig({ enabled: true }));
@@ -1124,17 +1209,24 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     const spawned = await spawnPeer(creator);
     const dispatcherId = String(spawned.dispatcher_id);
 
-    // The mark now records the spawner — the sender a cold resume needs.
+    // The mark now records the spawner — the sender the OLD fallback would
+    // have tried. The row also records the session SHAPE, which is what keeps
+    // this top-level peer off that route.
     const marks = await readMarks(storage);
     assert.equal(
       (marks.get(dispatcherId) as { parentSessionId?: string })
         .parentSessionId,
       "chat-1",
     );
+    assert.equal(
+      (marks.get(dispatcherId) as { origin?: string }).origin,
+      "top-level",
+      "the row records the session shape that bars the subagent route",
+    );
 
     // ── process restart ────────────────────────────────────────────────
     // Same storage, fresh plugin + host. NOTHING re-announces the child:
-    // the send is the only thing that can bring it back.
+    // the send is the only thing that could bring it back.
     const second = createActivationCtx(storage);
     apply(second, volatileConfig({ enabled: true }));
     await drain();
@@ -1142,50 +1234,132 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     await activateDispatcher(second, creatorTwo);
     assert.equal(second.children.length, 0, "the child is not live yet");
 
-    const sent = await callScoped(creatorTwo, "message_agent", {
-      target: dispatcherId,
-      text: "Pick the work back up.",
-    });
+    // The adapter reports the refused resume once, honestly, and leaves the
+    // text parked — capture it so the degraded path is asserted and the test
+    // output stays quiet.
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args);
+    };
+    const sent = await (async () => {
+      try {
+        const result = await callScoped(creatorTwo, "message_agent", {
+          target: dispatcherId,
+          text: "Pick the work back up.",
+        });
+        await drain();
+        return result;
+      } finally {
+        console.warn = originalWarn;
+      }
+    })();
+    // The core ACCEPTED it: a durable mark is not a phantom, and acceptance
+    // must not depend on whether this host can issue a resume.
     assert.equal(sent.ok, true, JSON.stringify(sent));
     if (!sent.ok) return;
     assert.equal(sent.delivered_as, "peer");
+    assert.equal(
+      warnings.filter((args) =>
+        String(args[0]).includes("is undeliverable"),
+      ).length,
+      1,
+      "the unreachable peer is named once, not silently swallowed",
+    );
+    assert.equal(
+      warnings.filter((args) =>
+        String(args[0]).includes("could not be resumed on send"),
+      ).length,
+      0,
+      "no resume was attempted at all",
+    );
+
+    // (a) The subagent route is NOT attempted for a top-level peer. The mark
+    // records a spawner, but a spawner is not a parent edge: a summoned
+    // dispatcher has no `parentSession`, so `ctx.subagents.sendMessage` could
+    // neither address nor cold-resume it. The old fallback tried anyway; that
+    // attempt is the defect this pins.
+    assert.equal(
+      second.sendMessageCalls.length,
+      0,
+      "ctx.subagents.sendMessage is never used for a top-level peer",
+    );
+    assert.equal(
+      second.sendMessageRefusals.length,
+      0,
+      "and therefore nothing is refused by the subagent double either",
+    );
+
+    // (b) Nothing was resumed. The old double re-created the peer here and
+    // the test mistook that for a live host capability.
+    assert.equal(second.children.length, 0, "no child was resurrected");
+    assert.equal(
+      second.agentsById.has(dispatcherId),
+      false,
+      "the peer is still dormant",
+    );
+
+    // (c) The message was not lost: the adapter parks the wake turn, so a
+    // later announcement of the same session delivers it exactly once, with
+    // the structured agent-message origin — never as user input.
+    const resumedChild = createScopedAgent(dispatcherId, {
+      topLevel: true,
+      agentPreset: "standard",
+    });
+    second.agentsById.set(dispatcherId, resumedChild);
+    second.children.push({ id: dispatcherId, agent: resumedChild });
+    second.fire("agent/created", { agent: resumedChild, source: "resume" });
     await drain();
 
-    // (a) The resume went through the host's own seam, from the SPAWNER.
-    assert.equal(second.sendMessageCalls.length, 1);
-    const resume = second.sendMessageCalls[0];
-    assert.ok(resume);
-    assert.equal(resume.targetId, dispatcherId);
-    assert.equal(resume.senderSessionId, "chat-1");
-    // The payload is the resume cue, never the peer text — the peer message
-    // rides the parked wake turn, so it is not delivered twice.
-    assert.ok(resume.text.includes("resumed"));
-    assert.ok(!resume.text.includes("Pick the work back up."));
-
-    // (b) The child exists again and came back AS A DISPATCHER — and, ticket
-    // 176, as the SPAWNED class: no `spawn_dispatcher` on its surface.
-    const resumed = second.children.find((child) => child.id === dispatcherId);
-    assert.ok(resumed, "the host's sendMessage resumed the child");
-    assert.deepEqual(
-      resumed.agent.scopedTools.names().sort(),
-      SPAWNED_DISPATCHER_TOOL_SET,
-    );
-    assert.equal(resumed.agent.injected.length, 1);
-
-    // (c) It received the peer message as its wake turn, with the structured
-    // agent-message origin — not as user input.
-    assert.equal(resumed.agent.followed.length, 1);
-    const wake = resumed.agent.followed[0] as {
+    assert.equal(resumedChild.followed.length, 1);
+    const wake = resumedChild.followed[0] as {
       content?: Array<{ text?: string }>;
       source?: { kind?: string; senderSessionId?: string };
     };
-    const wakeText = textOf(wake);
-    assert.ok(wakeText.includes("Pick the work back up."));
+    assert.ok(textOf(wake).includes("Pick the work back up."));
     assert.equal(wake.source?.kind, "agent-message");
     assert.equal(wake.source?.senderSessionId, "chat-1");
-    // Exactly one activation: a second resume would throw on the scoped
-    // registry (duplicate tool names) or add a second policy inject.
-    assert.equal(resumed.agent.injected.length, 1);
+    // Ticket 176: the resumed session is still the SPAWNED class, so it comes
+    // back as a team leader with no summon verb — and exactly one policy
+    // inject, because the announcement ran one activation.
+    assert.deepEqual(
+      resumedChild.scopedTools.names().sort(),
+      SPAWNED_DISPATCHER_TOOL_SET,
+    );
+    assert.equal(resumedChild.injected.length, 1);
+  });
+
+  it("the host-send double requires the EXACT live sender and a direct-child edge (fidelity)", async () => {
+    const ctx = createActivationCtx();
+    apply(ctx, volatileConfig({ enabled: true }));
+    const liveCreator = createScopedAgent("chat-1");
+    await activateDispatcher(ctx, liveCreator);
+    // Same id, different Agent object: the live host compares the instance
+    // (`ctx.agents.get(sender.id) === sender`), not the id string.
+    const staleCreator = createScopedAgent("chat-1");
+    const child = createScopedAgent("worker-direct", {
+      topLevel: false,
+      parentSessionId: "chat-1",
+    });
+    ctx.agentsById.set("worker-direct", child);
+
+    await assert.rejects(
+      () =>
+        ctx.subagents.sendMessage(staleCreator, "worker-direct", [
+          { type: "text", text: "hi" },
+        ]),
+      /sender-not-live/,
+    );
+    assert.equal(ctx.sendMessageRefusals[0]?.reason, "sender-not-live");
+
+    // The exact live sender + a direct child is accepted, and a LIVE target
+    // is steered rather than re-created.
+    await ctx.subagents.sendMessage(liveCreator, "worker-direct", [
+      { type: "text", text: "hi" },
+    ]);
+    assert.equal(ctx.sendMessageCalls.length, 2);
+    assert.equal(ctx.sendMessageRefusals.length, 1);
+    assert.equal(ctx.children.length, 0, "a live child is never re-created");
   });
 
   it("an unmarked unknown target still refuses unknown-target through the real wiring (ticket 138 fence)", async () => {
@@ -1427,6 +1601,11 @@ describe("ticket 142 — a durably marked worker is wake-able by a send", () => 
     assert.ok(resume);
     assert.equal(resume.targetId, workerId);
     assert.equal(resume.senderSessionId, "chat-1");
+    assert.equal(
+      resume.text,
+      RESUME_WAKE_CUE,
+      "the dormant-worker wake carries the resume cue, not the correction",
+    );
     assert.ok(!resume.text.includes("Pick the migration back up."));
 
     // (b) The worker exists again and was composed as a WORKER: no dispatcher
@@ -1434,7 +1613,6 @@ describe("ticket 142 — a durably marked worker is wake-able by a send", () => 
     const resumed = second.children.find((child) => child.id === workerId);
     assert.ok(resumed, "the host's sendMessage resumed the worker");
     assert.deepEqual(resumed.agent.scopedTools.names().sort(), [
-      "recall",
       "reply_to_dispatcher",
     ]);
     assert.deepEqual(resumed.agent.scopedSections, [WORKER_PERSONA_SECTION]);

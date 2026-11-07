@@ -119,29 +119,138 @@ export const localeDictionary: LocaleDictionary = {
     "roster.unavailable": "Worker status is unavailable right now.",
     "roster.loading": "Loading worker status…",
     "roster.landed": "Result ready — not delivered yet",
-    "roster.activity.toolcalls": "{count} tool calls",
+    "roster.activity.toolcalls.one": "{count} tool call",
+    "roster.activity.toolcalls.other": "{count} tool calls",
+    "roster.fact.started": "started {time}",
     "roster.section.active": "Active",
     "roster.section.needs-you": "Needs you",
     "roster.section.finished": "Finished",
-    "roster.finished.count": "{count} finished",
+    "roster.finished.count.one": "{count} finished",
+    "roster.finished.count.other": "{count} finished",
+    "status.starting": "Starting",
+    "status.working": "Working",
+    "status.adjusting": "Adjusting",
+    "status.done": "Done",
+    "status.failed": "Failed",
+    "status.stopped": "Stopped",
     "toolview.degraded": "Tool call details are unavailable.",
-    "toolview.field.worker": "Worker",
-    "toolview.field.title": "Title",
-    "toolview.field.stream": "Stream",
-    "toolview.field.todo": "Todo",
-    "toolview.field.outcome": "Outcome",
-    "toolview.field.steer": "Steer",
-    "toolview.field.delivered": "Delivered",
-    "toolview.field.attachments": "Attachments",
-    // Ticket 70: send_peer row labels (the conversation-visible trace of
-    // peer traffic; the message body itself never renders on the row).
-    "toolview.field.peer": "To session",
-    "toolview.field.priority": "Priority",
-    // Ticket 152: message_agent / await_agent / spawn_dispatcher row labels.
-    "toolview.field.agent": "Agent",
-    "toolview.field.status": "Status",
-    "toolview.field.delivered-as": "Delivered as",
-    "toolview.field.dispatcher": "Dispatcher",
+    "toolview.details": "Details",
+    "toolview.detail.worker": "Worker",
+    "toolview.detail.dispatcher": "Dispatcher",
+    "toolview.detail.target": "Target",
+    "toolview.detail.todo": "Todo",
+    "toolview.detail.stream": "Stream",
+    "toolview.detail.transcript": "Transcript",
+    "toolview.detail.message": "Message",
+    "toolview.detail.status": "Status",
+    "toolview.detail.reason": "Reason",
+    "toolview.detail.elapsed": "Elapsed",
+    "toolview.detail.settled": "Settled",
+    "toolview.detail.waited": "Waited",
+    "toolview.detail.mode": "Mode",
+    "toolview.detail.call": "Call",
+    "toolview.subject.worker": "the worker",
+    "toolview.subject.agent": "the agent",
+    "toolview.subject.dispatcher": "the dispatcher",
+    "toolview.subject.todo": "the todo",
+    // Ticket 180: human facts. Booleans are never rendered as true/false —
+    // `priority` exists only when it is true, `delivered` selects a sentence,
+    // and zero/false/null facts are omitted before they reach the row.
+    "toolview.fact.attachments.one": "{count} attachment",
+    "toolview.fact.attachments.other": "{count} attachments",
+    "toolview.fact.priority": "priority",
+    "toolview.fact.via-steer": "in the worker lane",
+    "toolview.fact.via-peer": "in the peer lane",
+    "toolview.fact.dormant": "its session is resuming",
+    "toolview.fact.keeps-running": "the worker keeps running",
+    "toolview.fact.waited": "waited {duration}",
+    "toolview.fact.user-spoke": "you said something",
+    "toolview.fact.turn-stopped": "the turn stopped",
+    "toolview.fact.todo-completed": "{ref} completed",
+    // ADR-0009 reply channel: the obligation is recorded, not yet delivered.
+    "toolview.fact.todo-marked-done": "todo \"{title}\" marked done",
+    "toolview.fact.todo-marked-done-ref": "{ref} marked done",
+    "toolview.fact.released-stream": "the stream was released",
+    "toolview.spawn.started": "Started \"{title}\"",
+    "toolview.spawn.started-generic": "Started {subject}",
+    "toolview.spawn.pending": "Starting \"{title}\"",
+    "toolview.spawn.pending-generic": "Starting {subject}",
+    "toolview.spawn.refused":
+      "Couldn't start \"{title}\" — {cause}. Nothing was started.",
+    "toolview.spawn.refused-generic":
+      "Couldn't start the worker — {cause}. Nothing was started.",
+    "toolview.check.pending": "Checking the roster",
+    "toolview.check.summary.none": "No workers on the roster.",
+    "toolview.check.summary.one": "Checked {count} worker",
+    "toolview.check.summary.other": "Checked {count} workers",
+    "toolview.check.refused": "Couldn't check the roster — {cause}.",
+    "toolview.steer.pending": "Steering {subject}",
+    "toolview.steer.sent": "Steering {subject}",
+    "toolview.steer.refused":
+      "Couldn't steer {subject} — {cause}. Nothing was queued.",
+    "toolview.stop.pending": "Stopping {subject}",
+    "toolview.stop.stopped": "Stopped {subject}",
+    "toolview.stop.released": "Released the stream held by {subject}",
+    "toolview.stop.refused":
+      "Couldn't stop {subject} — {cause}. Nothing changed.",
+    "toolview.deliver.pending": "Delivering",
+    "toolview.deliver.done": "Delivered to you",
+    "toolview.deliver.recorded": "Result recorded — say it in your reply",
+    "toolview.deliver.refused":
+      "Couldn't deliver — {cause}. Nothing reached the user.",
+    "toolview.message.pending": "Messaging {subject}",
+    "toolview.message.sent": "Message sent to {subject}",
+    "toolview.message.refused":
+      "Couldn't message {subject} — {cause}. Nothing was sent.",
+    "toolview.await.pending": "Waiting for {subject}",
+    "toolview.await.done": "{subject} finished",
+    "toolview.await.failed": "{subject} failed",
+    "toolview.await.stopped": "{subject} was stopped",
+    "toolview.await.working": "{subject} is still running",
+    "toolview.await.gone": "No result for {subject} — it is gone",
+    "toolview.await.released": "Stopped waiting for {subject}",
+    "toolview.await.refused": "Couldn't wait for {subject} — {cause}.",
+    "toolview.dispatcher.summoned": "Summoned \"{title}\"",
+    "toolview.dispatcher.summoned-generic": "Summoned {subject}",
+    "toolview.dispatcher.pending": "Summoning \"{title}\"",
+    "toolview.dispatcher.pending-generic": "Summoning {subject}",
+    "toolview.dispatcher.refused":
+      "Couldn't summon \"{title}\" — {cause}. Nothing was started.",
+    "toolview.dispatcher.refused-generic":
+      "Couldn't summon the dispatcher — {cause}. Nothing was started.",
+    "toolview.peer.pending": "Sending to {subject}",
+    "toolview.peer.sent": "Sent to {subject}",
+    "toolview.peer.refused":
+      "Couldn't send to {subject} — {cause}. Nothing was sent.",
+    // Every refusal enum maps to a human cause. The raw enum stays in the
+    // row's details area; the silent fence keeps its ambiguous wording ("no
+    // worker with that id in this chat"), never "belongs to another
+    // dispatcher".
+    "toolview.cause.duplicate-stream-key": "that stream key is already in use",
+    "toolview.cause.unknown-todo-id": "no todo with that id in this chat",
+    "toolview.cause.todo-already-linked":
+      "that todo is already linked to a worker",
+    "toolview.cause.unknown-worker": "no worker with that id in this chat",
+    "toolview.cause.not-running": "that worker has already finished",
+    "toolview.cause.already-settled": "that worker has already finished",
+    "toolview.cause.unknown-todo": "no todo with that id in this chat",
+    "toolview.cause.no-delivery-channel": "this build has no way to send to you",
+    "toolview.cause.send-failed": "the send failed",
+    "toolview.cause.unknown-agent": "no agent with that id in this chat",
+    "toolview.cause.unknown-dispatcher":
+      "no dispatcher with that id in this chat",
+    "toolview.cause.self-target": "that is your own session",
+    "toolview.cause.inbox-full": "that inbox is full",
+    "toolview.cause.rate-limited": "too many messages were sent just now",
+    "toolview.cause.invalid-envelope":
+      "the message could not be sent as written",
+    "toolview.cause.message-id-reuse": "that message id was already used",
+    "toolview.cause.not-awaitable": "a dispatcher is a peer, not a worker",
+    "toolview.cause.too-many-waits": "too many waits are already open",
+    "toolview.cause.invalid-timeout": "the timeout was not a valid number",
+    "toolview.cause.invalid-args": "the title or prompt was empty",
+    "toolview.cause.host-refused": "the host refused to start it",
+    "toolview.cause.failed": "something went wrong",
     // Ticket 32 (design-17 §7): the activation success presence hint. The
     // host command copy (`src/adapter/activation-command.ts`
     // `ACTIVATION_PRESENCE_HINT`) is the en authority; this face carries the
@@ -156,9 +265,9 @@ export const localeDictionary: LocaleDictionary = {
     // fallback is the copy-only degrade for when the draft is unreachable.
     "roster.steer.button": "Steer",
     "roster.steer.hint":
-      "Placed in the composer for {workerId} — review and send.",
+      "Placed in the composer for {worker} — review and send.",
     "roster.steer.copy-fallback":
-      "Composer not reachable here — type /dispatcher-steer {workerId} followed by your instruction in this chat.",
+      "Composer not reachable here — type /dispatcher-steer {worker} followed by your instruction in this chat.",
     // Ticket 47: the Settings → 插件配置 card. The title is the plugin's
     // display name; the enabled hint states the ADR-0005 rule in the user's
     // words (a saved change lands in NEW chats — the running chat keeps the
@@ -203,16 +312,16 @@ export const localeDictionary: LocaleDictionary = {
       "Microcompact old tool results",
     "settings.card.field.microcompactEnabled.hint":
       "When on, older tool output is emptied once a chat fills past a fixed share of the model window, keeping the newest few. This rewrites history, so the provider's prompt cache restarts from the oldest cleared entry.",
-    // Ticket 145: racoons is always on while the multitask plugin is
-    // enabled, so the card only tunes it — record-only, storage root and the
-    // half-window prune denominator. Ticket 150: the label states what the
-    // mode now does — it still records everything, but a result's entry
-    // checkpoint answer can apply to the context; only the bulk prune and
-    // manual forget are held back.
+    // Owner ruling 2026-11-05: racoons is an optional test feature, off by
+    // default. The card's first racoons control is the switch; the three
+    // tuning fields below only matter while it is on.
+    "settings.card.field.racoonsEnabled.label": "Enable Racoons",
+    "settings.card.field.racoonsEnabled.hint":
+      "Off by default. When on, racoons records every chat in this process to a per-chat ledger on disk and may prune old context; removed content stays restorable by recall id. Meant for manual test launches only.",
     "settings.card.field.racoonsRecordOnly.label":
       "Racoons record-only mode (entry checkpoint can still apply)",
     "settings.card.field.racoonsRecordOnly.hint":
-      "Off = racoons applies context cleanup to every chat in this process; on = everything is still recorded, the automatic prune and manual forget are held back, but a result's entry checkpoint answer can still rewrite that result turn. Removed content stays restorable by recall id, originals stored per session on disk.",
+      "Only used while Racoons is enabled. Off = racoons applies context cleanup to every chat in this process; on = everything is still recorded, the automatic prune and manual forget are held back, but a result's entry checkpoint answer can still rewrite that result turn. Removed content stays restorable by recall id, originals stored per session on disk.",
     "settings.card.field.racoonsStorageRoot.label":
       "Racoons storage root (empty = default <DSH_HOME>/storages/racoons)",
     "settings.card.field.racoonsStorageRoot.hint":
@@ -233,9 +342,14 @@ export const localeDictionary: LocaleDictionary = {
     "shell.noselection": "Select a dispatcher to see its work.",
     "shell.conversation.pending":
       "The conversation surface is not wired into this shell yet.",
-    "shell.row.working": "{count} working",
-    "shell.row.needs-you": "{count} need you",
-    "shell.row.finished": "{count} finished",
+    // One shell seat failed to render; the rest of the shell stays usable.
+    "shell.seat.failed": "This panel failed to render.",
+    "shell.row.working.one": "{count} working",
+    "shell.row.working.other": "{count} working",
+    "shell.row.needs-you.one": "{count} needs you",
+    "shell.row.needs-you.other": "{count} need you",
+    "shell.row.finished.one": "{count} finished",
+    "shell.row.finished.other": "{count} finished",
     "shell.row.presence-unavailable": "presence unavailable",
     // Ticket 70: the copy-session-id affordance on dispatcher rows — the
     // session id is what a peer addresses send_peer with (no directory; C13).
@@ -251,11 +365,18 @@ export const localeDictionary: LocaleDictionary = {
     "shell.conv.more": "Load older messages",
     "shell.conv.role-user": "You",
     "shell.conv.role-assistant": "Dispatcher",
+    // A peer dispatcher's relayed message is user-role on the wire but never
+    // the user's speech: it keeps its own role. The full sender id lives in
+    // the item's title attribute, never in the visible line.
+    "shell.conv.role-peer": "From another dispatcher",
     "shell.conv.working": "working…",
     "shell.conv.interrupted": "(interrupted)",
     "shell.conv.attachment-only": "(no text content)",
     "shell.conv.tool-running": "running",
     "shell.conv.tool-failed": "failed",
+    // The composer textarea's own accessible name. It must name the field
+    // ("Message"), not the send affordance — the old key was the button's.
+    "shell.conv.message": "Message",
     "shell.conv.send": "Send",
     "shell.conv.sending": "Sending…",
     "shell.conv.no-channel": "No send channel is reachable in this runtime.",
@@ -309,7 +430,13 @@ export const localeDictionary: LocaleDictionary = {
       "The answer could not be delivered — nothing was changed.",
     "shell.approval.submitted":
       "Answer sent — this card updates when the dispatcher confirms.",
-    "shell.dispatch.gating": "Gate",
+    // The worker-dispatch card leads with one readable sentence. The
+    // `ungated` gate value is never shown (there is no gate any more); ids
+    // and the stream key live behind Details.
+    "shell.dispatch.started": "Started \"{title}\"",
+    "shell.dispatch.started-generic": "Started {subject}",
+    "shell.dispatch.refused": "Couldn't start \"{title}\" — {cause}",
+    "shell.dispatch.refused-generic": "Couldn't start the worker — {cause}",
     // Ticket 123: the session-kind glyph labels. They are accessible names /
     // tooltips on a small mark, never visible paragraph copy. Only the
     // dispatcher mark is composed (the sidebar cell ADR-0024's rider licenses;
@@ -317,9 +444,9 @@ export const localeDictionary: LocaleDictionary = {
     // retained machinery for the declined header seat.
     // Ticket 177: the owner split the dispatcher kind in two, so each class
     // gets its own accessible name.
-    "indicator.dispatcher": "Dispatcher session",
-    "indicator.team-leader": "Summoned dispatcher session",
-    "indicator.worker": "Worker session",
+    "indicator.dispatcher": "Dispatcher",
+    "indicator.team-leader": "Summoned dispatcher",
+    "indicator.worker": "Worker",
   },
   zh: {
     "roster.title": "工作者",
@@ -327,34 +454,132 @@ export const localeDictionary: LocaleDictionary = {
     "roster.unavailable": "工作者状态暂时不可用。",
     "roster.loading": "正在加载工作者状态…",
     "roster.landed": "结果已就绪，尚未送达",
-    "roster.activity.toolcalls": "{count} 次工具调用",
+    "roster.activity.toolcalls.one": "{count} 次工具调用",
+    "roster.activity.toolcalls.other": "{count} 次工具调用",
+    "roster.fact.started": "开始于 {time}",
     "roster.section.active": "进行中",
     "roster.section.needs-you": "需要你处理",
     "roster.section.finished": "已完成",
-    "roster.finished.count": "{count} 个已完成",
+    "roster.finished.count.one": "{count} 个已完成",
+    "roster.finished.count.other": "{count} 个已完成",
+    "status.starting": "启动中",
+    "status.working": "工作中",
+    "status.adjusting": "调整中",
+    "status.done": "完成",
+    "status.failed": "失败",
+    "status.stopped": "已停止",
     "toolview.degraded": "工具调用详情不可用。",
-    "toolview.field.worker": "工作者",
-    "toolview.field.title": "标题",
-    "toolview.field.stream": "流",
-    "toolview.field.todo": "待办",
-    "toolview.field.outcome": "结果",
-    "toolview.field.steer": "纠偏",
-    "toolview.field.delivered": "已送达",
-    "toolview.field.attachments": "附件",
-    // Ticket 70：send_peer 行标签（同伴流量的对话可见痕迹；消息正文不出现在行上）。
-    "toolview.field.peer": "目标会话",
-    "toolview.field.priority": "优先级",
-    // Ticket 152：message_agent / await_agent / spawn_dispatcher 行标签。
-    "toolview.field.agent": "代理",
-    "toolview.field.status": "状态",
-    "toolview.field.delivered-as": "送达路径",
-    "toolview.field.dispatcher": "调度器",
+    "toolview.details": "详情",
+    "toolview.detail.worker": "工作者",
+    "toolview.detail.dispatcher": "调度器",
+    "toolview.detail.target": "目标",
+    "toolview.detail.todo": "待办",
+    "toolview.detail.stream": "流",
+    "toolview.detail.transcript": "记录",
+    "toolview.detail.message": "消息",
+    "toolview.detail.status": "状态",
+    "toolview.detail.reason": "原因",
+    "toolview.detail.elapsed": "耗时",
+    "toolview.detail.settled": "完成于",
+    "toolview.detail.waited": "等待",
+    "toolview.detail.mode": "模式",
+    "toolview.detail.call": "调用",
+    "toolview.subject.worker": "该工作者",
+    "toolview.subject.agent": "该代理",
+    "toolview.subject.dispatcher": "该调度器",
+    "toolview.subject.todo": "该待办",
+    // Ticket 180：人类可读的事实。布尔值不会显示成 true/false——只有为真时
+    // 才出现“优先”，送达由整句表达，零值/假值/空值在进入行之前就被省略。
+    "toolview.fact.attachments.one": "{count} 个附件",
+    "toolview.fact.attachments.other": "{count} 个附件",
+    "toolview.fact.priority": "优先",
+    "toolview.fact.via-steer": "走工作者通道",
+    "toolview.fact.via-peer": "走同伴通道",
+    "toolview.fact.dormant": "其会话正在恢复",
+    "toolview.fact.keeps-running": "工作者仍在运行",
+    "toolview.fact.waited": "已等待 {duration}",
+    "toolview.fact.user-spoke": "你说了话",
+    "toolview.fact.turn-stopped": "回合已停止",
+    "toolview.fact.todo-completed": "{ref} 已完成",
+    "toolview.fact.todo-marked-done": "待办“{title}”已标记完成",
+    "toolview.fact.todo-marked-done-ref": "{ref} 已标记完成",
+    "toolview.fact.released-stream": "流已释放",
+    "toolview.spawn.started": "已启动“{title}”",
+    "toolview.spawn.started-generic": "已启动 {subject}",
+    "toolview.spawn.pending": "正在启动“{title}”",
+    "toolview.spawn.pending-generic": "正在启动 {subject}",
+    "toolview.spawn.refused": "无法启动“{title}”——{cause}。没有启动任何东西。",
+    "toolview.spawn.refused-generic":
+      "无法启动工作者——{cause}。没有启动任何东西。",
+    "toolview.check.pending": "正在查看名单",
+    "toolview.check.summary.none": "名单上还没有工作者。",
+    "toolview.check.summary.one": "已查看 {count} 位工作者",
+    "toolview.check.summary.other": "已查看 {count} 位工作者",
+    "toolview.check.refused": "无法查看名单——{cause}。",
+    "toolview.steer.pending": "正在调整 {subject}",
+    "toolview.steer.sent": "正在调整 {subject}",
+    "toolview.steer.refused": "无法调整 {subject}——{cause}。没有排队任何内容。",
+    "toolview.stop.pending": "正在停止 {subject}",
+    "toolview.stop.stopped": "已停止 {subject}",
+    "toolview.stop.released": "已释放 {subject} 占用的流",
+    "toolview.stop.refused": "无法停止 {subject}——{cause}。没有任何更改。",
+    "toolview.deliver.pending": "正在送达",
+    "toolview.deliver.done": "已送达给你",
+    "toolview.deliver.recorded": "结果已记录——请在你的回复中告知用户",
+    "toolview.deliver.refused": "无法送达——{cause}。用户没有收到任何内容。",
+    "toolview.message.pending": "正在给 {subject} 发消息",
+    "toolview.message.sent": "消息已发送给 {subject}",
+    "toolview.message.refused":
+      "无法给 {subject} 发消息——{cause}。没有发送任何内容。",
+    "toolview.await.pending": "正在等待 {subject}",
+    "toolview.await.done": "{subject} 已完成",
+    "toolview.await.failed": "{subject} 失败了",
+    "toolview.await.stopped": "{subject} 已停止",
+    "toolview.await.working": "{subject} 仍在运行",
+    "toolview.await.gone": "没有 {subject} 的结果——它已不在",
+    "toolview.await.released": "已停止等待 {subject}",
+    "toolview.await.refused": "无法等待 {subject}——{cause}。",
+    "toolview.dispatcher.summoned": "已召唤“{title}”",
+    "toolview.dispatcher.summoned-generic": "已召唤 {subject}",
+    "toolview.dispatcher.pending": "正在召唤“{title}”",
+    "toolview.dispatcher.pending-generic": "正在召唤 {subject}",
+    "toolview.dispatcher.refused":
+      "无法召唤“{title}”——{cause}。没有启动任何东西。",
+    "toolview.dispatcher.refused-generic":
+      "无法召唤调度器——{cause}。没有启动任何东西。",
+    "toolview.peer.pending": "正在发送给 {subject}",
+    "toolview.peer.sent": "已发送给 {subject}",
+    "toolview.peer.refused": "无法发送给 {subject}——{cause}。没有发送任何内容。",
+    // 每个拒绝原因都映射为人类可读的原因；原始枚举只出现在详情里。静默围栏
+    // 保持模糊措辞（“此聊天中没有该 ID 的工作者”），绝不写“属于另一个调度器”。
+    "toolview.cause.duplicate-stream-key": "该流键已被占用",
+    "toolview.cause.unknown-todo-id": "此聊天中没有该 ID 的待办",
+    "toolview.cause.todo-already-linked": "该待办已关联到一位工作者",
+    "toolview.cause.unknown-worker": "此聊天中没有该 ID 的工作者",
+    "toolview.cause.not-running": "该工作者已经结束",
+    "toolview.cause.already-settled": "该工作者已经结束",
+    "toolview.cause.unknown-todo": "此聊天中没有该 ID 的待办",
+    "toolview.cause.no-delivery-channel": "此构建没有向你发送的通道",
+    "toolview.cause.send-failed": "发送失败",
+    "toolview.cause.unknown-agent": "此聊天中没有该 ID 的代理",
+    "toolview.cause.unknown-dispatcher": "此聊天中没有该 ID 的调度器",
+    "toolview.cause.self-target": "那是你自己的会话",
+    "toolview.cause.inbox-full": "该收件箱已满",
+    "toolview.cause.rate-limited": "刚才发送的消息太多",
+    "toolview.cause.invalid-envelope": "消息无法按原样发送",
+    "toolview.cause.message-id-reuse": "该消息 ID 已被使用",
+    "toolview.cause.not-awaitable": "调度器是同伴，不是工作者",
+    "toolview.cause.too-many-waits": "已经打开了太多等待",
+    "toolview.cause.invalid-timeout": "超时不是有效的数字",
+    "toolview.cause.invalid-args": "标题或提示为空",
+    "toolview.cause.host-refused": "宿主拒绝启动它",
+    "toolview.cause.failed": "出了点问题",
     "activation.presence-hint":
       "调度器会在工作中随时汇报进度；结果完成后会直接送达本聊天。",
     "roster.steer.button": "纠偏",
-    "roster.steer.hint": "已为 {workerId} 填入输入框——请检查后发送。",
+    "roster.steer.hint": "已为 {worker} 填入输入框——请检查后发送。",
     "roster.steer.copy-fallback":
-      "此处无法访问输入框——请在本聊天中输入 /dispatcher-steer {workerId} 加上你的指示。",
+      "此处无法访问输入框——请在本聊天中输入 /dispatcher-steer {worker} 加上你的指示。",
     // Ticket 47：设置 → 插件配置 卡片。标题即插件显示名；启用项的说明用用户的话
     // 说清 ADR-0005 规则（保存的更改对新会话生效——当前会话沿用启动时的开关值），
     // 以免这个控件被读成实时开关。
@@ -388,10 +613,14 @@ export const localeDictionary: LocaleDictionary = {
     // 仅记录模式、存储根目录、半窗口清理的窗口大小。Ticket 150：标签说明
     // 当前真实行为——一切照常记录，但结果回合的入口检查点答案仍可落到上下文；
     // 只有自动清理和手动遗忘会被拦下。
+    // 所有者决定（2026-11-05）：RACOONS 是可选测试功能，默认关闭。
+    "settings.card.field.racoonsEnabled.label": "启用 RACOONS",
+    "settings.card.field.racoonsEnabled.hint":
+      "默认关闭。开启后，RACOONS 会把本进程内的每个会话记录到磁盘上的独立账本，并可能清理旧上下文；被移除的内容仍可通过 recall id 按原样取回。仅用于手动发起的测试。",
     "settings.card.field.racoonsRecordOnly.label":
       "RACOONS 仅记录模式（入口检查点仍可生效）",
     "settings.card.field.racoonsRecordOnly.hint":
-      "关闭时，RACOONS 会对本进程内的所有会话执行上下文清理；开启时一切照常记录，自动清理和手动遗忘不再执行，但结果回合的入口检查点答案仍可改写该结果。被移除的内容仍可通过 recall id 按原样取回，原始内容按会话保存在磁盘上。",
+      "仅在 RACOONS 启用时生效。关闭时，RACOONS 会对本进程内的所有会话执行上下文清理；开启时一切照常记录，自动清理和手动遗忘不再执行，但结果回合的入口检查点答案仍可改写该结果。被移除的内容仍可通过 recall id 按原样取回，原始内容按会话保存在磁盘上。",
     "settings.card.field.racoonsStorageRoot.label":
       "RACOONS 存储根目录（留空使用默认 <DSH_HOME>/storages/racoons）",
     "settings.card.field.racoonsStorageRoot.hint":
@@ -417,9 +646,13 @@ export const localeDictionary: LocaleDictionary = {
     "shell.empty": "暂无调度会话。",
     "shell.noselection": "选择一个调度会话以查看其工作。",
     "shell.conversation.pending": "会话表面尚未接入此外壳。",
-    "shell.row.working": "{count} 个进行中",
-    "shell.row.needs-you": "{count} 个需要你",
-    "shell.row.finished": "{count} 个已完成",
+    "shell.seat.failed": "此面板渲染失败。",
+    "shell.row.working.one": "{count} 个进行中",
+    "shell.row.working.other": "{count} 个进行中",
+    "shell.row.needs-you.one": "{count} 个需要你",
+    "shell.row.needs-you.other": "{count} 个需要你",
+    "shell.row.finished.one": "{count} 个已完成",
+    "shell.row.finished.other": "{count} 个已完成",
     "shell.row.presence-unavailable": "状态不可用",
     // Ticket 70：调度会话行上的“复制会话 ID”入口——同伴互发消息以会话 ID 寻址
     // （不设目录；C13 维持）。
@@ -433,11 +666,13 @@ export const localeDictionary: LocaleDictionary = {
     "shell.conv.more": "载入更早的消息",
     "shell.conv.role-user": "你",
     "shell.conv.role-assistant": "调度",
+    "shell.conv.role-peer": "来自另一位调度器",
     "shell.conv.working": "输出中…",
     "shell.conv.interrupted": "（已中断）",
     "shell.conv.attachment-only": "（无文本内容）",
     "shell.conv.tool-running": "进行中",
     "shell.conv.tool-failed": "失败",
+    "shell.conv.message": "消息",
     "shell.conv.send": "发送",
     "shell.conv.sending": "发送中…",
     "shell.conv.no-channel": "当前运行时没有可用的发送通道。",
@@ -482,12 +717,17 @@ export const localeDictionary: LocaleDictionary = {
     "shell.approval.no-channel": "此处没有可用的审批通道——没有任何更改。",
     "shell.approval.failed": "答复未能送达——没有任何更改。",
     "shell.approval.submitted": "答复已提交——待调度器确认后此卡片会更新。",
-    "shell.dispatch.gating": "审批门",
+    // 工作者派遣卡片以一句可读的句子开头；`ungated` 审批门不再显示，ID 与流键
+    // 收在“详情”里。
+    "shell.dispatch.started": "已启动“{title}”",
+    "shell.dispatch.started-generic": "已启动 {subject}",
+    "shell.dispatch.refused": "无法启动“{title}”——{cause}",
+    "shell.dispatch.refused-generic": "无法启动工作者——{cause}",
     // Ticket 123：会话类别图标文案（仅作无障碍名称/悬停提示，不是可见段落）。
     // Ticket 177：调度器分成两类，各自有自己的无障碍名称。
-    "indicator.dispatcher": "调度会话",
-    "indicator.team-leader": "被召唤的调度会话",
-    "indicator.worker": "工作者会话",
+    "indicator.dispatcher": "调度器",
+    "indicator.team-leader": "被召唤的调度器",
+    "indicator.worker": "工作者",
   },
 };
 

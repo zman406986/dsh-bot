@@ -317,6 +317,21 @@ export interface UnknownStateWorker {
   readonly lastKnownStatus: WorkerStatus;
   readonly transcriptRef: string | null;
   readonly todoId: string | null;
+  /**
+   * Delivery redrive attempts spent before the restart (ticket 58, D-5),
+   * carried off the marker so reclaiming the worker continues the same
+   * lifetime budget instead of restarting it. Optional — a marker written
+   * before this field exists reads as 0.
+   */
+  readonly redriveAttempts?: number;
+  /**
+   * External intake provenance carried off the marker (ticket 113). The hold
+   * is the only copy of the marker between rebuild and reclaim, so dropping
+   * it here would make a reclaimed inbox job lose its delivery routing and
+   * become re-presentable as a duplicate. Optional because markers written
+   * before the inbox exist.
+   */
+  readonly external?: TodoExternalOrigin;
 }
 
 /** What a rebuild-from-markers pass restored or refused to invent. */

@@ -41,8 +41,10 @@ export const DOC_LINT_VERSION = '1.0.0';
 export const CONFIG = {
   // Ticket 96 check 1 names these orientation docs. Missing docs are skipped silently
   // (agent.md: context docs are created lazily — their absence is not rot).
+  // AGENTS.md is deliberately NOT here: it is gitignored/local-only, so requiring it
+  // made lint:docs permanently red on a developer machine and blind on a fresh clone.
+  // The tracked docs/agents-rulebook.md below is the durable home of those rules.
   orientationDocs: [
-    'AGENTS.md',
     'README.md',
     'CONTEXT.md',
     'agent.md',
@@ -81,6 +83,7 @@ export const PATH_ALLOWLIST = [
   { path: 'cancelled/', because: 'tracker status-folder shorthand for Issue-tracker/cancelled/ (agent.md §Domain docs layout list)' },
   { path: '.out-of-scope/', because: 'convention name from the research-notes skills convention (research/research.md §Naming), not a repo path' },
   { path: 'conversation.session.header.actions', because: 'dsh client UI slot name (the seat ADR-0024’s rider licenses and ADR-0031 extends; cited in docs/adr/README.md), not a repo path — ticket 156' },
+  { path: 'dsh-bot-RACOONS.bat', because: 'desktop-only owner launcher kept beside the checkout, not tracked in this repo; README names it as the manual RACOONS switch' },
 ];
 
 const ALLOWLISTED = new Set(PATH_ALLOWLIST.map((a) => a.path));
@@ -90,35 +93,6 @@ const ALLOWLISTED = new Set(PATH_ALLOWLIST.map((a) => a.path));
  * entries become standing guardrails. Extend data-driven: add an entry + a fixture that fires it.
  */
 export const DOC_EXPECTATIONS = [
-  {
-    doc: 'AGENTS.md',
-    mustCite: [
-      { path: 'docs/agents-rulebook.md', because: 'the tracked rulebook is the durable home of the authority stack and moved-rule register; the AGENTS.md stub must point at it (ticket 97)' },
-      { path: 'read-before-running-live-and-browser-tests.md', because: 'the live/browser-test rules moved there from AGENTS.md (ticket 97); the stub must route readers to them' },
-      { path: 'read-before-reference-tree-work.md', because: 'the reference-tree policy moved there from AGENTS.md (ticket 97); the stub must route readers to it' },
-      { path: 'Issue-tracker/issue-tracker.md', because: 'the tracker guide is the tracker authority; AGENTS.md must point at it, not at docs/agents/* (ticket 96)' },
-      { path: 'agent.md', because: 'the domain-docs and triage-label conventions live in agent.md (ticket 96)' },
-      { path: 'research/research.md', because: 'the research-notes convention lives at research/research.md (ticket 96)' },
-    ],
-    forbid: [
-      {
-        pattern: /no application code,\s*package manifest/i,
-        because: 'package.json, src/, test/, client/, lib/ and scripts/ exist (ticket 01 onward) — the "no application code / package manifest / build-test toolchain" claim is stale (ticket 96)',
-      },
-      {
-        pattern: /Issues and specs live[^.\n]*\.scratch\//i,
-        because: 'tickets live in Issue-tracker/<status>/ per Issue-tracker/issue-tracker.md; .scratch/ holds scratch specs during active work only (ticket 96)',
-      },
-      {
-        pattern: /Not TypeScript\.(\*\*)? Prefer Go/i,
-        because: 'the "Not TypeScript. Prefer Go…" constraint row is superseded by accepted ADR-0001 (TypeScript in-process core); the row survives only in the rulebook register, marked superseded (ticket 97)',
-      },
-      {
-        pattern: /S7\s*\/\s*PRD §12|grep the shipped tree for reconstruction identifiers/i,
-        because: 'the S7 clean-room identifier grep is voided as a ship gate (ADR-0018, human-ruled 2026-09-18); it must not reappear as a live requirement (ticket 97)',
-      },
-    ],
-  },
   {
     doc: 'docs/agents-rulebook.md',
     mustCite: [
@@ -418,7 +392,7 @@ function selfTest(fixtureRoot) {
   const checks = [];
   const check = (name, pass, detail = '') => checks.push({ name, pass, detail });
 
-  check('fixture repo exists', fs.existsSync(path.join(fixtureRoot, 'AGENTS.md')), fixtureRoot);
+  check('fixture repo exists', fs.existsSync(path.join(fixtureRoot, 'README.md')), fixtureRoot);
 
   const result = lintRepo(fixtureRoot);
   check('fixture lint produced findings', result.findings.length > 0, `${result.findings.length} findings`);

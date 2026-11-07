@@ -146,6 +146,14 @@ function FieldControl(props: {
 }): JSX.Element {
   const { t, box, disabled, onEdit, onReset } = props;
   const id = `${CARD_CLASS}-field-${box.field}`;
+  /**
+   * The one explanation line under the control. The invalid copy REPLACES the
+   * hint rather than sitting beside it (one line explains the control, and a
+   * rejected draft is the more urgent thing to say about it), so the control
+   * points at this id either way: a screen reader hears the current reason,
+   * never an unassociated paragraph.
+   */
+  const hintId = `${id}-hint`;
   const inputRef = useRef<HTMLInputElement>(null);
 
   // `checked` null means nothing readable backs the box: an indeterminate
@@ -187,6 +195,8 @@ function FieldControl(props: {
             className={`${CARD_CLASS}__checkbox`}
             checked={box.checked === true}
             disabled={disabled}
+            aria-describedby={hintId}
+            aria-invalid={box.invalid ? "true" : undefined}
             onChange={(event) => onEdit(event.target.checked ? "true" : "false")}
           />
         ) : box.kind === "string" ? (
@@ -196,6 +206,8 @@ function FieldControl(props: {
             className={`${CARD_CLASS}__input`}
             value={box.text}
             disabled={disabled}
+            aria-describedby={hintId}
+            aria-invalid={box.invalid ? "true" : undefined}
             onChange={(event) => onEdit(event.target.value)}
           />
         ) : (
@@ -206,14 +218,18 @@ function FieldControl(props: {
             className={`${CARD_CLASS}__input`}
             value={box.text}
             disabled={disabled}
+            aria-describedby={hintId}
+            aria-invalid={box.invalid ? "true" : undefined}
             onChange={(event) => onEdit(event.target.value)}
           />
         )}
       </div>
       {/* The invalid copy REPLACES the hint rather than sitting beside it: one
           line explains the control, and a rejected draft is the more urgent
-          thing to say about it. */}
+          thing to say about it. `id` is what the control's aria-describedby
+          names. */}
       <p
+        id={hintId}
         className={`${CARD_CLASS}__hint`}
         data-invalid={box.invalid ? "true" : "false"}
       >
@@ -229,9 +245,14 @@ function FieldControl(props: {
  * hands in `view` and, on a served row, `form`; the card attaches that form
  * and renders nothing while none is handed in.
  *
- * The attach effect keys on the snapshot reference: the page derives `state`
- * from `ConfigForm.getSnapshot()`, which is stable until the mirror changes,
- * so the effect runs once per real refresh and cannot feed its own publish.
+ * The store is SHARED by both seats of the row (`view: "summary"` and
+ * `view: "page"` render as separate slot cells), so only the page binds it:
+ * a summary attach carries no form and would blank the page card. The attach
+ * effect keys on the snapshot reference: the page derives `state` from
+ * `ConfigForm.getSnapshot()`, which is stable until the mirror changes, so
+ * the effect runs once per real refresh and cannot feed its own publish.
+ * Unmounting the page detaches the shared store; a re-render with a new
+ * snapshot re-attaches without clearing staged drafts.
  */
 export function createPluginSettingsCard(
   t: TranslateFn,
@@ -242,10 +263,22 @@ export function createPluginSettingsCard(
     const [open, setOpen] = useState(false);
     const { view } = box;
     const form = props.form;
+    const isPage = props.view === "page";
 
+    // Bind only from the page seat. A summary render must not attach
+    // `undefined` over the page's form (the remount-order blanking defect).
     useEffect(() => {
+      if (!isPage) return;
       store.attach(form);
-    }, [store, form?.state]);
+    }, [store, isPage, form?.state]);
+
+    // Detach with the page's fiber. Kept apart from the attach effect so a
+    // refresh (a new `form.state`) re-attaches WITHOUT detaching first —
+    // `detach()` drops the staged drafts, which a refresh must preserve.
+    useEffect(() => {
+      if (!isPage) return;
+      return () => store.detach();
+    }, [store, isPage]);
 
     if (props.view === "summary") {
       return <>{t(SETTINGS_CARD_DESCRIPTION_KEY)}</>;
@@ -260,7 +293,7 @@ export function createPluginSettingsCard(
           type="button"
           className={`${CARD_CLASS}__header`}
           aria-expanded={open}
-          aria-label={`${t(open ? SETTINGS_CARD_COLLAPSE_KEY : SETTINGS_CARD_EXPAND_KEY)}: ${t(SETTINGS_CARD_TITLE_KEY)}`}
+          aria-label={`${t(open ? SETTINGS_CARD_COLLAPSE_KEY : SETTINGS_CARD_EXPAND_KEY)}: ${t(SETTINGS_CARD_TITLE_KEY)}${box.dirty ? ` — ${t(SETTINGS_CARD_UNSAVED_KEY)}` : ""}`}
           onClick={() => setOpen(!open)}
         >
           <span className={`${CARD_CLASS}__head-text`}>

@@ -117,6 +117,17 @@ export const SESSION_KIND_PROJECTION_KEY = "sessionKind";
  * refolded from `init` (cache loss / a full cold read). That is the exact
  * status quo ante — no spawned child carried a mark before this ticket — so it
  * is not a regression. See the ticket comment.
+ *
+ * STILL 1 for the ticket-177 legacy-class fix (an active row with no class).
+ * The bump rule protects against persisting rows an older unit would
+ * mis-forward-apply; nothing about a row's SHAPE or the fold changed here. The
+ * reader ({@link dispatcherClassOf}) is what stopped treating "no class" as
+ * `"user"`. Bumping to 2 would discard every healthy cached cell — including
+ * user-started dispatchers whose glyph would then blank until a refold — while
+ * the only affected rows already parse and stay valid. Null is sufficient
+ * because it is not "not spawned": it hands the question to the caller's
+ * durable source, whose `dispatcher_sessions` mark is the spawned-only fact
+ * (and whose absence is the honest "user" answer for a real chat).
  */
 export const SESSION_KIND_PROJECTION_STATE_VERSION = 1;
 
@@ -224,20 +235,48 @@ export interface SessionProjectionDefinitionLike<S> {
 }
 
 /**
+ * Structural `ProjectionHandle` view (`dsh-session-projection/lib/types/
+ * index.d.ts:15-32`, 0.2.2): what an awaited `register` resolves to. Its
+ * `stateOf(session)` is the per-unit read the host asks consumers to use;
+ * the registry-level `stateOf(session, key)` is marked deprecated.
+ *
+ * Only `stateOf` is load-bearing here; `dispose` is optional so a stub handle
+ * stays minimal.
+ */
+export interface ProjectionHandleLike<S> {
+  stateOf(session: unknown): S;
+  dispose?(): Promise<void> | void;
+}
+
+/**
+ * What `register` answers across host versions:
+ * - dsh 0.2.2: an awaitable of the ready {@link ProjectionHandleLike} (the
+ *   same call also returns a callable disposer, a deprecated convenience this
+ *   module deliberately never invokes);
+ * - older hosts: the disposal function directly.
+ */
+export type SessionProjectionRegistrationLike =
+  | (() => void)
+  | ProjectionHandleLike<SessionKindProjectionState>
+  | PromiseLike<ProjectionHandleLike<SessionKindProjectionState>>;
+
+/**
  * Structural `ctx.sessionProjections` view: the `register` overload with a
  * wire view, plus the synchronous state read added by ticket 147.
  *
- * `stateOf(session, key)` materializes every registered unit at the session's
- * current log cursor and returns this unit's state, or `undefined` when the
- * key is not registered (`dsh-session-projection/lib/index.js:126-131`). It is
- * fully synchronous — that is why the resumed-dispatcher check rides it
- * instead of the asynchronous marker-store read.
+ * `stateOf(session, key)` still works but dsh 0.2.2 marks it deprecated
+ * ("use an awaited registration's `handle.stateOf(session)`"). This module
+ * therefore remembers the handle its registration resolves to and reads
+ * through it first ({@link sessionKindStateOf}); the registry-level overload
+ * remains only as a guarded fallback for older hosts.
  *
  * Optional member so stub registries in tests stay minimal; a registry
  * without it simply cannot answer the ticket-147 check.
  */
 export interface SessionProjectionsRegistryLike {
-  register(definition: SessionProjectionDefinitionLike<SessionKindProjectionState>): () => void;
+  register(
+    definition: SessionProjectionDefinitionLike<SessionKindProjectionState>,
+  ): SessionProjectionRegistrationLike;
   stateOf?(
     session: unknown,
     key: string,
@@ -405,6 +444,34 @@ export function initSessionKindProjection(
  * is still UNRESOLVED. Called from the fold on every committed event (the
  * only moment the unit is touched), and exposed for a direct settle after a
  * mirror warm-up. A resolved cell is returned unchanged (same reference).
+ *
+ * KNOWN GAP (resumed-dispatcher activation, recorded — NOT fixed here):
+ * the host re-activates a resumed top-level dispatcher only from its
+ * `agent/created` listener (`resumeUserStartedDispatcher`,
+ * `src/adapter/cordis-dsh-host.ts`), and that listener is synchronous. When
+ * the projection cell is still UNRESOLVED at that instant,
+ * {@link sessionKindOf} fail-closes to null, and a later event may settle the
+ * cell to `active: true` with no second activation attempt.
+ *
+ * The seam that already exists for closing it is the registry's change feed,
+ * NOT a new API in this module: dsh 0.2.2's
+ * `SessionProjectionRegistry.onChanged(listener)` (and `onEventChanged`)
+ * reports `(session, key, value, seq)` for every wire-value change. A host-side
+ * fix would:
+ *   1. retain the live `AgentLike` per session id at `agent/created` (the
+ *      only place the host is handed the agent);
+ *   2. subscribe through its guarded `resolveSessionProjections(ctx)` route
+ *      and filter `key === SESSION_KIND_PROJECTION_KEY` and
+ *      `value === DISPATCHER_SESSION_KIND`;
+ *   3. call `resumeUserStartedDispatcher(session, agent, sessionId)` again —
+ *      its `resumedUserDispatchers` dedupe already makes a repeat safe.
+ * The feed is driven by committed session events, so the event that folds a
+ * warmed mirror into an unresolved cell notifies; a mirror warm-up with no
+ * later event does not, and the host's existing session/prompt seam is then
+ * the second trigger it would need. Wiring either requires editing
+ * `src/adapter/cordis-dsh-host.ts` (agent retention + subscription) and is
+ * therefore left to that owner; no projection-module callback was invented,
+ * because the registry already publishes the event the host needs.
  */
 export function resolveSessionKindState(
   state: SessionKindProjectionState,
@@ -633,12 +700,19 @@ export function parseDispatcherSessionKind(
 
 /**
  * Structural `ctx.sessionProjections` view as the RESUME path reads it
- * (ticket 147): just the synchronous state read. Kept separate from
+ * (ticket 147): the synchronous state read plus, for the peer-label reader,
+ * the client-visible snapshot face. Kept separate from
  * {@link SessionProjectionsRegistryLike} so the registration side and the
  * read side can be stubbed independently.
+ *
+ * `stateOf` is the older/deprecated registry-level overload; `snapshot`
+ * (`dsh-session-projection/lib/types/index.d.ts:180-198`, 0.2.2) is the
+ * non-deprecated complete read for a key this plugin does not register.
+ * Both are optional so a stub answers only what it models.
  */
 export interface HostSessionProjectionsLike {
   stateOf?(session: unknown, key: string): unknown;
+  snapshot?(session: unknown, keys?: readonly string[]): unknown;
 }
 
 /**
@@ -680,16 +754,134 @@ export function resolveSessionProjections(
 }
 
 /**
+ * Cordis hands out a fresh traceable proxy on every service read
+ * (`@deepseek-ai/cordis` `getTraceable`), so the object identity a caller
+ * passes here need not equal the one registration saw. The proxy answers this
+ * well-known symbol with the raw service; a plain stub registry simply has no
+ * such property and is used as its own owner.
+ */
+const CORDIS_ORIGINAL_SYMBOL = Symbol.for("cordis.original");
+
+function projectionHandleOwner(registry: unknown): object | undefined {
+  if (
+    (typeof registry !== "object" && typeof registry !== "function") ||
+    registry === null
+  ) {
+    return undefined;
+  }
+  try {
+    const original = (registry as Record<symbol, unknown>)[
+      CORDIS_ORIGINAL_SYMBOL
+    ];
+    if (typeof original === "object" && original !== null) return original;
+    if (typeof original === "function") return original;
+  } catch {
+    // A hostile proxy must not break the read; key on what it exposed.
+  }
+  return registry;
+}
+
+/**
+ * Awaited registration handles, per registry and projection key — the
+ * non-deprecated read face of dsh 0.2.2. Weak so an unloaded registry (and
+ * every handle stored for it) can be collected.
+ */
+const projectionHandles = new WeakMap<
+  object,
+  Map<string, ProjectionHandleLike<SessionKindProjectionState>>
+>();
+
+function rememberProjectionHandle(
+  registry: unknown,
+  key: string,
+  handle: ProjectionHandleLike<SessionKindProjectionState>,
+): void {
+  const owner = projectionHandleOwner(registry);
+  if (owner === undefined) return;
+  let handles = projectionHandles.get(owner);
+  if (handles === undefined) {
+    handles = new Map();
+    projectionHandles.set(owner, handles);
+  }
+  handles.set(key, handle);
+}
+
+function forgetProjectionHandle(registry: unknown, key: string): void {
+  const owner = projectionHandleOwner(registry);
+  if (owner === undefined) return;
+  projectionHandles.get(owner)?.delete(key);
+}
+
+function rememberedProjectionHandle(
+  registry: unknown,
+  key: string,
+): ProjectionHandleLike<SessionKindProjectionState> | undefined {
+  const owner = projectionHandleOwner(registry);
+  if (owner === undefined) return undefined;
+  return projectionHandles.get(owner)?.get(key);
+}
+
+/** True for the 0.2.2 awaitable registration (tested before callability). */
+function isAwaitableRegistration(
+  value: unknown,
+): value is PromiseLike<ProjectionHandleLike<SessionKindProjectionState>> {
+  if (
+    (typeof value !== "object" && typeof value !== "function") ||
+    value === null
+  ) {
+    return false;
+  }
+  try {
+    return typeof (value as { then?: unknown }).then === "function";
+  } catch {
+    return false;
+  }
+}
+
+/** Structural check for a ready handle (never throws on junk). */
+function isProjectionHandle(
+  value: unknown,
+): value is ProjectionHandleLike<SessionKindProjectionState> {
+  if (
+    (typeof value !== "object" && typeof value !== "function") ||
+    value === null
+  ) {
+    return false;
+  }
+  try {
+    return typeof (value as { stateOf?: unknown }).stateOf === "function";
+  } catch {
+    return false;
+  }
+}
+
+/** Release one handle without ever raising from teardown. */
+function disposeProjectionHandle(handle: {
+  dispose?(): Promise<void> | void;
+}): void {
+  try {
+    const released = handle.dispose?.();
+    if (released !== undefined) {
+      void Promise.resolve(released).catch(() => {
+        // Releasing is best-effort; a failed dispose must not break teardown.
+      });
+    }
+  } catch {
+    // Same: teardown is never the place to raise.
+  }
+}
+
+/**
  * Ticket 147: the durable dispatcher kind of one session, read from the
  * host's projection registry — `"dispatcher"` only when the projection says
  * so; `null` for anything else (no registry, key not registered, inactive,
  * unreadable).
  *
  * This is the resume seam's authority, and it is deliberately fail-CLOSED: a
- * registry without `stateOf`, a throw inside the fold, or any state that does
- * not answer `active: true` all read as "not a dispatcher", so a resumed
- * session is never activated on a guess. The durable fact itself comes from
- * the session's own command log, folded by
+ * registry without a readable unit, a throw inside the fold, a malformed cell,
+ * or any state that does not answer `active: true` all read as "not a
+ * dispatcher", so a resumed session is never activated on a guess. The durable
+ * fact itself comes from the session's own command log, folded by
  * {@link applySessionKindProjection} — the same unit whose wire value draws
  * the client glyph, so the sidebar and the tool surface cannot disagree.
  *
@@ -713,29 +905,87 @@ export function sessionKindOf(
     : null;
 }
 
-/** The raw projection state, or undefined when nothing could answer. */
+/**
+ * The raw projection state, or undefined when nothing could answer.
+ *
+ * Read order (dsh 0.2.2 migration): the handle this module's registration
+ * resolved to first — the non-deprecated `handle.stateOf(session)` — then the
+ * registry-level `stateOf(session, key)` overload for older hosts, whose
+ * property read AND call are both guarded.
+ *
+ * Every answer is validated by {@link parseSessionKindProjectionState}: a cell
+ * with wrong field types or an unknown `dispatcherClass` is "cannot answer",
+ * never a truthy wrong kind.
+ */
 function sessionKindStateOf(
   registry: HostSessionProjectionsLike | undefined,
   session: unknown,
 ): SessionKindProjectionState | undefined {
-  if (registry === undefined || typeof registry.stateOf !== "function") {
+  if (registry === undefined) return undefined;
+  const handle = rememberedProjectionHandle(
+    registry,
+    SESSION_KIND_PROJECTION_KEY,
+  );
+  if (handle !== undefined) {
+    let state: unknown;
+    try {
+      state = handle.stateOf(session);
+    } catch {
+      // A projection that cannot answer must never activate a session.
+      return undefined;
+    }
+    return sessionKindStateFrom(state);
+  }
+  return sessionKindStateFromRegistry(registry, session);
+}
+
+/** Validate a cell; malformed persisted/live junk is "cannot answer". */
+function sessionKindStateFrom(
+  value: unknown,
+): SessionKindProjectionState | undefined {
+  try {
+    return parseSessionKindProjectionState(value);
+  } catch {
     return undefined;
   }
+}
+
+/**
+ * The pre-0.2.2 read face: `registry.stateOf(session, key)`, kept as a
+ * guarded fallback for hosts whose `register` returns a disposer instead of a
+ * handle. Both the member read and the call are guarded — on a live cordis
+ * context an un-injected/absent service member may throw.
+ */
+function sessionKindStateFromRegistry(
+  registry: HostSessionProjectionsLike,
+  session: unknown,
+): SessionKindProjectionState | undefined {
+  let read: unknown;
+  try {
+    read = registry.stateOf;
+  } catch {
+    return undefined;
+  }
+  if (typeof read !== "function") return undefined;
   let state: unknown;
   try {
-    state = registry.stateOf(session, SESSION_KIND_PROJECTION_KEY);
+    state = (read as (session: unknown, key: string) => unknown).call(
+      registry,
+      session,
+      SESSION_KIND_PROJECTION_KEY,
+    );
   } catch {
-    // A projection that cannot answer must never activate a session.
+    // The deprecation note says "use a handle"; a host that still has the
+    // overload may also throw inside its fold. Either way, fail closed.
     return undefined;
   }
-  return typeof state === "object" && state !== null
-    ? (state as SessionKindProjectionState)
-    : undefined;
+  return sessionKindStateFrom(state);
 }
 
 /**
  * Ticket 177: the durable CLASS of one dispatcher session, or null when the
- * session is not an active dispatcher.
+ * session is not an active dispatcher OR the cell cannot say which class it
+ * is.
  *
  * This is the seam that closes ticket 173's recorded limitation: a summoned
  * dispatcher is top-level (ADR-0032), so on a cold resume it reaches the
@@ -744,8 +994,22 @@ function sessionKindStateOf(
  *
  * Fail-closed in the same direction as {@link sessionKindOf}: no registry, no
  * key, a throw, or an inactive cell answers null, and the caller's default
- * (`"user"`) stands. A cell whose `dispatcherClass` was never settled is the
- * user-started class, which is what every pre-175 row could only have been.
+ * stands.
+ *
+ * Defect fix: an ACTIVE cell whose `dispatcherClass` was never settled also
+ * answers null — "cannot say", not `"user"`. Pre-177 rows for SPAWNED children
+ * are exactly that shape (`active: true`, no class), so returning `"user"`
+ * silently resumed a legacy team leader as the chief of staff and re-registered
+ * the summon tool on it. Null makes the caller consult its next source: the
+ * host's `dispatcherClassForSummon`, whose durable `dispatcher_sessions` mark
+ * is fail-closed to `"spawned"` for a legacy child (and answers `"user"` for a
+ * chat that carries no mark). A cell that explicitly settled `"user"` — every
+ * `/dsh-bot` settlement since ticket 177 — still answers `"user"`.
+ *
+ * The WIRE glyph is deliberately unchanged: {@link viewSessionKind} still
+ * renders an active classless cell as the user-started class, so a genuine
+ * user chat never loses its sidebar mark. Only the policy-facing class reader
+ * abstains.
  */
 export function dispatcherClassOf(
   registry: HostSessionProjectionsLike | undefined,
@@ -753,7 +1017,7 @@ export function dispatcherClassOf(
 ): DispatcherOrigin | null {
   const state = sessionKindStateOf(registry, session);
   if (state === undefined || state.active !== true) return null;
-  return state.dispatcherClass === "spawned" ? "spawned" : "user";
+  return state.dispatcherClass === undefined ? null : state.dispatcherClass;
 }
 
 /**
@@ -818,40 +1082,152 @@ export function sessionKindProjectionDefinition(
  * host), the registration is made on the injected child so unloading this
  * plugin removes the key with it.
  *
+ * dsh 0.2.2 migration: `register` now resolves to a {@link ProjectionHandleLike}
+ * and marks the registry-level `stateOf(session, key)` deprecated. This
+ * function keeps the registration awaitable, stores the ready handle per
+ * registry/key ({@link rememberProjectionHandle}) so {@link sessionKindOf} /
+ * {@link dispatcherClassOf} read through it, and still accepts an older
+ * host's direct disposer return. Nothing here awaits in the caller: the
+ * registration is adopted when it settles, and a read that lands before then
+ * falls back to the guarded deprecated overload.
+ *
  * @param probeOf ticket 140 (review fix): a late-bound thunk for the
  *   dispatcher-mark source. The plugin registers this unit BEFORE the host
  *   object exists, so the probe must be read at call time, never captured.
  *   Omitted: the command fold is the only source.
- * @returns the registry's own disposer, or null when no registry answered.
- *   Registration is already an effect on the calling/injected fiber; the
- *   disposer exists for explicit early removal (tests, HMR teardown).
+ * @returns the disposer, or null when no registry answered. Registration is
+ *   already an effect on the calling/injected fiber; the disposer exists for
+ *   explicit early removal (tests, HMR teardown). It releases the awaited
+ *   handle too, including a release requested before the await settled.
  */
 export function registerSessionKindProjection(
   ctx: SessionProjectionHostLike,
   probeOf?: () => DispatcherMarkProbe | undefined,
 ): (() => void) | null {
-  let dispose: (() => void) | null = null;
   const definition = sessionKindProjectionDefinition(probeOf);
-  const registerOn = (host: SessionProjectionChildLike): void => {
-    const registry = host.sessionProjections;
-    if (registry === undefined || typeof registry.register !== "function") {
-      return;
-    }
+  /** Set once a registry accepted the unit (null when none did). */
+  let dispose: (() => void) | null = null;
+  /** The registry the unit went to, for per-key handle bookkeeping. */
+  let registeredOn: unknown;
+  /** Older host: `register` answered with its disposer directly. */
+  let legacyDispose: (() => void) | null = null;
+  /** dsh 0.2.2: the ready handle, preferred over the deprecated overload. */
+  let projectionHandle:
+    | ProjectionHandleLike<SessionKindProjectionState>
+    | undefined;
+  /** A release requested before the awaited handle existed. */
+  let releaseRequested = false;
+
+  const warn = (error: unknown): void => {
+    // A cosmetic indicator must never break dispatcher activation: a host
+    // that rejects the unit (e.g. a key/version conflict) leaves the client
+    // reading capability absence, which renders no glyph.
     try {
-      dispose = registry.register(definition);
-    } catch (error) {
-      // A cosmetic indicator must never break dispatcher activation: a host
-      // that rejects the unit (e.g. a key/version conflict) leaves the client
-      // reading capability absence, which renders no glyph.
+      console.warn(
+        "[multitask-dispatcher] sessionKind projection not registered:",
+        error,
+      );
+    } catch {
+      // A broken console must not break activation either.
+    }
+  };
+
+  const release = (): void => {
+    releaseRequested = true;
+    if (registeredOn !== undefined) {
+      forgetProjectionHandle(registeredOn, definition.key);
+    }
+    const legacy = legacyDispose;
+    legacyDispose = null;
+    if (legacy !== null) {
       try {
-        console.warn(
-          "[multitask-dispatcher] sessionKind projection not registered:",
-          error,
-        );
+        legacy();
       } catch {
-        // A broken console must not break activation either.
+        // Releasing is best-effort.
       }
     }
+    const handle = projectionHandle;
+    projectionHandle = undefined;
+    if (handle !== undefined) disposeProjectionHandle(handle);
+  };
+
+  const adopt = (answer: unknown): void => {
+    if (isAwaitableRegistration(answer)) {
+      // dsh 0.2.2: registration completes asynchronously and resolves to the
+      // ready handle. The same call also returns a callable disposer, which
+      // this module deliberately never invokes (deprecated shape).
+      void Promise.resolve(answer).then(
+        (ready) => {
+          if (!isProjectionHandle(ready)) return;
+          if (releaseRequested) {
+            // Released before registration settled: release what arrived.
+            disposeProjectionHandle(ready);
+            return;
+          }
+          projectionHandle = ready;
+          if (registeredOn !== undefined) {
+            rememberProjectionHandle(registeredOn, definition.key, ready);
+          }
+        },
+        (error: unknown) => warn(error),
+      );
+      return;
+    }
+    if (typeof answer === "function") {
+      // Older host: the return value IS the disposer.
+      if (releaseRequested) {
+        try {
+          answer();
+        } catch {
+          // Releasing is best-effort.
+        }
+        return;
+      }
+      legacyDispose = answer as () => void;
+      return;
+    }
+    if (isProjectionHandle(answer)) {
+      if (releaseRequested) {
+        disposeProjectionHandle(answer);
+        return;
+      }
+      projectionHandle = answer;
+      if (registeredOn !== undefined) {
+        rememberProjectionHandle(registeredOn, definition.key, answer);
+      }
+    }
+  };
+
+  const registerOn = (host: SessionProjectionChildLike): void => {
+    let registry: SessionProjectionsRegistryLike | undefined;
+    try {
+      registry = host.sessionProjections;
+    } catch {
+      return;
+    }
+    if (registry === undefined) return;
+    let register: unknown;
+    try {
+      register = registry.register;
+    } catch {
+      // A live context/proxy throws on a member it never injected.
+      return;
+    }
+    if (typeof register !== "function") return;
+    registeredOn = registry;
+    dispose = release;
+    let answer: unknown;
+    try {
+      answer = (register as (
+        definition: SessionProjectionDefinitionLike<SessionKindProjectionState>,
+      ) => SessionProjectionRegistrationLike).call(registry, definition);
+    } catch (error) {
+      dispose = null;
+      registeredOn = undefined;
+      warn(error);
+      return;
+    }
+    adopt(answer);
   };
   if (typeof ctx.inject === "function") {
     ctx.inject(["sessionProjections"], registerOn);

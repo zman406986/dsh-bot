@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import {createCordisDshHost, mapStopReason, SPAWN_PROVIDER, type ActivationLike, type ActivationSpecLike, type AdapterContext, type AgentLike} from "../src/adapter/cordis-dsh-host.js";
+import {createCordisDshHost, listGlobalToolNames, mapStopReason, SPAWN_PROVIDER, type ActivationLike, type ActivationSpecLike, type AdapterContext, type AgentLike} from "../src/adapter/cordis-dsh-host.js";
+import { RESUME_WAKE_CUE } from "../src/adapter/wake-copy.js";
 import { bindDispatcherLifecycle, isTopLevel } from "../src/adapter/parent-agent.js";
 import { createMultitask } from "../src/core/multitask.js";
+import { assembleSessionPolicy } from "../src/core/policy/assembler.js";
 import {
   deriveWorkerLiveness,
   WORKER_STALL_THRESHOLD_MS,
 } from "../src/core/liveness.js";
 import { CHECK_ACTIVITY_CHARS, RECENT_RESULT_EXCERPT_CHARS } from "../src/core/report-clamp.js";
 import type { SettledEvent } from "../src/core/types.js";
+import type { DurableWorkerMarker } from "../src/core/durability.js";
 import { createWorkerAgentDef } from "../src/worker/agent-def.js";
 import { WORKER_PERSONA_SECTION } from "../src/worker/preset.js";
 import { EMPTY_WORKER_REPORT_PLACEHOLDER } from "../src/worker/report.js";
@@ -67,6 +70,14 @@ function createStubCtx() {
   ];
 
   const agents = new Map<string, AgentLike>();
+  /**
+   * Defect-fix harness: the live host answers `agents.get(id)` with the SAME
+   * object it announced. The default stub returns a recording wrapper (the
+   * wake tests count `followupCalls` through it); tests that exercise an
+   * identity check ("still the same agent") set this to true and bind the
+   * exact object.
+   */
+  let exactAgentIdentity = false;
 
   /**
    * Ticket 120: runs INSIDE `startActivation`, after `agent/created` and
@@ -95,6 +106,7 @@ function createStubCtx() {
       schemasScopes: unknown[];
     }>;
     bindAgent(agent: AgentLike): void;
+    setExactAgentIdentity(value: boolean): void;
   } = {
     startActivationCalls,
     disposedWorkerIds,
@@ -111,6 +123,9 @@ function createStubCtx() {
     },
     bindAgent(agent: AgentLike) {
       agents.set(String(agent.session.id), agent);
+    },
+    setExactAgentIdentity(value: boolean) {
+      exactAgentIdentity = value;
     },
     on(name: string, cb: (payload: never) => void) {
       const list = listeners.get(name) ?? [];
@@ -209,11 +224,14 @@ function createStubCtx() {
       get(id: unknown) {
         const agent = agents.get(String(id));
         if (agent === undefined) return undefined;
+        if (exactAgentIdentity) return agent;
         return {
           ...agent,
           followup(message: unknown) {
             followupCalls.push(message);
-            agent.followup(message);
+            // Preserve the driver's answer: a live driver may return a
+            // rejected promise, and the host must be able to own it.
+            return agent.followup(message);
           },
         };
       },
@@ -230,7 +248,8 @@ function createStubCtx() {
         return {
           table() {
             return {
-              get: (k: string) => table.get(k),
+              get: (k: string) =>
+                table.get(k) as DurableWorkerMarker | undefined,
               entries: () => table.entries() as never,
               put: async (k: string, v: unknown) => {
                 table.set(k, v);
@@ -458,9 +477,39 @@ describe("CordisDshHost spawn / interrupt / send", () => {
           "message_agent",
           "await_agent",
           "spawn_dispatcher",
+          "request_access",
         ],
       },
     ]);
+  });
+
+  it("a throwing worker composition does not fail child creation", async () => {
+    const ctx = createStubCtx();
+    const def = createWorkerAgentDef();
+    const throwingDef = {
+      ...def,
+      resolveToolFilter() {
+        throw new Error("tool barrier exploded");
+      },
+    };
+    const host = createCordisDshHost(ctx, { workerAgentDef: throwingDef });
+    host.bindParent(createAgent("disp-1"), "disp-1");
+
+    const warnings = await captureWarnings(async () => {
+      const workerId = await host.spawnWorker("Do the thing.", {
+        parentSessionId: "disp-1",
+        streamKey: "s1",
+        title: "Thing",
+      });
+      assert.equal(typeof workerId, "string");
+      assert.equal(host.owns(workerId), true, "the child is still live");
+    });
+
+    assert.ok(
+      warnings.some((line) => line.includes("could not be composed")),
+      "the composition failure is logged, not thrown into the host",
+    );
+    assert.equal(ctx.startActivationCalls.length, 1);
   });
 
   it("spawn owns the activation and disposes it on host dispose", async () => {
@@ -741,6 +790,53 @@ describe("bindDispatcherLifecycle", () => {
     assert.deepEqual(boundaries, [workerId]);
   });
 
+  it("sendMessage delivers through subagent delivery, never the peer facade", async () => {
+    // The production crash this pins: the steered session was a subagent
+    // child and `sessionController.resolveAgent` refused it with
+    // `session/agent-busy`. Subagent delivery is the only worker route; a
+    // mounted facade must not be consulted at all.
+    const ctx = createStubCtx();
+    const facadeCalls: string[] = [];
+    (ctx as unknown as Record<string, unknown>)["get"] = (name: string) =>
+      name === "sessionController"
+        ? {
+            async resolveAgent(sessionId: string) {
+              facadeCalls.push(sessionId);
+              return { error: new Error("session is owned by subagent routing") };
+            },
+          }
+        : undefined;
+
+    const host = createCordisDshHost(ctx);
+    const multitask = createMultitask(host);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
+
+    const parent = createAgent("disp-1");
+    assert.deepEqual(lifecycle.activate(parent), { ok: true });
+
+    const spawn = await multitask.spawnWorker({
+      parentSessionId: "disp-1",
+      streamKey: "s-steer",
+      title: "Steer",
+      prompt: "go",
+    });
+    assert.ok(spawn.ok);
+    if (!spawn.ok) return;
+
+    await host.sendMessage(spawn.workerId, "tighten it");
+
+    assert.deepEqual(facadeCalls, [], "the peer facade must not be asked");
+    assert.equal(ctx.sendMessageCalls.length, 1);
+    assert.equal(ctx.sendMessageCalls[0]?.targetId, spawn.workerId);
+    assert.equal(ctx.sendMessageCalls[0]?.sender, parent);
+    const content = ctx.sendMessageCalls[0]?.content as Array<{
+      readonly text?: string;
+    }>;
+    assert.ok(
+      content.map((block) => block.text ?? "").join("").includes("tighten it"),
+    );
+  });
+
   it("settle through subagent/end reaches the wake bus exactly once", async () => {
     const ctx = createStubCtx();
     const host = createCordisDshHost(ctx);
@@ -930,6 +1026,60 @@ describe("ticket 120: the first worker status edge precedes spawn registration",
     assert.equal(multitask.listTodos("disp-1")[0]?.status, "in_progress");
     // No duplicate roster rows from the reservation + resolution pair.
     assert.equal(multitask.listWorkers("disp-1").length, 1);
+  });
+
+  it("a worker that settles during startActivation is not re-inserted", async () => {
+    const { ctx, host } = wire();
+    const settled: SettledEvent[] = [];
+    host.onWorkerSettled((event) => settled.push(event));
+    ctx.activationSeams.duringActivation = (childId) => {
+      ctx.fire("subagent/end", {
+        id: childId,
+        stopReason: "completed",
+        lastAssistantMessage: [{ type: "text", text: "done already" }],
+      });
+    };
+
+    const workerId = await host.spawnWorker("x", {
+      parentSessionId: "disp-1",
+      streamKey: "s-settled-during-spawn",
+      title: "T",
+    });
+
+    assert.equal(settled.length, 1, "the settle was observed");
+    assert.equal(host.owns(workerId), false, "no post-settle re-insertion");
+    assert.equal(host.workerIdOf(workerId), undefined);
+    assert.deepEqual(ctx.disposedWorkerIds, [workerId]);
+
+    // Host teardown must not release the same activation twice.
+    host.dispose();
+    assert.deepEqual(ctx.disposedWorkerIds, [workerId]);
+  });
+
+  it("accepts a settle after the live entry is pruned when no durable store exists", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    host.bindParent(createAgent("disp-1"), "disp-1");
+    const workerId = await host.spawnWorker("x", {
+      parentSessionId: "disp-1",
+      streamKey: "s-no-durability",
+      title: "T",
+    });
+    const settled: SettledEvent[] = [];
+    host.onWorkerSettled((event) => settled.push(event));
+
+    // The live entry is gone (a disposal), and there is no durable wake row.
+    ctx.fire("agent/disposed", { agent: { session: { id: workerId } } });
+    assert.equal(host.owns(workerId), false);
+
+    ctx.fire("subagent/end", {
+      id: workerId,
+      stopReason: "completed",
+      lastAssistantMessage: [{ type: "text", text: "done" }],
+    });
+
+    assert.equal(settled.length, 1, "the in-process spawn proof keeps the settle");
+    assert.equal(settled[0]?.workerId, workerId);
   });
 
   it("a settled worker still refuses steering — the fix does not weaken the FSM", async () => {
@@ -1221,5 +1371,1453 @@ describe("CordisDshHost tool-call feed (ticket 75)", () => {
       ),
       "quiet",
     );
+  });
+});
+
+/**
+ * Defect fixes on the host's dormancy, delivery, and per-worker lifecycle
+ * paths. Each test fails against the pre-fix code:
+ * - a throwing `followup` escaped the synchronous `agent/created` listener;
+ * - `interruptWorker` returned success with no authority (the core had
+ *   already committed `aborted`);
+ * - a facade refusal was terminal, so pre-ADR-0032 rows were never resumed;
+ * - `resumeRequested` stranded forever after a resume that never activated;
+ * - a parked worker correction was dropped on a failed send;
+ * - a settled worker whose async row delete was lost was woken again;
+ * - `workers`/`spawnControllers`/`workerActivations` leaked until dispose.
+ */
+describe("defect fixes: wake, interrupt, dormancy and worker lifecycle", () => {
+  function tick(): Promise<void> {
+    return new Promise((resolve) => setImmediate(resolve));
+  }
+
+  async function drain(): Promise<void> {
+    for (let i = 0; i < 8; i += 1) await tick();
+  }
+
+  /** A mark store that answers every seam the host reads. */
+  function createMarkStore(options?: {
+    dispatchers?: Array<{
+      sessionId: string;
+      parentSessionId?: string;
+      generation?: number;
+      origin?: "subagent" | "top-level";
+    }>;
+    workers?: Array<{ sessionId: string; parentSessionId: string }>;
+    workerMarkers?: Array<{ workerId: string; parentSessionId: string; status: string }>;
+  }) {
+    const dispatchers = new Map(
+      (options?.dispatchers ?? []).map((row) => [row.sessionId, { ...row }]),
+    );
+    const workers = new Map(
+      (options?.workers ?? []).map((row) => [row.sessionId, { ...row }]),
+    );
+    const workerMarkers = options?.workerMarkers ?? [];
+    return {
+      dispatchers,
+      workers,
+      writeWorkerMarker() {},
+      readWorkerMarkers(parentSessionId: string) {
+        return workerMarkers.filter(
+          (marker) => marker.parentSessionId === parentSessionId,
+        ) as never;
+      },
+      deleteWorkerMarker() {},
+      writeDispatcherMark(mark: { sessionId: string; parentSessionId?: string }) {
+        dispatchers.set(mark.sessionId, { ...mark });
+      },
+      readDispatcherMark(sessionId: string) {
+        return dispatchers.get(sessionId);
+      },
+      listDispatcherMarks() {
+        return [...dispatchers.values()] as never;
+      },
+      peekDispatcherMark(sessionId: string) {
+        const mark = dispatchers.get(sessionId);
+        return mark === undefined
+          ? { kind: "not-dispatcher" as const }
+          : { kind: "dispatcher" as const, mark: mark as never };
+      },
+      listWorkerSessions() {
+        return [...workers.values()] as never;
+      },
+      readWorkerSession(sessionId: string) {
+        return workers.get(sessionId) as never;
+      },
+      deleteWorkerSession(sessionId: string) {
+        // `DurabilityPort` owns a void result; the row's fate is not part of
+        // the seam's answer.
+        workers.delete(sessionId);
+      },
+      writeWorkerSession(session: { sessionId: string; parentSessionId: string }) {
+        workers.set(session.sessionId, { ...session });
+      },    };
+  }
+
+  function textOfCall(call: RecordedCall): string {
+    const content = call["content"] as Array<{ text?: string }>;
+    return content.map((block) => block.text ?? "").join("");
+  }
+
+  /** A subagent-shaped child of ONE named dispatcher session. */
+  function createChildAgent(id: string, parentSessionId: string): AgentLike {
+    return {
+      session: {
+        id,
+        header: { parentSession: parentSessionId, delegationDepth: 1 },
+      },
+      followup() {},
+    };
+  }
+
+  it("a throwing dispatcher followup does not escape the listener, and the wake is re-parked", async () => {
+    const ctx = createStubCtx();
+    const store = createMarkStore({ dispatchers: [{ sessionId: "disp-1" }] });
+    const host = createCordisDshHost(ctx, { markers: store });
+    await host.refreshDispatcherMarks();
+
+    // The live agent's driver throws — the reported real shape of a disposed
+    // or half-torn-down Agent.
+    const flaky = createAgent("disp-1");
+    flaky.followup = () => {
+      throw new Error("driver is gone");
+    };
+    ctx.bindAgent(flaky);
+
+    // Must RESOLVE: the wake request is reached from settle callbacks, and an
+    // escaping throw there is an unhandled rejection in the host.
+    const warnings = await captureWarnings(async () => {
+      await host.requestDispatcherWakeup("disp-1");
+    });
+    assert.equal(ctx.followupCalls.length, 1);
+    assert.ok(
+      warnings.some((line) => line.includes("could not be opened")),
+      "the failure is logged",
+    );
+
+    // The parked text was re-parked, so the next announcement still delivers.
+    const followed: unknown[] = [];
+    const resumed = createAgent("disp-1");
+    resumed.followup = (message: unknown) => {
+      followed.push(message);
+    };
+    ctx.fire("agent/created", {
+      agent: resumed,
+      source: "resume",
+    });
+    assert.equal(followed.length, 1, "the wake was not lost");
+  });
+
+  it("a failed followup retries the composed body verbatim, never the generic cue", async () => {
+    const ctx = createStubCtx();
+    const store = createMarkStore({ dispatchers: [{ sessionId: "disp-1" }] });
+    const composed = "## Recent worker activity\n\n- parser finished; 42 tests passed";
+    let composes = 0;
+    const host = createCordisDshHost(ctx, {
+      markers: store,
+      composeWakeText: () => {
+        composes += 1;
+        return composed;
+      },
+    });
+    await host.refreshDispatcherMarks();
+
+    const flaky = createAgent("disp-1");
+    flaky.followup = () => {
+      throw new Error("driver is gone");
+    };
+    ctx.bindAgent(flaky);
+
+    const warnings = await captureWarnings(async () => {
+      await host.requestDispatcherWakeup("disp-1");
+    });
+    assert.equal(composes, 1, "the report is composed (and drained) exactly once");
+    assert.ok(warnings.some((line) => line.includes("could not be opened")));
+
+    // The parked turn is discharged by the next announcement. It must reuse
+    // the text composed before the failure: composing again would find the
+    // wake bus already drained and deliver only the generic cue.
+    const followed: unknown[] = [];
+    const resumed = createAgent("disp-1");
+    resumed.followup = (message: unknown) => {
+      followed.push(message);
+    };
+    ctx.fire("agent/created", { agent: resumed, source: "resume" });
+
+    assert.equal(followed.length, 1, "delivered exactly once");
+    assert.equal(
+      textOfWake(followed[0]),
+      composed,
+      "the composed report is delivered, not the generic settle cue",
+    );
+    assert.equal(composes, 1, "the retry must not compose/drain a second time");
+  });
+
+  it("a live wake whose followup returns a rejected promise is parked, never an unhandled rejection", async () => {
+    const watcher: unknown[] = [];
+    const listener = (reason: unknown): void => {
+      watcher.push(reason);
+    };
+    process.on("unhandledRejection", listener);
+    try {
+      const ctx = createStubCtx();
+      const composed = "worker report body";
+      let composes = 0;
+      const host = createCordisDshHost(ctx, {
+        composeWakeText: () => {
+          composes += 1;
+          return composed;
+        },
+      });
+      const flaky = createAgent("disp-1");
+      // A live driver can also return a rejected promise (instead of
+      // throwing synchronously); the wake path must own it.
+      flaky.followup = () => Promise.reject(new Error("driver rejected"));
+      ctx.bindAgent(flaky);
+
+      const warnings = await captureWarnings(async () => {
+        await host.requestDispatcherWakeup("disp-1");
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      });
+      assert.ok(
+        warnings.some((line) => line.includes("could not be opened")),
+        "the rejection is logged",
+      );
+
+      const followed: unknown[] = [];
+      const resumed = createAgent("disp-1");
+      resumed.followup = (message: unknown) => {
+        followed.push(message);
+      };
+      ctx.fire("agent/created", { agent: resumed, source: "resume" });
+      assert.equal(followed.length, 1);
+      assert.equal(textOfWake(followed[0]), composed);
+      assert.equal(composes, 1);
+
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.deepEqual(watcher, [], "no followup rejection may go unhandled");
+    } finally {
+      process.off("unhandledRejection", listener);
+    }
+  });
+
+  it("a live wake consumes the parked slot, so activation opens no second turn", async () => {
+    const ctx = createStubCtx();
+    ctx.setExactAgentIdentity(true);
+    const store = createMarkStore({ dispatchers: [{ sessionId: "disp-1" }] });
+    const host = createCordisDshHost(ctx, {
+      markers: store,
+      composeWakeText: () => "LIVE WAKE BODY",
+    });
+    await host.refreshDispatcherMarks();
+
+    // No live agent yet: the turn is parked and a resume is requested.
+    await host.requestDispatcherWakeup("disp-1");
+    await drain();
+
+    // The session becomes live BEFORE the activation hook runs. A live wake
+    // delivers now and must consume the parked slot.
+    const live = createChildAgent("disp-1", "disp-parent");
+    const followed: unknown[] = [];
+    live.followup = (message: unknown) => {
+      followed.push(message);
+    };
+    ctx.bindAgent(live);
+    await host.requestDispatcherWakeup("disp-1");
+    await drain();
+    assert.equal(followed.length, 1, "the live wake opened one turn");
+
+    // The activation hook now runs for the same id. The stale slot must not
+    // open a second, generic turn.
+    ctx.fire("agent/created", { agent: live, source: "resume" });
+    await drain();
+    assert.equal(
+      followed.length,
+      1,
+      "the parked body is only for the failure path and was cleared",
+    );
+  });
+
+  it("the session facade resumes a marked dispatcher with exactly one RESUME_WAKE_CUE followup and no subagent send", async () => {
+    const ctx = createStubCtx();
+    const store = createMarkStore({
+      dispatchers: [
+        { sessionId: "disp-facade", parentSessionId: "disp-spawner" },
+      ],
+    });
+    const resolved: string[] = [];
+    const followed: unknown[] = [];
+    (ctx as unknown as Record<string, unknown>)["get"] = (name: string) =>
+      name === "sessionController"
+        ? {
+            async resolveAgent(sessionId: string) {
+              resolved.push(sessionId);
+              const agent = createAgent(sessionId);
+              agent.followup = (message: unknown) => {
+                followed.push(message);
+              };
+              return { agent };
+            },
+          }
+        : undefined;
+    const host = createCordisDshHost(ctx, {
+      markers: store,
+      composeWakeText: () => "PEER MESSAGE: pick the work back up.",
+    });
+    await host.refreshDispatcherMarks();
+    // The spawner fallback WOULD be issuable; a successful facade resolve
+    // must still be the only route.
+    host.bindParent(createAgent("disp-spawner"), "disp-spawner");
+
+    await host.requestDispatcherWakeup("disp-facade");
+    await drain();
+
+    assert.deepEqual(resolved, ["disp-facade"]);
+    assert.equal(followed.length, 1, "exactly one followup opens the turn");
+    assert.equal(
+      textOfWake(followed[0]),
+      RESUME_WAKE_CUE,
+      "the payload is the resume cue, not the peer text",
+    );
+    assert.equal(
+      ctx.sendMessageCalls.length,
+      0,
+      "a successful facade resolve never falls back to subagents",
+    );
+  });
+
+  it("a facade followup failure does not double-send through subagents and keeps the wake parked", async () => {
+    const ctx = createStubCtx();
+    const store = createMarkStore({
+      dispatchers: [
+        { sessionId: "disp-facade", parentSessionId: "disp-spawner" },
+      ],
+    });
+    let resolves = 0;
+    (ctx as unknown as Record<string, unknown>)["get"] = (name: string) =>
+      name === "sessionController"
+        ? {
+            async resolveAgent() {
+              resolves += 1;
+              const agent = createAgent("disp-facade");
+              agent.followup = () => {
+                throw new Error("followup driver died");
+              };
+              return { agent };
+            },
+          }
+        : undefined;
+    let composes = 0;
+    const host = createCordisDshHost(ctx, {
+      markers: store,
+      composeWakeText: () => {
+        composes += 1;
+        return "PEER BODY: pick the work back up.";
+      },
+    });
+    await host.refreshDispatcherMarks();
+    host.bindParent(createAgent("disp-spawner"), "disp-spawner");
+
+    const warnings = await captureWarnings(async () => {
+      await host.requestDispatcherWakeup("disp-facade");
+      await drain();
+    });
+
+    assert.equal(resolves, 1);
+    assert.equal(
+      ctx.sendMessageCalls.length,
+      0,
+      "a resolved resume must never fall through to a second cue",
+    );
+    assert.ok(
+      warnings.some((line) =>
+        line.includes("was resumed but its followup failed"),
+      ),
+      "the followup failure is logged",
+    );
+    assert.equal(
+      composes,
+      0,
+      "the peer body is still parked in the wake bus, not drained",
+    );
+
+    // The parked wake is still an obligation: the announcement delivers it
+    // exactly once, and still never through the spawner route.
+    const followed: unknown[] = [];
+    const resumed = createAgent("disp-facade");
+    resumed.followup = (message: unknown) => {
+      followed.push(message);
+    };
+    ctx.fire("agent/created", { agent: resumed, source: "resume" });
+    assert.equal(followed.length, 1);
+    assert.equal(textOfWake(followed[0]), "PEER BODY: pick the work back up.");
+    assert.equal(ctx.sendMessageCalls.length, 0);
+  });
+
+  it("a rejected facade followup promise is owned, never an unhandled rejection", async () => {
+    const watcher: unknown[] = [];
+    const listener = (reason: unknown): void => {
+      watcher.push(reason);
+    };
+    process.on("unhandledRejection", listener);
+    try {
+      const ctx = createStubCtx();
+      const store = createMarkStore({
+        dispatchers: [
+          { sessionId: "disp-facade", parentSessionId: "disp-spawner" },
+        ],
+      });
+      (ctx as unknown as Record<string, unknown>)["get"] = (name: string) =>
+        name === "sessionController"
+          ? {
+              async resolveAgent() {
+                const agent = createAgent("disp-facade");
+                agent.followup = () => Promise.reject(new Error("driver rejected"));
+                return { agent };
+              },
+            }
+          : undefined;
+      const host = createCordisDshHost(ctx, { markers: store });
+      await host.refreshDispatcherMarks();
+      host.bindParent(createAgent("disp-spawner"), "disp-spawner");
+
+      const warnings = await captureWarnings(async () => {
+        await host.requestDispatcherWakeup("disp-facade");
+        await drain();
+      });
+
+      assert.equal(ctx.sendMessageCalls.length, 0);
+      assert.ok(
+        warnings.some((line) =>
+          line.includes("was resumed but its followup failed"),
+        ),
+      );
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.deepEqual(watcher, [], "no followup rejection may go unhandled");
+    } finally {
+      process.off("unhandledRejection", listener);
+    }
+  });
+
+  it("interruptWorker refuses with the missing authority instead of claiming success", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const parent = createAgent("disp-1");
+    host.bindParent(parent, "disp-1");
+    const workerId = await host.spawnWorker("Do it.", {
+      parentSessionId: "disp-1",
+      streamKey: "s1",
+      title: "T",
+    });
+
+    // The recorded parent is unbound: nothing can be issued.
+    host.unbindParent("disp-1");
+    await assert.rejects(
+      host.interruptWorker(workerId),
+      /no parent agent bound for worker/,
+    );
+    assert.equal(ctx.interruptCalls.length, 0);
+
+    // …but the host's own live registry still answers the same session id, and
+    // that agent is still the child's ancestor: the interrupt is issued.
+    ctx.bindAgent(parent);
+    await host.interruptWorker(workerId);
+    assert.equal(ctx.interruptCalls.length, 1);
+    const authority = (ctx.interruptCalls[0] as { authority: { agent: AgentLike } })
+      .authority;
+    assert.equal(String(authority.agent.session.id), "disp-1");
+  });
+
+  it("falls back to the recorded spawner when the session facade refuses a legacy parented child", async () => {
+    const ctx = createStubCtx();
+    const store = createMarkStore({
+      dispatchers: [
+        {
+          sessionId: "legacy-child",
+          parentSessionId: "disp-1",
+          origin: "subagent",
+        },
+      ],
+    });
+    (ctx as unknown as Record<string, unknown>)["get"] = (name: string) =>
+      name === "sessionController"
+        ? {
+            async resolveAgent() {
+              return { error: new Error("session/agent-busy") };
+            },
+          }
+        : undefined;
+    const host = createCordisDshHost(ctx, { markers: store });
+    await host.refreshDispatcherMarks();
+    const parent = createAgent("disp-1");
+    host.bindParent(parent, "disp-1");
+
+    await host.requestDispatcherWakeup("legacy-child");
+    await drain();
+
+    assert.equal(ctx.sendMessageCalls.length, 1);
+    const call = ctx.sendMessageCalls[0] as RecordedCall;
+    assert.equal(String(call["targetId"]), "legacy-child");
+    assert.equal(
+      String((call["sender"] as AgentLike).session.id),
+      "disp-1",
+      "the recorded spawner is the sender",
+    );
+    assert.equal(
+      textOfCall(call),
+      RESUME_WAKE_CUE,
+      "the fallback sends the resume cue, not the peer text",
+    );
+  });
+
+  it("does not use the subagent route for a top-level peer with no facade", async () => {
+    const ctx = createStubCtx();
+    const store = createMarkStore({
+      dispatchers: [
+        {
+          sessionId: "peer-top",
+          parentSessionId: "disp-1",
+          generation: 2,
+          origin: "top-level",
+        },
+      ],
+    });
+    // No session facade at all (ctx.get is absent on this stub).
+    const host = createCordisDshHost(ctx, { markers: store });
+    await host.refreshDispatcherMarks();
+    // The recorded summoner IS bound; that alone must not select the subagent
+    // route (the bug).
+    host.bindParent(createAgent("disp-1"), "disp-1");
+
+    const warnings = await captureWarnings(async () => {
+      await host.requestDispatcherWakeup("peer-top");
+      await drain();
+    });
+
+    assert.equal(
+      ctx.sendMessageCalls.length,
+      0,
+      "a top-level peer is not addressable through ctx.subagents.sendMessage",
+    );
+    assert.ok(
+      warnings.some((line) => line.includes("is undeliverable")),
+      "the gap is named rather than claimed as a resume",
+    );
+
+    // The wake stayed parked and is delivered on activation.
+    const followed: unknown[] = [];
+    const resumed = createChildAgent("peer-top", "disp-parent");
+    resumed.followup = (message: unknown) => {
+      followed.push(message);
+    };
+    ctx.fire("agent/created", { agent: resumed, source: "resume" });
+    await drain();
+    assert.equal(followed.length, 1, "the parked wake is still an obligation");
+  });
+
+  it("logs one undeliverable line and keeps the wake parked when the facade refuses with no spawner", async () => {
+    const ctx = createStubCtx();
+    const store = createMarkStore({ dispatchers: [{ sessionId: "orphan-child" }] });
+    (ctx as unknown as Record<string, unknown>)["get"] = (name: string) =>
+      name === "sessionController"
+        ? {
+            async resolveAgent() {
+              return { error: new Error("session/agent-busy") };
+            },
+          }
+        : undefined;
+    const host = createCordisDshHost(ctx, { markers: store });
+    await host.refreshDispatcherMarks();
+
+    const warnings = await captureWarnings(async () => {
+      await host.requestDispatcherWakeup("orphan-child");
+      await drain();
+    });
+    assert.equal(ctx.sendMessageCalls.length, 0, "nothing was sent");
+    assert.ok(
+      warnings.some((line) => line.includes("is undeliverable")),
+      "the gap is named, not claimed as a resume",
+    );
+
+    // The parked wake is still an obligation: the next announcement delivers.
+    const followed: unknown[] = [];
+    const resumed = createAgent("orphan-child");
+    resumed.followup = (message: unknown) => {
+      followed.push(message);
+    };
+    ctx.fire("agent/created", { agent: resumed, source: "resume" });
+    assert.equal(followed.length, 1, "the wake stayed parked");
+  });
+
+  it("clears a stranded resumeRequested on agent/created and agent/disposed", async () => {
+    const ctx = createStubCtx();
+    const store = createMarkStore({ dispatchers: [{ sessionId: "disp-1" }] });
+    let resolves = 0;
+    (ctx as unknown as Record<string, unknown>)["get"] = (name: string) =>
+      name === "sessionController"
+        ? {
+            async resolveAgent() {
+              resolves += 1;
+              return { agent: createAgent("disp-1") };
+            },
+          }
+        : undefined;
+    const host = createCordisDshHost(ctx, { markers: store });
+    await host.refreshDispatcherMarks();
+
+    // First send: one resume, which never reaches an activation here (the
+    // stub's `agents.get` does not answer the id).
+    await host.requestDispatcherWakeup("disp-1");
+    await drain();
+    assert.equal(resolves, 1);
+
+    // A second send is deduplicated, and says so instead of returning silently.
+    const warnings = await captureWarnings(async () => {
+      await host.requestDispatcherWakeup("disp-1");
+      await drain();
+    });
+    assert.equal(resolves, 1);
+    assert.ok(
+      warnings.some((line) => line.includes("already has a resume in flight")),
+      "the short-circuit is logged",
+    );
+
+    // The session is announced (no activation hook on this host): the marker
+    // is cleared, so a later send starts a FRESH resume.
+    ctx.fire("agent/created", {
+      agent: createAgent("disp-1"),
+      source: "resume",
+    });
+    await host.requestDispatcherWakeup("disp-1");
+    await drain();
+    assert.equal(resolves, 2, "a later send may resume again");
+  });
+
+  it("re-parks a parked worker correction when the spawner is not bound", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const rememberWake = host.rememberWorkerWake;
+    const wakeDormant = host.wakeDormantWorker;
+    assert.ok(rememberWake && wakeDormant, "the host exposes the wake seam");
+    rememberWake("w-1", "disp-1");
+
+    // No parent bound yet: nothing is issued and the text stays parked.
+    await wakeDormant("w-1", "tighten it");
+    const child = createChildAgent("w-1", "disp-1");
+    ctx.fire("agent/created", { agent: child, source: "resume" });
+    await drain();
+    // Only the resume cue could have been sent, and it was not (no sender).
+    assert.equal(ctx.sendMessageCalls.length, 0);
+
+    // The spawner activates: the same correction is delivered, not dropped.
+    const parent = createAgent("disp-1");
+    host.bindParent(parent, "disp-1");
+    ctx.fire("agent/created", { agent: child, source: "resume" });
+    await drain();
+    assert.equal(ctx.sendMessageCalls.length, 1);
+    assert.equal(
+      textOfCall(ctx.sendMessageCalls[0] as RecordedCall),
+      "tighten it",
+    );
+  });
+
+  it("binding a previously unbound spawner delivers its parked worker correction once", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const rememberWake = host.rememberWorkerWake;
+    const wakeDormant = host.wakeDormantWorker;
+    assert.ok(rememberWake && wakeDormant, "the host exposes the wake seams");
+    rememberWake("w-1", "disp-1");
+    await wakeDormant("w-1", "tighten it");
+    await drain();
+    assert.equal(
+      ctx.sendMessageCalls.length,
+      0,
+      "nothing can be sent without a bound spawner",
+    );
+
+    host.bindParent(createAgent("disp-1"), "disp-1");
+    await drain();
+    assert.equal(ctx.sendMessageCalls.length, 1, "activation delivered it");
+    assert.equal(
+      textOfCall(ctx.sendMessageCalls[0] as RecordedCall),
+      "tighten it",
+    );
+
+    // A later announcement of the same worker must not repeat it.
+    ctx.fire("agent/created", {
+      agent: createChildAgent("w-1", "disp-1"),
+      source: "resume",
+    });
+    await drain();
+    assert.equal(ctx.sendMessageCalls.length, 1);
+  });
+
+  it("a newer correction parked during an in-flight send is delivered after it resolves", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const rememberWake = host.rememberWorkerWake;
+    const wakeDormant = host.wakeDormantWorker;
+    assert.ok(rememberWake && wakeDormant, "the host exposes the wake seams");
+    rememberWake("w-1", "disp-1");
+
+    const corrections: string[] = [];
+    let releaseFirst: (() => void) | null = null;
+    ctx.subagents.sendMessage = async (
+      _sender: AgentLike,
+      _target: unknown,
+      content: unknown,
+    ) => {
+      const text = (content as Array<{ text?: string }>)
+        .map((block) => block.text ?? "")
+        .join("");
+      if (text === RESUME_WAKE_CUE) return "cue";
+      corrections.push(text);
+      if (text === "T1") {
+        await new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
+      }
+      return "ok";
+    };
+
+    await wakeDormant("w-1", "T1");
+    // Activation of the spawner starts T1's delivery (in flight).
+    host.bindParent(createAgent("disp-1"), "disp-1");
+    await tick();
+    assert.deepEqual(corrections, ["T1"]);
+
+    // A newer correction arrives while T1's send is still unresolved.
+    await wakeDormant("w-1", "T2");
+    await tick();
+    assert.deepEqual(corrections, ["T1"], "the in-flight guard holds T2");
+
+    // T1 resolves; T2 must now start on its own, exactly once, and T1 must
+    // not be repeated.
+    assert.ok(releaseFirst !== null);
+    (releaseFirst as () => void)();
+    await drain();
+    assert.deepEqual(corrections, ["T1", "T2"]);
+  });
+
+  it("does not re-park a failed correction for a worker that settled meanwhile", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const rememberWake = host.rememberWorkerWake;
+    const wakeDormant = host.wakeDormantWorker;
+    assert.ok(rememberWake && wakeDormant, "the host exposes the wake seams");
+    rememberWake("w-1", "disp-1");
+
+    const corrections: string[] = [];
+    let rejectFirst: ((error: Error) => void) | null = null;
+    ctx.subagents.sendMessage = async (
+      _sender: AgentLike,
+      _target: unknown,
+      content: unknown,
+    ) => {
+      const text = (content as Array<{ text?: string }>)
+        .map((block) => block.text ?? "")
+        .join("");
+      if (text === RESUME_WAKE_CUE) return "cue";
+      corrections.push(text);
+      if (text === "T1") {
+        await new Promise<void>((_resolve, reject) => {
+          rejectFirst = reject;
+        });
+      }
+      return "ok";
+    };
+
+    await wakeDormant("w-1", "T1");
+    host.bindParent(createAgent("disp-1"), "disp-1");
+    await tick();
+    assert.deepEqual(corrections, ["T1"]);
+
+    // The worker settles while its correction is in flight.
+    const forgetWake = host.forgetWorkerWake;
+    assert.ok(forgetWake, "the host exposes the tombstone seam");
+    forgetWake("w-1");
+    assert.ok(rejectFirst !== null);
+    (rejectFirst as (error: Error) => void)(new Error("delivery refused"));
+    await drain();
+
+    // Re-binding the spawner would deliver anything still parked. The failed
+    // text must NOT be re-parked for a tombstoned worker.
+    host.bindParent(createAgent("disp-1"), "disp-1");
+    await drain();
+    assert.deepEqual(corrections, ["T1"], "nothing was re-parked");
+  });
+
+  it("a dormant worker wake uses subagent delivery with the RESUME cue, never the peer facade", async () => {
+    const ctx = createStubCtx();
+    const store = createMarkStore({
+      workers: [{ sessionId: "w-1", parentSessionId: "disp-1" }],
+    });
+    let facadeCalls = 0;
+    (ctx as unknown as Record<string, unknown>)["get"] = (name: string) =>
+      name === "sessionController"
+        ? {
+            async resolveAgent() {
+              facadeCalls += 1;
+              return { error: new Error("session/agent-busy") };
+            },
+          }
+        : undefined;
+    const host = createCordisDshHost(ctx, { markers: store });
+    // The durable row is what marks this worker wake-able after a restart.
+    await host.refreshWorkerSessionMarks();
+    host.bindParent(createAgent("disp-1"), "disp-1");
+    const wakeDormant = host.wakeDormantWorker;
+    assert.ok(wakeDormant, "the host exposes the dormant-worker wake seam");
+
+    await wakeDormant("w-1", "tighten it");
+    await drain();
+
+    assert.equal(
+      facadeCalls,
+      0,
+      "the cross-session facade serves dispatcher peers, never subagent children",
+    );
+    assert.equal(ctx.sendMessageCalls.length, 1);
+    const call = ctx.sendMessageCalls[0] as RecordedCall;
+    assert.equal(String(call["targetId"]), "w-1");
+    assert.equal(
+      String((call["sender"] as AgentLike).session.id),
+      "disp-1",
+      "the recorded spawner is the sender",
+    );
+    assert.equal(
+      textOfCall(call),
+      RESUME_WAKE_CUE,
+      "the cue opens the turn; the correction is delivered after activation",
+    );
+  });
+
+  it("re-parks a parked worker correction when the send rejects", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const parent = createAgent("disp-1");
+    host.bindParent(parent, "disp-1");
+    const rememberWake = host.rememberWorkerWake;
+    const wakeDormant = host.wakeDormantWorker;
+    assert.ok(rememberWake && wakeDormant, "the host exposes the wake seam");
+    rememberWake("w-1", "disp-1");
+    await wakeDormant("w-1", "tighten it");
+    await drain();
+    assert.equal(ctx.sendMessageCalls.length, 1, "the resume cue went out");
+
+    // The delivery itself is refused once.
+    const original = ctx.subagents.sendMessage;
+    let refuses = 1;
+    ctx.subagents.sendMessage = async (...args) => {
+      if (refuses > 0) {
+        refuses -= 1;
+        throw new Error("delivery refused");
+      }
+      return original(...args);
+    };
+
+    const child = createChildAgent("w-1", "disp-1");
+    ctx.fire("agent/created", { agent: child, source: "resume" });
+    await drain();
+    // The refused delivery never reached the stub's recorder: only the cue is
+    // there, and the correction is back in the parked slot.
+    assert.equal(ctx.sendMessageCalls.length, 1);
+
+    // The failed text was re-parked and delivered on the next announcement.
+    ctx.fire("agent/created", { agent: child, source: "resume" });
+    await drain();
+    const corrections = ctx.sendMessageCalls
+      .filter((call) => String(call["targetId"]) === "w-1")
+      .map((call) => textOfCall(call as RecordedCall))
+      .filter((text) => text === "tighten it");
+    assert.deepEqual(corrections, ["tighten it"]);
+  });
+
+  it("a settled worker's live entries are pruned, and it is never adopted again", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    host.bindParent(createAgent("disp-1"), "disp-1");
+    const workerId = await host.spawnWorker("Do it.", {
+      parentSessionId: "disp-1",
+      streamKey: "s1",
+      title: "T",
+    });
+    assert.equal(host.owns(workerId), true);
+
+    ctx.fire("subagent/end", {
+      id: workerId,
+      stopReason: "completed",
+      lastAssistantMessage: [{ type: "text", text: "Done." }],
+    });
+
+    assert.equal(host.owns(workerId), false, "the registry entry is gone");
+    assert.equal(host.workerIdOf(workerId), undefined);
+    assert.deepEqual(
+      ctx.disposedWorkerIds,
+      [workerId],
+      "the activation is released",
+    );
+
+    // Re-adoption after a terminal settle is refused: stop is for good.
+    const again = createChildAgent(workerId, "disp-1");
+    ctx.fire("agent/created", { agent: again, source: "resume" });
+    await drain();
+    assert.equal(
+      host.owns(workerId),
+      false,
+      "a settled worker is not resurrected",
+    );
+  });
+
+  it("a disposed worker agent's live entries are pruned but its wake identity survives", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const parent = createAgent("disp-1");
+    host.bindParent(parent, "disp-1");
+    const workerId = await host.spawnWorker("Do it.", {
+      parentSessionId: "disp-1",
+      streamKey: "s1",
+      title: "T",
+    });
+    // The core records the wake identity at spawn (`rememberWorkerWake`);
+    // repeat it here because this test drives the host directly.
+    const rememberWake = host.rememberWorkerWake;
+    assert.ok(rememberWake, "the host exposes the worker wake mirror");
+    rememberWake(workerId, "disp-1");
+    assert.equal(host.owns(workerId), true);
+
+    ctx.fire("agent/disposed", {
+      agent: { session: { id: workerId } },
+    });
+
+    assert.equal(host.owns(workerId), false, "the live entry is gone");
+    assert.deepEqual(ctx.disposedWorkerIds, [workerId]);
+    assert.deepEqual(
+      host.workerSessionMark(workerId),
+      { parentSessionId: "disp-1" },
+      "the wake identity survives plain disposure",
+    );
+  });
+
+  it("a stale agent/disposed event after re-adoption does not prune the new activation", async () => {
+    const ctx = createStubCtx();
+    ctx.setExactAgentIdentity(true);
+    const host = createCordisDshHost(ctx);
+    host.bindParent(createAgent("disp-1"), "disp-1");
+    const workerId = await host.spawnWorker("Do it.", {
+      parentSessionId: "disp-1",
+      streamKey: "s1",
+      title: "T",
+    });
+
+    // The host re-adopted this id under a NEW Agent (cold resume on send).
+    const adopted = createChildAgent(workerId, "disp-1");
+    ctx.bindAgent(adopted);
+
+    // A stale disposal for the PREVIOUS Agent arrives afterwards.
+    ctx.fire("agent/disposed", {
+      agent: { session: { id: workerId } },
+    });
+
+    assert.equal(
+      host.owns(workerId),
+      true,
+      "the old disposal must not prune the re-adopted activation",
+    );
+    assert.deepEqual(
+      ctx.disposedWorkerIds,
+      [],
+      "and must not release its activation",
+    );
+  });
+
+  it("refreshWorkerSessionMarks skips rows whose worker is durably terminal", async () => {
+    const ctx = createStubCtx();
+    const store = createMarkStore({
+      workers: [
+        { sessionId: "w-done", parentSessionId: "disp-1" },
+        { sessionId: "w-live", parentSessionId: "disp-1" },
+      ],
+      workerMarkers: [
+        { workerId: "w-done", parentSessionId: "disp-1", status: "completed" },
+        { workerId: "w-live", parentSessionId: "disp-1", status: "running" },
+      ],
+    });
+    const host = createCordisDshHost(ctx, { markers: store });
+
+    await host.refreshWorkerSessionMarks();
+
+    assert.equal(
+      host.workerSessionMark("w-done"),
+      undefined,
+      "terminal row ignored",
+    );
+    assert.deepEqual(host.workerSessionMark("w-live"), {
+      parentSessionId: "disp-1",
+    });
+  });
+
+  it("skips adopting a worker whose durable marker is terminal, even through the store fallback", async () => {
+    const ctx = createStubCtx();
+    ctx.setExactAgentIdentity(true);
+    const store = createMarkStore({
+      workers: [{ sessionId: "w-done", parentSessionId: "disp-1" }],
+      workerMarkers: [
+        { workerId: "w-done", parentSessionId: "disp-1", status: "aborted" },
+      ],
+    });
+    const host = createCordisDshHost(ctx, { markers: store });
+    const parent = createAgent("disp-1");
+    host.bindParent(parent, "disp-1");
+    const child = createChildAgent("w-done", "disp-1");
+    ctx.bindAgent(child);
+
+    ctx.fire("agent/created", { agent: child, source: "resume" });
+    await drain();
+
+    assert.equal(
+      host.owns("w-done"),
+      false,
+      "a terminal worker is not adopted",
+    );
+  });
+
+  it("a disposed parented dispatcher re-activates on re-announcement, exactly once", async () => {
+    const ctx = createStubCtx();
+    ctx.setExactAgentIdentity(true);
+    const store = createMarkStore({
+      dispatchers: [
+        { sessionId: "legacy-child", parentSessionId: "disp-parent" },
+      ],
+    });
+    const state = {
+      activations: 0,
+      injects: 0,
+      tools: new Set<string>(),
+      parentBinding: null as AgentLike | null,
+    };
+    const agent = {
+      session: {
+        id: "legacy-child",
+        header: { parentSession: "disp-parent", delegationDepth: 1 },
+      },
+      followup() {},
+      inject() {
+        state.injects += 1;
+      },
+      ctx: {
+        tools: {
+          schemas: () => [...state.tools].map((name) => ({ name })),
+          register(definition: { name: string }) {
+            state.tools.add(definition.name);
+            return () => state.tools.delete(definition.name);
+          },
+        },
+      },
+    } as unknown as AgentLike;
+    ctx.bindAgent(agent);
+    let host: ReturnType<typeof createCordisDshHost>;
+    host = createCordisDshHost(ctx, {
+      markers: store,
+      onDispatcherSpawned: (child, sessionId) => {
+        // The three effects a real activation produces (bind, policy, scoped
+        // tools). The host's job is to run this hook once per activation.
+        state.activations += 1;
+        state.parentBinding = child;
+        host.bindParent(child, sessionId);
+        child.inject?.({ content: [{ type: "text", text: "policy" }] });
+        child.ctx?.tools?.register?.({
+          name: `dispatcher_tool_${state.activations}`,
+        });
+      },
+    });
+
+    ctx.fire("agent/created", { agent, source: "resume" });
+    await drain();
+    assert.equal(state.activations, 1);
+    assert.equal(state.injects, 1);
+    assert.equal(state.tools.size, 1);
+    assert.equal(host.parentAgentOf("legacy-child"), agent);
+
+    // Dispose the activation. The plugin's deactivation clears its surface;
+    // model that here so "returned" is observable.
+    ctx.fire("agent/disposed", { agent });
+    host.unbindParent("legacy-child");
+    state.tools.clear();
+    assert.equal(host.parentAgentOf("legacy-child"), undefined);
+
+    // A re-announcement of the same parented id must activate again.
+    ctx.fire("agent/created", { agent, source: "resume" });
+    await drain();
+    assert.equal(state.activations, 2, "the hook ran again");
+    assert.equal(state.injects, 2, "policy came back exactly once");
+    assert.equal(state.tools.size, 1, "the scoped tool surface came back once");
+    assert.equal(host.parentAgentOf("legacy-child"), agent);
+
+    // A repeat announcement while already active is still deduplicated.
+    ctx.fire("agent/created", { agent, source: "resume" });
+    await drain();
+    assert.equal(state.activations, 2, "no duplicate activation while live");
+    assert.equal(state.tools.size, 1);
+  });
+
+  it("does not activate a dispatcher whose agent was disposed during the store round-trip", async () => {
+    const ctx = createStubCtx();
+    const store = createMarkStore({ dispatchers: [{ sessionId: "disp-child" }] });
+    const spawned: string[] = [];
+    const host = createCordisDshHost(ctx, {
+      markers: store,
+      onDispatcherSpawned: (_agent, sessionId) => {
+        spawned.push(sessionId);
+      },
+    });
+    const child = createChildAgent("disp-child", "disp-parent");
+
+    // Announced, but the host's registry no longer answers it by the time the
+    // mark read resolves — a disposed Agent must not be installed.
+    ctx.fire("agent/created", { agent: child, source: "resume" });
+    await drain();
+
+    assert.deepEqual(spawned, [], "no activation on a dead agent");
+  });
+});
+
+describe("adapter host contract guards (second-round audit)", () => {
+  it("listGlobalToolNames requires and forwards the agent scope", () => {
+    const ctx = createStubCtx();
+    const scope = { session: { id: "agent-1" } };
+    let seen: unknown;
+    ctx.tools = {
+      schemas(received?: unknown) {
+        seen = received;
+        return [{ name: "scoped_tool" }];
+      },
+    };
+
+    const names = listGlobalToolNames(ctx, scope);
+    assert.deepEqual([...names], ["scoped_tool"]);
+    assert.equal(seen, scope, "the unscoped global-only view is never used");
+  });
+
+  it("listLiveJobs reads the guarded ctx.get('jobs') service", () => {
+    const ctx = createStubCtx();
+    const seen: unknown[] = [];
+    // The un-injected property read must not be the route.
+    ctx.jobs = {
+      list() {
+        throw new Error("ctx.jobs must not be read on a live shape");
+      },
+    };
+    (ctx as unknown as Record<string, unknown>)["get"] = (name: string) =>
+      name === "jobs"
+        ? {
+            list(callerSessionId?: unknown) {
+              seen.push(callerSessionId);
+              return [
+                {
+                  id: "job-1",
+                  kind: "worker",
+                  label: "Job",
+                  status: "running",
+                  startedAt: 1,
+                },
+              ];
+            },
+          }
+        : undefined;
+    const host = createCordisDshHost(ctx);
+
+    const jobs = host.listLiveJobs("caller-1");
+    assert.equal(jobs.length, 1);
+    assert.equal(jobs[0]?.id, "job-1");
+    assert.deepEqual(seen, ["caller-1"]);
+  });
+});
+
+/** Capture `console.warn` lines for one asynchronous run. */
+async function captureWarnings(
+  run: () => void | Promise<void>,
+): Promise<string[]> {
+  const messages: string[] = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => {
+    messages.push(args.map((arg) => String(arg)).join(" "));
+  };
+  try {
+    await run();
+  } finally {
+    console.warn = original;
+  }
+  return messages;
+}
+
+/** Text of a wake/followup message (`content` text blocks joined). */
+function textOfWake(message: unknown): string {
+  const content = (message as { content?: Array<{ text?: string }> }).content;
+  return Array.isArray(content)
+    ? content.map((block) => block.text ?? "").join("")
+    : "";
+}
+
+/**
+ * Ticket 163/ADR-0032 defect fixes that live in the lifecycle layer:
+ * - a disposed dispatcher no longer stays `busy` on the wake bus;
+ * - a peer's spawn title survives deactivation (it is a property of the id);
+ * - a transcript that already carries the session policy is not re-injected.
+ */
+describe("defect fixes: dispatcher lifecycle and policy idempotence", () => {
+  /** A top-level agent that records injects, for the policy/roster checks. */
+  function createInjectableAgent(id: string) {
+    const injected: unknown[] = [];
+    const agent = {
+      session: {
+        id,
+        header: { parentSession: undefined, delegationDepth: 0 },
+      },
+      injected,
+      followup() {},
+      inject(message: unknown) {
+        injected.push(message);
+      },
+    };
+    return agent;
+  }
+
+  /**
+   * Install the supported `sessionQuery` listing seam. The policy probe reads
+   * this (`ctx.get("sessionQuery").listEvents(sessionId)`), NOT the
+   * deprecated `session.snapshotEvents()`.
+   */
+  function installSessionQuery(
+    ctx: ReturnType<typeof createStubCtx>,
+    eventsBySession: Record<string, readonly unknown[]>,
+  ): void {
+    (ctx as unknown as Record<string, unknown>)["get"] = (name: string) =>
+      name === "sessionQuery"
+        ? {
+            listEvents(sessionId: string) {
+              return eventsBySession[sessionId] ?? [];
+            },
+          }
+        : undefined;
+  }
+
+  /** One committed `user/message` carrying `text` from this producer. */
+  function policyEvent(seq: number, text: string, extras?: {
+    role?: string;
+    sourceKind?: string;
+    type?: string;
+  }): unknown {
+    return {
+      type: extras?.type ?? "user/message",
+      seq,
+      data: {
+        role: extras?.role ?? "user",
+        content: [{ type: "text", text }],
+        source: { kind: extras?.sourceKind ?? "plugin:multitask-dispatcher" },
+      },
+    };
+  }
+
+  function textOf(message: unknown): string {
+    const content = (message as { content?: Array<{ text?: string }> }).content;
+    return Array.isArray(content)
+      ? content.map((block) => block.text ?? "").join("")
+      : "";
+  }
+
+  it("deactivation ends the wake-bus turn, so a re-activated dispatcher is not stuck busy", () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const multitask = createMultitask(host);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
+
+    const parent = createAgent("disp-1");
+    assert.deepEqual(lifecycle.activate(parent), { ok: true });
+    ctx.fire("agent/status", { agent: parent, status: "running" });
+    assert.equal(multitask.wakeBus.isBusy("disp-1"), true);
+
+    // Disposed mid-turn: the activation (and its turn) ends with it.
+    lifecycle.deactivate("disp-1");
+    assert.equal(
+      multitask.wakeBus.isBusy("disp-1"),
+      false,
+      "a disposed dispatcher must not stay busy",
+    );
+  });
+
+  it("deactivation cancels pending work without delivering it or resuming the session", async () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const multitask = createMultitask(host);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
+    let resumes = 0;
+    (ctx as unknown as Record<string, unknown>)["get"] = (name: string) =>
+      name === "sessionController"
+        ? {
+            async resolveAgent() {
+              resumes += 1;
+              return { error: new Error("refused") };
+            },
+          }
+        : undefined;
+
+    const parent = createAgent("disp-1");
+    ctx.bindAgent(parent);
+    assert.deepEqual(lifecycle.activate(parent), { ok: true });
+    // Mid-turn: the settle is queued, not delivered.
+    ctx.fire("agent/status", { agent: parent, status: "running" });
+    multitask.wakeBus.enqueueWorkerSettled({
+      parentSessionId: "disp-1",
+      workerId: "w-1",
+      status: "completed",
+      title: "Done",
+      resultText: "result",
+    });
+    assert.equal(ctx.followupCalls.length, 0);
+
+    lifecycle.deactivate("disp-1");
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(
+      ctx.followupCalls.length,
+      0,
+      "teardown must not open a wake turn into the disposed session",
+    );
+    assert.equal(resumes, 0, "and must not cold-resume it");
+    assert.equal(multitask.wakeBus.isBusy("disp-1"), false);
+    assert.equal(
+      multitask.wakeBus.peek("disp-1"),
+      undefined,
+      "no prepared wake is left ready for the dead activation",
+    );
+  });
+
+  it("keeps a peer's spawn title across deactivation and re-activation", () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const multitask = createMultitask(host);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
+
+    const titled = createInjectableAgent("disp-a");
+    const viewer = createInjectableAgent("disp-b");
+    assert.deepEqual(
+      lifecycle.activate(titled, { origin: "spawned", title: "Alpha team" }),
+      { ok: true },
+    );
+    assert.deepEqual(lifecycle.activate(viewer), { ok: true });
+
+    // The viewer's per-turn reminder lists the titled peer.
+    ctx.fire("agent/status", { agent: viewer, status: "running" });
+    const firstTurn = viewer.injected.map(textOf).join("\n");
+    assert.ok(firstTurn.includes("Alpha team"));
+
+    // Deactivate + re-activate WITHOUT the title: the label is a property of
+    // the session id, exactly like its generation, so it must not vanish.
+    lifecycle.deactivate("disp-a");
+    assert.deepEqual(lifecycle.activate(titled), { ok: true });
+    ctx.fire("agent/status", { agent: viewer, status: "running" });
+    const laterTurns = viewer.injected.map(textOf).join("\n");
+    assert.ok(
+      laterTurns.includes("Alpha team"),
+      "the re-activated peer kept its label",
+    );
+  });
+
+  it("skips injection only for a live committed producer policy above any compaction", () => {
+    const policy = assembleSessionPolicy(true, "user", 1, "en");
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const multitask = createMultitask(host);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
+
+    installSessionQuery(ctx, {
+      "disp-1": [policyEvent(1, policy)],
+      // A compaction landed AFTER the policy copy: its live-context presence
+      // can no longer be established, so the probe must inject again.
+      "disp-compacted": [
+        policyEvent(1, policy),
+        { type: "compaction/start", seq: 2, data: { compactionId: "c1" } },
+        { type: "compaction/end", seq: 3, data: { compactionId: "c1" } },
+      ],
+      // A compaction BEFORE the policy copy leaves the copy on the surface.
+      "disp-live": [
+        { type: "compaction/start", seq: 1, data: { compactionId: "c0" } },
+        { type: "compaction/end", seq: 2, data: { compactionId: "c0" } },
+        policyEvent(3, policy),
+      ],
+      // An assistant/model echo carries the text but is not OUR committed
+      // user message.
+      "disp-echo": [
+        policyEvent(1, policy, { role: "assistant" }),
+        policyEvent(2, policy, { sourceKind: "user" }),
+      ],
+    });
+
+    const carrying = createInjectableAgent("disp-1");
+    assert.deepEqual(lifecycle.activate(carrying), { ok: true });
+    assert.equal(carrying.injected.length, 0, "live policy is not re-injected");
+
+    const compacted = createInjectableAgent("disp-compacted");
+    assert.deepEqual(lifecycle.activate(compacted), { ok: true });
+    assert.equal(
+      compacted.injected.length,
+      1,
+      "old policy below a compaction boundary is injected again",
+    );
+
+    const live = createInjectableAgent("disp-live");
+    assert.deepEqual(lifecycle.activate(live), { ok: true });
+    assert.equal(live.injected.length, 0, "policy after a boundary is live");
+
+    const echo = createInjectableAgent("disp-echo");
+    assert.deepEqual(lifecycle.activate(echo), { ok: true });
+    assert.equal(echo.injected.length, 1, "an echo does not count as the policy");
+
+    // No supported query seam at all: fail open and inject.
+    const noSeamCtx = createStubCtx();
+    const noSeamHost = createCordisDshHost(noSeamCtx);
+    const noSeamLifecycle = bindDispatcherLifecycle(
+      noSeamCtx,
+      noSeamHost,
+      createMultitask(noSeamHost),
+    );
+    const fresh = createInjectableAgent("disp-2");
+    assert.deepEqual(noSeamLifecycle.activate(fresh), { ok: true });
+    assert.equal(fresh.injected.length, 1);
+  });
+
+  it("a throwing sessionKindOf reader does not escape the listener, and the parked wake still flushes", async () => {
+    const ctx = createStubCtx();
+    const store = {
+      writeWorkerMarker() {},
+      readWorkerMarkers() {
+        return [];
+      },
+      deleteWorkerMarker() {},
+      listDispatcherMarks() {
+        return [{ sessionId: "disp-cold" }];
+      },
+    };
+    const host = createCordisDshHost(ctx, {
+      markers: store,
+      onUserDispatcherResumed: () => {},
+      sessionKindOf: () => {
+        throw new Error("projection exploded");
+      },
+    });
+    await host.refreshDispatcherMarks();
+    await host.requestDispatcherWakeup("disp-cold");
+
+    const followed: unknown[] = [];
+    const resumed = createAgent("disp-cold");
+    resumed.followup = (message: unknown) => {
+      followed.push(message);
+    };
+    // The listener must not throw, and the parked wake is delivered even
+    // though the kind projection answered nothing.
+    ctx.fire("agent/created", { agent: resumed, source: "resume" });
+    assert.equal(followed.length, 1);
   });
 });

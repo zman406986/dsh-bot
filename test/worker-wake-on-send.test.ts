@@ -286,7 +286,7 @@ describe("ticket 142 — the steer fence accepts a durably marked dormant worker
 
     assert.equal(r.host.dormantWakeCalls.length, 0);
     assert.deepEqual(r.host.interruptCalls, [workerId]);
-    assert.deepEqual(r.host.sendMessageCalls, []);
+    assert.equal(r.host.sendMessageCalls.length, 0);
     assert.equal(r.multitask.getWorker(workerId)?.status, "steering");
 
     await r.host.fireStepBoundary(workerId);

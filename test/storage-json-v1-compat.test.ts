@@ -34,6 +34,7 @@
  * working cannot pass silently.
  */
 import assert from "node:assert/strict";
+import type { Dirent } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -135,7 +136,7 @@ function createJsonLikeBackend(root: string): StorageDomainLike & {
     const tables = new Map<string, Map<string, unknown>>();
     for (const table of Object.keys(spec.tables)) tables.set(table, new Map());
 
-    let entries: Awaited<ReturnType<typeof readdir>> = [];
+    let entries: Dirent[] = [];
     try {
       entries = await readdir(dir, { withFileTypes: true });
     } catch (error) {
@@ -335,6 +336,10 @@ describe("ticket 149 — a version-1 marker store opens again", () => {
 
     const backend = createJsonLikeBackend(root);
     const durability = createStorageDomainDurability(backend);
+    // The port types these optional so thinner stubs can omit them; the
+    // storage-backed store always implements them.
+    assert.ok(durability.writeDispatcherMark);
+    assert.ok(durability.readDispatcherMark);
 
     // The v1 rows are readable — this is the open that has been throwing.
     const sessionOne = await durability.readWorkerMarkers("session-1");
@@ -370,6 +375,7 @@ describe("ticket 149 — a version-1 marker store opens again", () => {
     // A SECOND process (fresh backend over the same root) sees documents and
     // therefore never bootstraps again; opens stay clean.
     const reopened = createStorageDomainDurability(createJsonLikeBackend(root));
+    assert.ok(reopened.readDispatcherMark);
     assert.equal((await reopened.readWorkerMarkers("session-1")).length, 1);
     assert.deepEqual(await reopened.readDispatcherMark("chat-1"), mark);
     await reopened.dispose();

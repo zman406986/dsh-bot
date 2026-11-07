@@ -433,7 +433,7 @@ describe("Multitask.awaitWorker (ticket 115, second half)", () => {
     const seams = manualAwaitSeams();
     const multitask = createMultitask(host, { awaits: { now: seams.now, schedule: seams.schedule } });
     const workerId = await spawnWorker(multitask);
-    void multitask.awaitWorker("session-1", workerId);
+    void multitask.awaitWorker("session-1", workerId, undefined);
     assert.equal(seams.scheduled.length, 1);
     assert.equal(seams.scheduled[0]?.ms, AWAIT_DEFAULT_TIMEOUT_MS);
     multitask.cancelWaits("session-1");

@@ -22,6 +22,7 @@ import { describe, it } from "node:test";
 import { ROSTER_PANEL_CSS } from "../src/client/panel.js";
 import { SESSION_KIND_GLYPH_CSS } from "../src/client/session-kind.js";
 import { SETTINGS_CARD_CSS } from "../src/client/settings-card.js";
+import { TOOLVIEW_CSS } from "../src/client/toolview-styles.js";
 
 /** Distinct `var(--dsw-…)` tokens referenced by a stylesheet, sorted. */
 function tokensIn(css: string): string[] {
@@ -38,6 +39,9 @@ const SURFACES = [
   // Ticket 146: the dispatcher bot portrait draws with `currentColor` plus
   // this one token, so it carries the same contract as the other surfaces.
   { name: "session-kind glyph (SESSION_KIND_GLYPH_CSS)", css: SESSION_KIND_GLYPH_CSS },
+  // Readable-status display: the tool row's three levels keep the muted
+  // label role only; no state colour is repurposed as decoration.
+  { name: "tool row (TOOLVIEW_CSS)", css: TOOLVIEW_CSS },
 ] as const;
 
 /** The colour-bearing declarations of one selector, for role assertions. */
@@ -119,6 +123,11 @@ describe("theme tokens — no private palette survives (ticket 49)", () => {
     // token, and it is the plain label colour (never the brand-primary trap).
     assert.deepEqual(tokensIn(SESSION_KIND_GLYPH_CSS), [
       "--dsw-alias-label-primary",
+    ]);
+    // Readable-status display: the row's primary/facts/details/row labels use
+    // one muted role and nothing else.
+    assert.deepEqual(tokensIn(TOOLVIEW_CSS), [
+      "--dsw-alias-label-tertiary",
     ]);
   });
 });

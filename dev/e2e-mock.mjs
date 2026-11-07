@@ -30,9 +30,14 @@
 // `--only s1,s4` runs just those phases; `--skip mock,boot,dispatch,s1` runs
 // everything else. `--self-check` runs only the cleanup identity matcher's
 // regression cases (no processes, no evidence) and exits. Exit code 0 means
-// every phase that ran passed and every process the harness launched is dead. The dispatcher smoke phase keeps its
-// separate `pass` / `blocked` / `fail` verdict and does not gate the exit code
-// (as before); the scenario phases DO gate it.
+// every selected phase passed: mock, boot, every scenario that ran, and the
+// dispatch phase unless it is `blocked` (a real skip: a known host-side blocker
+// stopped the turn, and no assertion failed). A dispatch `fail`, a failed
+// assertion anywhere, a cleanup failure, or an escaped throw DOES gate the exit
+// code; `blocked`, skipped, and unselected phases do not.
+//
+// The dispatch phase boots the built plugin from lib/; it refuses to start on
+// a stale/missing build (dev/build-freshness.mjs) and never rebuilds.
 
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
@@ -40,6 +45,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { zstdDecompressSync } from 'node:zlib';
+import { assertBuildFresh } from './build-freshness.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, '..');
@@ -193,6 +199,38 @@ function launchedProcessAlive(pid, expectedImage, tasklistCsv) {
   });
 }
 
+/** One PID's `tasklist` CSV rows, or null when tasklist itself could not run. */
+function tasklistFor(pid) {
+  const result = spawnSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (result.error !== undefined || result.status !== 0) return null;
+  return result.stdout;
+}
+
+/**
+ * Kill a launched child only if its PID still names the executable we started.
+ * A kill timer can fire long after the child exited; Windows recycles PIDs, and
+ * `taskkill /T /F` on a recycled PID would kill an innocent process. When
+ * tasklist cannot answer we skip the kill: the cleanup check reports the leak
+ * loudly, while a wrong kill would be invisible.
+ */
+function killIfOurs(entry) {
+  if (entry.exited || entry.pid === undefined) return false;
+  const csv = tasklistFor(entry.pid);
+  if (csv === null) {
+    record('kill-skip', { message: `${entry.label} pid=${entry.pid}: tasklist failed; not killing`, pid: entry.pid });
+    return false;
+  }
+  if (!launchedProcessAlive(entry.pid, entry.image, csv)) {
+    record('kill-skip', { message: `${entry.label} pid=${entry.pid} is not our image; not killing`, pid: entry.pid });
+    return false;
+  }
+  killTree(entry.pid);
+  return true;
+}
+
 /** Regression guard for the cleanup matcher; run with `--self-check`. */
 function selfCheckProcessIdentity() {
   const row = (image, pid) => `"${image}","${pid}","Console","1","10,000 K"`;
@@ -252,14 +290,20 @@ function launch(label, command, args, options, { timeoutMs = RUN_TIMEOUT_MS, log
   // Kill timer armed at launch, before any other work can fail.
   entry.timer = setTimeout(() => {
     entry.killTimerFired = true;
-    record('kill-timer', { message: `${label} exceeded ${timeoutMs} ms; killing tree`, pid: child.pid });
-    killTree(child.pid);
+    record('kill-timer', { message: `${label} exceeded ${timeoutMs} ms; checking before killing`, pid: child.pid });
+    killIfOurs(entry);
   }, timeoutMs);
   entry.timer.unref?.();
 
   if (logPath !== undefined) pipeToFile(child, logPath);
   child.once('exit', (code, signal) => {
     entry.exited = true;
+    // Clear the timer on exit: it must never fire at a PID that has already
+    // been released and possibly recycled.
+    if (entry.timer !== null) {
+      clearTimeout(entry.timer);
+      entry.timer = null;
+    }
     entry.exitCode = code;
     entry.signal = signal;
     record('exit', { message: `${label} pid=${child.pid} code=${code} signal=${signal}`, code, signal });
@@ -271,10 +315,47 @@ function launch(label, command, args, options, { timeoutMs = RUN_TIMEOUT_MS, log
 /** Kill every started child (newest first) and clear its timer. */
 function shutdownAll() {
   for (const entry of [...children].reverse()) {
-    if (entry.timer !== null) clearTimeout(entry.timer);
-    if (!entry.exited) killTree(entry.pid);
+    if (entry.timer !== null) {
+      clearTimeout(entry.timer);
+      entry.timer = null;
+    }
+    if (!entry.exited) killIfOurs(entry);
   }
 }
+
+// Ctrl+C, a closed terminal, or a background-task stop must not leave the
+// mock + dsh children holding ports. Windows does not deliver SIGTERM to a
+// killed parent's children and does not reparent them, so the parent is
+// probed for liveness (same watchdog as dev/browser-serve.mjs).
+let interrupted = false;
+function abortRun(signal) {
+  if (interrupted) return;
+  interrupted = true;
+  record('interrupt', { message: `${signal}; killing every launched child` });
+  shutdownAll();
+  process.exit(signal === 'SIGINT' ? 130 : 143);
+}
+process.on('SIGINT', () => abortRun('SIGINT'));
+process.on('SIGTERM', () => abortRun('SIGTERM'));
+
+const initialParent = process.ppid;
+function parentGone() {
+  if (process.ppid !== initialParent) return true;
+  try {
+    process.kill(initialParent, 0);
+    return false;
+  } catch {
+    return true;
+  }
+}
+const parentWatch = setInterval(() => {
+  if (!parentGone() || interrupted) return;
+  interrupted = true;
+  record('parent-gone', { message: `parent ${initialParent} gone; killing every launched child` });
+  shutdownAll();
+  process.exit(0);
+}, 2000);
+parentWatch.unref?.();
 
 /**
  * Wait for a predicate with a deadline. `watch` children that already exited
@@ -536,8 +617,8 @@ async function phaseMock() {
   result.requests = logged.length;
   assert('mock', 'every request is logged to JSONL', logged.length === 4 && logged.every((entry) => entry.path === '/v1/messages'), { count: logged.length });
 
-  evidence.phases.mock = { status: 'pass', ...result };
-  killTree(mock.entry.pid);
+  evidence.phases.mock = { status: statusFrom('mock'), ...result };
+  killIfOurs(mock.entry);
   // Await real exit, not a fixed delay: the cleanup check runs later and a
   // still-dying child would be reported as a leak.
   await waitFor('mock exit', () => Promise.resolve(mock.entry.exited), 10000, {
@@ -585,8 +666,8 @@ async function phaseBoot() {
   assert('boot', 'the host offered its tool catalog to the mock', first.toolNames.length > 0, { toolCount: first.toolNames.length });
   assert('boot', 'scripted reply reached stdout', stdout.includes('scripted boot reply'), { stdoutTail: result.stdoutTail });
 
-  evidence.phases.boot = { status: 'pass', ...result };
-  killTree(mock.entry.pid);
+  evidence.phases.boot = { status: statusFrom('boot'), ...result };
+  killIfOurs(mock.entry);
   await waitFor('mock exit', () => Promise.resolve(mock.entry.exited), 10000).catch(() => {});
 }
 
@@ -750,21 +831,27 @@ async function phaseDispatch(scriptFile) {
       { requests: dispatcherRequests.length },
     );
 
-    phase.status = 'pass';
+    phase.status = statusFrom('dispatch');
   } catch (error) {
     const log = existsSync(bootLog) ? readFileSync(bootLog, 'utf8') : '';
     const blockers = blockersIn(log);
     phase.error = String(error?.message ?? error);
     phase.diagnostics = diagnosticsFrom(log);
-    if (blockers.length > 0) {
+    // `blocked` is a real skip: a known host-side blocker stopped the turn
+    // before the plugin could run. It must never hide a failed assertion —
+    // that is a product/harness failure and gates the exit code.
+    const assertionFailed = assertionsFor('dispatch').some((entry) => !entry.passed);
+    if (blockers.length > 0 && !assertionFailed) {
       phase.status = 'blocked';
       // The first blocker is the one that stops boot; report all observed.
       phase.blockedBy = blockers[0].why;
       phase.knownBlockers = blockers.map((entry) => entry.why);
+    } else {
+      phase.status = 'fail';
     }
   } finally {
-    killTree(dsh.pid);
-    killTree(mock.entry.pid);
+    killIfOurs(dsh);
+    killIfOurs(mock.entry);
   }
 
   if (phase.status === 'blocked') {
@@ -1066,8 +1153,8 @@ async function scenario1() {
     const log = existsSync(bootLog) ? readFileSync(bootLog, 'utf8') : '';
     phase.diagnostics = diagnosticsFrom(log);
   } finally {
-    killTree(dsh.pid);
-    killTree(mock.entry.pid);
+    killIfOurs(dsh);
+    killIfOurs(mock.entry);
   }
   evidence.phases.s1 = phase;
   return phase;
@@ -1186,8 +1273,8 @@ async function scenario2() {
     const log = existsSync(bootLog) ? readFileSync(bootLog, 'utf8') : '';
     phase.diagnostics = diagnosticsFrom(log);
   } finally {
-    killTree(dsh.pid);
-    killTree(mock.entry.pid);
+    killIfOurs(dsh);
+    killIfOurs(mock.entry);
   }
   evidence.phases.s2 = phase;
   return phase;
@@ -1375,8 +1462,8 @@ async function scenario3() {
     const log = existsSync(bootLog) ? readFileSync(bootLog, 'utf8') : '';
     phase.diagnostics = diagnosticsFrom(log);
   } finally {
-    killTree(dsh.pid);
-    killTree(mock.entry.pid);
+    killIfOurs(dsh);
+    killIfOurs(mock.entry);
   }
   evidence.phases.s3 = phase;
   return phase;
@@ -1527,8 +1614,8 @@ async function scenario4() {
     const log = existsSync(bootLog) ? readFileSync(bootLog, 'utf8') : '';
     phase.diagnostics = diagnosticsFrom(log);
   } finally {
-    killTree(dsh.pid);
-    killTree(mock.entry.pid);
+    killIfOurs(dsh);
+    killIfOurs(mock.entry);
   }
   evidence.phases.s4 = phase;
   return phase;
@@ -1578,15 +1665,35 @@ try {
 
   if (!existsSync(OVERLAY)) throw new Error(`missing ${OVERLAY}`);
 
-  if (shouldRun('mock')) await phaseMock();
-  if (shouldRun('boot')) await phaseBoot();
+  if (shouldRun('mock')) {
+    // Pre-mark every selected phase `fail`: a phase that throws before it can
+    // record its own verdict must never read as unselected (non-gating).
+    evidence.phases.mock = { status: 'fail' };
+    await phaseMock();
+  }
+  if (shouldRun('boot')) {
+    evidence.phases.boot = { status: 'fail' };
+    await phaseBoot();
+  }
   if (shouldRun('dispatch')) {
-    const scriptFile = join(OUT, 'script.json');
-    writeDispatcherScript(scriptFile);
-    await phaseDispatch(scriptFile);
+    // The dispatch phase is the only one that loads the built plugin. Refuse a
+    // stale/missing lib/ or client/ instead of silently measuring an old build.
+    // The name is marked `fail` before any check, so a selected-but-broken
+    // dispatch can never read as skipped.
+    evidence.phases.dispatch = { status: 'fail' };
+    try {
+      assertBuildFresh('dispatch phase');
+      const scriptFile = join(OUT, 'script.json');
+      writeDispatcherScript(scriptFile);
+      await phaseDispatch(scriptFile);
+    } catch (error) {
+      evidence.phases.dispatch.error = String(error?.message ?? error);
+      throw error;
+    }
   }
   for (const [name, run] of Object.entries(SCENARIOS)) {
     if (!shouldRun(name)) continue;
+    evidence.phases[name] = { status: 'fail' };
     if (!existsSync(SRC_OVERLAY)) throw new Error(`missing ${SRC_OVERLAY}`);
     await run();
   }
@@ -1595,29 +1702,56 @@ try {
   record('error', { message: String(error?.stack ?? error) });
 } finally {
   shutdownAll();
-  await new Promise((resolveWait) => setTimeout(resolveWait, 1500));
+  // Bounded per-child exit wait instead of one fixed sleep: a child that exits
+  // promptly is not penalised, a stuck one has a deadline, and the cleanup
+  // identity check never runs against a half-dead tree.
+  for (const entry of children) {
+    if (entry.pid === undefined) continue;
+    await waitFor(`exit of ${entry.label}`, () => Promise.resolve(entry.exited), 5000, {
+      allowExit: true,
+    }).catch(() => {});
+  }
 
   const alive = [];
+  const tasklistFailures = [];
   for (const entry of children) {
     if (entry.pid === undefined) continue;
     const check = spawnSync('tasklist', ['/FI', `PID eq ${entry.pid}`, '/FO', 'CSV', '/NH'], {
       encoding: 'utf8',
       windowsHide: true,
     });
+    // A failed or blocked tasklist is NOT "no leak": it means the check could
+    // not answer, so cleanup fails loudly instead of passing blind.
+    if (check.error !== undefined || check.status !== 0) {
+      tasklistFailures.push({
+        label: entry.label,
+        pid: entry.pid,
+        error: String(check.error?.message ?? `tasklist exit ${check.status}`),
+      });
+      continue;
+    }
     // Identity, not PID alone: Windows recycles PIDs, so a recycled PID now
     // owned by another executable is not our leak (see launchedProcessAlive).
     if (launchedProcessAlive(entry.pid, entry.image, check.stdout)) {
       alive.push({ label: entry.label, pid: entry.pid, expectedImage: entry.image });
     }
   }
-  evidence.processCheck = { launched: children.map(({ label, pid, image }) => ({ label, pid, image })), aliveAfterCleanup: alive };
+  evidence.processCheck = {
+    launched: children.map(({ label, pid, image }) => ({ label, pid, image })),
+    aliveAfterCleanup: alive,
+    tasklistFailures,
+  };
   assert('cleanup', 'every process the harness launched is dead', alive.length === 0, alive);
+  assert('cleanup', 'tasklist answered for every launched process', tasklistFailures.length === 0, tasklistFailures);
 
   // A phase that was not selected contributes nothing — neither pass nor fail.
+  const cleanupFailed = evidence.assertions.some((entry) => entry.phase === 'cleanup' && !entry.passed);
   const harnessOk =
     (evidence.phases.mock === undefined || evidence.phases.mock.status === 'pass') &&
     (evidence.phases.boot === undefined || evidence.phases.boot.status === 'pass') &&
-    alive.length === 0;
+    alive.length === 0 &&
+    tasklistFailures.length === 0 &&
+    !cleanupFailed;
   const dispatchStatus = evidence.phases.dispatch?.status ?? 'skipped';
   // Ticket 120: every scenario that RAN must pass. A phase that was not
   // selected is `undefined`, which must not read as a failure.
@@ -1627,7 +1761,14 @@ try {
       .map((name) => [name, evidence.phases[name].status]),
   );
   const scenariosOk = Object.values(scenarioStatuses).every((status) => status === 'pass');
-  evidence.ok = harnessOk && scenariosOk;
+  // The dispatch phase's `blocked` verdict means a known host-side blocker
+  // stopped the turn before the plugin could run (a real skip, and
+  // phaseDispatch only assigns it when no assertion failed); it is reported
+  // separately and does not gate. A `fail` is a harness/product failure and does.
+  const dispatchOk = dispatchStatus !== 'fail';
+  // A throw that escaped a selected phase is a failure even when that phase's
+  // own verdict could not be recorded: `failure` must gate the exit code.
+  evidence.ok = failure === undefined && harnessOk && dispatchOk && scenariosOk;
   evidence.dispatchStatus = dispatchStatus;
   evidence.scenarioStatuses = scenarioStatuses;
   evidence.finishedAt = new Date().toISOString();

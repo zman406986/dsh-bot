@@ -167,8 +167,9 @@ describe("inbox core — enqueueExternalJob (ticket 113)", () => {
     const multitask = createMultitask(host);
     const workerId = await spawnRunning(multitask, "s-1", "k-1", "Busy");
     // The dispatcher's own turn is what gates the bus (the worker state
-    // machine and the wake bus track turns independently).
-    multitask.wakeBus.noteTurnStarted("s-1", "external-event");
+    // machine and the wake bus track turns independently). "user" is the
+    // closed set's name for that turn; the external job is the pending wake.
+    multitask.wakeBus.noteTurnStarted("s-1", "user");
 
     multitask.enqueueExternalJob({
       sessionId: "s-1",
@@ -194,7 +195,9 @@ describe("inbox core — enqueueExternalJob (ticket 113)", () => {
     const delivered: string[] = [];
     const scheduler = createManualScheduler();
     const bus: WakeBus = createWakeBus({
-      onDeliver: (id) => delivered.push(id),
+      onDeliver: (id) => {
+        delivered.push(id);
+      },
       coalesceWindowMs: 50,
       schedule: scheduler.schedule,
     });
@@ -231,7 +234,9 @@ describe("inbox core — the onInboxJobResolved hook (ticket 113)", () => {
     const host = new FakeDshHost();
     const resolutions: InboxJobResolution[] = [];
     const multitask = createMultitask(host, {
-      onInboxJobResolved: (resolution) => resolutions.push(resolution),
+      onInboxJobResolved: (resolution) => {
+        resolutions.push(resolution);
+      },
     });
     return { host, multitask, resolutions };
   }

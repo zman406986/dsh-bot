@@ -3,8 +3,14 @@
  *
  * The single critical path, over the real plugin `apply()` and the real
  * command/tool surface: activate a dispatcher → spawn a worker → the worker
- * settles → the settle wake reaches the dispatcher → the dispatcher delivers →
- * the linked todo is completed AND delivered.
+ * settles → the settle wake reaches the dispatcher → the dispatcher calls
+ * `deliver_result`.
+ *
+ * The live plugin wires no separate user-facing send channel, so delivery is
+ * conversational (ADR-0009): the dispatcher's own reply is the channel. The
+ * result is recorded with `channel: "reply"`, the todo is marked done, and the
+ * user receives the text when the dispatcher states it. The rendered row must
+ * never claim the user already saw it.
  *
  * Offline only (S8): a fake host context, no Cordis, no browser, no network,
  * no LLM. Everything else in `test/` is a unit test of a pure module; this file
@@ -33,11 +39,24 @@ async function flushActivation(): Promise<void> {
   for (let i = 0; i < 8; i += 1) await new Promise((r) => setImmediate(r));
 }
 
-interface RecordingAgent extends AgentLike {
-  readonly followups: unknown[];
+/** Structural per-agent tool surface (the host's `agent.ctx.tools`). */
+interface ScopedToolRegistry {
+  schemas(scope?: unknown): ReadonlyArray<{ readonly name: string }>;
+  register(definition: {
+    name: string;
+    execute: (args: unknown, exec?: unknown) => Promise<unknown>;
+  }): () => void;
 }
 
-function recordingAgent(id: string): RecordingAgent {
+interface RecordingAgent extends AgentLike {
+  readonly followups: unknown[];
+  readonly ctx?: { readonly tools: ScopedToolRegistry };
+}
+
+function recordingAgent(
+  id: string,
+  scopedTools?: ScopedToolRegistry,
+): RecordingAgent {
   const followups: unknown[] = [];
   return {
     session: { id, header: { parentSession: null, delegationDepth: 0 } },
@@ -46,10 +65,12 @@ function recordingAgent(id: string): RecordingAgent {
     },
     inject() {},
     followups,
+    ...(scopedTools !== undefined ? { ctx: { tools: scopedTools } } : {}),
   };
 }
 
 interface Ctx extends AdapterContext {
+  effect(execute: () => unknown): void;
   fire(name: string, ...payloads: unknown[]): void;
   runCommand(invocation: { commandId: string; agent: AgentLike }): void;
   tool(name: string):
@@ -60,6 +81,8 @@ interface Ctx extends AdapterContext {
   readonly activationCalls: ActivationSpecLike[];
   readonly createCalls: CreateAgentOptionsLike[];
   readonly disposers: Array<() => void>;
+  /** The scoped surface every test agent must carry (ADR-0019). */
+  readonly scopedTools: ScopedToolRegistry;
 }
 
 function createCtx(agentsById: ReadonlyMap<string, AgentLike>): Ctx {
@@ -80,10 +103,34 @@ function createCtx(agentsById: ReadonlyMap<string, AgentLike>): Ctx {
     }
   };
 
+  const registerTool = (definition: {
+    name: string;
+    execute: (args: unknown, exec?: unknown) => Promise<unknown>;
+  }): (() => void) => {
+    if (tools.some((t) => t.name === definition.name)) {
+      throw new Error(`tool "${definition.name}" is already registered`);
+    }
+    tools.push(definition);
+    return () => {
+      const at = tools.indexOf(definition);
+      if (at >= 0) tools.splice(at, 1);
+    };
+  };
+
+  // ADR-0019: the plugin registers dispatcher tools on the ACTIVATED agent's
+  // own scoped surface, never on the plugin-level one. The registry writes
+  // into the same list `ctx.tool(name)` reads, so the test surface is the
+  // agent's surface.
+  const scopedTools: ScopedToolRegistry = {
+    schemas: () => tools.map((t) => ({ name: t.name })),
+    register: registerTool,
+  };
+
   const ctx = {
     disposers,
     activationCalls,
     createCalls,
+    scopedTools,
     get registeredCommands() {
       return commands;
     },
@@ -136,19 +183,7 @@ function createCtx(agentsById: ReadonlyMap<string, AgentLike>): Ctx {
     },
     tools: {
       schemas: () => tools.map((t) => ({ name: t.name })),
-      register(definition: {
-        name: string;
-        execute: (args: unknown, exec?: unknown) => Promise<unknown>;
-      }) {
-        if (tools.some((t) => t.name === definition.name)) {
-          throw new Error(`tool "${definition.name}" is already registered`);
-        }
-        tools.push(definition);
-        return () => {
-          const at = tools.indexOf(definition);
-          if (at >= 0) tools.splice(at, 1);
-        };
-      },
+      register: registerTool,
     },
     subagents: {
       async startActivation(spec: ActivationSpecLike) {
@@ -199,10 +234,12 @@ function textOf(message: unknown): string {
 
 // ── the one critical path ─────────────────────────────────────────────────
 
-describe("critical path — activate, spawn, settle, wake, deliver, complete", () => {
-  it("carries one worker from spawn to a completed, delivered todo", async () => {
-    const dispatcher = recordingAgent("session-1");
-    const ctx = createCtx(new Map([["session-1", dispatcher]]));
+describe("critical path — activate, spawn, settle, wake, deliver", () => {
+  it("records the result for the dispatcher's reply and closes the obligation", async () => {
+    const agents = new Map<string, AgentLike>();
+    const ctx = createCtx(agents);
+    const dispatcher = recordingAgent("session-1", ctx.scopedTools);
+    agents.set("session-1", dispatcher);
 
     // 1. Activate the dispatcher: the command binds the session and raises
     //    the tool surface.
@@ -250,20 +287,36 @@ describe("critical path — activate, spawn, settle, wake, deliver, complete", (
     const wakeText = textOf(dispatcher.followups[0]);
     assert.match(wakeText, /The one thing is done\./);
 
-    // 5. The dispatcher delivers. Passing the todo id is what closes the
-    //    ledger item — worker exit alone never does.
+    // 5. The dispatcher calls deliver_result. This plugin wires no separate
+    //    user-facing send, so the dispatcher's own reply is the channel: the
+    //    result is recorded, the ledger item closes, and the tool says to
+    //    state the text in that reply.
     const deliver = ctx.tool("deliver_result");
     assert.ok(deliver);
     const delivered = (await deliver.execute({
       text: "The one thing is done.",
       todo_id: todoId,
-    })) as { ok: boolean; delivered: boolean; todo_completed: string | null };
+    })) as {
+      ok: boolean;
+      delivered: boolean;
+      channel?: string;
+      todo_completed: string | null;
+      reason?: string;
+      detail?: string;
+    };
     assert.deepEqual(
-      { ok: delivered.ok, delivered: delivered.delivered, todo: delivered.todo_completed },
-      { ok: true, delivered: true, todo: todoId },
+      {
+        ok: delivered.ok,
+        delivered: delivered.delivered,
+        channel: delivered.channel,
+        todo: delivered.todo_completed,
+      },
+      { ok: true, delivered: true, channel: "reply", todo: todoId },
     );
+    assert.match(delivered.detail ?? "", /say it in your reply/i);
 
-    // 6. The obligation is discharged: the roster reports nothing owed.
+    // 6. The obligation is closed: the result is recorded for the reply, so
+    //    the worker is no longer waiting-for-delivery.
     const checked = (await check.execute({})) as {
       rows: Array<{ worker_id: string; status: string; stage: string }>;
     };
@@ -276,8 +329,10 @@ describe("critical path — activate, spawn, settle, wake, deliver, complete", (
   });
 
   it("leaves the todo open when the worker errors until the dispatcher delivers", async () => {
-    const dispatcher = recordingAgent("session-1");
-    const ctx = createCtx(new Map([["session-1", dispatcher]]));
+    const agents = new Map<string, AgentLike>();
+    const ctx = createCtx(agents);
+    const dispatcher = recordingAgent("session-1", ctx.scopedTools);
+    agents.set("session-1", dispatcher);
 
     apply(ctx, volatileConfig({ enabled: true }));
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent: dispatcher });
@@ -316,8 +371,10 @@ describe("critical path — activate, spawn, settle, wake, deliver, complete", (
   });
 
   it("refuses a duplicate stream key without spawning a second worker", async () => {
-    const dispatcher = recordingAgent("session-1");
-    const ctx = createCtx(new Map([["session-1", dispatcher]]));
+    const agents = new Map<string, AgentLike>();
+    const ctx = createCtx(agents);
+    const dispatcher = recordingAgent("session-1", ctx.scopedTools);
+    agents.set("session-1", dispatcher);
 
     apply(ctx, volatileConfig({ enabled: true }));
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent: dispatcher });

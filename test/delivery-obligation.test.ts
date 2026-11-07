@@ -210,6 +210,7 @@ describe("delivery obligation — the bound is terminal (D-5)", () => {
         redriveAttempts: MAX_DELIVERY_REDRIVES,
         disposition: "dropped" as const,
         dispositionReason: "max-redrives" as const,
+        external: null,
         createdAtMs: 1_000,
         updatedAtMs: 1_000,
       },

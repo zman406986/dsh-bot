@@ -2,7 +2,15 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { FakeDshHost } from "../src/core/fake-host.js";
-import { createMultitask, type Multitask } from "../src/core/multitask.js";
+import {
+  createInMemoryDurability,
+  type InMemoryDurability,
+} from "../src/core/durability.js";
+import {
+  createMultitask,
+  type InboxJobResolution,
+  type Multitask,
+} from "../src/core/multitask.js";
 import {
   createDispatcherTools,
   HOST_SPAWN_TOOL_CANDIDATES,
@@ -10,8 +18,9 @@ import {
   withholdHostSpawnTools,
   type DispatcherToolDef,
 } from "../src/core/tools.js";
-import {AWAIT_AGENT_TOOL, CHECK_WORKERS_TOOL, DELIVER_RESULT_TOOL, DISPATCHER_TOOL_NAMES, SEND_PEER_TOOL, SPAWN_WORKER_TOOL, STOP_WORKER_TOOL} from "../src/core/policy/prompts.js";
-import type {CheckWorkersToolResult, DeliverResultToolResult, SpawnWorkerToolResult, StopWorkerToolResult} from "../src/core/tool-results.js";
+import {AWAIT_AGENT_TOOL, CHECK_WORKERS_TOOL, DELIVER_RESULT_TOOL, DISPATCHER_TOOL_NAMES, SEND_PEER_TOOL, SPAWN_WORKER_TOOL, STEER_WORKER_TOOL, STOP_WORKER_TOOL} from "../src/core/policy/prompts.js";
+import { toRegisterableTool } from "../src/adapter/dispatcher-tools.js";
+import type {CheckWorkersToolResult, DeliverResultToolResult, SpawnWorkerToolResult, SteerWorkerToolResult, StopWorkerToolResult} from "../src/core/tool-results.js";
 import type { SpawnResult } from "../src/core/types.js";
 
 function unwrapSpawn(result: SpawnResult): string {
@@ -280,6 +289,80 @@ describe("dispatcher tools — check_workers", () => {
   });
 });
 
+describe("dispatcher tools — foreign-worker fence", () => {
+  async function foreignRunningWorker(
+    multitask: Multitask,
+  ): Promise<string> {
+    const workerId = unwrapSpawn(
+      await multitask.spawnWorker({
+        parentSessionId: "session-2",
+        streamKey: "foreign-stream",
+        title: "Someone else's worker",
+        prompt: "Go.",
+      }),
+    );
+    multitask.noteTurnStarted(workerId);
+    return workerId;
+  }
+
+  it("steer refuses another dispatcher's live worker with the silent shape", async () => {
+    const { multitask, tools } = await setup();
+    const workerId = await foreignRunningWorker(multitask);
+
+    const result = (await byName(tools, STEER_WORKER_TOOL).execute({
+      worker_id: workerId,
+      message: "Do something else.",
+    })) as { ok: boolean; reason?: string; detail?: string };
+    assert.deepEqual(result, {
+      ok: false,
+      reason: "unknown-worker",
+      detail: `unknown worker: ${workerId}`,
+    });
+  });
+
+  it("steer refuses another dispatcher's dormant (durable-row) worker too", async () => {
+    // A dormant worker has NO roster record; the durable row is the only
+    // ownership evidence. The id must still read as unknown to this session.
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host, {
+      findDurableWorker: (workerId) =>
+        workerId === "foreign-dormant"
+          ? { parentSessionId: "session-2" }
+          : undefined,
+    });
+    const tools = createDispatcherTools({
+      multitask,
+      getSessionId: () => "session-1",
+    });
+
+    const result = (await byName(tools, STEER_WORKER_TOOL).execute({
+      worker_id: "foreign-dormant",
+      message: "One more thing.",
+    })) as { ok: boolean; reason?: string; detail?: string };
+    assert.deepEqual(result, {
+      ok: false,
+      reason: "unknown-worker",
+      detail: "unknown worker: foreign-dormant",
+    });
+  });
+
+  it("stop refuses another dispatcher's worker without interrupting it", async () => {
+    const { host, multitask, tools } = await setup();
+    const workerId = await foreignRunningWorker(multitask);
+
+    const result = (await byName(tools, STOP_WORKER_TOOL).execute({
+      worker_id: workerId,
+    })) as StopWorkerToolResult;
+    assert.ok(!result.ok);
+    if (result.ok) return;
+    assert.equal(result.reason, "already-settled");
+    assert.equal(result.detail, `unknown worker: ${workerId}`);
+    assert.equal(host.interruptCalls.length, 0, "a foreign worker was interrupted");
+    assert.equal(multitask.getWorker(workerId)?.status, "running");
+  });
+
+});
+
 describe("dispatcher tools — steer_worker / stop_worker", () => {
   it("stop aborts and returns a silent-to-user note", async () => {
     const { host, multitask, tools } = await setup();
@@ -299,9 +382,115 @@ describe("dispatcher tools — steer_worker / stop_worker", () => {
     assert.ok(result.ok);
     if (!result.ok) return;
     assert.ok(result.note.includes("Stopped"));
+    // Readable-status display fields are additive; the model-facing note is
+    // unchanged.
+    assert.equal(result.worker_id, workerId);
+    assert.equal(result.title, "Cancel me");
+    assert.equal(result.mode, "stopped");
     assert.equal(host.interruptCalls.length, 1);
   });
 
+  it("steer_worker keeps its model-facing note and adds worker_id/title", async () => {
+    const { multitask, tools } = await setup();
+    const workerId = unwrapSpawn(
+      await multitask.spawnWorker({
+        parentSessionId: "session-1",
+        streamKey: "s-1",
+        title: "Rewrite auth docs",
+        prompt: "Go.",
+      }),
+    );
+    multitask.noteTurnStarted(workerId);
+
+    const result = (await byName(tools, STEER_WORKER_TOOL).execute({
+      worker_id: workerId,
+      message: "focus on the failing test first",
+    })) as SteerWorkerToolResult;
+    assert.ok(result.ok);
+    if (!result.ok) return;
+    assert.equal(
+      result.note,
+      'Correction parked for "Rewrite auth docs". It will fold in at the next step boundary and continue from where it is — no restart. If you send another correction before delivery, only the latest applies.',
+      "model-facing copy stays byte-identical",
+    );
+    assert.equal(result.worker_id, workerId);
+    assert.equal(result.title, "Rewrite auth docs");
+    assert.equal(result.dormant, undefined);
+  });
+
+});
+
+/**
+ * A core rebuilt over a live marker (a crash-time hold), optionally with a
+ * marker store that refuses the release drop. The hold id is not on the
+ * roster — that is what makes it an unknown-state hold.
+ */
+async function rebuiltHold(options: { failRelease?: boolean } = {}): Promise<{
+  multitask: Multitask;
+  tools: DispatcherToolDef[];
+  workerId: string;
+}> {
+  const durability = createInMemoryDurability();
+  const coreA = createMultitask(new FakeDshHost(), { durability });
+  const spawned = await coreA.spawnWorker({
+    parentSessionId: "session-1",
+    streamKey: "held-stream",
+    title: "Held work",
+    prompt: "Go.",
+  });
+  if (!spawned.ok) throw new Error(spawned.detail);
+  coreA.noteTurnStarted(spawned.workerId);
+
+  const store: InMemoryDurability =
+    options.failRelease === true
+      ? {
+          ...durability,
+          deleteWorkerMarker: () =>
+            Promise.reject(new Error("marker store down")),
+        }
+      : durability;
+  const multitask = createMultitask(new FakeDshHost(), { durability: store });
+  const rebuild = await multitask.rebuildFromDurability("session-1");
+  assert.equal(rebuild.unknownState.length, 1, "the live marker is a hold");
+  const tools = createDispatcherTools({
+    multitask,
+    getSessionId: () => "session-1",
+  });
+  return { multitask, tools, workerId: spawned.workerId };
+}
+
+describe("dispatcher tools — stop_worker and crash-time holds (ticket 59)", () => {
+  it("releases a hold and says the worker was never reachable", async () => {
+    const { multitask, tools, workerId } = await rebuiltHold();
+
+    const result = (await byName(tools, STOP_WORKER_TOOL).execute({
+      worker_id: workerId,
+    })) as StopWorkerToolResult;
+    assert.ok(result.ok);
+    if (!result.ok) return;
+    assert.equal(result.mode, "released-hold");
+    assert.match(result.note, /never reachable/);
+    assert.equal(multitask.listUnknownStateHolds("session-1").length, 0);
+  });
+
+  it("reports a failed release instead of falling through to unknown-worker", async () => {
+    const { multitask, tools, workerId } = await rebuiltHold({
+      failRelease: true,
+    });
+
+    const result = (await byName(tools, STOP_WORKER_TOOL).execute({
+      worker_id: workerId,
+    })) as StopWorkerToolResult;
+    assert.ok(!result.ok);
+    if (result.ok) return;
+    assert.equal(result.reason, "hold-release-failed");
+    assert.match(result.detail, /Could not release the hold — the store did not confirm/);
+    assert.equal(
+      multitask.listUnknownStateHolds("session-1").length,
+      1,
+      "the hold and its stream key are still in place",
+    );
+  });
 });
 
 describe("dispatcher tools — deliver_result", () => {
@@ -334,12 +523,22 @@ describe("dispatcher tools — deliver_result", () => {
       todo_id: "t-1",
     })) as DeliverResultToolResult;
     assert.ok(result.ok);
+    if (!result.ok) return;
     assert.equal(result.delivered, true);
+    assert.equal(result.channel, "send");
     assert.equal(result.todo_completed, "t-1");
     assert.deepEqual(delivered, ["Here's the third-RFC summary…"]);
     const todo = multitask.listTodos("session-1").find((t) => t.id === "t-1");
     assert.equal(todo?.status, "completed");
     assert.equal(todo?.delivered, true);
+
+    // The explicit send channel keeps its existing success copy.
+    const renderable = toRegisterableTool(byName(tools, DELIVER_RESULT_TOOL));
+    const blocks = renderable.output.render({}, result);
+    assert.equal(
+      blocks[0]?.text,
+      "Delivered to the user. Todo completed: t-1.",
+    );
   });
 
   it("failed send does not mark the todo completed", async () => {
@@ -356,10 +555,163 @@ describe("dispatcher tools — deliver_result", () => {
       todo_id: "t-1",
     })) as DeliverResultToolResult;
     assert.ok(!result.ok);
+    if (result.ok) return;
     assert.equal(result.delivered, false);
     assert.equal(result.todo_completed, null);
+    assert.equal(result.reason, "send-failed");
     const todo = multitask.listTodos("session-1").find((t) => t.id === "t-1");
     assert.equal(todo?.delivered, false);
+  });
+
+  it("a todo from another dispatcher is refused silently and never marked", async () => {
+    const delivered: string[] = [];
+    const { multitask, tools } = await setup({
+      deliverToUser: async (text) => {
+        delivered.push(text);
+        return true;
+      },
+    });
+    multitask.createTodo({
+      sessionId: "session-2",
+      id: "t-foreign",
+      title: "Someone else's obligation",
+    });
+
+    const result = (await byName(tools, DELIVER_RESULT_TOOL).execute({
+      text: "Not mine to deliver.",
+      todo_id: "t-foreign",
+    })) as DeliverResultToolResult;
+    assert.deepEqual(result, {
+      ok: false,
+      delivered: false,
+      todo_completed: null,
+      reason: "unknown-target",
+      detail:
+        'No todo entry "t-foreign" in this session — nothing was delivered and nothing was marked completed.',
+    });
+    assert.deepEqual(delivered, [], "a foreign todo must not reach the user send");
+    const todo = multitask.listTodos("session-2").find((t) => t.id === "t-foreign");
+    assert.equal(todo?.delivered, false);
+  });
+
+  it("with no user-facing channel: records for the reply and completes the todo", async () => {
+    const { multitask, tools } = await setup();
+    multitask.createTodo({
+      sessionId: "session-1",
+      id: "t-1",
+      title: "Task",
+    });
+
+    const result = (await byName(tools, DELIVER_RESULT_TOOL).execute({
+      text: "The answer the user needs to hear.",
+      todo_id: "t-1",
+    })) as DeliverResultToolResult;
+    assert.ok(result.ok);
+    if (!result.ok) return;
+    assert.equal(result.delivered, true);
+    assert.equal(result.channel, "reply");
+    assert.equal(result.todo_completed, "t-1");
+    assert.equal(result.todo_title, "Task");
+    assert.match(result.detail ?? "", /say it in your reply/i);
+    assert.doesNotMatch(result.detail ?? "", /already (seen|read)/i);
+
+    const todo = multitask.listTodos("session-1").find((t) => t.id === "t-1");
+    assert.equal(todo?.delivered, true, "the reply is the channel");
+    assert.equal(todo?.status, "completed");
+
+    // The adapter renderer must state the truth: recorded for the reply, never
+    // "Delivered to the user".
+    const renderable = toRegisterableTool(byName(tools, DELIVER_RESULT_TOOL));
+    const blocks = renderable.output.render({}, result);
+    assert.equal(blocks[0]?.type, "text");
+    assert.match(blocks[0]?.text ?? "", /^Result recorded — say it in your reply/);
+    assert.match(blocks[0]?.text ?? "", /todo "Task" marked done/);
+    assert.doesNotMatch(blocks[0]?.text ?? "", /Delivered to the user/);
+  });
+
+  it("a no-channel delivery of an inbox job fires the replied hook with the text", async () => {
+    // The shipped plugin never wires deliverToUser, so an inbox job's only
+    // reply path is this one: the tool marks the item delivered and the core
+    // fires `replied`, which the plugin's writer turns into reply.md.
+    const host = new FakeDshHost();
+    const resolutions: InboxJobResolution[] = [];
+    const multitask = createMultitask(host, {
+      onInboxJobResolved: (resolution) => {
+        resolutions.push(resolution);
+      },
+    });
+    const tools = createDispatcherTools({
+      multitask,
+      getSessionId: () => "session-1",
+    });
+    const presented = multitask.enqueueExternalJob({
+      sessionId: "session-1",
+      jobId: "job-1",
+      jobDir: "/jobs/job-1",
+      promptText: "Build the widget",
+    });
+    assert.ok(presented.ok);
+    if (!presented.ok) return;
+
+    const result = (await byName(tools, DELIVER_RESULT_TOOL).execute({
+      text: "All done",
+      todo_id: presented.todoId,
+    })) as DeliverResultToolResult;
+    assert.ok(result.ok);
+    if (!result.ok) return;
+    assert.equal(result.channel, "reply");
+
+    assert.equal(resolutions.length, 1);
+    const resolution = resolutions[0];
+    assert.ok(resolution);
+    assert.equal(resolution.kind, "replied");
+    assert.equal(resolution.jobId, "job-1");
+    assert.equal(resolution.jobDir, "/jobs/job-1");
+    assert.equal(
+      resolution.kind === "replied" ? resolution.replyText : "",
+      "All done",
+    );
+  });
+
+  it("a no-channel delivery does not leave the obligation open (regression)", async () => {
+    const { host, multitask, tools } = await setup();
+    multitask.createTodo({
+      sessionId: "session-1",
+      id: "t-1",
+      title: "Task",
+    });
+    const workerId = unwrapSpawn(
+      await multitask.spawnWorker({
+        parentSessionId: "session-1",
+        streamKey: "t-1",
+        title: "Task",
+        prompt: "Go.",
+        todoId: "t-1",
+      }),
+    );
+    multitask.noteTurnStarted(workerId);
+    host.fireSettled({ workerId, status: "completed", report: "done" });
+    multitask.drainWake("session-1");
+
+    const delivered = (await byName(tools, DELIVER_RESULT_TOOL).execute({
+      text: "Done.",
+      todo_id: "t-1",
+    })) as DeliverResultToolResult;
+    assert.ok(delivered.ok);
+
+    // Nothing is owed any more: a redrive pass finds no open item and the
+    // worker stage is `ended`, not `waiting-for-delivery`.
+    const report = multitask.redriveUndelivered("session-1");
+    assert.deepEqual(report.redriven, []);
+    assert.deepEqual(report.lost, []);
+    assert.equal(multitask.todos.get("t-1")?.delivered, true);
+
+    const check = (await byName(tools, CHECK_WORKERS_TOOL).execute(
+      {},
+    )) as CheckWorkersToolResult;
+    assert.ok(check.ok);
+    if (!check.ok) return;
+    assert.equal(check.rows[0]?.stage, "ended");
   });
 
 });

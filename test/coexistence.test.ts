@@ -30,7 +30,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { apply as applyDispatcherHost } from "../src/plugin.js";
 import { volatileConfig } from "./support/plugin-config.js";
-import {DISPATCHER_START_COMMAND, DISPATCHER_START_SUCCESS, type AdapterContext, type AgentLike, type CommandDefinitionLike, type CommandResultLike} from "../src/adapter/index.js";
+import {DISPATCHER_START_COMMAND, DISPATCHER_START_SUCCESS, type AdapterContext, type AgentLike, type CommandDefinitionLike, type CommandResultLike, type SessionProjectionChildLike, type ToolsLike} from "../src/adapter/index.js";
 import {
   apply as applyDispatcherClient,
   inject as clientInject,
@@ -73,6 +73,50 @@ const FOREIGN_TOOL_RESULT = { ok: true, source: "foreign-helper" };
 
 interface TestAgent extends AgentLike {
   readonly injected: unknown[];
+  readonly scopedTools: ToolsLike & {
+    /** The fake always ships it; pin it so tests can register directly. */
+    register(definition: unknown): () => void;
+    registeredNames(): string[];
+    get(
+      name: string,
+    ):
+      | { execute: (args: unknown, exec?: unknown) => Promise<unknown> }
+      | undefined;
+  };
+}
+
+/**
+ * ADR-0019 scoped surface: the plugin registers the dispatcher tools on the
+ * activated agent's own context. A process-global fallback is refused, so the
+ * coexistence matrix must exercise the scoped shape.
+ */
+function createScopedTools(): TestAgent["scopedTools"] {
+  const scoped = new Map<
+    string,
+    { name: string; execute: (args: unknown, exec?: unknown) => Promise<unknown> }
+  >();
+  return {
+    schemas: () => [...scoped.keys()].map((name) => ({ name })),
+    register(definition: unknown) {
+      const tool = definition as {
+        name: string;
+        execute: (args: unknown, exec?: unknown) => Promise<unknown>;
+      };
+      if (scoped.has(tool.name)) {
+        throw new Error(
+          `tool "${tool.name}" is already registered (for a ` +
+            `per-agent variant, register through that agent's ` +
+            `\`agent.ctx\` instead)`,
+        );
+      }
+      scoped.set(tool.name, tool);
+      return () => {
+        scoped.delete(tool.name);
+      };
+    },
+    registeredNames: () => [...scoped.keys()],
+    get: (name) => scoped.get(name),
+  };
 }
 
 function createAgent(
@@ -81,6 +125,7 @@ function createAgent(
 ): TestAgent {
   const topLevel = opts?.topLevel ?? true;
   const injected: unknown[] = [];
+  const scopedTools = createScopedTools();
   return {
     session: {
       id,
@@ -93,6 +138,8 @@ function createAgent(
       injected.push(message);
     },
     injected,
+    ctx: { tools: scopedTools },
+    scopedTools,
   };
 }
 
@@ -240,8 +287,16 @@ function createHostCtx() {
         }
       }
     },
-    inject(services: readonly string[], cb: (child: unknown) => void) {
-      if (services.includes("settings")) cb({ settings: settingsProvider });
+    inject(
+      services: readonly string[],
+      cb: (child: SessionProjectionChildLike) => void,
+    ) {
+      // The fake serves the settings face through the inject callback; the
+      // Cordis callback type names the projection service, so cast the stub
+      // child to that shape (it is all-optional).
+      if (services.includes("settings")) {
+        cb({ settings: settingsProvider } as SessionProjectionChildLike);
+      }
     },
     on(name: string, cb: (payload: never) => void) {
       const list = listeners.get(name) ?? [];
@@ -485,7 +540,7 @@ function createClientCtx() {
       void label;
       const returned = execute();
       const disposer: () => void =
-        typeof returned === "function" ? returned : () => {};
+        typeof returned === "function" ? (returned as () => void) : () => {};
       effectDisposers.push(disposer);
       return () => {};
     },
@@ -557,7 +612,7 @@ function createClientCtx() {
           );
         }
         const entry = {
-          options: { ...rawOptions } as Record<string, unknown>,
+          options: { ...(rawOptions as Record<string, unknown>) },
           component,
           dispose: () => {},
         };
@@ -646,7 +701,7 @@ function createClientCtx() {
       }
       return Reflect.get(target, prop, receiver);
     },
-  }) as typeof ctx & ClientContext & {
+  }) as unknown as typeof ctx & ClientContext & {
     locales: Map<string, unknown>;
     injects: Array<{
       parent: string;
@@ -821,26 +876,33 @@ describe("coexistence — host face: fail-loud claims (Findings 1 and 2)", () =>
     applyForeignHostPlugin(ctx);
     applyDispatcherHost(ctx, volatileConfig({ enabled: true }));
 
-    // Activate so the dispatcher's own tool names are on the surface.
+    // Activate so the dispatcher's own tool names are on its SCOPE.
     const agent = createAgent("s-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await new Promise((resolve) => setImmediate(resolve));
 
-    // A latecomer tries to register over both plugins' tool names.
-    for (const name of ["spawn_worker", FOREIGN.tool]) {
-      assert.throws(
-        () =>
-          ctx.tools.register({
-            name,
-            execute: async () => ({ ok: false }),
-          }),
-        new RegExp(`tool "${name}" is already registered`),
-      );
-    }
+    // A latecomer cannot claim the foreign plugin's global name…
+    assert.throws(
+      () =>
+        ctx.tools.register({
+          name: FOREIGN.tool,
+          execute: async () => ({ ok: false }),
+        }),
+      new RegExp(`tool "${FOREIGN.tool}" is already registered`),
+    );
+    // …nor a dispatcher tool name on the activated agent's own scope.
+    assert.throws(
+      () =>
+        agent.scopedTools.register({
+          name: "spawn_worker",
+          execute: async () => ({ ok: false }),
+        }),
+      /tool "spawn_worker" is already registered/,
+    );
 
     // The first claimant's definition is untouched: the dispatcher tool still
     // executes (it was not replaced by the interloper).
-    const spawn = ctx.tool("spawn_worker");
+    const spawn = agent.scopedTools.get("spawn_worker");
     assert.ok(spawn);
     const value = (await spawn.execute(
       { stream_key: "s", title: "T", prompt: "P" },
@@ -868,22 +930,21 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
       await new Promise((resolve) => setImmediate(resolve));
     }
 
-    // The dispatcher surface (eight tools since ticket 118 + the ticket-145
-    // per-session recall, which this context-less agent takes on the
-    // plugin-level fallback) alongside the foreign tool — no clobbering.
-    // Ticket 174 / ADR-0033 removed `request_access`.
-    assert.deepEqual(ctx.toolNames().sort(), [
+    // The dispatcher surface (eight tools since ticket 118) lives in the
+    // agent's own scope; the foreign tool stays global — no clobbering.
+    // Ticket 174 / ADR-0033 removed `request_access`; owner ruling
+    // 2026-11-05 keeps racoons off by default, so no per-session `recall`.
+    assert.deepEqual(agent.scopedTools.registeredNames().sort(), [
       "await_agent",
       "check_workers",
       "deliver_result",
-      FOREIGN.tool,
       "message_agent",
-      "recall",
       "spawn_dispatcher",
       "spawn_worker",
       "steer_worker",
       "stop_worker",
     ]);
+    assert.deepEqual(ctx.toolNames().sort(), [FOREIGN.tool]);
 
     // The foreign tool still executes as the foreign one.
     assert.deepEqual(
@@ -891,13 +952,10 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
       FOREIGN_TOOL_RESULT,
     );
 
-    // ADR-0019 retired the process-global execute-time gate. This agent
-    // carries no scoped ctx, so the five tools registered through the
-    // plugin-level FALLBACK surface and an out-of-scope exec is no longer
-    // refused — it routes to the session that registered the tool. (Live
-    // hosts register per agent scope, where an out-of-scope caller cannot
-    // see the tool at all — the strictly stronger fence.)
-    const crossCaller = (await ctx.tool("spawn_worker")?.execute(
+    // ADR-0019: the dispatcher tools are scoped to this agent. Execution
+    // routes to the session that registered them; an out-of-scope caller
+    // cannot see the tools at all on a live host.
+    const crossCaller = (await agent.scopedTools.get("spawn_worker")?.execute(
       { stream_key: "k", title: "T", prompt: "P" },
       { agent: { session: { id: "some-other-chat" } } },
     )) as { ok: boolean } | undefined;
@@ -925,7 +983,7 @@ describe("coexistence — client face: additive lists and keyed cells (Finding 5
     // displacement registrations too — nothing of ours registers anywhere
     // in the shipped layout. The foreign plugin's entry is unmolested.
     assert.equal(entries.length, 1);
-    const options = entries[0]!.options as SlotRegistrationOptions;
+    const options = entries[0]!.options as unknown as SlotRegistrationOptions;
     assert.equal(options.id, FOREIGN.overlayEntryId);
     assert.equal(options.order, FOREIGN.overlayOrder);
     assert.match(options.id, /^foreign-helper-/);

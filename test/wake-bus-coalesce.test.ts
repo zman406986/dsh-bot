@@ -76,7 +76,9 @@ describe("wake bus coalescing — default off (ticket 108)", () => {
     const delivered: string[] = [];
     const scheduler = createManualScheduler();
     const bus = createWakeBus({
-      onDeliver: (id) => delivered.push(id),
+      onDeliver: (id) => {
+        delivered.push(id);
+      },
       schedule: scheduler.schedule,
     });
 
@@ -93,7 +95,9 @@ describe("wake bus coalescing — default off (ticket 108)", () => {
     const delivered: string[] = [];
     const scheduler = createManualScheduler();
     const bus = createWakeBus({
-      onDeliver: (id) => delivered.push(id),
+      onDeliver: (id) => {
+        delivered.push(id);
+      },
       schedule: scheduler.schedule,
     });
 
@@ -113,7 +117,9 @@ describe("wake bus coalescing — window batching (ticket 108)", () => {
     const delivered: string[] = [];
     const scheduler = createManualScheduler();
     const bus = createWakeBus({
-      onDeliver: (id) => delivered.push(id),
+      onDeliver: (id) => {
+        delivered.push(id);
+      },
       coalesceWindowMs: 50,
       schedule: scheduler.schedule,
     });
@@ -143,7 +149,9 @@ describe("wake bus coalescing — window batching (ticket 108)", () => {
     const delivered: string[] = [];
     const scheduler = createManualScheduler();
     const bus = createWakeBus({
-      onDeliver: (id) => delivered.push(id),
+      onDeliver: (id) => {
+        delivered.push(id);
+      },
       coalesceWindowMs: 50,
       schedule: scheduler.schedule,
     });
@@ -162,7 +170,9 @@ describe("wake bus coalescing — window batching (ticket 108)", () => {
     const delivered: string[] = [];
     const scheduler = createManualScheduler();
     const bus = createWakeBus({
-      onDeliver: (id) => delivered.push(id),
+      onDeliver: (id) => {
+        delivered.push(id);
+      },
       coalesceWindowMs: 50,
       schedule: scheduler.schedule,
     });
@@ -191,7 +201,9 @@ describe("wake bus coalescing — window batching (ticket 108)", () => {
     const delivered: string[] = [];
     const scheduler = createManualScheduler();
     const bus = createWakeBus({
-      onDeliver: (id) => delivered.push(id),
+      onDeliver: (id) => {
+        delivered.push(id);
+      },
       coalesceWindowMs: 50,
       schedule: scheduler.schedule,
     });
@@ -263,11 +275,67 @@ describe("wake bus coalescing — window batching (ticket 108)", () => {
     assert.equal(wake.settledWorkers[0]?.workerId, "w4");
   });
 
+  it("async delivery rejections count toward the same budget and never leak", async () => {
+    const watcher: unknown[] = [];
+    const listener = (reason: unknown): void => {
+      watcher.push(reason);
+    };
+    process.on("unhandledRejection", listener);
+    try {
+      let calls = 0;
+      const delivered: string[] = [];
+      const degraded: WakeBusDegradedInfo[] = [];
+      const scheduler = createManualScheduler();
+      const bus = createWakeBus({
+        onDeliver: async (id) => {
+          calls += 1;
+          if (calls <= 3) throw new Error(`async delivery ${calls} failed`);
+          delivered.push(id);
+        },
+        coalesceWindowMs: 50,
+        schedule: scheduler.schedule,
+        coalesceFailBudget: 3,
+        onDegraded: (info) => degraded.push(info),
+      });
+
+      // Three windows, each delivering a rejected promise. The wake stays
+      // ready (the flush marks it before notifying), so nothing is dropped.
+      for (const workerId of ["w1", "w2", "w3"]) {
+        bus.enqueueWorkerSettled(settled("s1", workerId));
+        scheduler.runAll();
+        // Let the owned rejection handler run before the next window.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.ok(bus.drain("s1"), `${workerId} was still made ready`);
+      }
+
+      assert.equal(degraded.length, 1, "a rejection is a counted failure");
+      assert.equal(degraded[0]?.consecutiveFailures, 3);
+      assert.ok(degraded[0]?.lastError instanceof Error);
+
+      // Degraded mode: a new enqueue bypasses the window.
+      bus.enqueueWorkerSettled(settled("s1", "w4"));
+      assert.equal(scheduler.scheduled.length, 3);
+      assert.deepEqual(delivered, ["s1"]);
+      assert.equal(bus.drain("s1")?.settledWorkers[0]?.workerId, "w4");
+
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.deepEqual(
+        watcher,
+        [],
+        "the bus owns delivery rejections; none may go unhandled",
+      );
+    } finally {
+      process.off("unhandledRejection", listener);
+    }
+  });
+
   it("peer priority rank order is preserved through a window flush", () => {
     const delivered: string[] = [];
     const scheduler = createManualScheduler();
     const bus = createWakeBus({
-      onDeliver: (id) => delivered.push(id),
+      onDeliver: (id) => {
+        delivered.push(id);
+      },
       coalesceWindowMs: 50,
       schedule: scheduler.schedule,
     });
@@ -313,5 +381,170 @@ describe("wake bus coalescing — window batching (ticket 108)", () => {
     assert.equal(batch.source, "worker-settled");
     assert.equal(batch.settledWorkers[0]?.workerId, "w1");
     assert.deepEqual(delivered, ["s1", "s1", "s1"]);
+  });
+});
+
+describe("wake bus — a rejected delivery re-arms the ready batch", () => {
+  const microtasks = (): Promise<void> =>
+    new Promise((resolve) => setImmediate(resolve));
+
+  it("a later settle retries the failed delivery exactly once and keeps the batch", async () => {
+    const calls: string[] = [];
+    let fail = true;
+    const bus = createWakeBus({
+      onDeliver: async (id) => {
+        calls.push(id);
+        if (fail) throw new Error("wake seam unavailable");
+      },
+    });
+
+    bus.enqueueWorkerSettled(settled("s1", "w1", "One", "r1"));
+    await microtasks();
+
+    assert.equal(calls.length, 1, "the first delivery failed");
+    assert.ok(bus.peek("s1"), "the ready wake survived the failure");
+
+    fail = false;
+    bus.enqueueWorkerSettled(settled("s1", "w2", "Two", "r2"));
+    await microtasks();
+
+    assert.equal(calls.length, 2, "the joining settle triggered one retry");
+    const wake = bus.drain("s1");
+    assert.ok(wake);
+    assert.deepEqual(
+      wake.settledWorkers.map((w) => w.workerId),
+      ["w1", "w2"],
+      "no duplicate notices and no lost settle",
+    );
+
+    // Nothing is owed after a successful delivery.
+    bus.noteTurnEnded("s1");
+    await microtasks();
+    assert.equal(calls.length, 2, "no retry after the host was told");
+  });
+
+  it("a turn end retries a ready batch whose delivery failed", async () => {
+    const calls: string[] = [];
+    let fail = true;
+    const bus = createWakeBus({
+      onDeliver: async (id) => {
+        calls.push(id);
+        if (fail) throw new Error("wake seam unavailable");
+      },
+    });
+
+    bus.noteTurnStarted("s1");
+    bus.enqueueWorkerSettled(settled("s1", "w1"));
+    assert.equal(calls.length, 0, "mid-turn settles only queue");
+
+    bus.noteTurnEnded("s1");
+    await microtasks();
+    assert.equal(calls.length, 1, "turn end flushed and failed once");
+    assert.ok(bus.peek("s1"));
+
+    fail = false;
+    bus.noteTurnEnded("s1");
+    await microtasks();
+    assert.equal(calls.length, 2, "turn end retried the same batch");
+    assert.ok(bus.drain("s1"), "the same ready wake is still delivered");
+  });
+
+  it("a delivery redrive is not subsumed by a batch the host was never told about", async () => {
+    const calls: string[] = [];
+    let fail = true;
+    const bus = createWakeBus({
+      onDeliver: async (id) => {
+        calls.push(id);
+        if (fail) throw new Error("wake seam unavailable");
+      },
+    });
+
+    bus.enqueueWorkerSettled(settled("s1", "w1"));
+    await microtasks();
+    assert.equal(calls.length, 1);
+    assert.ok(bus.peek("s1"));
+
+    fail = false;
+    bus.enqueueDeliveryRedrive("s1");
+    await microtasks();
+    assert.equal(calls.length, 2, "the redrive retried instead of being subsumed");
+    assert.ok(bus.peek("s1"));
+  });
+});
+
+describe("wake bus — delivery failures and interrupts have separate budgets", () => {
+  it("successful interrupts do not reset consecutive delivery failures", () => {
+    let interrupts = 0;
+    const degraded: WakeBusDegradedInfo[] = [];
+    const bus = createWakeBus({
+      onDeliver: () => {
+        throw new Error("delivery down");
+      },
+      onInterrupt: () => {
+        interrupts += 1;
+      },
+      coalesceFailBudget: 3,
+      onDegraded: (info) => degraded.push(info),
+    });
+
+    bus.noteTurnStarted("s1", "worker-settled");
+    for (const id of ["m1", "m2", "m3", "m4"]) {
+      bus.enqueuePeer({
+        sessionId: "s1",
+        notice: peerNotice(id, true),
+        effectivePriority: true,
+      });
+    }
+
+    assert.equal(interrupts, 4, "every priority peer interrupted the turn");
+    assert.equal(degraded.length, 1, "four failed deliveries reached the budget");
+    assert.equal(degraded[0]?.consecutiveFailures, 3);
+    assert.ok(bus.peek("s1"), "the ready peer wake was never dropped");
+  });
+});
+
+describe("wake bus — onDegraded is guarded", () => {
+  it("a throwing onDegraded never escapes a synchronous settle", () => {
+    const bus = createWakeBus({
+      onDeliver: () => {
+        throw new Error("delivery down");
+      },
+      coalesceFailBudget: 1,
+      onDegraded: () => {
+        throw new Error("degrade observer down");
+      },
+    });
+
+    assert.doesNotThrow(() =>
+      bus.enqueueWorkerSettled(settled("s1", "w1")),
+    );
+    assert.ok(bus.peek("s1"), "the ready wake survives the observer throw");
+  });
+
+  it("a rejecting onDegraded never becomes an unhandled rejection", async () => {
+    const rejections: unknown[] = [];
+    const listener = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+    process.on("unhandledRejection", listener);
+    try {
+      const bus = createWakeBus({
+        onDeliver: () => {
+          throw new Error("delivery down");
+        },
+        coalesceFailBudget: 1,
+        onDegraded: async () => {
+          throw new Error("degrade observer down");
+        },
+      });
+
+      bus.enqueueWorkerSettled(settled("s1", "w1"));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      assert.deepEqual(rejections, [], "the bus owns the observer rejection");
+      assert.ok(bus.peek("s1"), "the ready wake survives the observer rejection");
+    } finally {
+      process.off("unhandledRejection", listener);
+    }
   });
 });

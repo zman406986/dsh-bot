@@ -163,6 +163,15 @@ export interface InboxJobCheckpoint {
  * storage-domain calls `.parse` on each loaded record; writes are not re-validated.
  * Structural stand-in keeps the adapter free of a `zod` dependency.
  */
+const WORKER_STATUSES: readonly string[] = [
+  "spawned",
+  "running",
+  "steering",
+  "completed",
+  "error",
+  "aborted",
+];
+
 function parseWorkerMarker(value: unknown): DurableWorkerMarker {
   if (typeof value !== "object" || value === null) {
     throw new Error("worker marker must be an object");
@@ -180,14 +189,49 @@ function parseWorkerMarker(value: unknown): DurableWorkerMarker {
   if (typeof m.title !== "string") {
     throw new Error("worker marker.title must be a string");
   }
-  if (typeof m.status !== "string") {
-    throw new Error("worker marker.status must be a string");
+  // A torn/legacy row must not open as a LIVE marker: an unknown status would
+  // otherwise hold its stream key as unknown-state forever. Reject instead of
+  // guessing a status.
+  if (typeof m.status !== "string" || !WORKER_STATUSES.includes(m.status)) {
+    throw new Error("worker marker.status must be a known worker status");
   }
   if (m.transcriptRef !== null && typeof m.transcriptRef !== "string") {
     throw new Error("worker marker.transcriptRef must be string or null");
   }
   if (m.todoId !== null && typeof m.todoId !== "string") {
     throw new Error("worker marker.todoId must be string or null");
+  }
+  // Optional for rows written before ticket 58; when present it must be a
+  // real count, not NaN/Infinity from a torn write.
+  if (
+    m.redriveAttempts !== undefined &&
+    (typeof m.redriveAttempts !== "number" ||
+      !Number.isFinite(m.redriveAttempts))
+  ) {
+    throw new Error("worker marker.redriveAttempts must be a finite number");
+  }
+  // Optional for rows written before the inbox existed (ticket 113). A
+  // present value must be a complete origin: a half-filled one would silently
+  // lose the re-presentation dedupe key.
+  if (m.external !== undefined) {
+    const external = m.external;
+    if (typeof external !== "object" || external === null) {
+      throw new Error("worker marker.external must be an object");
+    }
+    const e = external as Record<string, unknown>;
+    if (e.kind !== "inbox") {
+      throw new Error("worker marker.external.kind must be 'inbox'");
+    }
+    if (typeof e.jobId !== "string" || e.jobId.length === 0) {
+      throw new Error(
+        "worker marker.external.jobId must be a non-empty string",
+      );
+    }
+    if (typeof e.jobDir !== "string" || e.jobDir.length === 0) {
+      throw new Error(
+        "worker marker.external.jobDir must be a non-empty string",
+      );
+    }
   }
   if (typeof m.startedAtMs !== "number") {
     throw new Error("worker marker.startedAtMs must be a number");
@@ -305,6 +349,25 @@ function parseCompactionBoundary(value: unknown): CompactionBoundary {
       throw new Error(`compaction boundary.${field} must be a number array`);
     }
   }
+  // The interface contract (src/core/durability.ts) is stricter than the
+  // field types: the two lists are index-aligned, never empty, and
+  // `boundarySeq` is the LAST replacement's log seq (the resume cut). A row
+  // that disagrees with itself must fail at open, not guide a resume.
+  const clearedSeqs = b.clearedSeqs as readonly number[];
+  const replacementSeqs = b.replacementSeqs as readonly number[];
+  if (clearedSeqs.length !== replacementSeqs.length) {
+    throw new Error(
+      "compaction boundary.clearedSeqs and replacementSeqs must have equal length",
+    );
+  }
+  if (replacementSeqs.length === 0) {
+    throw new Error("compaction boundary.replacementSeqs must not be empty");
+  }
+  if (b.boundarySeq !== replacementSeqs[replacementSeqs.length - 1]) {
+    throw new Error(
+      "compaction boundary.boundarySeq must be the last replacement seq",
+    );
+  }
   return value as CompactionBoundary;
 }
 
@@ -392,6 +455,25 @@ export function markerDomainSpec(): unknown {
     // first open, unchanged on disk. See {@link DOMAIN_LEGACY_VERSIONS}.
     layout: "per-record",
     compatibleVersions: DOMAIN_LEGACY_VERSIONS,
+    // One torn or foreign row must not brick the WHOLE domain. The installed
+    // `@deepseek-ai/dsh-storage-domain` default rejects the entire `open()`
+    // with `invalid-record` when any stored row fails its table schema, and
+    // the failed open is retried against the SAME row forever — so one bad
+    // row would disable every marker/wake/inbox/compaction table until the
+    // process restarts, permanently.
+    //
+    // `backup-and-skip` is the library policy for exactly this: the
+    // `per-record` backend (which this spec selects) implements
+    // `KvUnit.backupRecord`, so the failing document is moved aside as
+    // `<key>.json.bak.<stamp>`, the cause is logged, and the record is
+    // treated as absent. Absence is the fail-closed answer for every table
+    // here (no live marker, no dispatcher mark, no checkpoint), and the
+    // bytes stay on disk for inspection. A domain that cannot be opened at
+    // all (permission error, version mismatch, backend missing) still
+    // rejects: this policy only covers per-record schema validation.
+    // See `DomainSpec.invalidRecords` in the installed
+    // `dsh-storage-domain/lib/types/spec.d.ts`.
+    invalidRecords: "backup-and-skip",
     tables: {
       [MARKER_TABLE_NAME]: {
         valueSchema: markerValueSchema,
@@ -432,6 +514,16 @@ export interface StorageDomainDurability
 }
 
 /**
+ * Backoff between `storageDomain.open` attempts after a failure. The first
+ * retry is immediate-ish and the delay doubles to {@link DOMAIN_OPEN_RETRY_MAX_MS},
+ * so one transient failure recovers on the next call while a permanently
+ * broken store is probed at most once per window instead of on every marker
+ * operation.
+ */
+const DOMAIN_OPEN_RETRY_BASE_MS = 100;
+const DOMAIN_OPEN_RETRY_MAX_MS = 30_000;
+
+/**
  * Durable marker + inbox checkpoint + compaction boundary + dispatcher
  * identity + worker wake identity store over `ctx.storageDomain` (ADR-0006,
  * ticket 113, ticket 124, ticket 130, ticket 142). Open is lazy: the first
@@ -454,18 +546,91 @@ export function createStorageDomainDurability(
    */
   let openedDomain: DomainLike | null = null;
   let disposed = false;
+  /**
+   * A failed open is NOT cached forever. The cached rejection is dropped and
+   * the next call (after a bounded backoff) opens again, so one transient
+   * store failure does not disable every marker/row operation for the rest of
+   * the process. Until an attempt succeeds, answers stay fail-closed: reads
+   * reject and the synchronous peek still says `"unknown"`.
+   */
+  let openFailures = 0;
+  let retryOpenAtMs = 0;
+  let lastOpenError: unknown = null;
+  /** In-flight operations `dispose` waits for before closing the domain. */
+  let inFlight = 0;
+  let idleWaiters: Array<() => void> = [];
+  let disposePromise: Promise<void> | null = null;
+
+  function finishOperation(): void {
+    inFlight -= 1;
+    if (inFlight > 0) return;
+    const waiters = idleWaiters;
+    idleWaiters = [];
+    for (const resolve of waiters) resolve();
+  }
+
+  async function trackOperation<T>(operation: () => Promise<T>): Promise<T> {
+    inFlight += 1;
+    try {
+      return await operation();
+    } finally {
+      finishOperation();
+    }
+  }
+
+  function whenIdle(): Promise<void> {
+    if (inFlight === 0) return Promise.resolve();
+    return new Promise((resolve) => {
+      idleWaiters.push(resolve);
+    });
+  }
+
+  function openDomain(): Promise<DomainLike> {
+    // `Promise.resolve().then` also turns a synchronous `open` throw into a
+    // rejection, so every caller sees the same failure mode.
+    const attempt = Promise.resolve()
+      .then(() => storageDomain.open(markerDomainSpec()))
+      .then(
+        (domain) => {
+          openedDomain = domain;
+          openFailures = 0;
+          retryOpenAtMs = 0;
+          lastOpenError = null;
+          return domain;
+        },
+        (error: unknown) => {
+          openFailures += 1;
+          const backoffMs = Math.min(
+            DOMAIN_OPEN_RETRY_BASE_MS * 2 ** Math.min(openFailures - 1, 20),
+            DOMAIN_OPEN_RETRY_MAX_MS,
+          );
+          retryOpenAtMs = Date.now() + backoffMs;
+          lastOpenError = error;
+          // Drop the cached rejection: a later call retries instead of
+          // inheriting this failure for the life of the process.
+          domainPromise = null;
+          throw error;
+        },
+      );
+    domainPromise = attempt;
+    return attempt;
+  }
 
   function ensureDomain(): Promise<DomainLike> {
     if (disposed) {
       return Promise.reject(new Error("marker store disposed"));
     }
-    if (domainPromise === null) {
-      domainPromise = storageDomain.open(markerDomainSpec()).then((domain) => {
-        openedDomain = domain;
-        return domain;
-      });
+    if (domainPromise !== null) return domainPromise;
+    if (openFailures > 0 && Date.now() < retryOpenAtMs) {
+      // Backing off after a failure: fail closed rather than hammering the
+      // store or pretending there is no data.
+      return Promise.reject(
+        lastOpenError instanceof Error
+          ? lastOpenError
+          : new Error("marker store open failed; retry is backing off"),
+      );
     }
-    return domainPromise;
+    return openDomain();
   }
 
   function ensureTable(): Promise<KvTableLike<DurableWorkerMarker>> {
@@ -515,22 +680,28 @@ export function createStorageDomainDurability(
 
   const inbox: InboxCheckpointStore = {
     async record(entry: InboxJobCheckpoint): Promise<void> {
-      const table = await ensureInboxTable();
-      await table.put(entry.jobId, entry);
+      return trackOperation(async () => {
+        const table = await ensureInboxTable();
+        await table.put(entry.jobId, entry);
+      });
     },
 
     async get(jobId: string): Promise<InboxJobCheckpoint | undefined> {
-      const table = await ensureInboxTable();
-      return table.get(jobId);
+      return trackOperation(async () => {
+        const table = await ensureInboxTable();
+        return table.get(jobId);
+      });
     },
 
     async list(): Promise<readonly InboxJobCheckpoint[]> {
-      const table = await ensureInboxTable();
-      const out: InboxJobCheckpoint[] = [];
-      for (const [, entry] of table.entries()) {
-        out.push(entry);
-      }
-      return out;
+      return trackOperation(async () => {
+        const table = await ensureInboxTable();
+        const out: InboxJobCheckpoint[] = [];
+        for (const [, entry] of table.entries()) {
+          out.push(entry);
+        }
+        return out;
+      });
     },
   };
 
@@ -538,26 +709,32 @@ export function createStorageDomainDurability(
     inbox,
 
     async writeWorkerMarker(marker: DurableWorkerMarker): Promise<void> {
-      const table = await ensureTable();
-      await table.put(marker.workerId, marker);
+      return trackOperation(async () => {
+        const table = await ensureTable();
+        await table.put(marker.workerId, marker);
+      });
     },
 
     async readWorkerMarkers(
       parentSessionId: string,
     ): Promise<readonly DurableWorkerMarker[]> {
-      const table = await ensureTable();
-      const out: DurableWorkerMarker[] = [];
-      for (const [, marker] of table.entries()) {
-        if (marker.parentSessionId === parentSessionId) {
-          out.push(marker);
+      return trackOperation(async () => {
+        const table = await ensureTable();
+        const out: DurableWorkerMarker[] = [];
+        for (const [, marker] of table.entries()) {
+          if (marker.parentSessionId === parentSessionId) {
+            out.push(marker);
+          }
         }
-      }
-      return out;
+        return out;
+      });
     },
 
     async deleteWorkerMarker(workerId: string): Promise<void> {
-      const table = await ensureTable();
-      await table.delete(workerId);
+      return trackOperation(async () => {
+        const table = await ensureTable();
+        await table.delete(workerId);
+      });
     },
 
     // Ticket 124 / ADR-0029: the compaction boundary in the SAME domain.
@@ -566,41 +743,51 @@ export function createStorageDomainDurability(
     async writeCompactionBoundary(
       boundary: CompactionBoundary,
     ): Promise<void> {
-      const table = await ensureBoundaryTable();
-      await table.put(boundary.sessionId, boundary);
+      return trackOperation(async () => {
+        const table = await ensureBoundaryTable();
+        await table.put(boundary.sessionId, boundary);
+      });
     },
 
     async readCompactionBoundary(
       sessionId: string,
     ): Promise<CompactionBoundary | undefined> {
-      const table = await ensureBoundaryTable();
-      return table.get(sessionId);
+      return trackOperation(async () => {
+        const table = await ensureBoundaryTable();
+        return table.get(sessionId);
+      });
     },
 
     // Ticket 130: durable dispatcher identity, in the SAME domain. Keyed by
     // session id and never deleted — see `DISPATCHER_SESSION_TABLE_NAME`.
     async writeDispatcherMark(mark: DurableDispatcherMark): Promise<void> {
-      const table = await ensureDispatcherTable();
-      await table.put(mark.sessionId, mark);
+      return trackOperation(async () => {
+        const table = await ensureDispatcherTable();
+        await table.put(mark.sessionId, mark);
+      });
     },
 
     async readDispatcherMark(
       sessionId: string,
     ): Promise<DurableDispatcherMark | undefined> {
-      const table = await ensureDispatcherTable();
-      return table.get(sessionId);
+      return trackOperation(async () => {
+        const table = await ensureDispatcherTable();
+        return table.get(sessionId);
+      });
     },
 
     // Ticket 138: the whole mark table, so the adapter can warm its
     // synchronous "durably known target" set once per activation (the peer
     // fence is synchronous and cannot await a store read).
     async listDispatcherMarks(): Promise<readonly DurableDispatcherMark[]> {
-      const table = await ensureDispatcherTable();
-      const out: DurableDispatcherMark[] = [];
-      for (const [, mark] of table.entries()) {
-        out.push(mark);
-      }
-      return out;
+      return trackOperation(async () => {
+        const table = await ensureDispatcherTable();
+        const out: DurableDispatcherMark[] = [];
+        for (const [, mark] of table.entries()) {
+          out.push(mark);
+        }
+        return out;
+      });
     },
 
     // Ticket 140 review fix: the SYNCHRONOUS single-row peek the projection
@@ -637,40 +824,79 @@ export function createStorageDomainDurability(
     // worker id and DELETED once the worker is terminal or abandoned — see
     // `WORKER_SESSION_TABLE_NAME`.
     async writeWorkerSession(session: DurableWorkerSession): Promise<void> {
-      const table = await ensureWorkerSessionTable();
-      await table.put(session.sessionId, session);
+      return trackOperation(async () => {
+        const table = await ensureWorkerSessionTable();
+        await table.put(session.sessionId, session);
+      });
     },
 
     async readWorkerSession(
       workerId: string,
     ): Promise<DurableWorkerSession | undefined> {
-      const table = await ensureWorkerSessionTable();
-      return table.get(workerId);
+      return trackOperation(async () => {
+        const table = await ensureWorkerSessionTable();
+        return table.get(workerId);
+      });
     },
 
     async deleteWorkerSession(workerId: string): Promise<void> {
-      const table = await ensureWorkerSessionTable();
-      await table.delete(workerId);
+      return trackOperation(async () => {
+        const table = await ensureWorkerSessionTable();
+        await table.delete(workerId);
+      });
     },
 
     // Ticket 142: the whole table, read once per activation to warm the
     // adapter's synchronous mirror — same reason as `listDispatcherMarks`.
     async listWorkerSessions(): Promise<readonly DurableWorkerSession[]> {
-      const table = await ensureWorkerSessionTable();
-      const out: DurableWorkerSession[] = [];
-      for (const [, session] of table.entries()) {
-        out.push(session);
-      }
-      return out;
+      return trackOperation(async () => {
+        const table = await ensureWorkerSessionTable();
+        const out: DurableWorkerSession[] = [];
+        for (const [, session] of table.entries()) {
+          out.push(session);
+        }
+        return out;
+      });
     },
 
-    async dispose(): Promise<void> {
-      if (disposed) return;
-      disposed = true;
+    dispose(): Promise<void> {
+      // Idempotent and shared: a second call while teardown is running waits
+      // for the same close, not for a second one.
+      if (disposePromise === null) {
+        disposePromise = closeDomain();
+      }
+      return disposePromise;
+    },
+  };
+
+  async function closeDomain(): Promise<void> {
+    disposed = true;
+    // Fail closed from this point: a synchronous peek during teardown answers
+    // `"unknown"` instead of reading a domain that is about to close.
+    openedDomain = null;
+    try {
+      // Let operations that already acquired the domain finish. Closing under
+      // an in-flight write would turn a durable write into a store error that
+      // the caller may have `void`ed.
+      await whenIdle();
       if (domainPromise !== null) {
         const domain = await domainPromise;
         await domain.close();
       }
-    },
-  };
+    } catch (error) {
+      // The plugin unloads with `void markers.dispose()`, so a teardown
+      // failure must not surface as an unhandled rejection. The store is being
+      // dropped anyway; log and continue.
+      try {
+        console.warn(
+          "[multitask-dispatcher] marker store dispose failed:",
+          error,
+        );
+      } catch {
+        // A broken console must not break unload either.
+      }
+    } finally {
+      domainPromise = null;
+    }
+  }
 }

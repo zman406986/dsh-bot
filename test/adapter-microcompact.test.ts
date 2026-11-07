@@ -473,6 +473,51 @@ describe("microcompact boundary round-trip (ticket 124)", () => {
   });
 });
 
+describe("microcompact boundary read failure (durability)", () => {
+  /**
+   * A failed boundary read is NOT "there is no previous boundary": treating
+   * the two alike would reset `passSeq` to 1 and overwrite the session's only
+   * row. The pass must skip, apply nothing, and keep the counter monotonic
+   * once the read works again.
+   */
+  it("skips instead of overwriting the only row when the read fails", async () => {
+    const session = createFakeSession(baseSurface(8));
+    const rows = new Map<string, CompactionBoundary>();
+    const writes: CompactionBoundary[] = [];
+    let failRead = true;
+    const store = {
+      writeCompactionBoundary(boundary: CompactionBoundary) {
+        writes.push(boundary);
+        rows.set(boundary.sessionId, boundary);
+      },
+      readCompactionBoundary(sessionId: string) {
+        if (failRead) throw new Error("store unavailable");
+        return rows.get(sessionId);
+      },
+    };
+    // A previous pass already recorded passSeq 7.
+    rows.set("session-1", {
+      sessionId: "session-1",
+      passSeq: 7,
+    } as CompactionBoundary);
+    const meter = createFakeMeter(THRESHOLD + 1);
+
+    const failed = await runMicrocompactPass(OPTIONS, meter, store, session);
+    assert.equal(failed.compacted, false);
+    assert.equal(failed.reason, "boundary-read-failed");
+    assert.equal(writes.length, 0, "no row was written");
+    assert.equal(rows.get("session-1")?.passSeq, 7, "the only row survives");
+    assert.equal(session.appendLog.length, 0, "nothing was applied");
+
+    // Once the read recovers, the pass continues from the stored counter.
+    failRead = false;
+    const retried = await runMicrocompactPass(OPTIONS, meter, store, session);
+    assert.equal(retried.compacted, true);
+    assert.equal(retried.boundary?.passSeq, 8);
+    assert.equal(writes.length, 1);
+  });
+});
+
 describe("microcompact listener (ticket 124)", () => {
   /** Minimal bus fake: one listener per event name. */
   function createBus(): MicrocompactContextLike & {

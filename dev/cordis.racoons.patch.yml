@@ -2,11 +2,12 @@
 # Run from the repo root: dsh --profile web --patch dev/cordis.racoons.patch.yml
 # The plugin path resolves relative to this patch, so it uses this checkout's build.
 #
-# Ticket 145: racoons mounts unconditionally while the plugin is enabled, so
-# there is no on/off switch here any more. This overlay only pins the test
-# storage root (keeping test ledgers out of <DSH_HOME>/storages/racoons) and
-# states the enforcement mode explicitly.
+# Ticket 145: racoons is an OPTIONAL test feature, off by default
+# (owner ruling 2026-11-05). This overlay is the manual switch: it turns the
+# mount on, pins the test storage root (keeping test ledgers out of
+# <DSH_HOME>/storages/racoons) and states the enforcement mode explicitly.
 #
+# racoonsEnabled: true → mount racoons for this launch only.
 # racoonsRecordOnly: false → enforcement "apply" (the owner-ruled default).
 # Set it to true to record verdicts without applying any context edit.
 # racoonsContextWindowTokens: 0 → half-window auto prune off.
@@ -17,6 +18,7 @@
       name: '../lib/index.js'
       config:
         enabled: true
+        racoonsEnabled: true
         racoonsRecordOnly: false
         racoonsStorageRoot: '.scratch/racoons-storage'
         racoonsContextWindowTokens: 0

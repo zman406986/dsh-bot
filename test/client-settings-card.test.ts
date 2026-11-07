@@ -84,6 +84,15 @@ function createForm(options?: { noMutate?: boolean }) {
     get state() {
       return state;
     },
+    /**
+     * A LIVE reader: unlike the shipped page form (a plain object), this fake
+     * can read the accepted document at any moment, so read-back tests settle
+     * synchronously. The plain-object shape the host actually hands in is
+     * covered by the regressions for the live "Not saved" defect below.
+     */
+    getSnapshot() {
+      return state;
+    },
   };
   if (options?.noMutate !== true) {
     form.mutate = async (
@@ -369,8 +378,9 @@ describe("settings card — render model (ticket 47)", () => {
         ["wakeCoalesceWindowMs", "number", "", null],
         // Ticket 113: the inbox trio — boolean, string (text input), number.
         ["inboxEnabled", "boolean", "", null],
-        // Ticket 145: the racoons trio replaces the old on/off switch —
-        // boolean (record-only), string (storage root), number (window).
+        // Owner ruling 2026-11-05: racoons is an optional test feature, so
+        // the switch comes first; ticket 145's tuning trio follows it.
+        ["racoonsEnabled", "boolean", "", null],
         ["racoonsRecordOnly", "boolean", "", null],
         ["racoonsStorageRoot", "string", "", null],
         ["racoonsContextWindowTokens", "number", "", null],
@@ -384,7 +394,7 @@ describe("settings card — render model (ticket 47)", () => {
     assert.deepEqual(
       view.fields.map((field) => field.overridden),
       [
-        false, false, false, false, false, false, false, false, false,
+        false, false, false, false, false, false, false, false, false, false,
       ],
     );
   });
@@ -408,6 +418,7 @@ describe("settings card — render model (ticket 47)", () => {
         ["enabled", true],
         ["wakeCoalesceWindowMs", false],
         ["inboxEnabled", false],
+        ["racoonsEnabled", false],
         ["racoonsRecordOnly", false],
         ["racoonsStorageRoot", false],
         ["racoonsContextWindowTokens", false],
@@ -557,10 +568,11 @@ describe("settings card — store: staging, saving, and the honest failure path 
     assert.deepEqual(
       store.getBox().view.fields.map((field) => field.text),
       // Ticket 113: the three inbox fields seed empty from the read-back.
-      // Ticket 145: the three racoons fields likewise.
-      // Ticket 124: the microcompact switch is the ninth field, also empty.
+      // Ticket 145: the three racoons tuning fields likewise.
+      // Owner ruling 2026-11-05: the racoons switch is the tenth field.
+      // Ticket 124: the microcompact switch, also empty.
       // Ticket 174 / ADR-0033 removed the access-timeout field.
-      ["false", "500", "", "", "", "", "", "", ""],
+      ["false", "500", "", "", "", "", "", "", "", ""],
     );
   });
 
@@ -599,13 +611,301 @@ describe("settings card — store: staging, saving, and the honest failure path 
     const { fake, store } = attached();
     store.edit("enabled", "false");
     fake.setDropWrites(true);
-    await store.save();
+    const pending = store.save();
+    // A fresh read-back is one at a CHANGED revision: the Host republishes
+    // the document without applying the write (revision 7 -> 8) while the
+    // save is in flight.
+    fake.publish({
+      status: "ready",
+      value: documentWith(),
+      writable: true,
+      revision: 8,
+    });
+    await pending;
     // `mutate` can resolve `true` while the accepted document still disagrees,
     // so only the read-back can tell whether the value landed: claiming
     // success here would be a lie.
     assert.equal(store.getBox().failed, true);
     assert.equal(store.getBox().dirty, true);
     assert.equal(store.getBox().view.fields[0]?.text, "false");
+  });
+
+  it("an accepted write against a PLAIN-OBJECT form is never 'Not saved' (live defect)", async () => {
+    // The shipped page hands `ConfigPageForm.state` as a plain object captured
+    // at the last render, so immediately after `mutate` resolves it still
+    // carries the PRE-SAVE document. Comparing the write against it reported a
+    // successful save as failed; the form updates only when the page re-renders.
+    const before = {
+      status: "ready" as const,
+      value: documentWith(),
+      writable: true,
+      revision: 2,
+    };
+    const form: ConfigPageFormLike = {
+      state: before,
+      mutate: async () => true,
+    };
+    const store = createSettingsCardStore();
+    store.attach(form);
+    store.edit("enabled", "false");
+    await store.save();
+    assert.equal(
+      store.getBox().failed,
+      false,
+      "the host accepted; the pre-save snapshot is not a read-back",
+    );
+    assert.equal(store.getBox().dirty, false);
+
+    // The page re-renders with the accepted document: a NEW plain object.
+    store.attach({
+      state: {
+        status: "ready",
+        value: documentWith({ enabled: false }),
+        writable: true,
+        revision: 3,
+      },
+      mutate: form.mutate,
+    });
+    assert.equal(store.getBox().failed, false);
+    assert.equal(store.getBox().view.fields[0]?.text, "false");
+  });
+
+  it("defers the read-back to the refreshed plain-object snapshot and reports a dropped write there", async () => {
+    const before = {
+      status: "ready" as const,
+      value: documentWith(),
+      writable: true,
+      revision: 2,
+    };
+    const mutate = async (): Promise<boolean> => true; // accepted, then dropped
+    const form: ConfigPageFormLike = { state: before, mutate };
+    const store = createSettingsCardStore();
+    store.attach(form);
+    store.edit("enabled", "false");
+    await store.save();
+    assert.equal(store.getBox().failed, false, "no verdict from a stale snapshot");
+
+    // The page re-renders with a FRESH object that still carries the old
+    // value: only now can the dropped write be reported, and the draft comes
+    // back for correction.
+    store.attach({
+      state: {
+        status: "ready",
+        value: documentWith(),
+        writable: true,
+        revision: 3,
+      },
+      mutate,
+    });
+    assert.equal(store.getBox().failed, true);
+    assert.equal(store.getBox().dirty, true);
+    assert.equal(store.getBox().view.fields[0]?.text, "false");
+  });
+
+  it("uses a live getSnapshot reader to settle an accepted write immediately", async () => {
+    // A form that can read the document now needs no deferred verification:
+    // the live read either agrees (clean) or proves the write did not land —
+    // but only once the Host revision actually advances.
+    let state: ConfigFormSnapshotLike = {
+      status: "ready",
+      value: documentWith(),
+      writable: true,
+      revision: 4,
+    };
+    const form: ConfigPageFormLike = {
+      get state() {
+        return state;
+      },
+      getSnapshot: () => state,
+      mutate: async () => {
+        // The Host accepts and republishes at the next revision, still
+        // carrying the old value (a dropped write).
+        state = {
+          status: "ready",
+          value: documentWith(),
+          writable: true,
+          revision: 5,
+        };
+        return true;
+      },
+    };
+    const store = createSettingsCardStore();
+    store.attach(form);
+    store.edit("enabled", "false");
+    await store.save();
+    assert.equal(store.getBox().failed, true, "the live read still shows enabled");
+    assert.equal(store.getBox().dirty, true);
+  });
+
+  it("does not treat a republish at the same revision as a landed-write verdict", async () => {
+    // The page can hand a NEW snapshot object without the Host revision
+    // moving. That is the same document: it can neither prove the write
+    // landed nor prove it was dropped.
+    let state: ConfigFormSnapshotLike = {
+      status: "ready",
+      value: documentWith(),
+      writable: true,
+      revision: 5,
+    };
+    const form: ConfigPageFormLike = {
+      get state() {
+        return state;
+      },
+      // A new object each read, same revision: exactly the trap.
+      getSnapshot: () => ({ ...state }),
+      mutate: async () => true, // accepted, but the document does not change
+    };
+    const store = createSettingsCardStore();
+    store.attach(form);
+    store.edit("enabled", "false");
+    await store.save();
+    assert.equal(
+      store.getBox().failed,
+      false,
+      "a same-revision republish is not a landed write",
+    );
+    assert.equal(store.getBox().dirty, false, "no verdict yet: drafts clear");
+    assert.equal(store.getBox().saving, false);
+
+    // The revision finally advances with the OLD value still there: now the
+    // dropped write is reportable, and the parked draft returns.
+    state = {
+      status: "ready",
+      value: documentWith(),
+      writable: true,
+      revision: 6,
+    };
+    store.attach({
+      state,
+      mutate: form.mutate,
+    });
+    assert.equal(store.getBox().failed, true);
+    assert.equal(store.getBox().dirty, true);
+    assert.equal(store.getBox().view.fields[0]?.text, "false");
+  });
+
+  it("a same-form page refresh during a save stays verifiable (not a rebind)", async () => {
+    let state: ConfigFormSnapshotLike = {
+      status: "ready",
+      value: documentWith(),
+      writable: true,
+      revision: 7,
+    };
+    let finishMutate: ((accepted: boolean) => void) | undefined;
+    const form: ConfigPageFormLike = {
+      get state() {
+        return state;
+      },
+      mutate: () =>
+        new Promise<boolean>((resolve) => {
+          finishMutate = resolve;
+        }),
+    };
+    const store = createSettingsCardStore();
+    store.attach(form);
+    store.edit("enabled", "false");
+    const pending = store.save();
+
+    // The page refreshes with the same form object and the republished
+    // document (the write was dropped): the save still owns its verification.
+    state = {
+      status: "ready",
+      value: documentWith(),
+      writable: true,
+      revision: 8,
+    };
+    store.attach(form);
+    finishMutate?.(true);
+    await pending;
+
+    assert.equal(store.getBox().failed, true);
+    assert.equal(store.getBox().dirty, true);
+  });
+
+  it("a save continuation from before detach never touches the reattached form", async () => {
+    let finishMutate: ((accepted: boolean) => void) | undefined;
+    const firstForm: ConfigPageFormLike = {
+      state: { status: "ready", value: documentWith(), writable: true, revision: 1 },
+      mutate: () =>
+        new Promise<boolean>((resolve) => {
+          finishMutate = resolve;
+        }),
+    };
+    const store = createSettingsCardStore();
+    store.attach(firstForm);
+    store.edit("enabled", "false");
+    const pending = store.save();
+    assert.equal(store.getBox().saving, true);
+
+    // The page unmounts mid-save and a NEW form is bound with its own draft.
+    store.detach();
+    const secondForm: ConfigPageFormLike = {
+      state: { status: "ready", value: documentWith(), writable: true, revision: 2 },
+      mutate: async () => true,
+    };
+    store.attach(secondForm);
+    store.edit("wakeCoalesceWindowMs", "750");
+
+    finishMutate?.(true);
+    await pending;
+
+    // The late continuation is stale: it must not clear the new draft, must
+    // not resurrect a failure, and must not leave `saving` stuck.
+    assert.equal(store.getBox().saving, false);
+    assert.equal(store.getBox().failed, false);
+    assert.equal(store.getBox().dirty, true);
+    const timeout = store.getBox().view.fields.find(
+      (field) => field.field === "wakeCoalesceWindowMs",
+    );
+    assert.equal(timeout?.text, "750");
+  });
+
+  it("attach(undefined) clears staged drafts and the failure line; the namespace returns clean", async () => {
+    const { fake, store } = attached();
+    store.edit("enabled", "false");
+    fake.setRefuse(true);
+    await store.save();
+    assert.equal(store.getBox().failed, true);
+    assert.equal(store.getBox().dirty, true);
+
+    // The Host stops serving the namespace: nothing may survive it — a draft
+    // keyed to a document that no longer exists would render as if accepted.
+    store.attach(undefined);
+    assert.equal(store.getBox().dirty, false);
+    assert.equal(store.getBox().failed, false);
+    assert.equal(store.getBox().view.available, false);
+
+    fake.setRefuse(false);
+    store.attach(fake.form);
+    assert.equal(store.getBox().view.available, true);
+    assert.equal(store.getBox().dirty, false);
+    assert.equal(store.getBox().view.fields[0]?.text, "true");
+  });
+
+  it("isolates subscribers: a throwing one neither stops later ones nor escapes", () => {
+    const { store } = attached();
+    let later = 0;
+    store.subscribe(() => {
+      throw new Error("subscriber exploded");
+    });
+    store.subscribe(() => {
+      later += 1;
+    });
+    assert.doesNotThrow(() => store.edit("enabled", "false"));
+    assert.equal(later, 1, "the later subscriber still ran");
+  });
+
+  it("a malformed form.state is an unreadable document, never a thrown read", () => {
+    const form = {
+      get state(): ConfigFormSnapshotLike {
+        throw new Error("state getter exploded");
+      },
+      mutate: async () => true,
+    } as ConfigPageFormLike;
+    const store = createSettingsCardStore();
+    assert.doesNotThrow(() => store.attach(form));
+    assert.equal(store.getBox().view.available, false);
+    assert.doesNotThrow(() => store.edit("enabled", "false"));
   });
 
   it("a throwing mutate fails loudly and keeps the drafts for correction", async () => {

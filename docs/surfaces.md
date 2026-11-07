@@ -52,12 +52,13 @@ proxies are the panel (when mounted) and in-chat narration — the dispatcher
 reconciles the ledger and *speaks* the result (PRD S6). There is no task
 list, no column board, and no per-todo card.
 
-The `todoId` chip rendered muted on a panel row is **linkage metadata**
-(worker ↔ ledger correlation so a settled worker can be matched to its
-entry), never a board item and never a task list. It is truncated, low
-contrast, and has no affordances. Rendered progress is carried by the
-worker rows themselves. This is dormant machinery in the native-dsh posture:
-the panel is retained and unmounted, so nothing renders it today.
+The `todoId` chip is **no longer rendered visibly** on a panel row. The
+linkage is still carried as `data-todo-id` (and on the view model) for
+worker ↔ ledger correlation, never as a board item and never as a task list.
+Visible progress is carried by the row's one human status word and its facts
+line (`elapsed · tool calls · started <time>`). This is dormant machinery in
+the native-dsh posture: the panel is retained and unmounted, so nothing
+renders it today.
 
 Building a board would be *our-invention surface*: the reference has none,
 the PRD requires none, and rendering ledger rows as a board risks reading
@@ -105,17 +106,30 @@ invisible" rule (§6.1) and S1/S5: workers are leaves that never address the
 user, and the dispatcher is the only voice.
 
 Per-tool call rows (`tool.call.toolview`) render **collapsible call
-details**, not a live console. Long values are clamped. There is no
-drill-down from a panel row into a worker's chat — rows are not chats.
+details**, not a live console. There is no drill-down from a panel row into a
+worker's chat — rows are not chats.
 
-A row reads as a **single labelled line**: each field is its own block
-(`Worker` then its id, `Title` then the title, …) with the fields separated by
-a small dot, all wrapping inside the collapsible body. The separation is
-structural — flex block layout, a `gap`, and a real separator element — so no
-field can run into its own label or into the next field (ticket 169 fixed a
-render where they did: the class names existed but no stylesheet ever defined
-them). A `check_workers` row renders its outcome once, then one line per
-worker (`id`, title, verbatim core status, optional activity phrase).
+A row has exactly **three levels** and no field-pair anatomy:
+
+1. **one primary sentence** — what happened, with no field label and no
+   UUID (`Started "Rewrite auth docs"`, `Delivered to you`,
+   `Couldn't steer Rewrite auth docs — that worker has already finished.
+   Nothing was queued.`). Booleans are never printed as `true`/`false`: `ok`
+   selects the sentence, `delivered` becomes a sentence or an honest refusal,
+   `priority:false` and `todo_completed:null` are omitted.
+2. **at most two self-describing facts** separated by ` · ` (`4m 12s`,
+   `7 tool calls`, `todo 7 completed`), with zero/false/duplicate facts
+   omitted.
+3. **a nested `Details` area** (`<details><summary>Details</summary><dl>`) —
+   the only place full ids, stream keys, transcript refs, message ids, raw
+   reason codes and times live. Subjects resolve title first, then kind +
+   short ref (`worker …6132`, `session …93a7`, `todo 7`); old transcripts
+   without the adapter's `display` projection degrade to short refs.
+
+A `check_workers` row renders a summary sentence, then one readable line per
+worker: title first, one localized status word (the raw FSM status stays in
+`data-status`), elapsed/tool-call facts, an optional activity line, and the
+short ref last. The status is never duplicated.
 
 ## No timeline cards
 
@@ -268,7 +282,7 @@ slots carry our content.
 | Session-kind glyph in the sidebar row | `src/client/session-kind.tsx` + the registration in `src/client/index.ts` | **Live** — one additive `sidebar.session.row.leading` entry (order 20, above the stock schedule mark at 10), a dispatcher glyph keyed on the adapter's `sessionKind` projection. Single slot: the rider licenses exactly one registration, and since ticket 177 that ONE entry marks both dispatcher classes, drawing a different portrait per class (`dispatcher` = chief of staff, `dispatcher-team-leader` = summoned team leader). Limits: worker/subagent sessions are hidden by stock dsh and never become rows, so only dispatcher vs normal shows here; the leading cell renders only on idle, non-archived, non-blank rows. 16px cell: glyph only, no text (ADR-0024 rider, 2026-10-18) |
 | Session-kind header chip (a spawned dispatcher's own conversation) | removed — `src/client/session-kind.tsx` + the registration in `src/client/index.ts` | **Withdrawn (2026-10-28)** — the `conversation.session.header.actions` entry (order 30) was removed from the client; the seat it occupied is no longer composed. It existed under the ticket-140 ruling of the same day, which assumed a spawned dispatcher is a subagent child with no sidebar row. ADR-0032 makes a summoned dispatcher a top-level session, so it now has a real sidebar row and the glyph on that row is the one mark, replacing the chip. The WORKER marker in this slot stays **declined** (ticket 123, 2026-10-22) — no seat composes it |
 | Settings card (the Plugins page row) | `src/client/settings-card.tsx` + `src/client/settings-card-store.ts` | **Live** — keyed `plugins.row.config`, the one configuration surface we register |
-| Nine tool call views | `src/client/toolviews.ts` + `src/client/toolview-panel.tsx` + `src/client/toolview-styles.ts` | **Live** — nine keyed `tool.call.toolview` entries: all eight dispatcher tools plus the retained historical `send_peer` key (ticket 152 added the `message_agent`, `await_agent`, and `spawn_dispatcher` rows, so no live dispatcher tool falls back to the generic tool row). Ticket 169 gave the rows their own stylesheet: each field is a flex block with a separator between fields, so label, value and the next field cannot render as one run |
+| Nine tool call views | `src/client/toolviews.ts` + `src/client/toolview-panel.tsx` + `src/client/toolview-styles.ts` | **Live** — nine keyed `tool.call.toolview` entries: all eight dispatcher tools plus the retained historical `send_peer` key. Each row is one primary sentence, at most two ` · `-separated facts, and a nested Details area with full ids; `check_workers` adds one readable line per worker (title, one human status word, facts, activity, short ref). Raw statuses stay in `data-status`; client copy ships EN + ZH through `src/client/status-format.ts` |
 | Locale dictionary (en + zh, identical key sets) | `src/client/overlay.ts` | **Live** — namespace registration, not layout. Since ticket 153 the same `locale.preference` also selects the model-facing copy: dispatcher policy, standing rules, wake/access/peer blocks, the eight tool descriptions, the worker contract, the wake cues and the access-prompt labels all ship an EN and a ZH face (`src/core/policy/prompts.ts`, `src/worker/prompt.ts`, `src/adapter/wake-copy.ts`, `src/adapter/access-prompt.ts`); an absent or unknown preference composes EN |
 | Roster wire contract (snapshot v4) | `src/core/roster-snapshot.ts` | **Retained** — the parse/projection contract stays; no live channel feeds it on 0.2.1 (the settings-document mirror is gone) |
 | Activation command + presence hint | `src/adapter/activation-command.ts` | **Live** — `/dsh-bot` in the stock chat |

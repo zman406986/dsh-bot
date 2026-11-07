@@ -197,4 +197,159 @@ describe("multitask core ↔ DshHost seam", () => {
     }
   });
 
+  /**
+   * Fidelity (live `spawnDispatcher`): the core type makes the parent
+   * mandatory, and the real adapter throws when no parent agent is bound. A
+   * fake that minted an orphan id for the impossible input would let a test
+   * claim a spawn the host can never serve.
+   */
+  it("spawnDispatcher refuses a missing or empty parent instead of minting an orphan id", async () => {
+    const host = new FakeDshHost();
+
+    await assert.rejects(
+      () => host.spawnDispatcher({ title: "Peer", prompt: "Go." } as never),
+      /parentSessionId/,
+    );
+    await assert.rejects(
+      () =>
+        host.spawnDispatcher({
+          parentSessionId: "",
+          title: "Peer",
+          prompt: "Go.",
+        }),
+      /parentSessionId/,
+    );
+    assert.deepEqual(host.dispatcherSpawnCalls, []);
+
+    // The legitimate shape still records exactly one dispatcher spawn, and
+    // never enters the worker-call list.
+    await host.spawnDispatcher({
+      parentSessionId: "session-1",
+      title: "Peer",
+      prompt: "Go.",
+    });
+    assert.equal(host.dispatcherSpawnCalls.length, 1);
+    assert.equal(host.spawnCalls.length, 0);
+  });
+
+  /**
+   * Fidelity (live `interruptWorker`): the adapter resolves the worker's
+   * spawning dispatcher and REJECTS when none is bound — the restart case.
+   * The core has already transitioned the worker to `aborted`, so its
+   * committed-abort catch must absorb that rejection and still report
+   * `{ok:true}`: the stop is the core's state, not the host's answer.
+   */
+  it("interruptWorker rejects with no authority; the core's committed abort still returns ok", async () => {
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host);
+    const stoppedWithoutAuthority = unwrapSpawn(
+      await multitask.spawnWorker({
+        parentSessionId: "session-1",
+        streamKey: "no-authority",
+        title: "Unbound",
+        prompt: "Do it.",
+      }),
+    );
+    const stoppedWithAuthority = unwrapSpawn(
+      await multitask.spawnWorker({
+        parentSessionId: "session-1",
+        streamKey: "authority",
+        title: "Bound",
+        prompt: "Do it.",
+      }),
+    );
+    host.noInterruptAuthority.add(stoppedWithoutAuthority);
+
+    // The direct seam refuses: exactly the live adapter's missing-parent
+    // error, never a silent success.
+    await assert.rejects(
+      () => host.interruptWorker(stoppedWithoutAuthority),
+      /CordisDshHost: no parent agent bound for worker .*the interrupt was not issued/,
+    );
+
+    // The core's committed-abort catch: the abort is already terminal, so
+    // the rejection is logged and the stop still reports success.
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map((arg) => String(arg)).join(" "));
+    };
+    let withoutAuthority: Awaited<ReturnType<typeof multitask.abortWorker>>;
+    let withAuthority: Awaited<ReturnType<typeof multitask.abortWorker>>;
+    try {
+      withoutAuthority = await multitask.abortWorker(stoppedWithoutAuthority);
+      withAuthority = await multitask.abortWorker(stoppedWithAuthority);
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    assert.deepEqual(withoutAuthority, { ok: true });
+    assert.deepEqual(withAuthority, { ok: true });
+    assert.ok(
+      warnings.some(
+        (line) =>
+          line.includes(`interrupt for stopped worker ${stoppedWithoutAuthority} failed`) &&
+          line.includes("no parent agent bound for worker"),
+      ),
+      "the missing authority is logged, not silently dropped",
+    );
+
+    assert.deepEqual(host.interruptCalls, [
+      stoppedWithoutAuthority, // the direct refusal
+      stoppedWithoutAuthority, // the core's caught attempt
+      stoppedWithAuthority,
+    ]);
+    assert.deepEqual(host.interruptAuthorityCalls, [
+      { workerId: stoppedWithoutAuthority, authorityAvailable: false },
+      { workerId: stoppedWithoutAuthority, authorityAvailable: false },
+      { workerId: stoppedWithAuthority, authorityAvailable: true },
+    ]);
+    // The core's stop is terminal either way — the missing authority only
+    // means the host had nothing to interrupt.
+    assert.equal(multitask.getWorker(stoppedWithoutAuthority)?.status, "aborted");
+    assert.equal(multitask.getWorker(stoppedWithAuthority)?.status, "aborted");
+  });
+
+  /**
+   * Fidelity (live `sendMessage`): the adapter throws "no parent agent bound;
+   * cannot send" when it cannot resolve delivery authority. The core must not
+   * read that as a successful steer: the correction stays parked and the next
+   * step boundary retries it.
+   */
+  it("a failing sendMessage leaves the correction parked and retries at the next boundary", async () => {
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host);
+    const workerId = unwrapSpawn(
+      await multitask.spawnWorker({
+        parentSessionId: "session-1",
+        streamKey: "lost-send",
+        title: "Lost delivery",
+        prompt: "Take a step.",
+      }),
+    );
+    multitask.noteTurnStarted(workerId);
+    const refusal = new Error("CordisDshHost: no parent agent bound; cannot send");
+    host.failNextSendMessage(refusal);
+
+    assert.deepEqual(await multitask.steerWorker(workerId, "keep going"), {
+      ok: true,
+    });
+    await host.fireStepBoundary(workerId);
+
+    // The refused send is recorded as an attempt AND a failure. The worker is
+    // still `steering` because `steer-injected` never ran.
+    assert.equal(host.sendMessageCalls.length, 1);
+    assert.equal(host.sendMessageFailures.length, 1);
+    assert.equal(host.sendMessageFailures[0]?.workerId, workerId);
+    assert.equal(multitask.getWorker(workerId)?.status, "steering");
+
+    // Nothing was lost: the correction was peeked, not popped, so the next
+    // boundary delivers the SAME text and only then claims the injection.
+    await host.fireStepBoundary(workerId);
+    assert.equal(host.sendMessageCalls.length, 2);
+    assert.equal(host.sendMessageFailures.length, 1);
+    assert.ok(host.sendMessageCalls[1]?.message.includes("keep going"));
+    assert.equal(multitask.getWorker(workerId)?.status, "running");
+  });
+
 });

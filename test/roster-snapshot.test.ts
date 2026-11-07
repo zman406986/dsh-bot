@@ -37,6 +37,7 @@ import {
   DISPATCHER_START_COMMAND,
   type AdapterContext,
   type AgentLike,
+  type ToolsLike,
 } from "../src/adapter/index.js";
 import { apply as pluginApply } from "../src/plugin.js";
 import { volatileConfig } from "./support/plugin-config.js";
@@ -259,6 +260,10 @@ describe("roster snapshot — deliverables excerpt (ticket 41, schema v3)", () =
     streamKey: "k",
     workerId: "w-1",
     delivered: false,
+    redriveAttempts: 0,
+    disposition: null,
+    dispositionReason: null,
+    external: null,
     createdAtMs: 0,
     updatedAtMs: 0,
   };
@@ -363,7 +368,7 @@ describe("roster snapshot — deliverables excerpt (ticket 41, schema v3)", () =
     delete missing.recentResult;
     assert.equal(parseRosterSnapshot(missing), null, "missing key fails closed");
 
-    const malformed: Array<Record<string, unknown>> = [
+    const malformed: unknown[] = [
       "done",
       42,
       {},
@@ -437,6 +442,10 @@ describe("roster snapshot — parse and staleness (v3 wire contract)", () => {
             streamKey: "k",
             workerId: "w-1",
             delivered: false,
+            redriveAttempts: 0,
+            disposition: null,
+            dispositionReason: null,
+            external: null,
             createdAtMs: 0,
             updatedAtMs: 0,
           },
@@ -704,13 +713,53 @@ function createSettingsAwareCtx() {
   };
 }
 
-function topLevelAgent(id: string): AgentLike {
+interface ScopedToolSurface extends ToolsLike {
+  register(definition: unknown): () => void;
+  get(
+    name: string,
+  ): { execute: (args: unknown, exec?: unknown) => Promise<unknown> } | undefined;
+}
+
+/**
+ * ADR-0019: every live agent loop mints a scoped tool surface. The plugin
+ * refuses the process-global fallback, so the fake agent carries one.
+ */
+function createScopedTools(): ScopedToolSurface {
+  const scoped = new Map<
+    string,
+    { name: string; execute: (args: unknown, exec?: unknown) => Promise<unknown> }
+  >();
+  return {
+    schemas: () => [...scoped.keys()].map((name) => ({ name })),
+    register(definition: unknown) {
+      const tool = definition as {
+        name: string;
+        execute: (args: unknown, exec?: unknown) => Promise<unknown>;
+      };
+      if (scoped.has(tool.name)) {
+        throw new Error(`tool "${tool.name}" is already registered`);
+      }
+      scoped.set(tool.name, tool);
+      return () => {
+        scoped.delete(tool.name);
+      };
+    },
+    get: (name) => scoped.get(name),
+  };
+}
+
+function topLevelAgent(id: string): AgentLike & {
+  readonly scopedTools: ScopedToolSurface;
+} {
+  const scopedTools = createScopedTools();
   return {
     session: {
       id,
       header: { parentSession: null, delegationDepth: 0 },
     },
     followup() {},
+    ctx: { tools: scopedTools },
+    scopedTools,
   };
 }
 
@@ -732,14 +781,15 @@ describe("roster snapshot — no settings-document publish (0.2.1)", () => {
     const ctx = createSettingsAwareCtx();
     pluginApply(ctx, volatileConfig({ enabled: true }));
 
+    const agent = topLevelAgent("s-1");
     const result = ctx.runCommand(
       DISPATCHER_START_COMMAND,
-      topLevelAgent("s-1"),
+      agent,
     ) as { kind: string };
     assert.equal(result.kind, "success");
     await flushActivation();
 
-    const spawn = ctx.tool("spawn_worker");
+    const spawn = agent.scopedTools.get("spawn_worker");
     assert.ok(spawn);
     const spawned = (await spawn.execute(
       { stream_key: "k", title: "Parser worker", prompt: "P" },

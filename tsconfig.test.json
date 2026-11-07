@@ -1,4 +1,29 @@
 {
+  // `typecheck:test` includes every test file (plus the client build script
+  // under `scripts/`) except the six below. Those six are the remaining
+  // pre-existing TEST-SIDE error files from the old 33-entry blanket list;
+  // re-probed on 2026-11-07, every one still has errors when included, so this
+  // is the smallest exclusion set that keeps them out. Delete an entry only
+  // after its errors are fixed (in the test file, never in src/):
+  //
+  //   test/adapter-dispatcher-tools.test.ts  mock AdapterContext lacks `on`; optional tools
+  //   test/client-face-scaffold.test.ts      `Function` vs `() => void`, unknown spreads/casts
+  //   test/client-session-kind.test.ts       no @types/jsdom; React prop typing
+  //   test/client-settings-card.test.ts      config-form mock misses `mutate`; Function
+  //   test/client-toolviews.test.ts          same client-mock class
+  //   test/composition-polish.test.ts        mock CordisContext vs exactOptionalPropertyTypes
+  //
+  // Why the gate can still be red: every OTHER test file is now included, so
+  // errors caused by in-flight src/ edits (the wake-bus callback and
+  // ClientSessions signatures, for example) surface instead of hiding behind
+  // this list. Do not re-add those files here; fix the test or the source.
+  //
+  // `scripts/**/*.ts` is included deliberately: `npm run typecheck` never
+  // covered the client build script, so include it here (this config already
+  // carries the DOM lib and noEmit the builder needs).
+  //
+  // (The client tests need the DOM lib above; `src/client` is excluded only as
+  // a root set — its files are still pulled in through those tests' imports.)
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "lib": ["ES2022", "DOM"],
@@ -6,41 +31,14 @@
     "noEmit": true,
     "rootDir": "."
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts"],
+  "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts", "scripts/**/*.ts"],
   "exclude": [
     "src/client",
-    "test/activation-lifecycle.test.ts",
-    "test/adapter-cordis-dsh-host.test.ts",
     "test/adapter-dispatcher-tools.test.ts",
-    "test/adapter-durable-marker.test.ts",
     "test/client-face-scaffold.test.ts",
     "test/client-session-kind.test.ts",
     "test/client-settings-card.test.ts",
     "test/client-toolviews.test.ts",
-    "test/coexistence.test.ts",
-    "test/composition-polish.test.ts",
-    "test/delivery-obligation.test.ts",
-    "test/dispatcher-resume-reactivation.test.ts",
-    "test/durable-roster.test.ts",
-    "test/e2e-critical-path.test.ts",
-    "test/feature-flag.test.ts",
-    "test/inbox-core.test.ts",
-    "test/inbox-end-to-end.test.ts",
-    "test/multi-dispatcher.test.ts",
-    "test/peer-inbox.test.ts",
-    "test/plugin-microcompact.test.ts",
-    "test/plugin-scaffold.test.ts",
-    "test/policy-peer-roster.test.ts",
-    "test/policy-zh-assets.test.ts",
-    "test/restart-honesty.test.ts",
-    "test/roster-snapshot.test.ts",
-    "test/session-kind-projection.test.ts",
-    "test/settle-records.test.ts",
-    "test/spawn-dispatcher-activation.test.ts",
-    "test/steer-command.test.ts",
-    "test/storage-json-v1-compat.test.ts",
-    "test/todo-reconciler.test.ts",
-    "test/tool-schema-shape.test.ts",
-    "test/worker-wake-on-send.test.ts"
+    "test/composition-polish.test.ts"
   ]
 }

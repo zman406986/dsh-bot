@@ -17,12 +17,55 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { apply } from "../src/plugin.js";
 import { volatileConfig } from "./support/plugin-config.js";
-import {DISPATCHER_START_COMMAND, DISPATCHER_STEER_COMMAND, DISPATCHER_STEER_DESCRIPTION, DISPATCHER_STEER_INPUT_HINT, DISPATCHER_STEER_NOT_ACTIVE, DISPATCHER_STEER_NOT_DISPATCHER, dispatcherSteerNotRunning, dispatcherSteerSuccess, parseSteerInput, type AdapterContext, type AgentLike, type CommandDefinitionLike, type CommandResultLike} from "../src/adapter/index.js";
+import {DISPATCHER_START_COMMAND, DISPATCHER_STEER_COMMAND, DISPATCHER_STEER_COPY_EN, DISPATCHER_STEER_COPY_ZH, DISPATCHER_STEER_DESCRIPTION, DISPATCHER_STEER_INPUT_HINT, DISPATCHER_STEER_NOT_ACTIVE, DISPATCHER_STEER_NOT_DISPATCHER, createDispatcherSteerCommand, dispatcherSteerCopy, dispatcherSteerNotRunning, dispatcherSteerSuccess, parseSteerInput, type AdapterContext, type AgentLike, type CommandDefinitionLike, type CommandResultLike, type ToolsLike} from "../src/adapter/index.js";
+
+interface ScopedToolSurface extends ToolsLike {
+  register(definition: unknown): () => void;
+  get(
+    name: string,
+  ): { execute: (args: unknown, exec?: unknown) => Promise<unknown> } | undefined;
+}
+
+interface ScopedAgent extends AgentLike {
+  readonly ctx: { readonly tools: ScopedToolSurface };
+}
+
+/**
+ * ADR-0019: the live host mints a scoped tool surface per agent. The plugin
+ * refuses the retired process-global fallback, so test agents carry one.
+ */
+function createScopedTools(): ScopedToolSurface {
+  const scoped = new Map<
+    string,
+    { name: string; execute: (args: unknown, exec?: unknown) => Promise<unknown> }
+  >();
+  return {
+    schemas: () => [...scoped.keys()].map((name) => ({ name })),
+    register(definition: unknown) {
+      const tool = definition as {
+        name: string;
+        execute: (args: unknown, exec?: unknown) => Promise<unknown>;
+      };
+      if (scoped.has(tool.name)) {
+        throw new Error(
+          `tool "${tool.name}" is already registered (for a ` +
+            `per-agent variant, register through that agent's ` +
+            `\`agent.ctx\` instead)`,
+        );
+      }
+      scoped.set(tool.name, tool);
+      return () => {
+        scoped.delete(tool.name);
+      };
+    },
+    get: (name) => scoped.get(name),
+  };
+}
 
 function createAgent(
   id: string,
   opts?: { topLevel?: boolean },
-): AgentLike {
+): ScopedAgent {
   const topLevel = opts?.topLevel ?? true;
   return {
     session: {
@@ -33,6 +76,7 @@ function createAgent(
     },
     followup() {},
     inject() {},
+    ctx: { tools: createScopedTools() },
   };
 }
 
@@ -51,6 +95,12 @@ function createFullCtx() {
   const disposers: Array<() => void> = [];
   const sentMessages: SentMessage[] = [];
   let nextChild = 1;
+  /**
+   * ADR-0019: the plugin registers the dispatcher tools on the activated
+   * agent's own scope. These helpers read that surface; there is no global
+   * registry fallback to read.
+   */
+  let scopedAgent: ScopedAgent | null = null;
 
   const fire = (name: string, payload: unknown) => {
     for (const cb of [...(listeners.get(name) ?? [])]) {
@@ -188,9 +238,13 @@ function createFullCtx() {
       }
       return command.handler(invocation as never) as CommandResultLike;
     },
+    /** Remember the agent whose scoped surface this activation serves. */
+    setActiveAgent: (agent: ScopedAgent): void => {
+      scopedAgent = agent;
+    },
     /** Spawn a worker through the real dispatcher tool surface. */
     spawnWorker: async (sessionId: string): Promise<string> => {
-      const spawn = tools.get("spawn_worker");
+      const spawn = scopedAgent?.ctx.tools.get("spawn_worker");
       assert.ok(spawn);
       const value = (await spawn.execute(
         { stream_key: "k", title: "T", prompt: "P" },
@@ -218,7 +272,7 @@ function createFullCtx() {
       workerId: string,
       sessionId: string,
     ): Promise<string> => {
-      const check = tools.get("check_workers");
+      const check = scopedAgent?.ctx.tools.get("check_workers");
       assert.ok(check);
       const value = (await check.execute(
         { worker_id: workerId },
@@ -226,7 +280,9 @@ function createFullCtx() {
       )) as { ok: boolean; rows: Array<{ status: string }> };
       assert.equal(value.ok, true);
       assert.equal(value.rows.length, 1);
-      return value.rows[0].status;
+      const row = value.rows[0];
+      assert.ok(row);
+      return row.status;
     },
     sentMessages,
   };
@@ -235,6 +291,7 @@ function createFullCtx() {
 
 async function activateWithRunningWorker(ctx: ReturnType<typeof createFullCtx>) {
   const agent = createAgent("s-1");
+  ctx.setActiveAgent(agent);
   const activation = await ctx.runCommand({
     commandId: DISPATCHER_START_COMMAND,
     agent,
@@ -367,9 +424,11 @@ describe("steer command — routes into the existing core steer queue", () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
 
     assert.equal(ctx.sentMessages.length, 1);
-    assert.equal(ctx.sentMessages[0].targetId, workerId);
-    assert.match(ctx.sentMessages[0].text, /\[Parent correction\]/);
-    assert.match(ctx.sentMessages[0].text, /focus on the failing test first/);
+    const sent = ctx.sentMessages[0];
+    assert.ok(sent);
+    assert.equal(sent.targetId, workerId);
+    assert.match(sent.text, /\[Parent correction\]/);
+    assert.match(sent.text, /focus on the failing test first/);
     // Delivery completes the steering step: back to running.
     assert.equal(await ctx.workerStatus(workerId, "s-1"), "running");
   });
@@ -415,3 +474,80 @@ describe("steer command — HMR reversal", () => {
 
 // Ticket 91's fail-loud duplicate-registration pin lives in
 // test/plugin-scaffold.test.ts: it is one host rule, pinned once.
+
+describe("steer command — localized copy (EN + ZH)", () => {
+  it("the EN face is the shipped copy, byte-identical", () => {
+    assert.equal(DISPATCHER_STEER_COPY_EN.description, DISPATCHER_STEER_DESCRIPTION);
+    assert.equal(DISPATCHER_STEER_COPY_EN.inputHint, DISPATCHER_STEER_INPUT_HINT);
+    assert.equal(DISPATCHER_STEER_COPY_EN.notActive, DISPATCHER_STEER_NOT_ACTIVE);
+    assert.equal(DISPATCHER_STEER_COPY_EN.notDispatcher, DISPATCHER_STEER_NOT_DISPATCHER);
+    assert.equal(
+      DISPATCHER_STEER_COPY_EN.success("w-1"),
+      dispatcherSteerSuccess("w-1"),
+    );
+    assert.equal(
+      DISPATCHER_STEER_COPY_EN.notRunning("w-1"),
+      dispatcherSteerNotRunning("w-1"),
+    );
+    assert.equal(dispatcherSteerCopy(undefined), DISPATCHER_STEER_COPY_EN);
+    assert.equal(dispatcherSteerCopy("en"), DISPATCHER_STEER_COPY_EN);
+  });
+
+  it("answers a successful steer with ZH copy", async () => {
+    const command = createDispatcherSteerCommand({
+      ctx: {} as AdapterContext,
+      activeSessionIds: () => ["s-1"],
+      steer: async () => ({ ok: true }),
+      language: () => "zh",
+    });
+    const result = await command.handler({
+      agent: { session: { id: "s-1" } },
+      rawInput: "w-1 先处理失败的测试",
+    } as never);
+    assert.deepEqual(result, {
+      kind: "success",
+      text: DISPATCHER_STEER_COPY_ZH.success("w-1"),
+    });
+    assert.equal(DISPATCHER_STEER_COPY_ZH.success("w-1"), "已为 w-1 排队纠偏。");
+  });
+
+  it("answers a refusal with ZH copy and never a raw reason enum", async () => {
+    const command = createDispatcherSteerCommand({
+      ctx: {} as AdapterContext,
+      activeSessionIds: () => ["s-1"],
+      steer: async () => ({
+        ok: false,
+        reason: "unknown-worker",
+        detail: "unknown worker: w-gone",
+      }),
+      language: () => "zh",
+    });
+    const result = await command.handler({
+      agent: { session: { id: "s-1" } },
+      rawInput: "w-gone 继续",
+    } as never);
+    assert.deepEqual(result, {
+      kind: "error",
+      text: DISPATCHER_STEER_COPY_ZH.unknownWorker("w-gone"),
+    });
+    assert.equal(String(result.text).includes("unknown-worker"), false);
+  });
+
+  it("localizes the dormant/not-active faces too", async () => {
+    const dormant = createDispatcherSteerCommand({
+      ctx: {} as AdapterContext,
+      activeSessionIds: () => [],
+      steer: async () => ({ ok: true }),
+      language: () => "zh",
+    });
+    const notActive = await dormant.handler({
+      agent: { session: { id: "s-1" } },
+      rawInput: "w-1 继续",
+    } as never);
+    assert.deepEqual(notActive, {
+      kind: "error",
+      text: DISPATCHER_STEER_COPY_ZH.notActive,
+    });
+    assert.doesNotMatch(DISPATCHER_STEER_COPY_ZH.notActive, /dispatcher is active/i);
+  });
+});

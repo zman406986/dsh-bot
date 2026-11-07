@@ -18,6 +18,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { Config, apply } from "../src/plugin.js";
 import { volatileConfig } from "./support/plugin-config.js";
+import type { MutableRef } from "./support/plugin-config.js";
 
 import { SETTINGS_NAMESPACE } from "../src/adapter/settings-section.js";
 import { DISPATCHER_START_COMMAND } from "../src/adapter/activation-command.js";
@@ -25,12 +26,15 @@ import { DISPATCHER_STEER_COMMAND } from "../src/adapter/steer-command.js";
 import type {
   AdapterContext,
   CommandDefinitionLike,
+  CommandsLike,
 } from "../src/adapter/cordis-dsh-host.js";
 
 function createStubCtx(options?: {
   withTools?: boolean;
 }): AdapterContext & {
   effect: (execute: () => unknown, label?: string) => unknown;
+  /** The stub always provides the command registry; `AdapterContext` has it optional. */
+  commands: CommandsLike;
   disposers: Array<() => void>;
   listeners: Map<string, Array<(payload: never) => void>>;
   registeredTools: Array<{ name: string }>;
@@ -223,9 +227,10 @@ describe("feature flag — enabled path boots dormant (ticket 19)", () => {
     assert.equal(ctx.listeners.has("agent/session-start"), false);
     assert.ok(ctx.listeners.has("agent/status"));
     assert.ok(ctx.listeners.has("subagent/end"));
-    // Command disposers + lifecycle cleanup + the ticket-145 racoons mount
-    // (unconditional inside the enabled path).
-    assert.equal(ctx.disposers.length, 4);
+    // Command disposers + lifecycle cleanup. Owner ruling 2026-11-05: the
+    // ticket-145 racoons mount is NOT registered unless `racoonsEnabled` is
+    // on, so the default product has no fifth disposer.
+    assert.equal(ctx.disposers.length, 3);
   });
 });
 
@@ -237,7 +242,8 @@ describe("feature flag — freeze semantics (ADR-0005)", () => {
 
     // Mid-session flip — forbidden live toggle, even via the host's own
     // volatile commit (the ref value changes; the frozen copy does not).
-    config.enabled.set(false);
+    // `volatileConfig` publishes read-only refs but builds mutable ones.
+    (config.enabled as MutableRef<boolean>).set(false);
 
     // Boot state unchanged (freeze copied the primitive at apply entry):
     // the commands are still registered and the lifecycle still activates
@@ -277,6 +283,7 @@ describe("feature flag — volatile settings form (0.2.1)", () => {
       "inboxRescanIntervalMs",
       "microcompactEnabled",
       "racoonsContextWindowTokens",
+      "racoonsEnabled",
       "racoonsRecordOnly",
       "racoonsStorageRoot",
       "wakeCoalesceWindowMs",
@@ -302,7 +309,8 @@ describe("feature flag — volatile settings form (0.2.1)", () => {
     const config = volatileConfig({ enabled: true });
     apply(ctx, config);
     const before = ctx.registeredCommands.map((c) => c.name);
-    config.enabled.set(false);
+    // The ref the host would commit: mutable at runtime, read-only in the type.
+    (config.enabled as MutableRef<boolean>).set(false);
     assert.deepEqual(ctx.registeredCommands.map((c) => c.name), before);
     assert.ok(!before.some((name) => /stop|disable|cancel|kill/i.test(name)));
   });

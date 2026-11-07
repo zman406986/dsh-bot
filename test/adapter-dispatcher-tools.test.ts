@@ -411,6 +411,86 @@ describe("adapter dispatcher tool registration", () => {
     }
   });
 
+  it("carries a compact display subject (kind/id/title) resolved from the core", async () => {
+    const ctx = createToolsCaptureCtx();
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host);
+    registerDispatcherTools({
+      ctx,
+      multitask,
+      getSessionId: () => "session-1",
+    });
+    const spawn = ctx.registered.find((tool) => tool.name === "spawn_worker");
+    assert.ok(spawn);
+    const args = {
+      stream_key: "s-display",
+      title: "Parser hardening",
+      prompt: "(never projected)",
+    };
+    const value = (await spawn.execute(args)) as {
+      worker_id: string;
+      ack: string;
+    };
+    const meta = spawn.output.presentationMeta?.(args, value) as {
+      ack?: unknown;
+      display?: {
+        subject?: { kind?: string; id?: string; title?: string };
+      };
+    };
+    assert.equal(meta.ack, undefined, "the model-facing ack stays out");
+    assert.deepEqual(meta.display?.subject, {
+      kind: "worker",
+      id: value.worker_id,
+      title: "Parser hardening",
+    });
+    // Losslessly JSON-serializable (the host snapshots presentationMeta).
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(meta)).display.subject,
+      meta.display.subject,
+    );
+    // Never a prompt, report, or transcript string.
+    assert.equal(JSON.stringify(meta).includes("never projected"), false);
+  });
+
+  it("resolves a todo title for deliver_result and a dispatcher kind for peers", async () => {
+    const ctx = createToolsCaptureCtx();
+    const multitask = createMultitask(new FakeDshHost());
+    multitask.createTodo({
+      sessionId: "session-1",
+      id: "todo-7",
+      title: "Summarize RFCs",
+    });
+    registerDispatcherTools({
+      ctx,
+      multitask,
+      getSessionId: () => "session-1",
+      deliverToUser: async () => true,
+    });
+    const deliver = ctx.registered.find((tool) => tool.name === "deliver_result");
+    assert.ok(deliver);
+    const deliverArgs = { text: "done", todo_id: "todo-7" };
+    const deliverValue = await deliver.execute(deliverArgs);
+    const deliverMeta = deliver.output.presentationMeta?.(deliverArgs, deliverValue) as {
+      display?: { subject?: { kind?: string; id?: string; title?: string } };
+    };
+    assert.deepEqual(deliverMeta.display?.subject, {
+      kind: "todo",
+      id: "todo-7",
+      title: "Summarize RFCs",
+    });
+
+    const message = ctx.registered.find((tool) => tool.name === "message_agent");
+    assert.ok(message);
+    const messageArgs = { target: "session-0123456789abcdef", text: "hello" };
+    const messageValue = await message.execute(messageArgs);
+    const messageMeta = message.output.presentationMeta?.(messageArgs, messageValue) as {
+      display?: { subject?: { kind?: string; id?: string; title?: string } };
+    };
+    assert.equal(messageMeta.display?.subject?.kind, "dispatcher");
+    assert.equal(messageMeta.display?.subject?.id, "session-0123456789abcdef");
+    assert.equal(messageMeta.display?.subject?.title, undefined);
+  });
+
   it("passes recentActivity through to check rows (ticket 29)", async () => {
     const ctx = createToolsCaptureCtx();
     const host = new FakeDshHost();

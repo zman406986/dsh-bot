@@ -49,7 +49,6 @@ export interface ShellFeedRowLike {
 export interface ShellFeedSnapshotLike {
   readonly ids?: readonly string[];
   readonly byId?: Readonly<Record<string, ShellFeedRowLike>>;
-  readonly current?: string;
 }
 
 /** The minimal `ctx.sessions` face the binding reads (read face only). */
@@ -82,13 +81,15 @@ export function sessionsFeedInputs(
   return inputs;
 }
 
-/** Hooks the composition can use to ride the host's selection verb. */
+/** Hooks the composition can use to react to an accepted selection. */
 export interface ShellFeedBindingHooks {
   /**
-   * Called AFTER the store accepted a selection, with the same id — the
-   * composition wires this to `ctx.sessions.open(id)` ("selection via
-   * `open(id)` semantics", ticket 79). Never called for unknown ids: the
-   * host's `open` "fails loud" on them, so the guard comes first.
+   * Called AFTER the store accepted a selection, with the same id. 0.2.x has
+   * NO host `open(id)` selection verb: selection is view-owned, and the
+   * composition's conversation feed acquires (retains) the selected session
+   * from the store change this hook follows. The hook therefore carries no
+   * host call by default; it stays as the composition's one post-selection
+   * seam. Never called for unknown ids.
    */
   readonly onOpen?: (sessionId: string) => void;
 }
@@ -116,7 +117,12 @@ export function bindShellSessionsFeed(
   hooks: ShellFeedBindingHooks = {},
 ): ShellFeedBinding {
   const sync = (): void => {
-    const snapshot = sessions.list.getSnapshot();
+    let snapshot: ShellFeedSnapshotLike;
+    try {
+      snapshot = sessions.list.getSnapshot();
+    } catch {
+      return; // unreadable feed: project nothing, remove nothing
+    }
     const ids = snapshot.ids;
     if (!Array.isArray(ids)) return; // malformed: no lies, no wipes
     store.upsertSessions(sessionsFeedInputs(snapshot));
@@ -126,10 +132,13 @@ export function bindShellSessionsFeed(
   };
 
   sync();
-  const disposeFeed =
-    sessions.list.subscribe !== undefined
-      ? sessions.list.subscribe(() => sync())
-      : () => {};
+  // The subscription is optional and its return is only a disposer when it
+  // is callable; a snapshot-only face syncs once and degrades honestly.
+  let disposeFeed: () => void = () => {};
+  if (typeof sessions.list.subscribe === "function") {
+    const unsubscribe = sessions.list.subscribe(() => sync());
+    if (typeof unsubscribe === "function") disposeFeed = unsubscribe;
+  }
 
   return {
     open(sessionId) {

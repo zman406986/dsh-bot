@@ -29,13 +29,14 @@ import {
   DISPATCHER_START_COMMAND,
   DISPATCHER_STEER_COMMAND,
   MARKER_TABLE_NAME,
+  markerDomainSpec,
   RESTART_DEGRADED_NOTICE,
   RESTART_NOTICE_HEADING,
   restartRestoredLine,
-  type AdapterContext,
   type AgentLike,
   type CommandDefinitionLike,
   type CommandResultLike,
+  type ToolsLike,
 } from "../src/adapter/index.js";
 import type { DurableWorkerMarker } from "../src/core/durability.js";
 
@@ -47,6 +48,7 @@ import {
 import {assembleSessionPolicy} from "../src/core/policy/assembler.js";
 import {
   abortedReportBody,
+  emptyReportPlaceholder,
   formatWakeReportBody,
 } from "../src/core/report-clamp.js";
 
@@ -61,11 +63,48 @@ interface TestAgent extends AgentLike {
   readonly injected: unknown[];
   /** Ticket 57: waking deliveries (`followup`) — must not be confused with injects. */
   readonly woken: unknown[];
+  readonly scopedTools: ScopedToolSurface;
+}
+
+interface ScopedToolSurface extends ToolsLike {
+  register(definition: unknown): () => void;
+  get(
+    name: string,
+  ): { execute: (args: unknown, exec?: unknown) => Promise<unknown> } | undefined;
+}
+
+/**
+ * ADR-0019: the live host mints a scoped tool surface per agent. The plugin
+ * refuses the retired process-global fallback, so test agents carry one.
+ */
+function createScopedTools(): ScopedToolSurface {
+  const scoped = new Map<
+    string,
+    { name: string; execute: (args: unknown, exec?: unknown) => Promise<unknown> }
+  >();
+  return {
+    schemas: () => [...scoped.keys()].map((name) => ({ name })),
+    register(definition: unknown) {
+      const tool = definition as {
+        name: string;
+        execute: (args: unknown, exec?: unknown) => Promise<unknown>;
+      };
+      if (scoped.has(tool.name)) {
+        throw new Error(`tool "${tool.name}" is already registered`);
+      }
+      scoped.set(tool.name, tool);
+      return () => {
+        scoped.delete(tool.name);
+      };
+    },
+    get: (name) => scoped.get(name),
+  };
 }
 
 function createAgent(id: string): TestAgent {
   const injected: unknown[] = [];
   const woken: unknown[] = [];
+  const scopedTools = createScopedTools();
   return {
     session: {
       id,
@@ -79,6 +118,8 @@ function createAgent(id: string): TestAgent {
     },
     injected,
     woken,
+    ctx: { tools: scopedTools },
+    scopedTools,
   };
 }
 
@@ -283,7 +324,9 @@ function createRestartCtx() {
     updates,
     settingsProvider,
     commandNames: () => [...commands.keys()],
-    tool: (name: string) => tools.get(name),
+    tool: (name: string, agent?: AgentLike) =>
+      (agent?.ctx?.tools as ScopedToolSurface | undefined)?.get(name) ??
+      tools.get(name),
     /** Park the next marker-table resolution until released (ticket 90). */
     holdNextMarkerTable() {
       let release: () => void = () => {};
@@ -307,7 +350,7 @@ function createRestartCtx() {
       return command.handler(invocation as never) as CommandResultLike;
     },
   };
-  return ctx as unknown as AdapterContext & {
+  return ctx as unknown as Parameters<typeof pluginApply>[0] & {
     fire(name: string, payload: unknown): void;
     readonly updates: unknown[];
     readonly settingsProvider: {
@@ -315,7 +358,10 @@ function createRestartCtx() {
       installSection(owner: unknown, ns: string): void;
     };
     commandNames(): string[];
-    tool(name: string):
+    tool(
+      name: string,
+      agent?: AgentLike,
+    ):
       | { execute: (args: unknown, exec?: unknown) => Promise<unknown> }
       | undefined;
     holdNextMarkerTable(): void;
@@ -331,7 +377,7 @@ async function seedMarkers(
   ctx: ReturnType<typeof createRestartCtx>,
   markers: DurableWorkerMarker[],
 ): Promise<void> {
-  const domain = await ctx.storageDomain.open();
+  const domain = await ctx.storageDomain.open(markerDomainSpec());
   const table = await domain.table(MARKER_TABLE_NAME);
   for (const marker of markers) {
     await table.put(marker.workerId, marker);
@@ -342,7 +388,7 @@ async function seedMarkers(
 async function readMarkers(
   ctx: ReturnType<typeof createRestartCtx>,
 ): Promise<Map<string, DurableWorkerMarker>> {
-  const domain = await ctx.storageDomain.open();
+  const domain = await ctx.storageDomain.open(markerDomainSpec());
   const table = await domain.table(MARKER_TABLE_NAME);
   const entries = table.entries() as Iterable<[string, DurableWorkerMarker]>;
   return new Map([...entries]);
@@ -443,7 +489,7 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
 
     // The rebuild must have landed before the first roster read: the live
     // roster already carries the restored terminal row.
-    const check = ctx.tool(CHECK_WORKERS_TOOL);
+    const check = ctx.tool(CHECK_WORKERS_TOOL, agent);
     assert.ok(check, "the dispatcher tool surface is registered");
     const roster = (await check.execute({})) as {
       ok: boolean;
@@ -514,7 +560,9 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
                 `instead)`,
             );
           }
-          if (name !== undefined) tools.set(name, definition);
+          if (name !== undefined && definition !== undefined) {
+            tools.set(name, definition);
+          }
           return () => {};
         },
       },
@@ -618,7 +666,7 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
     // A roster-affecting transition lands inside the window. A worker spawn is
     // the cheapest real one: its marker write is a LATER table resolution, so
     // it completes while the activation read is still parked.
-    const spawn = ctx.tool(SPAWN_WORKER_TOOL);
+    const spawn = ctx.tool(SPAWN_WORKER_TOOL, agent);
     assert.ok(spawn, "the dispatcher tool surface is registered");
     const spawned = (await spawn.execute({
       stream_key: "k-race",
@@ -632,7 +680,7 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
 
     // The post-rebuild roster carries BOTH the restored rows and the raced
     // transition — the mid-read spawn was never dropped.
-    const check = ctx.tool(CHECK_WORKERS_TOOL);
+    const check = ctx.tool(CHECK_WORKERS_TOOL, agent);
     assert.ok(check);
     const roster = (await check.execute({})) as {
       ok: boolean;
@@ -681,7 +729,7 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
     );
 
     // A roster transition lands while the LIVE chain is still reading.
-    const spawn = ctx.tool(SPAWN_WORKER_TOOL);
+    const spawn = ctx.tool(SPAWN_WORKER_TOOL, agent);
     assert.ok(spawn);
     const spawned = (await spawn.execute({
       stream_key: "k-race",
@@ -701,7 +749,7 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
       1,
       "the persisted D-5 budget was spent once, not twice",
     );
-    const check = ctx.tool(CHECK_WORKERS_TOOL);
+    const check = ctx.tool(CHECK_WORKERS_TOOL, agent);
     assert.ok(check);
     const roster = (await check.execute({})) as {
       ok: boolean;
@@ -793,19 +841,30 @@ describe("restart honesty — policy copy (new, clean-room)", () => {
   });
 });
 
-describe("restart honesty — aborted workers settle with no report (no revival)", () => {
-  it("abortedReportBody is the exact no-report body and wins over any report text", () => {
+describe("restart honesty — aborted workers settle with an honest report (no revival)", () => {
+  it("abortedReportBody is the exact no-report body; real partial findings are kept and labelled", () => {
     assert.equal(
       abortedReportBody(),
       "(Stopped before completion. No report.)",
     );
-    // A report that raced the stop is never shown for an aborted worker.
+    // A report that raced the stop is REAL work product: keep it, but label it
+    // partial so it can never read as a completed deliverable.
+    const partial = formatWakeReportBody(
+      "aborted",
+      "confidential partial work",
+      "child-1",
+    );
+    assert.ok(partial.includes("confidential partial work"));
+    assert.ok(partial.includes("Partial report"));
+    assert.ok(!partial.includes("completed"));
+    // No text — or the completed placeholder a normalized empty settle leaves —
+    // still gets the exact no-report body.
     assert.equal(
-      formatWakeReportBody("aborted", "confidential partial work", "child-1"),
+      formatWakeReportBody("aborted", "", null),
       "(Stopped before completion. No report.)",
     );
     assert.equal(
-      formatWakeReportBody("aborted", "", null),
+      formatWakeReportBody("aborted", emptyReportPlaceholder(), null),
       "(Stopped before completion. No report.)",
     );
   });

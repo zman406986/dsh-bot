@@ -1,16 +1,16 @@
 /**
- * Ticket 24 — per-tool call views (`tool.call.toolview`) for the dispatcher
- * tools (ticket 152 completed the set: all eight plus the retained historical
- * `send_peer` key): keyed registration data, pure payload parsing, locale
- * shape, and apply() wiring over fake client seams (idioms from tickets
- * 20/21).
+ * Per-tool call views (`tool.call.toolview`) for the dispatcher tools —
+ * readable-status anatomy.
  *
  * Offline only (S8): no real Cordis, no browser, no DOM harness. Everything
  * asserted here is pure logic (registration options, payload → view model
- * parsing) or fake-seam registration. Ticket 169 adds one step beyond pure
- * data: the row's *rendered* text, produced by `react-dom/server` static
- * markup (no DOM, no jsdom) so a label/value/field run-on can never come back
- * unnoticed.
+ * parsing) or fake-seam registration, plus static markup produced by
+ * `react-dom/server` (no DOM) so the three-level row — primary sentence,
+ * facts, nested Details — cannot regress unnoticed.
+ *
+ * The owner's reported paste forms are pinned as a negative: `Agent <uuid> /
+ * Delivered as peer / Outcome ok` and `Delivered true / Todo todo-7 /
+ * Outcome ok` can never appear again.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -18,13 +18,94 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { apply } from "../src/client/index.js";
 import type { ClientContext } from "../src/client/context.js";
-import {LOCALE_NAMESPACE, SHELL_OVERLAY_SLOT, localeDictionary} from "../src/client/overlay.js";
-import {TOOLVIEW_FIELD_KEYS, TOOLVIEW_TOOL_NAMES, TOOL_CALL_TOOLVIEW_SLOT, describeToolview, isDispatcherToolName, toolviewRegistration, type ToolviewModel} from "../src/client/toolviews.js";
+import {
+  LOCALE_NAMESPACE,
+  SHELL_OVERLAY_SLOT,
+  localeDictionary,
+} from "../src/client/overlay.js";
+import {
+  TOOLVIEW_DETAIL_KEYS,
+  TOOLVIEW_TOOL_NAMES,
+  TOOL_CALL_TOOLVIEW_SLOT,
+  describeToolview,
+  isDispatcherToolName,
+  refusalCauseKey,
+  toolviewRegistration,
+  type ToolviewFact,
+  type ToolviewModel,
+} from "../src/client/toolviews.js";
 import { createToolviewComponent } from "../src/client/toolview-panel.js";
 import { TOOLVIEW_CLASS, TOOLVIEW_CSS } from "../src/client/toolview-styles.js";
-import {AWAIT_AGENT_TOOL, CHECK_WORKERS_TOOL, DELIVER_RESULT_TOOL, DISPATCHER_TOOL_NAMES, MESSAGE_AGENT_TOOL, SEND_PEER_TOOL, SPAWN_DISPATCHER_TOOL, SPAWN_WORKER_TOOL, STEER_WORKER_TOOL, STOP_WORKER_TOOL} from "../src/core/policy/prompts.js";
+import {
+  AWAIT_AGENT_TOOL,
+  CHECK_WORKERS_TOOL,
+  DELIVER_RESULT_TOOL,
+  DISPATCHER_TOOL_NAMES,
+  MESSAGE_AGENT_TOOL,
+  SEND_PEER_TOOL,
+  SPAWN_DISPATCHER_TOOL,
+  SPAWN_WORKER_TOOL,
+  STEER_WORKER_TOOL,
+  STOP_WORKER_TOOL,
+} from "../src/core/policy/prompts.js";
 import { ROSTER_STATUS_KEYS } from "../src/core/roster-snapshot.js";
 import type { WorkerStatus } from "../src/core/types.js";
+import {
+  formatCount,
+  formatTemplate,
+} from "../src/client/status-format.js";
+
+type DetailView = Extract<ToolviewModel, { kind: "detail" }>;
+
+const EN = localeDictionary.en;
+const t = (key: string): string => EN[key] ?? key;
+
+/** Resolve one fact exactly as the renderer does. */
+function factText(fact: ToolviewFact): string {
+  switch (fact.kind) {
+    case "text":
+      return fact.text;
+    case "copy":
+      return formatTemplate(t(fact.key), fact.values);
+    case "count":
+      return formatCount(t, fact.keyBase, fact.count);
+  }
+}
+
+/** Resolve the primary sentence exactly as the renderer does. */
+function primaryOf(view: DetailView): string {
+  const values: Record<string, string> = { ...view.primaryValues };
+  if (view.causeKey !== null) values["cause"] = t(view.causeKey);
+  if (view.subject === null && view.subjectKey !== null) {
+    values["subject"] = t(view.subjectKey);
+  }
+  return formatTemplate(t(view.primaryKey), values);
+}
+
+function factsOf(view: DetailView): string[] {
+  return view.facts.map(factText);
+}
+
+function detailsOf(view: DetailView): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  for (const detail of view.details) {
+    const list = map.get(detail.labelKey) ?? [];
+    list.push(detail.value);
+    map.set(detail.labelKey, list);
+  }
+  return map;
+}
+
+function detailFirst(view: DetailView, labelKey: string): string | undefined {
+  return detailsOf(view).get(labelKey)?.[0];
+}
+
+/** Assert a view is a detail and return it narrowed. */
+function assertDetail(view: ToolviewModel): DetailView {
+  assert.equal(view.kind, "detail");
+  if (view.kind !== "detail") throw new Error("unreachable");
+  return view;
+}
 
 /** One recorded slot entry in a fake's per-slot cell (ticket 86). */
 interface FakeSlotEntry {
@@ -33,11 +114,6 @@ interface FakeSlotEntry {
   dispose(): void;
 }
 
-/**
- * The shipped SlotCore register rule, shared by this file's fake (ticket 86):
- * cell lookup by slot name, `(priority ?? 0)` default, per-kind collision
- * throw with host wording, ascending insert sort, entry disposer.
- */
 function registerEntry(
   cells: Map<string, FakeSlotEntry[]>,
   owners: FakeSlotEntry[],
@@ -111,35 +187,12 @@ function registerEntry(
   return entry.dispose;
 }
 
-/**
- * Fake the client face (see test/client-face-scaffold.test.ts for the idiom).
- *
- * Ticket 86 (2026-09-19): the slots fake runs the shipped SlotCore register
- * rule — one cell per slot name, `(priority ?? 0)` default, and a throw on a
- * same-(priority ?? 0) collision along the entry's identity axis (key→keyed,
- * id→list, else single) with the host's wording. This is the same rule the
- * ticket-85 fix taught test/client-shell-mount.test.ts; it is what makes a
- * no-priority `root` register (the pre-85 cutover bug) fail offline. Host
- * source: `dsh-web-frontend/dist/assets/index-BKQ_L1z6.js`, minified
- * SlotCore.register (`a = t.priority ?? 0`; per-kind `entries.find(...)`).
- */
 function createClientCtx() {
   const locales = new Map<string, unknown>();
-  const cells = new Map<
-    string,
-    Array<{
-      options: Record<string, unknown>;
-      component: unknown;
-      dispose(): void;
-    }>
-  >();
+  const cells = new Map<string, FakeSlotEntry[]>();
   const injects: Array<{
     parent: string;
-    entries: Array<{
-      options: Record<string, unknown>;
-      component: unknown;
-      dispose(): void;
-    }>;
+    entries: FakeSlotEntry[];
   }> = [];
   const injectControllers: Array<() => void> = [];
   const effectDisposers: Array<() => void> = [];
@@ -155,7 +208,7 @@ function createClientCtx() {
     },
     slots: {
       inject(parent: string, callback: () => unknown) {
-        const record = { parent, entries: [] as typeof injects[number]["entries"] };
+        const record = { parent, entries: [] as FakeSlotEntry[] };
         injects.push(record);
         callback();
         const controller = () => {
@@ -188,7 +241,6 @@ function createClientCtx() {
         };
       },
     },
-    // Test surface.
     locales,
     injects,
     cells,
@@ -210,7 +262,6 @@ function createClientCtx() {
   };
 }
 
-/** Build a realistic spawn_worker success result (shape from src/core/tools.ts). */
 function spawnOkResult(overrides?: Partial<Record<string, unknown>>) {
   return {
     ok: true,
@@ -222,7 +273,6 @@ function spawnOkResult(overrides?: Partial<Record<string, unknown>>) {
   };
 }
 
-/** One realistic check row (shape from src/core/tool-results.ts). */
 function checkRow(overrides?: Partial<Record<string, unknown>>) {
   return {
     worker_id: "w-7f3a",
@@ -238,88 +288,108 @@ function checkRow(overrides?: Partial<Record<string, unknown>>) {
   };
 }
 
-/** Assert a view is a detail and return it narrowed. */
-function assertDetail(view: ToolviewModel): Extract<ToolviewModel, { kind: "detail" }> {
-  assert.equal(view.kind, "detail");
-  if (view.kind !== "detail") throw new Error("unreachable");
-  return view;
-}
-
-/** Field lookup by locale label key. */
-function fieldOf(
-  view: Extract<ToolviewModel, { kind: "detail" }>,
-  labelKey: string,
-): string | undefined {
-  return view.fields.find((field) => field.labelKey === labelKey)?.value;
-}
-
 describe("toolview — keyed registrations claim only our wire tool names", () => {
   it("claims every dispatcher tool plus the retained historical send_peer key", () => {
-    // Ticket 152 closed the deliberate lag: message_agent, await_agent and
-    // spawn_dispatcher each have their own row renderer now, so the claimed
-    // set is the dispatcher surface key for key, and send_peer stays claimed
-    // alone for historical rows (tickets 116-118 registered the new names).
     const expected = [...DISPATCHER_TOOL_NAMES, SEND_PEER_TOOL];
     assert.deepEqual([...TOOLVIEW_TOOL_NAMES], expected);
-    // Every claimed name is either a live dispatcher tool or the retained
-    // historical send_peer key.
     for (const name of TOOLVIEW_TOOL_NAMES) {
       if (name === SEND_PEER_TOOL) continue;
       assert.ok(isDispatcherToolName(name));
     }
   });
-
 });
 
-describe("toolview — spawn_worker payload parsing", () => {
-  it("renders worker id, title, stream, todo, and the ok outcome", () => {
+describe("toolview — spawn_worker", () => {
+  it("leads with Started \"title\", one worker fact, and full ids in details", () => {
     const view = assertDetail(
-      describeToolview("spawn_worker", {
+      describeToolview(SPAWN_WORKER_TOOL, {
         args: {
           stream_key: "t-2",
           title: "Rewrite auth docs",
-          prompt: "Self-contained instruction…",
+          prompt: "(never renders)",
           todo_id: "t-2",
         },
         result: spawnOkResult(),
       }),
     );
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.worker), "w-7f3a");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.title), "Rewrite auth docs");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.stream), "t-2");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.todo), "t-2");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "ok");
-    // No status rows outside check_workers.
+    assert.equal(view.state, "starting");
+    assert.equal(primaryOf(view), 'Started "Rewrite auth docs"');
+    assert.equal(view.subject, "Rewrite auth docs");
+    assert.deepEqual(factsOf(view), ["worker 7f3a", "todo t-2"]);
+    assert.equal(detailFirst(view, TOOLVIEW_DETAIL_KEYS.worker), "w-7f3a");
+    assert.equal(detailFirst(view, TOOLVIEW_DETAIL_KEYS.stream), "t-2");
+    assert.equal(detailFirst(view, TOOLVIEW_DETAIL_KEYS.todo), "t-2");
+    // The ack (which embeds the prompt) never reaches the row.
+    assert.equal(
+      JSON.stringify(view).includes("never renders"),
+      false,
+    );
     assert.equal(view.statusRows.length, 0);
   });
 
-  it("renders the verbatim failure reason and falls title/stream back to args", () => {
+  it("maps a duplicate-stream-key refusal to a human sentence, raw enum in details", () => {
     const view = assertDetail(
-      describeToolview("spawn_worker", {
+      describeToolview(SPAWN_WORKER_TOOL, {
         args: { stream_key: "t-2", title: "Rewrite auth docs", prompt: "…" },
-        result: {
-          ok: false,
-          reason: "duplicate-stream-key",
-          detail: "stream t-2 already has a live worker",
-        },
+        result: { ok: false, reason: "duplicate-stream-key", detail: "…" },
       }),
     );
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "duplicate-stream-key");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.worker), undefined);
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.title), "Rewrite auth docs");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.stream), "t-2");
+    assert.equal(view.state, "failed");
+    assert.equal(
+      primaryOf(view),
+      "Couldn't start \"Rewrite auth docs\" — that stream key is already in use. Nothing was started.",
+    );
+    assert.equal(view.causeKey, "toolview.cause.duplicate-stream-key");
+    assert.equal(
+      detailFirst(view, TOOLVIEW_DETAIL_KEYS.reason),
+      "duplicate-stream-key",
+    );
+    assert.deepEqual(factsOf(view), []);
   });
 
-});
-
-describe("toolview — check_workers payload parsing", () => {
-  it("renders status rows with verbatim core FSM vocabulary labels", () => {
-    const workers: WorkerStatus[] = [...ROSTER_STATUS_KEYS];
+  it("degrades to the worker short ref when no title exists anywhere", () => {
     const view = assertDetail(
-      describeToolview("check_workers", {
+      describeToolview(SPAWN_WORKER_TOOL, {
         args: {},
         result: {
           ok: true,
+          worker_id: "063f41a2-9897-4936-95de-1cd3f2f76132",
+          stream_key: "k",
+        },
+      }),
+    );
+    assert.equal(primaryOf(view), "Started worker …6132");
+    assert.equal(
+      primaryOf(view).startsWith("session-"),
+      false,
+      "never leads with session-",
+    );
+    assert.doesNotMatch(primaryOf(view), /^[0-9a-f]{8}-/i, "never leads with a UUID");
+  });
+
+  it("renders an unsettled call from its arguments without inventing an outcome", () => {
+    const view = assertDetail(
+      describeToolview(SPAWN_WORKER_TOOL, {
+        args: { title: "Rewrite auth docs", stream_key: "t-2" },
+        result: null,
+      }),
+    );
+    assert.equal(view.state, "starting");
+    assert.equal(primaryOf(view), 'Starting "Rewrite auth docs"');
+    assert.equal(view.causeKey, null);
+    assert.deepEqual(factsOf(view), []);
+  });
+});
+
+describe("toolview — check_workers", () => {
+  it("renders a summary line and one readable row per worker", () => {
+    const workers: WorkerStatus[] = [...ROSTER_STATUS_KEYS];
+    const view = assertDetail(
+      describeToolview(CHECK_WORKERS_TOOL, {
+        args: {},
+        result: {
+          ok: true,
+          summary: "…",
           rows: workers.map((status, index) =>
             checkRow({
               worker_id: `w-${index}`,
@@ -327,21 +397,90 @@ describe("toolview — check_workers payload parsing", () => {
               status,
             }),
           ),
-          summary: "…",
         },
       }),
     );
+    assert.equal(view.state, "done");
+    assert.equal(primaryOf(view), `Checked ${workers.length} workers`);
     assert.equal(view.statusRows.length, workers.length);
+    const words = [
+      "starting",
+      "working",
+      "adjusting",
+      "done",
+      "failed",
+      "stopped",
+    ];
     for (const [index, row] of view.statusRows.entries()) {
       assert.equal(row.workerId, `w-${index}`);
       assert.equal(row.title, `Worker ${index}`);
+      // Raw core vocabulary stays available for data-status…
       assert.equal(row.statusLabel, workers[index]);
+      // …while exactly one human word renders.
+      assert.equal(row.statusWordKey, `status.${words[index]}`);
     }
+    // One outcome signal: the summary sentence. There is no Outcome field.
+    assert.equal("outcome" in TOOLVIEW_DETAIL_KEYS, false);
   });
 
-  it("falls a missing row title back to the worker id and skips junk rows", () => {
+  it("orders a row title → status → facts → activity → short ref", () => {
     const view = assertDetail(
-      describeToolview("check_workers", {
+      describeToolview(CHECK_WORKERS_TOOL, {
+        args: {},
+        result: { ok: true, rows: [checkRow()] },
+      }),
+    );
+    const row = view.statusRows[0];
+    assert.ok(row);
+    assert.equal(row.title, "Rewrite auth docs");
+    assert.equal(t(row.statusWordKey ?? ""), "Working");
+    assert.deepEqual(row.facts.map(factText), ["4m 12s", "7 tool calls"]);
+    assert.equal(row.activity, "reading src/auth/session.ts");
+    assert.equal(row.shortRef, "worker 7f3a");
+    assert.equal(
+      detailFirst(view, TOOLVIEW_DETAIL_KEYS.worker),
+      "w-7f3a",
+      "full id lives in details",
+    );
+    assert.equal(detailFirst(view, TOOLVIEW_DETAIL_KEYS.stream), "t-2");
+    assert.equal(detailFirst(view, TOOLVIEW_DETAIL_KEYS.transcript), "sess_abc");
+  });
+
+  it("pluralizes one tool call, omits zero, and says no workers for an empty roster", () => {
+    const one = assertDetail(
+      describeToolview(CHECK_WORKERS_TOOL, {
+        args: {},
+        result: {
+          ok: true,
+          rows: [checkRow({ tool_call_count: 1, elapsed_ms: 1_000 })],
+        },
+      }),
+    );
+    assert.deepEqual(one.statusRows[0]?.facts.map(factText), [
+      "1s",
+      "1 tool call",
+    ]);
+
+    const zero = assertDetail(
+      describeToolview(CHECK_WORKERS_TOOL, {
+        args: {},
+        result: { ok: true, rows: [checkRow({ tool_call_count: 0 })] },
+      }),
+    );
+    assert.deepEqual(zero.statusRows[0]?.facts.map(factText), ["4m 12s"]);
+
+    const empty = assertDetail(
+      describeToolview(CHECK_WORKERS_TOOL, {
+        args: {},
+        result: { ok: true, rows: [] },
+      }),
+    );
+    assert.equal(primaryOf(empty), "No workers on the roster.");
+  });
+
+  it("falls a missing row title back to the short ref and skips junk rows", () => {
+    const view = assertDetail(
+      describeToolview(CHECK_WORKERS_TOOL, {
         args: {},
         result: {
           ok: true,
@@ -354,7 +493,6 @@ describe("toolview — check_workers payload parsing", () => {
             null,
             checkRow({ worker_id: 7 }),
           ],
-          summary: "…",
         },
       }),
     );
@@ -362,15 +500,15 @@ describe("toolview — check_workers payload parsing", () => {
       view.statusRows.map((row) => [row.workerId, row.title]),
       [
         ["w-7f3a", "Parser"],
-        ["w-ok", "w-ok"],
-        ["w-7f3a", "w-7f3a"],
+        ["w-ok", "worker ok"],
+        ["w-7f3a", "worker 7f3a"],
       ],
     );
   });
 
   it("degrades a success result whose rows are not an array", () => {
     assert.deepEqual(
-      describeToolview("check_workers", {
+      describeToolview(CHECK_WORKERS_TOOL, {
         args: {},
         result: { ok: true, rows: "all fine", summary: "…" },
       }),
@@ -378,105 +516,538 @@ describe("toolview — check_workers payload parsing", () => {
     );
   });
 
-  it("renders the unknown-worker refusal without status rows", () => {
+  it("maps the unknown-worker fence without fabricating status rows", () => {
     const view = assertDetail(
-      describeToolview("check_workers", {
+      describeToolview(CHECK_WORKERS_TOOL, {
         args: { worker_id: "w-gone" },
-        result: { ok: false, reason: "unknown-worker", detail: "unknown worker: w-gone" },
+        result: { ok: false, reason: "unknown-worker", detail: "…" },
       }),
     );
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.worker), "w-gone");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "unknown-worker");
+    assert.equal(
+      primaryOf(view),
+      "Couldn't check the roster — no worker with that id in this chat.",
+    );
     assert.equal(view.statusRows.length, 0);
+    assert.equal(
+      detailFirst(view, TOOLVIEW_DETAIL_KEYS.reason),
+      "unknown-worker",
+    );
   });
 });
 
-describe("toolview — check_workers activity rows (ticket 29)", () => {
-  it("renders the row's recent_activity phrase when present", () => {
+describe("toolview — steer_worker", () => {
+  it("leads with the title, keeps the instruction as one fact", () => {
+    const long = `${"focus on the failing test first, ".repeat(12)}then report`;
     const view = assertDetail(
-      describeToolview("check_workers", {
-        args: {},
+      describeToolview(STEER_WORKER_TOOL, {
+        args: { worker_id: "w-7f3a", message: long },
+        result: { ok: true, worker_id: "w-7f3a", title: "Rewrite auth docs" },
+      }),
+    );
+    assert.equal(view.state, "adjusting");
+    assert.equal(primaryOf(view), "Steering Rewrite auth docs");
+    assert.equal(view.facts.length, 1);
+    const instruction = factText(view.facts[0]!);
+    assert.ok(instruction.length <= 161, "compact clamp applies");
+    assert.ok(instruction.endsWith("…"));
+    assert.ok(!instruction.includes("\n"), "whitespace collapsed to one line");
+    assert.equal(detailFirst(view, TOOLVIEW_DETAIL_KEYS.worker), "w-7f3a");
+  });
+
+  it("degrades an old transcript (no display title) to the worker short ref", () => {
+    const view = assertDetail(
+      describeToolview(STEER_WORKER_TOOL, {
+        args: { worker_id: "w-7f3a", message: "focus" },
+        result: { ok: true },
+      }),
+    );
+    assert.equal(primaryOf(view), "Steering worker 7f3a");
+    assert.equal(view.subject, "worker 7f3a");
+  });
+
+  it("maps not-running honestly and adds the dormant fact only when true", () => {
+    const refused = assertDetail(
+      describeToolview(STEER_WORKER_TOOL, {
+        args: { worker_id: "w-7f3a", message: "focus" },
+        result: { ok: false, reason: "not-running", detail: "…" },
+      }),
+    );
+    assert.equal(
+      primaryOf(refused),
+      "Couldn't steer worker 7f3a — that worker has already finished. Nothing was queued.",
+    );
+
+    const dormant = assertDetail(
+      describeToolview(STEER_WORKER_TOOL, {
+        args: { worker_id: "w-dormant", message: "focus" },
+        result: { ok: true, worker_id: "w-dormant", dormant: true },
+      }),
+    );
+    assert.deepEqual(dormant.facts.map(factText), [
+      "focus",
+      "its session is resuming",
+    ]);
+  });
+});
+
+describe("toolview — stop_worker", () => {
+  it("renders the stopped sentence and the mode in details", () => {
+    const view = assertDetail(
+      describeToolview(STOP_WORKER_TOOL, {
+        args: { worker_id: "w-7f3a" },
         result: {
           ok: true,
-          rows: [
-            checkRow({ recent_activity: "bash: npm test" }),
-            checkRow({ worker_id: "w-quiet", recent_activity: null }),
-          ],
+          worker_id: "w-7f3a",
+          title: "Rewrite auth docs",
+          mode: "stopped",
+        },
+      }),
+    );
+    assert.equal(view.state, "stopped");
+    assert.equal(primaryOf(view), "Stopped Rewrite auth docs");
+    assert.equal(detailFirst(view, TOOLVIEW_DETAIL_KEYS.mode), "stopped");
+  });
+
+  it("names the released hold path instead of claiming a stop", () => {
+    const view = assertDetail(
+      describeToolview(STOP_WORKER_TOOL, {
+        args: { worker_id: "w-held" },
+        result: { ok: true, worker_id: "w-held", mode: "released-hold" },
+      }),
+    );
+    assert.equal(primaryOf(view), "Released the stream held by worker held");
+  });
+
+  it("maps already-settled to a human cause", () => {
+    const view = assertDetail(
+      describeToolview(STOP_WORKER_TOOL, {
+        args: { worker_id: "w-7f3a" },
+        result: { ok: false, reason: "already-settled", detail: "…" },
+      }),
+    );
+    assert.equal(
+      primaryOf(view),
+      "Couldn't stop worker 7f3a — that worker has already finished. Nothing changed.",
+    );
+  });
+});
+
+describe("toolview — deliver_result", () => {
+  it("turns delivered:true into a sentence; todo and attachments become facts", () => {
+    const view = assertDetail(
+      describeToolview(DELIVER_RESULT_TOOL, {
+        args: {
+          text: "The migration guide is rewritten.",
+          todo_id: "todo-7",
+          attachment_paths: ["/w/auth.md", "/w/changelog.md"],
+        },
+        result: { ok: true, delivered: true, todo_completed: "todo-7" },
+      }),
+    );
+    assert.equal(view.state, "done");
+    assert.equal(primaryOf(view), "Delivered to you");
+    assert.deepEqual(factsOf(view), ["todo 7 completed", "2 attachments"]);
+    assert.equal(
+      JSON.stringify(view).includes("true"),
+      false,
+      "no boolean ever renders as text",
+    );
+    assert.equal(detailFirst(view, TOOLVIEW_DETAIL_KEYS.todo), "todo-7");
+  });
+
+  it("channel:'reply' records the result instead of claiming it was delivered", () => {
+    // ADR-0009: with no wired send channel the dispatcher's own reply is the
+    // channel, so the user has not read anything yet. `delivered: true` means
+    // the obligation was recorded, never that the text arrived.
+    const view = assertDetail(
+      describeToolview(DELIVER_RESULT_TOOL, {
+        args: { text: "The migration guide is rewritten.", todo_id: "todo-7" },
+        result: {
+          ok: true,
+          delivered: true,
+          channel: "reply",
+          todo_completed: "todo-7",
+          todo_title: "Rewrite auth docs",
+        },
+      }),
+    );
+    assert.equal(view.state, "done");
+    assert.equal(primaryOf(view), "Result recorded — say it in your reply");
+    assert.deepEqual(factsOf(view), ['todo "Rewrite auth docs" marked done']);
+    assert.notEqual(primaryOf(view), "Delivered to you");
+  });
+
+  it("an explicit-send result keeps the delivered copy", () => {
+    const view = assertDetail(
+      describeToolview(DELIVER_RESULT_TOOL, {
+        args: { text: "Done.", todo_id: "todo-7" },
+        result: {
+          ok: true,
+          delivered: true,
+          channel: "send",
+          todo_completed: "todo-7",
+        },
+      }),
+    );
+    assert.equal(primaryOf(view), "Delivered to you");
+    assert.deepEqual(factsOf(view), ["todo 7 completed"]);
+  });
+
+  it("turns delivered:false into an honest refusal and omits todo_completed:null", () => {
+    const view = assertDetail(
+      describeToolview(DELIVER_RESULT_TOOL, {
+        args: { text: "…", todo_id: "todo-7" },
+        result: { ok: false, delivered: false, todo_completed: null },
+      }),
+    );
+    assert.equal(view.state, "failed");
+    assert.equal(
+      primaryOf(view),
+      "Couldn't deliver — the send failed. Nothing reached the user.",
+    );
+    assert.deepEqual(factsOf(view), []);
+    assert.equal(
+      JSON.stringify(view).includes("false"),
+      false,
+      "no boolean ever renders as text",
+    );
+    assert.equal(
+      detailsOf(view).get(TOOLVIEW_DETAIL_KEYS.todo)?.join(","),
+      "todo-7",
+      "the argument todo is still the details truth",
+    );
+  });
+
+  it("maps no-delivery-channel to its own cause", () => {
+    const view = assertDetail(
+      describeToolview(DELIVER_RESULT_TOOL, {
+        args: { text: "…" },
+        result: {
+          ok: false,
+          delivered: false,
+          todo_completed: null,
+          reason: "no-delivery-channel",
+        },
+      }),
+    );
+    assert.equal(
+      primaryOf(view),
+      "Couldn't deliver — this build has no way to send to you. Nothing reached the user.",
+    );
+  });
+});
+
+describe("toolview — send_peer (historical parser)", () => {
+  it("renders the target, the priority fact, and details without the body", () => {
+    const view = assertDetail(
+      describeToolview(SEND_PEER_TOOL, {
+        args: {
+          to_session: "dispatcher-b",
+          text: "(body never renders on the row)",
+          priority: true,
+        },
+        result: {
+          ok: true,
+          message_id: "peer-1",
+          to_session: "dispatcher-b",
+        },
+      }),
+    );
+    assert.equal(primaryOf(view), "Sent to dispatcher b");
+    assert.deepEqual(factsOf(view), ["priority"]);
+    assert.equal(
+      detailFirst(view, TOOLVIEW_DETAIL_KEYS.target),
+      "dispatcher-b",
+    );
+    assert.equal(detailFirst(view, TOOLVIEW_DETAIL_KEYS.message), "peer-1");
+    assert.equal(JSON.stringify(view).includes("body never renders"), false);
+  });
+
+  it("omits priority:false and maps unknown-target to the dispatcher fence", () => {
+    const view = assertDetail(
+      describeToolview(SEND_PEER_TOOL, {
+        args: { to_session: "ghost-session", text: "…", priority: false },
+        result: { ok: false, reason: "unknown-target", detail: "…" },
+      }),
+    );
+    assert.deepEqual(factsOf(view), []);
+    assert.equal(
+      primaryOf(view),
+      "Couldn't send to dispatcher ghost-session — no dispatcher with that id in this chat. Nothing was sent.",
+    );
+    assert.doesNotMatch(primaryOf(view), /another dispatcher/);
+  });
+});
+
+describe("toolview — message_agent", () => {
+  it("renders the target title, the lane fact, and omits priority:false", () => {
+    const view = assertDetail(
+      describeToolview(MESSAGE_AGENT_TOOL, {
+        args: {
+          target: "worker-7",
+          text: "(body never renders on the row)",
+          priority: false,
+        },
+        result: {
+          ok: true,
+          target: "worker-7",
+          delivered_as: "steer",
+          message_id: "msg-1",
+        },
+      }),
+    );
+    assert.equal(primaryOf(view), "Message sent to worker 7");
+    assert.deepEqual(factsOf(view), ["in the worker lane"]);
+    assert.equal(detailFirst(view, TOOLVIEW_DETAIL_KEYS.message), "msg-1");
+    assert.equal(detailFirst(view, TOOLVIEW_DETAIL_KEYS.mode), "steer");
+    assert.equal(JSON.stringify(view).includes("body never renders"), false);
+  });
+
+  it("uses the adapter display title and kind for a dispatcher target", () => {
+    const view = assertDetail(
+      describeToolview(MESSAGE_AGENT_TOOL, {
+        args: { target: "session-d5c7e1f0-1111-2222-3333-4444555593a7" },
+        result: {
+          ok: true,
+          target: "session-d5c7e1f0-1111-2222-3333-4444555593a7",
+          delivered_as: "peer",
+          message_id: "msg-2",
+          display: {
+            subject: {
+              kind: "dispatcher",
+              id: "session-d5c7e1f0-1111-2222-3333-4444555593a7",
+              title: "Auth lead",
+            },
+          },
+        },
+      }),
+    );
+    assert.equal(primaryOf(view), "Message sent to Auth lead");
+    assert.deepEqual(factsOf(view), ["in the peer lane"]);
+    assert.equal(
+      detailFirst(view, TOOLVIEW_DETAIL_KEYS.target),
+      "session-d5c7e1f0-1111-2222-3333-4444555593a7",
+    );
+  });
+
+  it("degrades an old transcript to an agent short ref and maps the fence", () => {
+    const view = assertDetail(
+      describeToolview(MESSAGE_AGENT_TOOL, {
+        args: { target: "ghost", text: "…" },
+        result: { ok: false, reason: "unknown-target", detail: "…" },
+      }),
+    );
+    assert.equal(
+      primaryOf(view),
+      "Couldn't message agent ghost — no agent with that id in this chat. Nothing was sent.",
+    );
+    assert.doesNotMatch(primaryOf(view), /another dispatcher/);
+  });
+
+  it("degrades a wrong-typed target instead of rendering a junk row", () => {
+    assert.equal(
+      describeToolview(MESSAGE_AGENT_TOOL, {
+        args: { target: 42 },
+        result: { ok: "yes", delivered_as: true },
+      }).kind,
+      "degraded",
+    );
+  });
+});
+
+describe("toolview — await_agent", () => {
+  it("is about wait state only: never echoes a result excerpt", () => {
+    const view = assertDetail(
+      describeToolview(AWAIT_AGENT_TOOL, {
+        args: { target: "worker-3", timeout_ms: 30000 },
+        result: {
+          ok: true,
+          status: "settled",
+          target: "worker-3",
+          worker_status: "completed",
+          result: "(this report must never reach the row)",
+          settled_at_ms: 1_700_000_000_000,
+          waited_ms: 1200,
           summary: "…",
         },
       }),
     );
-    assert.equal(view.statusRows.length, 2);
-    assert.equal(view.statusRows[0]?.activity, "bash: npm test");
-    assert.equal(view.statusRows[1]?.activity, null);
-  });
-
-});
-
-describe("toolview — steer_worker payload parsing", () => {
-  it("renders worker id, the clamped steer text, and the outcome", () => {
-    const long = `${"focus on the failing test first, ".repeat(12)}then report`;
-    const view = assertDetail(
-      describeToolview("steer_worker", {
-        args: { worker_id: "w-7f3a", message: long },
-        result: { ok: true, note: "Correction parked for \"Rewrite auth docs\"." },
-      }),
+    assert.equal(view.state, "done");
+    assert.equal(primaryOf(view), "worker 3 finished");
+    assert.deepEqual(factsOf(view), ["waited 1s"]);
+    assert.equal(JSON.stringify(view).includes("this report"), false);
+    assert.equal(
+      detailFirst(view, TOOLVIEW_DETAIL_KEYS.status),
+      "settled",
     );
-    const steer = fieldOf(view, TOOLVIEW_FIELD_KEYS.steer);
-    assert.ok(steer, "steer text rendered");
-    assert.ok(steer.length <= 161, "compact clamp applies");
-    assert.ok(steer.endsWith("…"));
-    assert.ok(!steer.includes("\n"), "whitespace collapsed to one line");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.worker), "w-7f3a");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "ok");
-  });
-
-});
-
-describe("toolview — stop_worker payload parsing", () => {
-  it("renders worker id and the ok outcome", () => {
-    const view = assertDetail(
-      describeToolview("stop_worker", {
-        args: { worker_id: "w-7f3a" },
-        result: { ok: true, note: "Stopped." },
-      }),
+    assert.equal(
+      detailFirst(view, TOOLVIEW_DETAIL_KEYS.mode),
+      "completed",
     );
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.worker), "w-7f3a");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "ok");
+    assert.equal(
+      detailFirst(view, TOOLVIEW_DETAIL_KEYS.settled),
+      "1700000000000",
+    );
   });
 
-});
+  it("maps terminal worker statuses onto done / failed / stopped", () => {
+    const statuses = [
+      ["completed", "done"],
+      ["error", "failed"],
+      ["aborted", "stopped"],
+    ] as const;
+    for (const [workerStatus, state] of statuses) {
+      const view = assertDetail(
+        describeToolview(AWAIT_AGENT_TOOL, {
+          args: { target: "worker-3" },
+          result: {
+            ok: true,
+            status: "settled",
+            target: "worker-3",
+            worker_status: workerStatus,
+            result: "…",
+            waited_ms: 0,
+          },
+        }),
+      );
+      assert.equal(view.state, state, workerStatus);
+    }
+  });
 
-describe("toolview — deliver_result payload parsing", () => {
-  it("renders delivered, todo completion, attachment count, and outcome", () => {
+  it("names the racer and keeps the worker-running fact for a released wait", () => {
     const view = assertDetail(
-      describeToolview("deliver_result", {
-        args: {
-          text: "The migration guide is rewritten.",
-          todo_id: "t-2",
-          attachment_paths: ["/w/auth.md", "/w/changelog.md"],
+      describeToolview(AWAIT_AGENT_TOOL, {
+        args: { target: "worker-3" },
+        result: {
+          ok: true,
+          status: "released",
+          target: "worker-3",
+          reason: "user-message",
+          waited_ms: 500,
         },
-        result: { ok: true, delivered: true, todo_completed: "t-2" },
       }),
     );
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.delivered), "true");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.todo), "t-2");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.attachments), "2");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "ok");
+    assert.equal(view.state, "stopped");
+    assert.equal(primaryOf(view), "Stopped waiting for worker 3");
+    assert.deepEqual(factsOf(view), [
+      "you said something",
+      "the worker keeps running",
+    ]);
   });
 
-  it("renders a failed delivery (no reason field) as the failed outcome", () => {
+  it("renders still-running and gone as their own sentences", () => {
+    const working = assertDetail(
+      describeToolview(AWAIT_AGENT_TOOL, {
+        args: { target: "worker-3" },
+        result: {
+          ok: true,
+          status: "still-running",
+          target: "worker-3",
+          waited_ms: 30000,
+        },
+      }),
+    );
+    assert.equal(working.state, "working");
+    assert.equal(primaryOf(working), "worker 3 is still running");
+
+    const gone = assertDetail(
+      describeToolview(AWAIT_AGENT_TOOL, {
+        args: { target: "worker-3" },
+        result: { ok: true, status: "gone", target: "worker-3", waited_ms: 0 },
+      }),
+    );
+    assert.equal(gone.state, "failed");
+    assert.equal(primaryOf(gone), "No result for worker 3 — it is gone");
+  });
+
+  it("maps not-awaitable to the peer explanation", () => {
     const view = assertDetail(
-      describeToolview("deliver_result", {
-        args: { text: "…", todo_id: "t-2" },
-        result: { ok: false, delivered: false, todo_completed: null },
+      describeToolview(AWAIT_AGENT_TOOL, {
+        args: { target: "dispatcher-b" },
+        result: {
+          ok: false,
+          reason: "not-awaitable",
+          detail: "Dispatchers are peers and cannot be awaited.",
+        },
       }),
     );
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.delivered), "false");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "failed");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.todo), "t-2", "falls back to args todo");
+    assert.equal(
+      primaryOf(view),
+      "Couldn't wait for dispatcher b — a dispatcher is a peer, not a worker.",
+    );
   });
 
+  it("degrades a wrong-typed status instead of rendering a junk row", () => {
+    assert.equal(
+      describeToolview(AWAIT_AGENT_TOOL, {
+        args: { target: 42 },
+        result: { ok: true, status: 7, target: {} },
+      }).kind,
+      "degraded",
+    );
+  });
+});
+
+describe("toolview — spawn_dispatcher", () => {
+  it("leads with Summoned \"title\" and puts the session id in details", () => {
+    const view = assertDetail(
+      describeToolview(SPAWN_DISPATCHER_TOOL, {
+        args: {
+          title: "Own the auth migration",
+          prompt: "(handoff prompt never renders on the row)",
+        },
+        result: {
+          ok: true,
+          dispatcher_id: "sess_child",
+          title: "Own the auth migration",
+        },
+      }),
+    );
+    assert.equal(view.state, "starting");
+    assert.equal(primaryOf(view), 'Summoned "Own the auth migration"');
+    assert.deepEqual(factsOf(view), ["dispatcher sess_child"]);
+    assert.equal(
+      detailFirst(view, TOOLVIEW_DETAIL_KEYS.dispatcher),
+      "sess_child",
+    );
+    assert.equal(JSON.stringify(view).includes("handoff prompt"), false);
+  });
+
+  it("renders the args-only pending call and a host refusal", () => {
+    const before = assertDetail(
+      describeToolview(SPAWN_DISPATCHER_TOOL, {
+        args: { title: "Own the auth migration", prompt: "…" },
+        result: null,
+      }),
+    );
+    assert.equal(primaryOf(before), 'Summoning "Own the auth migration"');
+    assert.equal(before.causeKey, null);
+
+    const refused = assertDetail(
+      describeToolview(SPAWN_DISPATCHER_TOOL, {
+        args: { title: "Too deep", prompt: "…" },
+        result: { ok: false, reason: "host-refused", detail: "maxDepth reached" },
+      }),
+    );
+    assert.equal(
+      primaryOf(refused),
+      "Couldn't summon \"Too deep\" — the host refused to start it. Nothing was started.",
+    );
+    assert.equal(
+      detailFirst(refused, TOOLVIEW_DETAIL_KEYS.reason),
+      "host-refused",
+    );
+  });
+
+  it("degrades a wrong-typed dispatcher id instead of rendering a junk row", () => {
+    assert.equal(
+      describeToolview(SPAWN_DISPATCHER_TOOL, {
+        args: { title: 9 },
+        result: { ok: "yes", dispatcher_id: ["sess"], title: null },
+      }).kind,
+      "degraded",
+    );
+  });
 });
 
 describe("toolview — degraded-but-safe on malformed payloads (never throws)", () => {
@@ -512,462 +1083,98 @@ describe("toolview — degraded-but-safe on malformed payloads (never throws)", 
   }
 });
 
+describe("toolview — refusal cause mapping is total and human", () => {
+  it("maps every reason enum to a dictionary key", () => {
+    const cases: Array<[string, string, string]> = [
+      [SPAWN_WORKER_TOOL, "duplicate-stream-key", "toolview.cause.duplicate-stream-key"],
+      [SPAWN_WORKER_TOOL, "unknown-todo-id", "toolview.cause.unknown-todo-id"],
+      [SPAWN_WORKER_TOOL, "todo-already-linked", "toolview.cause.todo-already-linked"],
+      [CHECK_WORKERS_TOOL, "unknown-worker", "toolview.cause.unknown-worker"],
+      [STEER_WORKER_TOOL, "unknown-worker", "toolview.cause.unknown-worker"],
+      [STEER_WORKER_TOOL, "not-running", "toolview.cause.not-running"],
+      [STOP_WORKER_TOOL, "already-settled", "toolview.cause.already-settled"],
+      [DELIVER_RESULT_TOOL, "unknown-target", "toolview.cause.unknown-todo"],
+      [DELIVER_RESULT_TOOL, "no-delivery-channel", "toolview.cause.no-delivery-channel"],
+      [MESSAGE_AGENT_TOOL, "unknown-target", "toolview.cause.unknown-agent"],
+      [MESSAGE_AGENT_TOOL, "self-target", "toolview.cause.self-target"],
+      [MESSAGE_AGENT_TOOL, "not-running", "toolview.cause.not-running"],
+      [MESSAGE_AGENT_TOOL, "inbox-full", "toolview.cause.inbox-full"],
+      [MESSAGE_AGENT_TOOL, "rate-limited", "toolview.cause.rate-limited"],
+      [MESSAGE_AGENT_TOOL, "invalid-envelope", "toolview.cause.invalid-envelope"],
+      [AWAIT_AGENT_TOOL, "unknown-target", "toolview.cause.unknown-worker"],
+      [AWAIT_AGENT_TOOL, "self-target", "toolview.cause.self-target"],
+      [AWAIT_AGENT_TOOL, "not-awaitable", "toolview.cause.not-awaitable"],
+      [AWAIT_AGENT_TOOL, "too-many-waits", "toolview.cause.too-many-waits"],
+      [AWAIT_AGENT_TOOL, "invalid-timeout", "toolview.cause.invalid-timeout"],
+      [SPAWN_DISPATCHER_TOOL, "invalid-args", "toolview.cause.invalid-args"],
+      [SPAWN_DISPATCHER_TOOL, "host-refused", "toolview.cause.host-refused"],
+      [SEND_PEER_TOOL, "unknown-target", "toolview.cause.unknown-dispatcher"],
+      [SEND_PEER_TOOL, "self-target", "toolview.cause.self-target"],
+      [SEND_PEER_TOOL, "inbox-full", "toolview.cause.inbox-full"],
+      [SEND_PEER_TOOL, "message-id-reuse", "toolview.cause.message-id-reuse"],
+      [SEND_PEER_TOOL, "invalid-envelope", "toolview.cause.invalid-envelope"],
+    ];
+    for (const [tool, reason, key] of cases) {
+      assert.equal(refusalCauseKey(tool, reason), key, `${tool}/${reason}`);
+      assert.equal(typeof EN[key], "string", `missing copy ${key}`);
+      assert.notEqual(EN[key], "", `empty copy ${key}`);
+    }
+    // Unknown enums still get an honest generic phrase, never a raw enum.
+    assert.equal(refusalCauseKey(STEER_WORKER_TOOL, "brand-new"), "toolview.cause.failed");
+    assert.equal(refusalCauseKey(STEER_WORKER_TOOL, null), null);
+  });
+});
+
 describe("toolview — apply() registers one keyed entry per tool via the fake seam", () => {
-  it("registers one keyed toolview entry per claimed wire name; the overlay era is over", () => {
+  it("registers one keyed toolview entry per claimed wire name", () => {
     const ctx = createClientCtx();
     apply(ctx);
-
-    // Three injects: tool.call.toolview (toolviews) + plugins.row.config
-    // (ticket 47's settings page) + the dispatcher session-kind glyph in the
-    // sidebar leading cell (ticket 123). The ticket-140 header chip was
-    // removed 2026-10-28. The `main` page and `root` election are not
-    // composed (stock dsh stays primary). The shell.overlay injects
-    // (capsule, launcher) retired at the ticket-78 cutover.
     assert.equal(ctx.injects.length, 3);
     const overlay = ctx.findInject(SHELL_OVERLAY_SLOT);
     const toolviews = ctx.findInject(TOOL_CALL_TOOLVIEW_SLOT);
     assert.equal(overlay, undefined, "no overlay inject post-cutover");
     assert.ok(toolviews, "toolview inject present");
-
     assert.equal(toolviews.entries.length, TOOLVIEW_TOOL_NAMES.length);
     for (const [index, name] of TOOLVIEW_TOOL_NAMES.entries()) {
       const entry = toolviews.entries[index];
       assert.deepEqual(entry?.options, toolviewRegistration(name));
       assert.equal(typeof entry?.component, "function");
     }
-    // Locale namespace registered once with the merged dictionary.
     assert.ok(ctx.locales.has(LOCALE_NAMESPACE));
   });
-
 });
 
-describe("toolview — send_peer payload parsing (ticket 70)", () => {
-  it("renders the target session, the priority flag, and the acceptance outcome", () => {
-    const view = assertDetail(
-      describeToolview("send_peer", {
-        args: {
-          to_session: "dispatcher-b",
-          text: "(body never renders on the row)",
-          priority: true,
-        },
-        result: {
-          ok: true,
-          message_id: "peer-1",
-          to_session: "dispatcher-b",
-          summary: "Accepted for peer session dispatcher-b (message peer-1).",
-        },
-      }),
-    );
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.peer), "dispatcher-b");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.priority), "true");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "ok");
-    // The message body is never a row field.
-    assert.equal(
-      view.fields.some((field) => field.value.includes("body never renders")),
-      false,
-    );
-  });
+describe("toolview — rendered anatomy (static markup)", () => {
+  function renderToolview(toolName: string, props: unknown): string {
+    const Component = createToolviewComponent(toolName, t);
+    return renderToStaticMarkup(createElement(Component, props));
+  }
 
-  it("renders a refused send as the verbatim reason outcome", () => {
-    const view = assertDetail(
-      describeToolview("send_peer", {
-        args: { to_session: "ghost-session", text: "…" },
-        result: {
-          ok: false,
-          reason: "unknown-target",
-          detail: "No live dispatcher session \"ghost-session\".",
-        },
-      }),
-    );
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.peer), "ghost-session");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "unknown-target");
-    // No priority arg: the field is omitted entirely (honest absence).
-    assert.equal(
-      view.fields.some((field) => field.labelKey === TOOLVIEW_FIELD_KEYS.priority),
-      false,
-    );
-  });
+  /** The row's visible text WITHOUT the nested Details area. */
+  function visibleText(markup: string): string {
+    return markup
+      .replace(/<style>[\s\S]*?<\/style>/g, "")
+      .replace(/<details\b[\s\S]*?<\/details>/g, "")
+      .replace(/<\/?(?:div|ul|li|span)\b[^>]*>/g, " ")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/&quot;/g, '"')
+      .replace(/&#x27;/g, "'")
+      .replace(/&amp;/g, "&")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
 
-});
+  function detailsText(markup: string): string {
+    return (markup.match(/<details\b[\s\S]*?<\/details>/g) ?? [])
+      .join(" ")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/&quot;/g, '"')
+      .replace(/&#x27;/g, "'")
+      .replace(/&amp;/g, "&")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
 
-describe("toolview — message_agent payload parsing (ticket 152)", () => {
-  it("renders the target, the acceptance lane, priority, and the ok outcome", () => {
-    const view = assertDetail(
-      describeToolview(MESSAGE_AGENT_TOOL, {
-        args: {
-          target: "worker-7",
-          text: "(body never renders on the row)",
-          priority: false,
-        },
-        result: {
-          ok: true,
-          target: "worker-7",
-          delivered_as: "steer",
-          message_id: "msg-1",
-          note: "Message parked.",
-        },
-      }),
-    );
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.agent), "worker-7");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.deliveredAs), "steer");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.priority), "false");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "ok");
-    // The message body is never a row field.
-    assert.equal(
-      view.fields.some((field) => field.value.includes("body never renders")),
-      false,
-    );
-  });
-
-  it("renders a refused send with its reason and no lane field", () => {
-    const view = assertDetail(
-      describeToolview(MESSAGE_AGENT_TOOL, {
-        args: { target: "ghost", text: "…" },
-        result: {
-          ok: false,
-          reason: "unknown-target",
-          detail: "No agent \"ghost\".",
-        },
-      }),
-    );
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.agent), "ghost");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "unknown-target");
-    assert.equal(
-      view.fields.some(
-        (field) => field.labelKey === TOOLVIEW_FIELD_KEYS.deliveredAs,
-      ),
-      false,
-    );
-  });
-
-  it("degrades a wrong-typed target instead of rendering a junk row", () => {
-    assert.equal(
-      describeToolview(MESSAGE_AGENT_TOOL, {
-        args: { target: 42 },
-        result: { ok: "yes", delivered_as: true },
-      }).kind,
-      "degraded",
-    );
-  });
-});
-
-describe("toolview — await_agent payload parsing (ticket 152)", () => {
-  it("renders the worker and the settled status with its terminal outcome", () => {
-    const view = assertDetail(
-      describeToolview(AWAIT_AGENT_TOOL, {
-        args: { target: "worker-3", timeout_ms: 30000 },
-        result: {
-          ok: true,
-          status: "settled",
-          target: "worker-3",
-          worker_status: "completed",
-          result: "Done.",
-          settled_at_ms: 1_700_000_000_000,
-          waited_ms: 1200,
-          summary: "Worker \"worker-3\" settled: completed.",
-        },
-      }),
-    );
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.worker), "worker-3");
-    assert.equal(
-      fieldOf(view, TOOLVIEW_FIELD_KEYS.status),
-      "settled · completed",
-    );
-    // A timeout is a normal outcome, not a failure: no Outcome field.
-    assert.equal(
-      view.fields.some(
-        (field) => field.labelKey === TOOLVIEW_FIELD_KEYS.outcome,
-      ),
-      false,
-    );
-  });
-
-  it("names the racer for a released wait and the reason for a refusal", () => {
-    const released = assertDetail(
-      describeToolview(AWAIT_AGENT_TOOL, {
-        args: { target: "worker-3" },
-        result: {
-          ok: true,
-          status: "released",
-          target: "worker-3",
-          reason: "user-message",
-          waited_ms: 500,
-          summary: "The wait was released.",
-        },
-      }),
-    );
-    assert.equal(
-      fieldOf(released, TOOLVIEW_FIELD_KEYS.status),
-      "released · user-message",
-    );
-
-    const refused = assertDetail(
-      describeToolview(AWAIT_AGENT_TOOL, {
-        args: { target: "dispatcher-b" },
-        result: {
-          ok: false,
-          reason: "not-awaitable",
-          detail: "Dispatchers are peers and cannot be awaited.",
-        },
-      }),
-    );
-    assert.equal(fieldOf(refused, TOOLVIEW_FIELD_KEYS.worker), "dispatcher-b");
-    assert.equal(
-      fieldOf(refused, TOOLVIEW_FIELD_KEYS.outcome),
-      "not-awaitable",
-    );
-  });
-
-  it("degrades a wrong-typed status instead of rendering a junk row", () => {
-    assert.equal(
-      describeToolview(AWAIT_AGENT_TOOL, {
-        args: { target: 42 },
-        result: { ok: true, status: 7, target: {} },
-      }).kind,
-      "degraded",
-    );
-  });
-});
-
-describe("toolview — spawn_dispatcher payload parsing (ticket 152)", () => {
-  it("renders the child session id, the title, and the ok outcome", () => {
-    const view = assertDetail(
-      describeToolview(SPAWN_DISPATCHER_TOOL, {
-        args: {
-          title: "Own the auth migration",
-          prompt: "(handoff prompt never renders on the row)",
-        },
-        result: {
-          ok: true,
-          dispatcher_id: "sess_child",
-          title: "Own the auth migration",
-          note: "Summoned as a peer dispatcher.",
-        },
-      }),
-    );
-    assert.equal(
-      fieldOf(view, TOOLVIEW_FIELD_KEYS.dispatcher),
-      "sess_child",
-    );
-    assert.equal(
-      fieldOf(view, TOOLVIEW_FIELD_KEYS.title),
-      "Own the auth migration",
-    );
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "ok");
-    // The handoff prompt is never a row field.
-    assert.equal(
-      view.fields.some((field) => field.value.includes("handoff prompt")),
-      false,
-    );
-  });
-
-  it("falls the title back to the args and renders a host refusal verbatim", () => {
-    const before = assertDetail(
-      describeToolview(SPAWN_DISPATCHER_TOOL, {
-        args: { title: "Own the auth migration", prompt: "…" },
-        result: null,
-      }),
-    );
-    assert.equal(fieldOf(before, TOOLVIEW_FIELD_KEYS.title), "Own the auth migration");
-    assert.equal(
-      before.fields.some(
-        (field) => field.labelKey === TOOLVIEW_FIELD_KEYS.outcome,
-      ),
-      false,
-    );
-
-    const refused = assertDetail(
-      describeToolview(SPAWN_DISPATCHER_TOOL, {
-        args: { title: "Too deep", prompt: "…" },
-        result: { ok: false, reason: "host-refused", detail: "maxDepth reached" },
-      }),
-    );
-    assert.equal(fieldOf(refused, TOOLVIEW_FIELD_KEYS.outcome), "host-refused");
-    assert.equal(
-      refused.fields.some(
-        (field) => field.labelKey === TOOLVIEW_FIELD_KEYS.dispatcher,
-      ),
-      false,
-    );
-  });
-
-  it("degrades a wrong-typed dispatcher id instead of rendering a junk row", () => {
-    assert.equal(
-      describeToolview(SPAWN_DISPATCHER_TOOL, {
-        args: { title: 9 },
-        result: { ok: "yes", dispatcher_id: ["sess"], title: null },
-      }).kind,
-      "degraded",
-    );
-  });
-});
-
-/**
- * The shipped reader face (`dsh-util-values/.../partial-json.d.ts:24-123`),
- * faked over a plain field map. `keys()` lists what has arrived so far and the
- * readers answer `undefined` for absent fields, exactly like the real view.
- */
-function fakeArgs(fields: Record<string, unknown>): {
-  keys(): readonly string[];
-  complete(key: string): boolean;
-  text(key: string): string | undefined;
-  value(key: string): unknown;
-} {
-  return {
-    keys: () => Object.keys(fields),
-    complete: (key) => key in fields,
-    text: (key) => {
-      const value = fields[key];
-      return typeof value === "string" ? value : undefined;
-    },
-    value: (key) => {
-      const value = fields[key];
-      return typeof value === "string" ? undefined : value;
-    },
-  };
-}
-
-describe("toolview — shipped slot props (phase/block) adapt to the parsers", () => {
-  it("reads the lazy args view and the result content off a settled call", () => {
-    // Exactly what the shipped composition spreads: `phase` + `block` only
-    // (`dsh-client-ui-tool/lib/client.js:1936-1947`); no `args`, no `result`.
-    const view = assertDetail(
-      describeToolview(SPAWN_WORKER_TOOL, {
-        phase: "result",
-        block: {
-          kind: "tool-result",
-          callId: "c-1",
-          name: "spawn_worker",
-          args: fakeArgs({ stream_key: "t-2", title: "Rewrite auth docs", todo_id: "t-2" }),
-          call: {
-            name: "spawn_worker",
-            argsRaw: JSON.stringify({ stream_key: "t-2", title: "Rewrite auth docs" }),
-          },
-          content: [{ type: "text", text: JSON.stringify(spawnOkResult()) }],
-          isError: false,
-        },
-      }),
-    );
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.worker), "w-7f3a");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.title), "Rewrite auth docs");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.todo), "t-2");
-    assert.equal(fieldOf(view, TOOLVIEW_FIELD_KEYS.outcome), "ok");
-  });
-
-  it("takes the structured result from meta, and reports an error without one", () => {
-    const withMeta = assertDetail(
-      describeToolview(SPAWN_WORKER_TOOL, {
-        phase: "result",
-        block: {
-          kind: "tool-result",
-          callId: "c-5",
-          name: "spawn_worker",
-          args: fakeArgs({ stream_key: "t-2", title: "Rewrite auth docs" }),
-          call: null,
-          content: [{ type: "text", text: 'Started "Rewrite auth docs".' }],
-          isError: false,
-          meta: spawnOkResult(),
-        },
-      }),
-    );
-    assert.equal(fieldOf(withMeta, TOOLVIEW_FIELD_KEYS.worker), "w-7f3a");
-    assert.equal(fieldOf(withMeta, TOOLVIEW_FIELD_KEYS.outcome), "ok");
-
-    const failed = assertDetail(
-      describeToolview(SPAWN_WORKER_TOOL, {
-        phase: "result",
-        block: {
-          kind: "tool-result",
-          callId: "c-6",
-          name: "spawn_worker",
-          args: fakeArgs({ title: "Rewrite auth docs" }),
-          call: null,
-          content: [{ type: "text", text: "Error: denied" }],
-          isError: true,
-          error: { name: "ToolError", code: "denied" },
-        },
-      }),
-    );
-    assert.equal(fieldOf(failed, TOOLVIEW_FIELD_KEYS.outcome), "denied");
-    assert.equal(fieldOf(failed, TOOLVIEW_FIELD_KEYS.title), "Rewrite auth docs");
-  });
-
-  it("degrades a result phase that carries nothing readable, without throwing", () => {
-    let view: ToolviewModel | undefined;
-    assert.doesNotThrow(() => {
-      view = describeToolview(SPAWN_WORKER_TOOL, {
-        phase: "result",
-        block: {
-          kind: "tool-result",
-          callId: "c-8",
-          name: "spawn_worker",
-          args: fakeArgs({}),
-          call: null,
-          content: [{ type: "image" }],
-          isError: false,
-        },
-      });
-    });
-    assert.equal(view?.kind, "degraded");
-  });
-});
-
-//#region ticket 169 — the rendered row keeps label, value and field apart
-
-/**
- * The owner's reported defect (ticket 169): the row rendered every field as
- * bare inline spans, so `Worker`, the id, `Title` and the title ran together
- * into one unbroken string. These pins read the *rendered* markup, not the
- * view model — the model was already correct, which is why the ticket's
- * unit-level tests passed while the live page was unreadable.
- */
-
-/** The translate seat the shipped kit binds (locale namespace dictionary). */
-const t = (key: string): string => localeDictionary.en[key] ?? key;
-
-/** Render one toolview component to static markup (no DOM, no jsdom). */
-function renderToolview(toolName: string, props: unknown): string {
-  const Component = createToolviewComponent(toolName, t);
-  return renderToStaticMarkup(createElement(Component, props));
-}
-
-/**
- * The row's text as it actually reaches the eye: drop the row's own style
- * block, turn block-element boundaries into line breaks the way `innerText`
- * does, then fold whitespace. Inline elements (the label and value spans)
- * deliberately get NO boundary — that is the point: if the row ever fuses a
- * value and the next label inside inline boxes, this helper answers
- * `Worker…Title…` and the run-on assertion fails.
- */
-function renderedLine(markup: string): string {
-  return markup
-    .replace(/<style>[\s\S]*?<\/style>/g, "")
-    .replace(/<\/?(?:div|ul|li|style)\b[^>]*>/g, "\n")
-    .replace(/<[^>]*>/g, "")
-    .replace(/[ \t]+/g, " ")
-    .replace(/ *\n+ */g, "\n")
-    .trim()
-    .replace(/\n+/g, " → ");
-}
-
-/**
- * Every field's label and value as separate rendered text nodes, scraped from
- * the markup in document order: `[["Worker", "w-1"], ["Title", "…"]]`. This is
- * the structural claim — a label and its value must be two elements, not one
- * fused string.
- */
-function renderedPairs(markup: string): string[][] {
-  const scrape = (attribute: string): string[] =>
-    [...markup.matchAll(new RegExp(`data-${attribute}="[^"]*"[^>]*>([^<]*)<`, "g"))].map(
-      (match) => match[1]!.trim(),
-    );
-  const labels = scrape("field-label");
-  const values = scrape("field-value");
-  assert.equal(labels.length, values.length, "a field lost its label or value");
-  return labels.map((label, index) => [label, values[index]!]);
-}
-
-describe("toolview — the rendered row separates label, value and fields (ticket 169)", () => {
   const spawnCall = {
     phase: "result",
     block: {
@@ -987,283 +1194,204 @@ describe("toolview — the rendered row separates label, value and fields (ticke
     },
   };
 
-  it("renderer imports the row stylesheet it constructs class names for", () => {
-    // The defect's root cause: the renderer built `__field*` class names but
-    // no stylesheet anywhere defined them, so every span stayed inline. The
-    // stylesheet must be non-empty and must actually style the field row.
-    assert.ok(TOOLVIEW_CSS.trim().length > 0, "row stylesheet is empty");
-    assert.match(TOOLVIEW_CSS, new RegExp(`\\.${TOOLVIEW_CLASS}__field\\{[^}]*display:flex`));
-    assert.match(TOOLVIEW_CSS, new RegExp(`\\.${TOOLVIEW_CLASS}__field\\{[^}]*gap:`));
-  });
-
-  it("the stylesheet ships inside the rendered component, not just in the module", () => {
-    // A stylesheet the component never renders is the same defect again: the
-    // class names would exist with nothing behind them.
+  it("renders one primary sentence, facts, then a nested Details dl", () => {
     const markup = renderToolview(SPAWN_WORKER_TOOL, spawnCall);
-    assert.ok(markup.includes(`.${TOOLVIEW_CLASS}__field{`), "stylesheet not rendered with the row");
-  });
-
-  it("label and value are separate elements, never one fused string", () => {
-    const markup = renderToolview(SPAWN_WORKER_TOOL, spawnCall);
-    assert.deepEqual(renderedPairs(markup), [
-      ["Worker", "063f41a2-9897-4936-95de-1cd3f2f76132"],
-      ["Title", "Add stale-build guards to both launchers"],
-      ["Stream", "launcher-staleness-guard"],
-      ["Outcome", "ok"],
-    ]);
-  });
-
-  it("the rendered line never runs a value into the next label", () => {
-    const line = renderedLine(renderToolview(SPAWN_WORKER_TOOL, spawnCall));
-    // The exact collapse the owner pasted: `…TitleAdd stale-build…Outcomeok`.
-    assert.doesNotMatch(line, /TitleAdd /, "title label ran into its value");
-    assert.doesNotMatch(line, /Outcomeok/, "outcome label ran into its value");
-    assert.doesNotMatch(line, /worker_title/, "labels stayed unresolved");
-    // And the readable shape, in the order the parser produces.
-    assert.equal(
-      line,
-      "Worker 063f41a2-9897-4936-95de-1cd3f2f76132 Title Add stale-build guards " +
-        "to both launchers Stream launcher-staleness-guard Outcome ok",
+    assert.ok(markup.includes(`.${TOOLVIEW_CLASS}__primary{`), "stylesheet rendered");
+    assert.match(
+      markup,
+      /<div class="multitask-dispatcher-toolview__primary">Started &quot;Add stale-build guards to both launchers&quot;<\/div>/,
     );
-  });
-
-  it("each field carries a separator element so the visual gap cannot collapse", () => {
-    // A `gap` alone dies the moment a selector loses the rule; a real
-    // separator element is a second, independent line of defence.
-    const markup = renderToolview(SPAWN_WORKER_TOOL, spawnCall);
-    const separators = markup.match(new RegExp(`class="${TOOLVIEW_CLASS}__sep"`, "g"));
-    assert.equal(
-      separators?.length,
-      3,
-      "expected one separator between each of the four fields",
+    assert.match(
+      markup,
+      /<div class="multitask-dispatcher-toolview__facts">worker …6132<\/div>/,
     );
-  });
-
-  it("the outcome appears exactly once on a settled spawn row", () => {
-    const markup = renderToolview(SPAWN_WORKER_TOOL, spawnCall);
-    const line = renderedLine(markup);
-    assert.equal(
-      line.match(/Outcome/gi)?.length,
-      1,
-      `outcome rendered more than once: ${line}`,
+    assert.match(
+      markup,
+      /<details class="multitask-dispatcher-toolview__details"><summary>Details<\/summary><dl>/,
     );
-    assert.equal(line.match(/\bok\b/g)?.length, 1, `"ok" rendered more than once: ${line}`);
+    // The full id and stream key live ONLY in details.
+    assert.equal(visibleText(markup).includes("063f41a2-9897"), false);
+    assert.equal(visibleText(markup).includes("launcher-staleness-guard"), false);
+    assert.ok(detailsText(markup).includes("063f41a2-9897-4936-95de-1cd3f2f76132"));
+    assert.ok(detailsText(markup).includes("launcher-staleness-guard"));
+    // No field-label/value pairs survive the old anatomy.
+    assert.equal(markup.includes("data-field-label"), false);
+    assert.equal(markup.includes("data-field-value"), false);
   });
 
-  it("a check_workers row's outcome is emitted once, above its roster rows", () => {
-    // Ticket 169 §Problem.2: the owner saw the outcome twice. The component
-    // never mirrors its outcome — the second line was the NEXT call's row,
-    // whose boundary was invisible while every field rendered inline. Pinning
-    // one emission here keeps a future edit from adding a real second one.
+  it("renders the check row title → status → facts → activity → short ref", () => {
     const markup = renderToolview(CHECK_WORKERS_TOOL, {
-      phase: "result",
-      block: {
-        kind: "tool-result",
-        callId: "c-169-count",
-        name: CHECK_WORKERS_TOOL,
-        args: {},
-        call: null,
-        content: [{ type: "text", text: "ok" }],
-        isError: false,
-        meta: {
-          ok: true,
-          rows: [
-            { worker_id: "w-1", title: "one", status: "completed" },
-            { worker_id: "w-2", title: "two", status: "running" },
-          ],
-        },
+      args: {},
+      result: {
+        ok: true,
+        rows: [
+          {
+            worker_id: "063f41a2-9897-4936-95de-1cd3f2f76132",
+            title: "Add stale-build guards to both launchers",
+            status: "completed",
+            elapsed_ms: 252_000,
+            tool_call_count: 7,
+            recent_activity: "wrote two launcher guards",
+            stream_key: "t-2",
+            transcript_ref: "sess_abc",
+          },
+        ],
       },
     });
-    const line = renderedLine(markup);
-    assert.equal(line.match(/Outcome/gi)?.length, 1, line);
-    assert.equal(line.match(/\bok\b/g)?.length, 1, line);
+    const visible = visibleText(markup);
+    assert.match(visible, /^Checked 1 worker /);
+    assert.match(
+      visible,
+      /Add stale-build guards to both launchers Done 4m 12s · 7 tool calls wrote two launcher guards worker …6132$/,
+    );
+    // Raw status is the data attribute; the word is localized.
+    assert.match(markup, /data-status="completed"/);
+    assert.match(markup, />Done</);
+    assert.equal((visible.match(/Done/g) ?? []).length, 1, "status never duplicates");
+    assert.equal(visible.includes("completed"), false, "raw enum never renders");
   });
 
-  it("check_workers status rows separate id, title and status", () => {
-    const markup = renderToolview(CHECK_WORKERS_TOOL, {
-      phase: "result",
-      block: {
-        kind: "tool-result",
-        callId: "c-169-check",
-        name: CHECK_WORKERS_TOOL,
-        args: {},
-        call: null,
-        content: [{ type: "text", text: "ok" }],
-        isError: false,
-        meta: {
-          ok: true,
-          rows: [
-            {
-              worker_id: "063f41a2-9897-4936-95de-1cd3f2f76132",
-              title: "Add stale-build guards to both launchers",
-              status: "completed",
-              recent_activity: "wrote two launcher guards",
-            },
-          ],
-        },
+  it("renders plural counts from copy (1 tool call / 2 tool calls)", () => {
+    const one = renderToolview(CHECK_WORKERS_TOOL, {
+      args: {},
+      result: { ok: true, rows: [checkRow({ tool_call_count: 1 })] },
+    });
+    assert.match(visibleText(one), /1 tool call\b/);
+    const two = renderToolview(CHECK_WORKERS_TOOL, {
+      args: {},
+      result: { ok: true, rows: [checkRow({ tool_call_count: 2 })] },
+    });
+    assert.match(visibleText(two), /2 tool calls\b/);
+  });
+
+  it("the reported paste style can no longer appear (message_agent)", () => {
+    const markup = renderToolview(MESSAGE_AGENT_TOOL, {
+      args: {
+        target: "063f41a2-9897-4936-95de-1cd3f2f76132",
+        text: "…",
+        priority: false,
+      },
+      result: {
+        ok: true,
+        target: "063f41a2-9897-4936-95de-1cd3f2f76132",
+        delivered_as: "peer",
+        message_id: "msg-1",
       },
     });
-    const line = renderedLine(markup);
-    // The status-row collapse the ticket pastes: `…launcherscompleted`.
-    assert.doesNotMatch(line, /launcherscompleted/, "title ran into status");
-    assert.doesNotMatch(line, /completedwrote/, "status ran into activity");
-    assert.match(
-      line,
-      /063f41a2-9897-4936-95de-1cd3f2f76132 Add stale-build guards to both launchers completed/,
-    );
-    // The roster row is its own styled block, not inline text.
-    assert.match(
-      TOOLVIEW_CSS,
-      new RegExp(`\\.${TOOLVIEW_CLASS}__row\\{[^}]*display:flex`),
-    );
+    const visible = visibleText(markup);
+    assert.doesNotMatch(visible, /\bAgent\b/);
+    assert.doesNotMatch(visible, /Delivered as/);
+    assert.doesNotMatch(visible, /\bOutcome\b/);
+    assert.doesNotMatch(visible, /063f41a2-9897/);
+    assert.doesNotMatch(visible, /\btrue\b|\bfalse\b/);
+    // The UUID is allowed in details.
+    assert.ok(detailsText(markup).includes("063f41a2-9897-4936-95de-1cd3f2f76132"));
+  });
+
+  it("the reported paste style can no longer appear (deliver_result)", () => {
+    const markup = renderToolview(DELIVER_RESULT_TOOL, {
+      args: { text: "…", todo_id: "todo-7" },
+      result: { ok: true, delivered: true, todo_completed: "todo-7" },
+    });
+    const visible = visibleText(markup);
+    assert.doesNotMatch(visible, /Delivered true/);
+    assert.doesNotMatch(visible, /\bTodo\b/);
+    assert.doesNotMatch(visible, /\bOutcome\b/);
+    assert.doesNotMatch(visible, /\btrue\b|\bfalse\b/);
+    assert.match(visible, /Delivered to you/);
+    assert.match(visible, /todo 7 completed/);
   });
 
   it("the degraded row still renders its honest line", () => {
     const markup = renderToolview(SPAWN_WORKER_TOOL, { phase: "result", block: null });
-    assert.equal(renderedLine(markup), localeDictionary.en["toolview.degraded"]);
+    assert.equal(
+      markup
+        .replace(/<style>[\s\S]*?<\/style>/g, "")
+        .replace(/<[^>]*>/g, "")
+        .trim(),
+      EN["toolview.degraded"],
+    );
   });
 
-  it("all nine claimed keys separate every label from its value", () => {
-    // Acceptance covers the whole claimed set, not just the two tools the
-    // owner happened to paste. One representative payload per tool, each with
-    // at least one field, rendered and read as text.
+  it("every claimed tool renders a primary sentence and no legacy field pairs", () => {
     const payloads: Record<string, unknown> = {
       [SPAWN_WORKER_TOOL]: spawnCall,
       [CHECK_WORKERS_TOOL]: {
-        phase: "result",
-        block: {
-          kind: "tool-result",
-          callId: "c-a",
-          name: CHECK_WORKERS_TOOL,
-          args: { worker_id: "w-1" },
-          call: null,
-          content: [{ type: "text", text: "ok" }],
-          isError: false,
-          meta: { ok: true, rows: [] },
-        },
+        args: {},
+        result: { ok: true, rows: [] },
       },
       [STEER_WORKER_TOOL]: {
-        phase: "result",
-        block: {
-          kind: "tool-result",
-          callId: "c-b",
-          name: STEER_WORKER_TOOL,
-          args: { worker_id: "w-1", message: "check the logs" },
-          call: null,
-          content: [{ type: "text", text: "ok" }],
-          isError: false,
-          meta: { ok: true },
-        },
+        args: { worker_id: "w-1", message: "check the logs" },
+        result: { ok: true, worker_id: "w-1", title: "Worker one" },
       },
       [STOP_WORKER_TOOL]: {
-        phase: "result",
-        block: {
-          kind: "tool-result",
-          callId: "c-c",
-          name: STOP_WORKER_TOOL,
-          args: { worker_id: "w-1" },
-          call: null,
-          content: [{ type: "text", text: "ok" }],
-          isError: false,
-          meta: { ok: true },
-        },
+        args: { worker_id: "w-1" },
+        result: { ok: true, worker_id: "w-1", title: "Worker one", mode: "stopped" },
       },
       [DELIVER_RESULT_TOOL]: {
-        phase: "result",
-        block: {
-          kind: "tool-result",
-          callId: "c-d",
-          name: DELIVER_RESULT_TOOL,
-          args: { todo_id: "t-2", attachment_paths: ["a"] },
-          call: null,
-          content: [{ type: "text", text: "ok" }],
-          isError: false,
-          meta: { ok: true, delivered: true, todo_completed: "t-2" },
-        },
+        args: { todo_id: "t-2", attachment_paths: ["a"] },
+        result: { ok: true, delivered: true, todo_completed: "t-2" },
       },
       [MESSAGE_AGENT_TOOL]: {
-        phase: "result",
-        block: {
-          kind: "tool-result",
-          callId: "c-e",
-          name: MESSAGE_AGENT_TOOL,
-          args: { target: "w-1", priority: true },
-          call: null,
-          content: [{ type: "text", text: "ok" }],
-          isError: false,
-          meta: { ok: true, target: "w-1", delivered_as: "steer" },
+        args: { target: "w-1", priority: true },
+        result: {
+          ok: true,
+          target: "w-1",
+          delivered_as: "steer",
+          message_id: "msg-1",
         },
       },
       [AWAIT_AGENT_TOOL]: {
-        phase: "result",
-        block: {
-          kind: "tool-result",
-          callId: "c-f",
-          name: AWAIT_AGENT_TOOL,
-          args: { target: "w-1" },
-          call: null,
-          content: [{ type: "text", text: "ok" }],
-          isError: false,
-          meta: { ok: true, target: "w-1", status: "settled", worker_status: "completed" },
+        args: { target: "w-1" },
+        result: {
+          ok: true,
+          target: "w-1",
+          status: "settled",
+          worker_status: "completed",
+          waited_ms: 1,
         },
       },
       [SPAWN_DISPATCHER_TOOL]: {
-        phase: "result",
-        block: {
-          kind: "tool-result",
-          callId: "c-g",
-          name: SPAWN_DISPATCHER_TOOL,
-          args: { title: "second chair" },
-          call: null,
-          content: [{ type: "text", text: "ok" }],
-          isError: false,
-          meta: { ok: true, dispatcher_id: "d-1", title: "second chair" },
-        },
+        args: { title: "second chair" },
+        result: { ok: true, dispatcher_id: "d-1", title: "second chair" },
       },
       [SEND_PEER_TOOL]: {
-        phase: "result",
-        block: {
-          kind: "tool-result",
-          callId: "c-h",
-          name: SEND_PEER_TOOL,
-          args: { to_session: "s-2", priority: false },
-          call: null,
-          content: [{ type: "text", text: "ok" }],
-          isError: false,
-          meta: { ok: true, to_session: "s-2" },
-        },
+        args: { to_session: "s-2", priority: false },
+        result: { ok: true, to_session: "s-2", message_id: "m-1" },
       },
     };
-
     assert.deepEqual(
       Object.keys(payloads).sort(),
       [...TOOLVIEW_TOOL_NAMES].sort(),
       "the fixture set drifted from the claimed keys",
     );
-
     for (const toolName of TOOLVIEW_TOOL_NAMES) {
       const markup = renderToolview(toolName, payloads[toolName]);
-      const pairs = renderedPairs(markup);
-      assert.ok(pairs.length > 0, `${toolName} rendered no fields`);
-      // Every pair is two non-empty strings: the label resolved through the
-      // dictionary, and the value stayed its own element.
-      for (const [label, value] of pairs) {
-        assert.notEqual(label, "", `${toolName} rendered a blank label`);
-        assert.notEqual(value, "", `${toolName} rendered a blank value`);
-        assert.notEqual(label, label.toUpperCase(), `${toolName} label not resolved: ${label}`);
-      }
-      // The rendered line has a space (or a break) wherever the row changes
-      // from a value to the next label — the collapse the ticket reported.
-      const line = renderedLine(markup);
-      for (const [label] of pairs) {
-        assert.ok(
-          line.includes(` ${label}`) || line.startsWith(label),
-          `${toolName}: label "${label}" does not start a separated run in: ${line}`,
-        );
-      }
+      const primary = markup.match(
+        /multitask-dispatcher-toolview__primary">([^<]*)</,
+      )?.[1];
+      assert.ok(primary, `${toolName} rendered no primary sentence`);
+      assert.ok(primary.length > 0, `${toolName} rendered a blank primary`);
+      assert.notEqual(primary, primary.toUpperCase(), `${toolName}: unresolved key`);
+      assert.equal(primary.includes("toolview."), false, `${toolName}: primary key did not resolve`);
+      assert.equal(primary.includes("status."), false, `${toolName}: status key did not resolve`);
+      const visible = visibleText(markup);
+      assert.equal(visible.includes("toolview."), false, `${toolName}: a fact/detail key did not resolve`);
+      assert.equal(markup.includes("data-field-label"), false, `${toolName}: legacy field anatomy`);
+      assert.match(
+        markup,
+        /multitask-dispatcher-toolview__details/,
+        `${toolName}: no details area`,
+      );
     }
   });
+
+  it("the stylesheet defines the new anatomy with a gap and block layout", () => {
+    assert.ok(TOOLVIEW_CSS.trim().length > 0, "row stylesheet is empty");
+    assert.match(TOOLVIEW_CSS, /__primary\{[^}]*font-weight/);
+    assert.match(TOOLVIEW_CSS, /__facts\{[^}]*overflow-wrap/);
+    assert.match(TOOLVIEW_CSS, /__details dl\{[^}]*grid/);
+    assert.match(TOOLVIEW_CSS, /__row\{[^}]*display:flex/);
+    assert.match(TOOLVIEW_CSS, /__row\{[^}]*gap:/);
+  });
 });
-
-//#endregion
-
