@@ -481,9 +481,16 @@ export class DshApplicationPort implements ApplicationPort {
     try {
       const data = resultNode.data;
       const message = isRecord(data['message']) ? data['message'] : {};
+      // ISSUE-188: a native host result can be mixed content. The shaped text
+      // replaces the result's text projection, but every non-text block (and
+      // its attachment reference) is re-emitted verbatim: a partial retention
+      // decision about text is not a decision to drop an image the agent saw.
+      const preserved = Array.isArray(message['content'])
+        ? message['content'].filter(block => isRecord(block) && block['type'] !== 'text')
+        : [];
       shapedSeq = session.append('tool/result', {
         turn: data['turn'], step: data['step'],
-        message: { ...message, content: [{ type: 'text', text: turnText }] },
+        message: { ...message, content: [{ type: 'text', text: turnText }, ...preserved] },
         ...data['meta'] === undefined ? {} : { meta: data['meta'] },
         ...data['error'] === undefined ? {} : { error: data['error'] },
       }, { surfaceOp: { op: 'replace', startSeq: resultNode.seq, endSeq: resultNode.seq },
