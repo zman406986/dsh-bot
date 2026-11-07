@@ -2792,6 +2792,7 @@ export function createCordisDshHost(
     sessionId: string,
     parentSessionId?: string,
     generation?: number,
+    workerModel?: ModelRoute,
   ): Promise<void> {
     // Ticket 138: the local mirror is updated FIRST and synchronously, so a
     // send arriving before the store write settles already sees the mark. The
@@ -2802,6 +2803,16 @@ export function createCordisDshHost(
     // child resolves its number even before the store round-trips.
     if (generation !== undefined) {
       dispatcherGenerations.set(sessionId, generation);
+    }
+    // Ticket 285: the leader worker default is mirrored the same way, and
+    // under the SAME id the row is written for — the host-assigned leader
+    // id, never the reservation. usableRoute is the last defensive narrowing:
+    // a malformed route from a JS caller is absent (one warning) and stores
+    // nothing, so a later worker keeps today's inherited route instead of a
+    // route the host could only fail on at its first request.
+    const defaultWorkerModel = usableRoute(workerModel);
+    if (defaultWorkerModel !== undefined) {
+      workerModelDefaults.set(sessionId, defaultWorkerModel);
     }
     const store = markers;
     if (store === undefined || store.writeDispatcherMark === undefined) return;
@@ -2816,6 +2827,9 @@ export function createCordisDshHost(
         sessionId,
         ...(parentSessionId !== undefined ? { parentSessionId } : {}),
         ...(generation !== undefined ? { generation } : {}),
+        ...(defaultWorkerModel !== undefined
+          ? { workerModel: defaultWorkerModel }
+          : {}),
         origin: "top-level",
       } as DurableDispatcherMark);
     } catch (error) {
@@ -3526,6 +3540,16 @@ export function createCordisDshHost(
           // store only fills the gap. A pre-141 row reads as generation 2.
           if (!dispatcherGenerations.has(mark.sessionId)) {
             dispatcherGenerations.set(mark.sessionId, mark.generation ?? 2);
+          }
+          // Ticket 285: same rule for the leader worker default — an
+          // in-process value (a spawn in THIS process) is authoritative, so
+          // the store only fills the gap. A pre-285 row fills nothing, and
+          // its workers inherit the leader's own route (plan §4.4).
+          if (!workerModelDefaults.has(mark.sessionId)) {
+            const restoredDefault = usableRoute(mark.workerModel);
+            if (restoredDefault !== undefined) {
+              workerModelDefaults.set(mark.sessionId, restoredDefault);
+            }
           }
         }
       } catch (error) {
@@ -4384,6 +4408,9 @@ export function createCordisDshHost(
             dispatcherId,
             opts.parentSessionId,
             childGeneration,
+            // Ticket 285: the worker default rides the same durable row, so
+            // a cold-resumed leader restores it (refreshDispatcherMarks).
+            opts.workerModel,
           ),
           `dispatcher mark for ${dispatcherId}`,
         );
@@ -4490,13 +4517,17 @@ export function createCordisDshHost(
         // phantom that refused a later summon from a session reusing that id.
         // Collect every id that did not become the live child (the
         // reservation, and any id `setup` activated under), then clear all
-        // five seed maps for each.
+        // six seed maps for each.
         const phantomIds = new Set<string>([reservedChildId]);
         if (activationChildId !== null) phantomIds.add(activationChildId);
         if (spawnedId !== null) phantomIds.delete(spawnedId);
         for (const id of phantomIds) {
           dispatcherMarks.delete(id);
           dispatcherGenerations.delete(id);
+          // Ticket 285: a worker default must never outlive a create that
+          // produced no session — it would silently apply to a later spawn
+          // that reuses the id.
+          workerModelDefaults.delete(id);
           dispatcherClasses.delete(id);
           dispatcherActivations.delete(id);
           reservedDispatcherIds.delete(id);

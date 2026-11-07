@@ -1,6 +1,6 @@
 # Opt-in model choice for summoned team leaders and workers
 
-**Status:** draft (non-human-approved) — agent-drafted 2026-11-08 from the implementation plan; the plan's open questions are still for the owner, so this records the recommended shape rather than a human ruling.
+**Status:** draft (non-human-approved) — agent-drafted 2026-11-08 from the implementation plan. Every answer to the plan's §10 questions in this ADR is agent-drafted, not owner-ruled; the questions remain open for the owner, so this records the recommended shape rather than a human ruling.
 
 **Numbering:** 0035, the first free number at filing (2026-11-08; highest in use was accepted 0034). Implementation is ticket 285; the detailed contract, algorithm, file list, and test plan live in `.scratch/model-arg/PLAN.md`.
 
@@ -40,12 +40,31 @@ The host already supports per-child routes: a leader can be created with `agentO
 1. **Inline prompt directive** (for example "Use model X for this worker"). Rejected as the shape. The prompt is model-authored; the host would have to parse and strip a value out of it, validate it with no structured feedback path, and keep that parser stable against every prompt wording. A tool parameter gets schema validation, a typed result note, and no prompt risk. This is the main reason for the decision.
 2. **Refuse the spawn when the value is invalid.** Rejected: the requirement is to fall back to today's behaviour, and a refusal would make an optional convenience a new failure mode.
 3. **Display-name aliases or `default`/`inherit` sentinels.** Rejected for v1: the host has no stable alias table, and omitting the argument is clearer than a sentinel.
-4. **A separate runtime tool that switches the caller's own model.** Out of scope for v1. It would change a live session, raise transcript and model-switch-notice questions, and is not needed to choose a spawned leader's or worker's model (plan open question Q1).
+4. **A runtime switch instead of a spawn-time choice.** Rejected for v1: calling `agent.model.select` on a live session changes the caller's own route and raises transcript and model-switch-notice questions, and it would be a separate self-switch tool (plan open question Q1). The creation-time `agentOptions` channel already carries the route, so selecting after create would only add an event and a second write before the first turn.
 5. **Only per-worker choice, with no `worker_model`.** Rejected: a team leader would have to repeat its default on every spawn, and the summoning dispatcher could not set a worker default at summons time.
+6. **One `model` field on `spawn_dispatcher` for both the leader and its workers.** Rejected: one field cannot express "leader on A, workers on B" without a convention, and the task asks for two separate choices.
+7. **A process-wide worker-model setting.** Rejected: the choice is per-leader and per-spawn; a global default would silently change every existing dispatch.
+8. **Trust the value without catalog validation.** Rejected: an unknown route hard-fails at the session's first request with no mid-run fallback, turning a typo into a dead leader or worker.
 
 ## Open questions
 
-The plan's §10 items remain for the owner — literal self-model switch, aliases, `worker_model` scope, invalid-value policy, warning visibility, restart durability, reasoning effort, and naming. This ADR records the recommended answers; the ticket carries the questions. None blocks the shape above, and the alternatives stay open until the owner rules.
+The plan's §10 questions remain open for the owner. Each V1 answer below is **agent-drafted, not owner-ruled**:
+
+1. **Literal self-model switch (Q1):** v1 chooses the leader's model at summon time; a live self-switch stays out of scope. Agent-drafted; open.
+2. **Aliases (Q2):** `provider/model-id`, plus a bare id only when it is unique; no display names. Agent-drafted; open.
+3. **`worker_model` scope (Q3):** a default for every worker the leader later spawns, set by the summoning dispatcher; the leader can override per worker. Agent-drafted; open.
+4. **Invalid values (Q4):** fall back, one warning, one tool-result note; never refuse. Agent-drafted; open.
+5. **Warning visibility (Q5):** the dsh process log plus the tool-result note; no UI toast. Agent-drafted; open.
+6. **Restart durability (Q6):** the worker default rides the leader's durable dispatcher mark. Agent-drafted; open.
+7. **Reasoning effort (Q7):** model-only; a route change clears the inherited effort. Agent-drafted; open.
+8. **Naming (Q8):** `model` and `worker_model`. Agent-drafted; open.
+
+None blocks the shape above.
+
+## Verification
+
+- Offline focused suites are green on `feat/spawn-model-option` (implementation lane). The full offline suite and the merge run are handled separately; this docs pass did not run tests.
+- Manual Web check: it needs a dsh restart, so it is left staged and not run by this docs pass.
 
 ## Traceability
 

@@ -5,6 +5,10 @@
 **Blocked by:** nothing. Optional tool parameters plus one adapter resolver; no transcript or WorkerRecord schema change (the dispatcher mark gains one optional field).
 **Related:** ADR-0035 (the decision), ADR-0032 (a summoned dispatcher is a top-level session), ADR-0025 (mitosis), ADR-0034 (two dispatcher classes), `.scratch/model-arg/PLAN.md` (implementation detail).
 
+## Implementation status
+
+2026-11-08: plan Tasks 1–10 are implemented on `feat/spawn-model-option`; Task 11 is this docs pass. Focused suites are green. The full offline suite and the merge run are handled separately. The ticket stays open until the merge.
+
 ## Problem
 
 The two spawn tools take no model argument. A summoned team leader inherits the summoning dispatcher's live route, and every worker inherits its team leader's route. A dispatcher that needs one job on a different model has only two poor choices today:
@@ -101,8 +105,20 @@ Final verification owns the full offline gate (`npm test`, `npm run typecheck`, 
 
 ## Open questions for owner review
 
-The plan's §10 questions remain for owner review: literal self-model switch (Q1), aliases (Q2), `worker_model` scope (Q3), invalid-value policy (Q4), warning visibility (Q5), restart durability (Q6), reasoning effort (Q7), and naming (Q8). V1 follows the recommended answers above; they are cheap to change before implementation and expensive after.
+The plan's §10 questions remain for owner review. Each V1 answer below is **agent-drafted, not owner-ruled**, and stays open:
+
+1. **Literal self-model switch (Q1).** Does "a team leader can set its own model" mean the dispatcher chooses it at summon time, or that the leader can change its own live model later? Agent-drafted answer: summon-time choice in v1; a later self-switch would be a separate tool. Open.
+2. **Aliases and bare ids (Q2).** Is `provider/model-id` plus a unique bare model id enough, or should display names and aliases be accepted too? Agent-drafted answer: no display names in v1. Open.
+3. **`worker_model` scope (Q3).** Is it a default for every worker the leader later spawns or only a one-shot value, and may the leader change it later? Agent-drafted answer: a default for every later worker, set by the summoning dispatcher; the leader can override per worker only. Open.
+4. **Invalid values (Q4).** Confirm that an invalid value should not refuse the spawn. Agent-drafted answer: fall back, one warning, one tool-result note. Open.
+5. **Warning visibility (Q5).** Is the dsh process log enough, or should the warning also appear in the tool result or UI? Agent-drafted answer: process log plus the tool-result note; no UI toast. Open.
+6. **Restart durability (Q6).** Should the leader's worker default survive a restart through the dispatcher mark, or is in-memory enough? Agent-drafted answer: the durable mark field. Open.
+7. **Reasoning effort (Q7).** Should the option choose reasoning effort too, or is model-only enough? Agent-drafted answer: model-only in v1. Open.
+8. **Naming (Q8).** Are `model` and `worker_model` the wanted names, or should they be `leader_model`, `workers_model`, or `default_worker_model`? Agent-drafted answer: keep `model` and `worker_model`. Open.
+
+None blocks the shape recorded in ADR-0035.
 
 ## Comments
 
 - 2026-11-08 — Filed as plan Task 1. Docs only: ticket, ADR-0035, ADR index row, and the generated open-ticket index row. No source code, tests, or builds.
+- 2026-11-08 — Plan Task 11 docs pass: README "Choosing models" subsection, ADR-0035 verification note and agent-drafted open questions, ticket implementation status. Ran `node tools/doc-lint.mjs`, `node tools/issue-index.mjs --check`, and `node tools/adr-index.mjs --check`; all clean. No source, tests, ticket move, or index edit.

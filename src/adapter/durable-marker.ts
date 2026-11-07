@@ -386,6 +386,12 @@ const compactionBoundaryValueSchema = {
  * field is a pre-141 row and parses fine; a present one must be an integer of
  * at least 2, because every marked session was spawned — generation 1 is
  * reserved for user-started dispatchers, which never carry a mark.
+ *
+ * Ticket 285 adds the optional worker default, following the same precedent:
+ * a missing field is a pre-285 row and restores no default; a present one must
+ * be a complete route (a plain object with non-empty string provider and
+ * model). A half-filled route would restore a default the host cannot apply,
+ * which is worse than reading the row as "no default" silently.
  */
 function parseDispatcherMark(value: unknown): DurableDispatcherMark {
   if (typeof value !== "object" || value === null) {
@@ -409,6 +415,25 @@ function parseDispatcherMark(value: unknown): DurableDispatcherMark {
     ) {
       throw new Error(
         "dispatcher mark.generation must be an integer >= 2 when present",
+      );
+    }
+  }
+  if (m.workerModel !== undefined) {
+    const route = m.workerModel;
+    // Plain object only: an array or a primitive here is a foreign/torn row,
+    // never a route the host could apply.
+    if (typeof route !== "object" || route === null || Array.isArray(route)) {
+      throw new Error("dispatcher mark.workerModel must be an object");
+    }
+    const w = route as Record<string, unknown>;
+    if (typeof w.provider !== "string" || w.provider.length === 0) {
+      throw new Error(
+        "dispatcher mark.workerModel.provider must be a non-empty string",
+      );
+    }
+    if (typeof w.model !== "string" || w.model.length === 0) {
+      throw new Error(
+        "dispatcher mark.workerModel.model must be a non-empty string",
       );
     }
   }

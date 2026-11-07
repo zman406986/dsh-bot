@@ -1,4 +1,4 @@
-import type { WorkerRecord, WorkerStatus } from "./types.js";
+import type { ModelRoute, WorkerRecord, WorkerStatus } from "./types.js";
 import type { TodoExternalOrigin } from "./todo-reconciler.js";
 
 /**
@@ -150,6 +150,17 @@ export interface DurableDispatcherMark {
    * stay readable.
    */
   readonly generation?: number;
+  /**
+   * Ticket 285 (plan §1.6, Task 10): the default model route this team leader
+   * was given for every worker it later spawns
+   * (`spawn_dispatcher.worker_model`). Present on rows written from 285 on;
+   * absent on earlier rows, which restore
+   * no default and let workers inherit the leader's own route — safe
+   * degradation. Carried on the same row for the ticket-130 reason: identity is
+   * already durable here, so a cold-resumed leader keeps the default it was
+   * summoned with. Optional, so no DOMAIN_VERSION bump.
+   */
+  readonly workerModel?: ModelRoute;
 }
 
 /**

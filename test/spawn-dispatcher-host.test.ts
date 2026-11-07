@@ -24,6 +24,7 @@ import {
 } from "../src/core/policy/prompts.js";
 import { FakeDshHost } from "../src/core/fake-host.js";
 import type { ModelCatalogLike } from "../src/adapter/model-option.js";
+import type { ModelRoute } from "../src/core/types.js";
 
 interface ComposedChild {
   readonly childId: string;
@@ -2166,6 +2167,322 @@ describe("Ticket 285: spawnDispatcher applies the leader's model option", () => 
       String(warn.mock.calls[0]?.arguments[0]),
       /^\[multitask-dispatcher\]/,
     );
+  });
+});
+
+/**
+ * Ticket 285 (plan §§1.6, 4.4, 6 Task 10): the leader's worker default is
+ * stored on its durable dispatcher mark and restored into the in-memory map
+ * on the next boot, so a cold-resumed leader still gives its workers the
+ * route it was summoned with.
+ *
+ * The map has no other writer: spawnDispatcher is the only production path
+ * that stores a default, and refreshDispatcherMarks is the only restart path
+ * that restores one. Every case here therefore drives that pair and then
+ * observes the next spawnWorker request — the exact seam the leader's later
+ * spawn_worker call reaches (plan §4.4).
+ */
+describe("Ticket 285: the leader's worker default is stored and restored", () => {
+  /**
+   * A mark store that both writes and LISTS rows: the row is what a restart
+   * would read, so a test can seed one directly to model an earlier process.
+   */
+  function createListableMarkStore() {
+    const marks = new Map<
+      string,
+      {
+        sessionId: string;
+        parentSessionId?: string;
+        generation?: number;
+        workerModel?: ModelRoute;
+      }
+    >();
+    return {
+      marks,
+      writeWorkerMarker() {},
+      readWorkerMarkers() {
+        return [];
+      },
+      deleteWorkerMarker() {},
+      writeDispatcherMark(mark: {
+        sessionId: string;
+        parentSessionId?: string;
+        generation?: number;
+        workerModel?: ModelRoute;
+      }) {
+        marks.set(mark.sessionId, mark);
+      },
+      readDispatcherMark(sessionId: string) {
+        return marks.get(sessionId);
+      },
+      listDispatcherMarks() {
+        return [...marks.values()];
+      },
+      peekDispatcherMark(sessionId: string) {
+        return marks.has(sessionId)
+          ? ({ kind: "dispatcher", mark: marks.get(sessionId)! } as const)
+          : ({ kind: "not-dispatcher" } as const);
+      },
+    };
+  }
+
+  /** Bind a top-level agent for an id so a later spawnWorker can resolve it. */
+  function bindLeader(
+    host: ReturnType<typeof createCordisDshHost>,
+    id: string,
+  ): void {
+    host.bindParent(createAgent(id, 0, { cwd: "C:\\work" }), id);
+  }
+
+  it("records worker_model on the mark row and applies it to a later worker spawn", async () => {
+    const ctx = createStubCtx();
+    const store = createListableMarkStore();
+    const host = createCordisDshHost(ctx, { markers: store });
+    host.bindParent(createAgent("disp-1"), "disp-1");
+
+    const summoned = await host.spawnDispatcher({
+      parentSessionId: "disp-1",
+      title: "Peer",
+      prompt: "Own the slice.",
+      workerModel: { provider: "pC", model: "mC" },
+    });
+
+    // The durable row is the restart source, so the default must be ON it —
+    // not only in this process map.
+    assert.deepEqual(store.marks.get(summoned.dispatcherId)?.workerModel, {
+      provider: "pC",
+      model: "mC",
+    });
+    // …and mirrored for the live process before any store round-trip.
+    bindLeader(host, summoned.dispatcherId);
+    await host.spawnWorker("Do the thing.", {
+      parentSessionId: summoned.dispatcherId,
+      streamKey: "s1",
+      title: "Thing",
+    });
+
+    const spec = ctx.startActivationCalls[0] as unknown as ActivationSpecLike;
+    assert.deepEqual(spec.request.agentOptions, {
+      provider: "pC",
+      model: "mC",
+    });
+  });
+
+  it("lets an explicit worker model win over the stored default", async () => {
+    const ctx = createStubCtx();
+    const store = createListableMarkStore();
+    const host = createCordisDshHost(ctx, { markers: store });
+    host.bindParent(createAgent("disp-1"), "disp-1");
+
+    const summoned = await host.spawnDispatcher({
+      parentSessionId: "disp-1",
+      title: "Peer",
+      prompt: "Own the slice.",
+      workerModel: { provider: "pC", model: "mC" },
+    });
+    bindLeader(host, summoned.dispatcherId);
+    await host.spawnWorker("Do the thing.", {
+      parentSessionId: summoned.dispatcherId,
+      streamKey: "s1",
+      title: "Thing",
+      model: { provider: "pD", model: "mD" },
+    });
+
+    const spec = ctx.startActivationCalls[0] as unknown as ActivationSpecLike;
+    // Plan §0.3: the per-worker option is the higher precedence level.
+    assert.deepEqual(spec.request.agentOptions, {
+      provider: "pD",
+      model: "mD",
+    });
+  });
+
+  it("keys the stored default by the host-assigned leader id, not the reservation", async () => {
+    // The host ignores the reservation and mints its own id (plan §9 risk 7):
+    // the mark row and the map must follow the LIVE session, or every later
+    // worker spawn from it would silently lose the default.
+    const ctx = createStubCtx(undefined, undefined, {
+      createIdOverride: "host-assigned-peer",
+    });
+    const store = createListableMarkStore();
+    const host = createCordisDshHost(ctx, { markers: store });
+    host.bindParent(createAgent("disp-1"), "disp-1");
+
+    const summoned = await host.spawnDispatcher({
+      parentSessionId: "disp-1",
+      title: "Peer",
+      prompt: "Own the slice.",
+      workerModel: { provider: "pC", model: "mC" },
+    });
+
+    assert.equal(summoned.dispatcherId, "host-assigned-peer");
+    assert.deepEqual(store.marks.get("host-assigned-peer")?.workerModel, {
+      provider: "pC",
+      model: "mC",
+    });
+    bindLeader(host, "host-assigned-peer");
+    await host.spawnWorker("Do the thing.", {
+      parentSessionId: "host-assigned-peer",
+      streamKey: "s1",
+      title: "Thing",
+    });
+
+    const spec = ctx.startActivationCalls[0] as unknown as ActivationSpecLike;
+    assert.deepEqual(spec.request.agentOptions, {
+      provider: "pC",
+      model: "mC",
+    });
+  });
+
+  it("restores the default from a durable row when refreshDispatcherMarks runs (restart path)", async () => {
+    const ctx = createStubCtx();
+    const store = createListableMarkStore();
+    // A row from an earlier process: this leader was summoned with pC/mC.
+    store.marks.set("leader-1", {
+      sessionId: "leader-1",
+      parentSessionId: "chat-1",
+      generation: 2,
+      workerModel: { provider: "pC", model: "mC" },
+    });
+    const host = createCordisDshHost(ctx, {
+      markers: store,
+      dispatcherGenerationOf: () => null,
+    });
+    await host.refreshDispatcherMarks();
+    bindLeader(host, "leader-1");
+
+    await host.spawnWorker("Do the thing.", {
+      parentSessionId: "leader-1",
+      streamKey: "s1",
+      title: "Thing",
+    });
+
+    const spec = ctx.startActivationCalls[0] as unknown as ActivationSpecLike;
+    assert.deepEqual(spec.request.agentOptions, {
+      provider: "pC",
+      model: "mC",
+    });
+  });
+
+  it("does not downgrade an in-process default with a different store row", async () => {
+    const ctx = createStubCtx();
+    const store = createListableMarkStore();
+    const host = createCordisDshHost(ctx, { markers: store });
+    host.bindParent(createAgent("disp-1"), "disp-1");
+
+    const summoned = await host.spawnDispatcher({
+      parentSessionId: "disp-1",
+      title: "Peer",
+      prompt: "Own the slice.",
+      workerModel: { provider: "pC", model: "mC" },
+    });
+    // A stale/foreign row for the same session claims another default. The
+    // in-process value is authoritative (same rule as parent/generation).
+    store.marks.set(summoned.dispatcherId, {
+      sessionId: summoned.dispatcherId,
+      parentSessionId: "disp-1",
+      workerModel: { provider: "pX", model: "mX" },
+    });
+    await host.refreshDispatcherMarks();
+    bindLeader(host, summoned.dispatcherId);
+
+    await host.spawnWorker("Do the thing.", {
+      parentSessionId: summoned.dispatcherId,
+      streamKey: "s1",
+      title: "Thing",
+    });
+
+    const spec = ctx.startActivationCalls[0] as unknown as ActivationSpecLike;
+    assert.deepEqual(spec.request.agentOptions, {
+      provider: "pC",
+      model: "mC",
+    });
+  });
+
+  it("restores nothing for a legacy row without a worker default and leaves the request shape untouched", async () => {
+    const ctx = createStubCtx();
+    const store = createListableMarkStore();
+    // A pre-285 row: a dispatcher, but no worker default. Its workers inherit
+    // the leader's own route — the safe degradation plan §4.4 states.
+    store.marks.set("legacy-leader", {
+      sessionId: "legacy-leader",
+      parentSessionId: "chat-1",
+    });
+    const host = createCordisDshHost(ctx, {
+      markers: store,
+      dispatcherGenerationOf: () => null,
+    });
+    await host.refreshDispatcherMarks();
+    bindLeader(host, "legacy-leader");
+
+    await host.spawnWorker("Do the thing.", {
+      parentSessionId: "legacy-leader",
+      streamKey: "s1",
+      title: "Thing",
+    });
+
+    const spec = ctx.startActivationCalls[0] as unknown as ActivationSpecLike;
+    assert.equal("agentOptions" in spec.request, false);
+    assert.deepEqual(Object.keys(spec.request).sort(), [
+      "maxDepth",
+      "parent",
+      "prompt",
+    ]);
+  });
+
+  it("omits workerModel from the row when no worker default was given", async () => {
+    const ctx = createStubCtx();
+    const store = createListableMarkStore();
+    const host = createCordisDshHost(ctx, { markers: store });
+    host.bindParent(createAgent("disp-1"), "disp-1");
+
+    const summoned = await host.spawnDispatcher({
+      parentSessionId: "disp-1",
+      title: "Peer",
+      prompt: "Own the slice.",
+    });
+
+    const row = store.marks.get(summoned.dispatcherId);
+    assert.ok(row);
+    assert.equal("workerModel" in row, false);
+  });
+
+  it("stores no default and warns once when worker_model is malformed", async () => {
+    const ctx = createStubCtx();
+    const store = createListableMarkStore();
+    const host = createCordisDshHost(ctx, { markers: store });
+    host.bindParent(createAgent("disp-1"), "disp-1");
+    const warn = mock.method(console, "warn", () => {});
+    let summoned: { dispatcherId: string };
+    try {
+      summoned = await host.spawnDispatcher({
+        parentSessionId: "disp-1",
+        title: "Peer",
+        prompt: "Own the slice.",
+        // Present, yet not a route the host could apply.
+        workerModel: { provider: "", model: "mC" },
+      });
+    } finally {
+      mock.restoreAll();
+    }
+    assert.equal(warn.mock.callCount(), 1);
+    assert.match(
+      String(warn.mock.calls[0]?.arguments[0]),
+      /^\[multitask-dispatcher\]/,
+    );
+
+    // Nothing was stored, so the row omits the field and the leader's workers
+    // keep today's inheritance shape.
+    const row = store.marks.get(summoned.dispatcherId);
+    assert.ok(row);
+    assert.equal("workerModel" in row, false);
+    bindLeader(host, summoned.dispatcherId);
+    await host.spawnWorker("Do the thing.", {
+      parentSessionId: summoned.dispatcherId,
+      streamKey: "s1",
+      title: "Thing",
+    });
+    const spec = ctx.startActivationCalls[0] as unknown as ActivationSpecLike;
+    assert.equal("agentOptions" in spec.request, false);
   });
 });
 

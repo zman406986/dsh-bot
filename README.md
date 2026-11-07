@@ -79,6 +79,22 @@ The dispatcher can call `spawn_dispatcher` to summon another dispatcher.
 - Only the user-started dispatcher class may summon. A summoned dispatcher is a team leader: it is not given `spawn_dispatcher` at all (ticket 176), so there is no second level of dispatchers.
 - On the user-started class, the plugin sets no depth or count bound of its own. Because the new dispatcher is a top-level session, dsh's subagent depth limit and its live-child pool do not apply to it either. That is observed behaviour, not a promise.
 
+### Choosing models
+
+Both spawn tools take an optional model.
+
+- `spawn_dispatcher` takes `model` for the summoned team leader and `worker_model` for the default model of the workers that leader later spawns.
+- `spawn_worker` takes `model` for that one worker. An explicit value wins; the leader's stored `worker_model` applies when the argument is omitted.
+- Write the value as provider/model-id. For example:
+
+  ```text
+  deepseek/deepseek-reasoner
+  ```
+
+  A bare model id works only when it names exactly one catalog model.
+- Omit the argument to keep today's behavior: a leader inherits the summoning dispatcher's live route, and a worker inherits its leader's default or route.
+- An unknown or invalid value does not refuse the spawn. The spawn falls back to the inherited route, writes one `[multitask-dispatcher]` warning to the dsh process log, and adds a short note to the tool result.
+
 ## Configuration
 
 Every field is a setting on the plugin's card on dsh's Plugins page. A saved change is not applied live. It takes effect in the next chat.

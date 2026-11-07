@@ -462,6 +462,44 @@ describe("durable marker store over storageDomain", () => {
     assert.equal(spec.version, 2);
   });
 
+  it("round-trips the optional worker model on a dispatcher mark (ticket 285)", async () => {
+    const sd = createStubStorageDomain();
+    const durability = createDurability(sd);
+
+    await durability.writeDispatcherMark({
+      sessionId: "leader-1",
+      parentSessionId: "chat-1",
+      generation: 2,
+      workerModel: { provider: "pC", model: "mC" },
+    });
+    const read = await durability.readDispatcherMark("leader-1");
+    assert.ok(read);
+    assert.deepEqual(read.workerModel, { provider: "pC", model: "mC" });
+    assert.equal(read.parentSessionId, "chat-1");
+
+    // A pre-285 row is still readable and simply carries no worker default:
+    // its workers inherit the leader's own route (safe degradation).
+    await durability.writeDispatcherMark({ sessionId: "leader-legacy" });
+    const legacy = await durability.readDispatcherMark("leader-legacy");
+    assert.ok(legacy);
+    assert.equal(legacy.workerModel, undefined);
+
+    // The whole-table read is what a restart restores from
+    // (`refreshDispatcherMarks`), so it must carry the route too.
+    const listed = await durability.listDispatcherMarks();
+    assert.deepEqual(
+      listed.find((mark) => mark.sessionId === "leader-1")?.workerModel,
+      { provider: "pC", model: "mC" },
+    );
+    assert.equal(
+      listed.find((mark) => mark.sessionId === "leader-legacy")?.workerModel,
+      undefined,
+    );
+    // No version bump for the new optional field (ticket-141 precedent).
+    const spec = markerDomainSpec() as { version: number };
+    assert.equal(spec.version, 2);
+  });
+
   it("lists every dispatcher mark so the adapter can warm its mirror (ticket 138)", async () => {
     const sd = createStubStorageDomain();
     const durability = createDurability(sd);
@@ -619,6 +657,26 @@ describe("durable marker store over storageDomain", () => {
           { sessionId: "child-1", generation: 1 },
         ],
         accepted: { sessionId: "child-1" },
+      },
+      {
+        // Ticket 285: the optional worker default follows the generation
+        // precedent — absent parses fine (the case above), but a PRESENT
+        // value must be a complete route. A half-filled one would restore a
+        // default the host cannot apply.
+        table: DISPATCHER_SESSION_TABLE_NAME,
+        rejected: [
+          { sessionId: "child-1", workerModel: null },
+          { sessionId: "child-1", workerModel: "pC/mC" },
+          { sessionId: "child-1", workerModel: {} },
+          { sessionId: "child-1", workerModel: { provider: "", model: "mC" } },
+          { sessionId: "child-1", workerModel: { provider: "pC", model: "" } },
+          { sessionId: "child-1", workerModel: { provider: "pC", model: 7 } },
+          { sessionId: "child-1", workerModel: { provider: 7, model: "mC" } },
+        ],
+        accepted: {
+          sessionId: "child-1",
+          workerModel: { provider: "pC", model: "mC" },
+        },
       },
       {
         table: WORKER_SESSION_TABLE_NAME,
