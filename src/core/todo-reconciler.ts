@@ -480,6 +480,15 @@ export interface CreateTodoInput {
  */
 export interface TodoLedger {
   create(input: CreateTodoInput): TodoItem;
+  /**
+   * Advance the generated id sequence past an explicit id WITHOUT creating a
+   * row (ticket 198). Restart recovery is parent-scoped, so the surviving
+   * markers of a sibling that has not been rebuilt yet are the only durable
+   * record of that sibling's todo ids; reserving them keeps the next
+   * generated `todo-N` from stealing one. Non-`todo-N` ids cannot collide
+   * with the generated form and are ignored.
+   */
+  reserveId(todoId: string): void;
   get(todoId: string): TodoItem | undefined;
   list(sessionId: string): TodoItem[];
   /** Structural link set at spawn (ADR-0007). */
@@ -567,6 +576,19 @@ export function createTodoLedger(options?: {
     return todo;
   }
 
+  /**
+   * Ticket 151 + 198: an explicit id must advance the generated sequence past
+   * itself. Ticket 198 additionally uses this WITHOUT a row for ids a
+   * not-yet-rebuilt sibling's durable marker still owns, so a later
+   * generated `todo-N` cannot alias them.
+   */
+  function reserveId(todoId: string): void {
+    const generated = /^todo-(\d+)$/.exec(todoId);
+    if (generated !== null) {
+      nextId = Math.max(nextId, Number(generated[1]) + 1);
+    }
+  }
+
   return {
     create(input: CreateTodoInput): TodoItem {
       const at = input.nowMs ?? now();
@@ -575,12 +597,7 @@ export function createTodoLedger(options?: {
       // sequence past it. Otherwise a restored `todo-1` leaves nextId at 1
       // and the next generated create throws "todo already exists", killing
       // every auto-created spawn after a restart.
-      if (input.id !== undefined) {
-        const generated = /^todo-(\d+)$/.exec(input.id);
-        if (generated !== null) {
-          nextId = Math.max(nextId, Number(generated[1]) + 1);
-        }
-      }
+      if (input.id !== undefined) reserveId(input.id);
       const id = input.id ?? `todo-${nextId++}`;
       if (items.has(id)) {
         throw new Error(`todo already exists: ${id}`);
@@ -601,6 +618,8 @@ export function createTodoLedger(options?: {
         updatedAtMs: at,
       });
     },
+
+    reserveId,
 
     get(todoId: string): TodoItem | undefined {
       return items.get(todoId);

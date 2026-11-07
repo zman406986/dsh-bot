@@ -33,6 +33,7 @@ type AdapterDurability = StorageDomainDurability &
   Required<
     Pick<
       StorageDomainDurability,
+      | "listWorkerMarkers"
       | "writeDispatcherMark"
       | "readDispatcherMark"
       | "listDispatcherMarks"
@@ -364,6 +365,30 @@ describe("durable marker store over storageDomain", () => {
     await durability.deleteWorkerMarker("w-1");
     const after = await durability.readWorkerMarkers("session-1");
     assert.equal(after.length, 0);
+  });
+
+  it("lists every marker so a restart can reserve a sibling's todo id (ticket 198)", async () => {
+    const sd = createStubStorageDomain();
+    const durability = createDurability(sd);
+
+    assert.deepEqual(await durability.listWorkerMarkers(), []);
+
+    await durability.writeWorkerMarker(marker({ todoId: "todo-1" }));
+    await durability.writeWorkerMarker(
+      marker({
+        workerId: "w-2",
+        parentSessionId: "session-2",
+        todoId: "todo-2",
+      }),
+    );
+
+    const listed = await durability.listWorkerMarkers();
+    assert.deepEqual(
+      listed.map((m) => `${m.parentSessionId}:${m.todoId}`).sort(),
+      ["session-1:todo-1", "session-2:todo-2"],
+      "the whole table is visible, not one parent's slice",
+    );
+    assert.equal(sd.opens.length, 1, "the list shares the one open domain");
   });
 
   it("records, updates, and lists inbox checkpoints", async () => {

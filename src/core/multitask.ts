@@ -352,7 +352,8 @@ export interface Multitask {
   reclaimWorker(workerId: string, parentSessionId: string): boolean;
   /**
    * First turn started: spawned → running. Marks any linked todo in_progress.
-   * No-op if illegal.
+   * No-op if illegal. An edge observed while an adopted worker's marker is
+   * still loading is buffered and replayed by the rebuild (ticket 190).
    */
   noteTurnStarted(workerId: string): void;
   /** Steer received for a running worker: running → steering. No-op if illegal. */
@@ -625,6 +626,14 @@ export function createMultitask(
    */
   const pendingSettles = new Map<string, SettledEvent>();
   /**
+   * Ticket 190: first-turn running edges observed after the host adopted a
+   * worker back but before `rebuildFromDurability` restored its record — the
+   * same adopt-before-rebuild window `pendingSettles` covers, for the live
+   * edge instead of the terminal one. The rebuild replays the edge onto the
+   * record it creates, so a resumed turn is not silently left `spawned`.
+   */
+  const pendingTurnStarts = new Set<string>();
+  /**
    * Worker ids with a step-boundary steer send in flight. Two boundaries can
    * arrive inside one send window; the second must not send the same parked
    * correction again.
@@ -652,6 +661,13 @@ export function createMultitask(
     });
   const steerQueue: SteerQueue = createSteerQueue();
   const todoLedger: TodoLedger = createTodoLedger();
+  /**
+   * Ticket 198: the first restart rebuild seeds the generated todo id
+   * sequence from the whole marker table (once). Until it succeeds, a later
+   * rebuild retries; restoreLedgerLink's foreign-owner branch is the safety
+   * net when the store cannot answer or a todo was created too early.
+   */
+  let durableTodoIdsReserved = false;
   const peerInbox: PeerInbox = createPeerInbox(options?.peer);
   // Ticket 108: coalescing knobs flow through conditionally spread so an
   // unset option stays truly absent (the bus applies its own defaults).
@@ -769,6 +785,7 @@ export function createMultitask(
    */
   function forgetWorkerWake(workerId: string): void {
     adoptedAwaitingMarker.delete(workerId);
+    pendingTurnStarts.delete(workerId);
     try {
       host.forgetWorkerWake?.(workerId);
     } catch {
@@ -856,6 +873,21 @@ export function createMultitask(
     return next;
   }
 
+  /**
+   * Ticket 190: the first-turn edge and its side effects, shared by the host
+   * status handler and the rebuild's replay of an edge observed before the
+   * adopted worker's record existed. Advancing the FSM also promotes the
+   * linked todo (spawn → in_progress), exactly like `noteTurnStarted`.
+   */
+  function applyTurnStarted(workerId: string): void {
+    const next = transition(workerId, { type: "turn-started" });
+    if (next === undefined) return;
+    const record = workers.get(workerId);
+    if (record?.todoId != null) {
+      todoLedger.markInProgress(record.todoId);
+    }
+  }
+
   /** Close the linked todo when a worker is aborted for good. */
   function cancelLinkedTodo(record: WorkerRecord): void {
     if (record.todoId === null) return;
@@ -874,6 +906,33 @@ export function createMultitask(
         jobDir: todo.external.jobDir,
         reason: "worker-aborted",
       });
+    }
+  }
+
+  /**
+   * Ticket 198: reserve every todo id any durable marker still points at,
+   * including a sibling dispatcher that has not been rebuilt yet. Recovery
+   * is lazy and parent-scoped, while the generated id sequence is process-
+   * local, so without this a new todo created after rebuilding A can take
+   * the id B's marker owns; B's restore then finds a foreign row instead of
+   * its own obligation. Best-effort: a store without the listing seam, or a
+   * failed read, leaves restoreLedgerLink's collision path as the safety
+   * net.
+   */
+  async function reserveDurableTodoIds(): Promise<void> {
+    if (durableTodoIdsReserved || durability === undefined) return;
+    try {
+      const listed = durability.listWorkerMarkers?.();
+      if (listed === undefined) return;
+      for (const marker of await Promise.resolve(listed)) {
+        if (marker.todoId !== null) todoLedger.reserveId(marker.todoId);
+      }
+      durableTodoIdsReserved = true;
+    } catch (error) {
+      warnBestEffort(
+        "durable worker markers could not be listed for todo id reservation",
+        error,
+      );
     }
   }
 
@@ -901,10 +960,17 @@ export function createMultitask(
     readonly nowMs?: number;
   }): void {
     if (args.todoId === null) return;
-    if (todoLedger.get(args.todoId) !== undefined) return;
-    todoLedger.create({
+    const existing = todoLedger.get(args.todoId);
+    // An item this same session already restored IS the link (ticket 151):
+    // never duplicate it. An item owned by ANOTHER session is not (ticket
+    // 198): that id is what the process-local sequence handed out before the
+    // sibling recovered, and adopting it would silently move this worker's
+    // obligation onto a foreign row. Fall through and re-link under a fresh
+    // generated id instead.
+    if (existing !== undefined && existing.sessionId === args.sessionId) return;
+    const todo = todoLedger.create({
       sessionId: args.sessionId,
-      id: args.todoId,
+      ...(existing === undefined ? { id: args.todoId } : {}),
       title: args.title,
       status: args.status,
       streamKey: args.streamKey,
@@ -914,7 +980,23 @@ export function createMultitask(
       ...(args.external !== undefined ? { external: args.external } : {}),
       ...(args.nowMs !== undefined ? { nowMs: args.nowMs } : {}),
     });
-    todoLedger.linkWorker(args.todoId, args.workerId, args.streamKey);
+    todoLedger.linkWorker(todo.id, args.workerId, args.streamKey);
+    if (todo.id === args.todoId) return;
+    // The re-link changed the id this worker owns. The roster record is the
+    // live truth; write the corrected marker too (best-effort) so the next
+    // restart does not have to relink again.
+    const record = workers.get(args.workerId);
+    if (record === undefined) return;
+    record.todoId = todo.id;
+    if (durability !== undefined) {
+      durabilityBestEffort(
+        `worker marker for ${args.workerId} could not be re-linked to ${todo.id}`,
+        () =>
+          durability.writeWorkerMarker(
+            toDurableMarker(record, args.external ?? null),
+          ),
+      );
+    }
   }
 
   /** Pure-reconcile against the session roster. Does not apply mutations. */
@@ -1658,13 +1740,17 @@ export function createMultitask(
     },
 
     noteTurnStarted(workerId: string): void {
-      const next = transition(workerId, { type: "turn-started" });
-      if (next === undefined) return;
-      // Todo before spawn → in_progress when the worker actually starts.
-      const record = workers.get(workerId);
-      if (record?.todoId != null) {
-        todoLedger.markInProgress(record.todoId);
+      if (!workers.has(workerId)) {
+        // Ticket 190: the edge can land after the host adopted this worker but
+        // before the rebuild's marker read resolves. Buffer it exactly like a
+        // settle; the rebuild replays it onto the record it creates. An id with
+        // no adoption evidence is still ignored.
+        if (adoptedAwaitingMarker.has(workerId)) {
+          pendingTurnStarts.add(workerId);
+        }
+        return;
       }
+      applyTurnStarted(workerId);
     },
 
     reclaimWorker(workerId: string, parentSessionId: string): boolean {
@@ -1972,6 +2058,11 @@ export function createMultitask(
       if (durability === undefined) {
         return { restored, unknownState };
       }
+      // Ticket 198: seed the generated todo id sequence from EVERY durable
+      // marker before this parent's rebuild can hand out a new id. Recovery
+      // is lazy and parent-scoped, so a sibling's marker is not otherwise
+      // visible here until that sibling activates.
+      await reserveDurableTodoIds();
       const markers = await Promise.resolve(
         durability.readWorkerMarkers(parentSessionId),
       );
@@ -1985,6 +2076,10 @@ export function createMultitask(
         // provably running.
         if (adoptedAwaitingMarker.has(marker.workerId)) {
           adoptedAwaitingMarker.delete(marker.workerId);
+          // Ticket 190: an observed first-turn running edge buffered while
+          // this read was pending. Consumed here; replayed once the record
+          // exists, before any buffered terminal settle.
+          const observedRunning = pendingTurnStarts.delete(marker.workerId);
           const recovered: WorkerRecord = {
             workerId: marker.workerId,
             parentSessionId: marker.parentSessionId,
@@ -2018,6 +2113,13 @@ export function createMultitask(
               : {}),
             nowMs: marker.updatedAtMs,
           });
+          // Ticket 190: replay the buffered running edge through the normal
+          // first-turn path (status, todo promotion, roster publish). A
+          // buffered settle is applied AFTER it, so a worker that finished in
+          // this window still ends terminal — the settle wins.
+          if (observedRunning) {
+            applyTurnStarted(recovered.workerId);
+          }
           // A settle that landed inside the adopt-before-rebuild window was
           // buffered because no roster record existed yet. The record exists
           // now, so replay it through the normal terminal path: status,
@@ -2116,6 +2218,15 @@ export function createMultitask(
         if (workers.has(workerId)) continue;
         if (adoptedAwaitingMarker.get(workerId) === parentSessionId) {
           pendingSettles.delete(workerId);
+        }
+      }
+      // Ticket 190: the same ownership rule for a buffered running edge whose
+      // marker never restored a record — it must not leak into a later
+      // rebuild (or a sibling's) and revive an unrelated worker.
+      for (const workerId of [...pendingTurnStarts]) {
+        if (workers.has(workerId)) continue;
+        if (adoptedAwaitingMarker.get(workerId) === parentSessionId) {
+          pendingTurnStarts.delete(workerId);
         }
       }
       // Restored entries re-join the visible roster (ticket 21 observer);

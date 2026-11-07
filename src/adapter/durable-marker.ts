@@ -755,6 +755,21 @@ export function createStorageDomainDurability(
       });
     },
 
+    // Ticket 198: the whole marker table, so the core's first rebuild can
+    // reserve todo ids owned by sibling dispatchers that have not been
+    // rebuilt yet (recovery is lazy and parent-scoped). Same one-domain read
+    // as readWorkerMarkers, without the parent filter.
+    async listWorkerMarkers(): Promise<readonly DurableWorkerMarker[]> {
+      return trackOperation(async () => {
+        const table = await ensureTable();
+        const out: DurableWorkerMarker[] = [];
+        for (const [, marker] of table.entries()) {
+          out.push(marker);
+        }
+        return out;
+      });
+    },
+
     async deleteWorkerMarker(workerId: string): Promise<void> {
       return trackOperation(async () => {
         const table = await ensureTable();

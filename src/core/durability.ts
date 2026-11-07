@@ -235,6 +235,18 @@ export interface DurabilityPort {
   readWorkerMarkers(
     parentSessionId: string,
   ): readonly DurableWorkerMarker[] | Promise<readonly DurableWorkerMarker[]>;
+  /**
+   * Ticket 198: every marker in the store, any order. The first restart
+   * rebuild reads this ONCE to seed the process-local todo id sequence past
+   * ids a sibling dispatcher's not-yet-rebuilt marker still owns — recovery
+   * is lazy and parent-scoped, so nothing else carries that knowledge before
+   * the sibling activates. Optional like the other list seams: a store that
+   * omits it keeps the pre-198 behaviour, where the restore-time relink is
+   * the safety net instead.
+   */
+  listWorkerMarkers?():
+    | readonly DurableWorkerMarker[]
+    | Promise<readonly DurableWorkerMarker[]>;
   /** Drop a marker once its obligation is closed (delivered or aborted). */
   deleteWorkerMarker(workerId: string): void | Promise<void>;
   /**
@@ -424,6 +436,9 @@ export function createInMemoryDurability(): InMemoryDurability {
       return [...markers.values()].filter(
         (marker) => marker.parentSessionId === parentSessionId,
       );
+    },
+    listWorkerMarkers(): readonly DurableWorkerMarker[] {
+      return [...markers.values()];
     },
     deleteWorkerMarker(workerId: string): void {
       markers.delete(workerId);

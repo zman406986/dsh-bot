@@ -6,6 +6,9 @@ import {
 } from "../src/core/durability.js";
 import { FakeDshHost } from "../src/core/fake-host.js";
 import { createMultitask, type Multitask } from "../src/core/multitask.js";
+import { DELIVER_RESULT_TOOL } from "../src/core/policy/prompts.js";
+import type { DeliverResultToolResult } from "../src/core/tool-results.js";
+import { createDispatcherTools } from "../src/core/tools.js";
 import type { SpawnResult } from "../src/core/types.js";
 
 function unwrapSpawn(result: SpawnResult): string {
@@ -79,6 +82,41 @@ async function runPreCrash(options: {
   }
 
   return { workerId, parentSessionId, todoId, host, multitask };
+}
+
+/**
+ * Ticket 198 fixture: TWO dispatcher sessions with one settled-undelivered
+ * worker each, created by one pre-crash core over a shared store. Session A
+ * owns todo-1, session B todo-2 — the ids a lazy restart must not alias.
+ */
+async function seedTwoUndeliveredSessions(
+  durability: InMemoryDurability,
+): Promise<{ workerA: string; workerB: string }> {
+  const host = new FakeDshHost();
+  const core = createMultitask(host, { durability });
+  const spawnOne = async (sessionId: string, todoId: string): Promise<string> => {
+    core.createTodo({ sessionId, id: todoId, title: `${sessionId} work` });
+    const workerId = unwrapSpawn(
+      await core.spawnWorker({
+        parentSessionId: sessionId,
+        streamKey: todoId,
+        title: `${sessionId} work`,
+        prompt: `Do ${sessionId}.`,
+        todoId,
+      }),
+    );
+    core.noteTurnStarted(workerId);
+    host.fireSettled({
+      workerId,
+      status: "completed",
+      report: `${sessionId} result`,
+      transcriptRef: `child-${sessionId}`,
+    });
+    return workerId;
+  };
+  const workerA = await spawnOne("session-a", "todo-1");
+  const workerB = await spawnOne("session-b", "todo-2");
+  return { workerA, workerB };
 }
 
 describe("durable roster marker — write path", () => {
@@ -497,6 +535,118 @@ describe("durable roster marker — restart rebuild", () => {
     assert.equal(after.listWorkers("session-b").length, 0);
     // session-b markers still on the store for a later rebuild.
     assert.ok(durability.markers.has(workerB));
+  });
+
+  // Ticket 198: recovery is lazy and parent-scoped, but the ledger's id
+  // sequence is process-local. Rebuilding A must not hand A's next todo an id
+  // that B's durable marker still owns; and if an id ever does collide, B's
+  // restore must bind to its own row instead of silently reusing A's.
+  it("a sibling's not-yet-rebuilt todo id is never aliased, and its result stays deliverable", async () => {
+    const durability = createInMemoryDurability();
+    // Session B has settled and is undelivered but will NOT be rebuilt yet, so
+    // its marker's id is the only durable record of it.
+    const { workerB } = await seedTwoUndeliveredSessions(durability);
+
+    // Restart. Rebuild A only, then let A create a new todo before B recovers:
+    // the exact order that used to allocate todo-2 over B's marker.
+    const after = createMultitask(new FakeDshHost(), { durability });
+    const rebuiltA = await after.rebuildFromDurability("session-a");
+    assert.equal(rebuiltA.restored.length, 1);
+
+    const bMarker = durability.markers.get(workerB);
+    assert.ok(bMarker, "B's marker outlives A's rebuild");
+    assert.equal(bMarker.todoId, "todo-2", "B still durably owns todo-2");
+
+    const aNew = after.createTodo({ sessionId: "session-a", title: "A follow-up" });
+    assert.notEqual(
+      aNew.id,
+      bMarker.todoId,
+      "a new todo must not take an id a not-yet-rebuilt sibling still owns",
+    );
+
+    // Now B recovers, after the allocation that used to alias it.
+    const rebuiltB = await after.rebuildFromDurability("session-b");
+    assert.equal(rebuiltB.restored.length, 1);
+    assert.equal(rebuiltB.restored[0]?.workerId, workerB);
+
+    const aTodos = after.listTodos("session-a");
+    const bTodos = after.listTodos("session-b");
+    assert.equal(bTodos.length, 1, "B's restored obligation has a row of its own");
+    const bTodo = bTodos[0];
+    assert.ok(bTodo);
+    assert.equal(bTodo.sessionId, "session-b");
+    assert.equal(bTodo.workerId, workerB);
+    assert.equal(after.getWorker(workerB)?.todoId, bTodo.id);
+    const allIds = [...aTodos.map((todo) => todo.id), bTodo.id];
+    assert.equal(
+      new Set(allIds).size,
+      allIds.length,
+      "the two sessions' todo ids never alias",
+    );
+    assert.equal(after.todos.get(aNew.id)?.sessionId, "session-a");
+
+    // B's completed result is still owed and redrives against B's row.
+    assert.equal(after.todos.get(bTodo.id)?.delivered, false);
+    const redrive = after.redriveUndelivered("session-b");
+    assert.equal(redrive.redriven.length, 1);
+    assert.equal(redrive.redriven[0]?.id, bTodo.id);
+
+    // The delivery tool's ownership fence is what made the alias fatal. B can
+    // deliver its own row and still cannot close A's.
+    const tools = createDispatcherTools({
+      multitask: after,
+      getSessionId: () => "session-b",
+    });
+    const deliver = tools.find((tool) => tool.name === DELIVER_RESULT_TOOL);
+    assert.ok(deliver);
+    const foreign = (await deliver.execute({
+      text: "Not B's result.",
+      todo_id: aNew.id,
+    })) as DeliverResultToolResult;
+    assert.equal(foreign.ok, false);
+    assert.equal(foreign.ok ? null : foreign.reason, "unknown-target");
+    assert.equal(after.todos.get(aNew.id)?.delivered, false);
+
+    const own = (await deliver.execute({
+      text: "B's result reaches the user.",
+      todo_id: bTodo.id,
+    })) as DeliverResultToolResult;
+    assert.equal(own.ok, true);
+    assert.equal(own.ok ? own.todo_completed : null, bTodo.id);
+    assert.equal(after.todos.get(bTodo.id)?.delivered, true);
+    assert.equal(durability.markers.has(workerB), false, "delivery closes B's marker");
+  });
+
+  // The reservation above needs the store's whole-table listing seam. An
+  // older/thinner port (or a todo created before the first rebuild lands) can
+  // still hit the collision, so restore itself must resolve it: never adopt a
+  // foreign row, re-link the worker to its own fresh id, and persist that.
+  it("a foreign-owner collision re-links the restored worker to its own todo", async () => {
+    const store = createInMemoryDurability();
+    const { workerB } = await seedTwoUndeliveredSessions(store);
+
+    // A pre-198 store: no whole-table listing, so the reservation cannot run
+    // and the next generated id really does collide with B's marker.
+    const { listWorkerMarkers: _omitted, ...storeWithoutList } = store;
+    const after = createMultitask(new FakeDshHost(), {
+      durability: storeWithoutList,
+    });
+    await after.rebuildFromDurability("session-a");
+    const aNew = after.createTodo({ sessionId: "session-a", title: "A follow-up" });
+    assert.equal(aNew.id, "todo-2", "the fixture reproduces the aliasing id");
+
+    const rebuiltB = await after.rebuildFromDurability("session-b");
+    assert.equal(rebuiltB.restored.length, 1);
+    const bTodo = after.listTodos("session-b")[0];
+    assert.ok(bTodo, "B's obligation is not lost behind A's row");
+    assert.equal(bTodo.sessionId, "session-b");
+    assert.equal(bTodo.workerId, workerB);
+    assert.notEqual(bTodo.id, aNew.id, "B gets its own id, not A's row");
+    assert.equal(after.getWorker(workerB)?.todoId, bTodo.id);
+    // The corrected link is durable, so the next restart starts from it.
+    assert.equal(store.markers.get(workerB)?.todoId, bTodo.id);
+
+    assert.equal(after.redriveUndelivered("session-b").redriven.length, 1);
   });
 
   it("aborted workers leave no marker, so restart reports nothing for them", async () => {
