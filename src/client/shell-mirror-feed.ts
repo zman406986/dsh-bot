@@ -96,6 +96,13 @@ export function createShellMirrorFeed(): ShellMirrorFeed {
     readonly value: unknown;
   }[] = [];
   let hasTruth = false;
+  /**
+   * Counts accepted publications. A synchronous store subscriber may reenter
+   * this hub during fanout; the nested publication is newer truth and has
+   * already been fanned out to every attached store, so the suspended outer
+   * publication must stop rather than write its stale entries over it.
+   */
+  let publication = 0;
 
   return {
     attach(store) {
@@ -114,8 +121,10 @@ export function createShellMirrorFeed(): ShellMirrorFeed {
       if (mirrors === null) return;
       hasTruth = true;
       lastMirrors = mirrors;
+      const accepted = ++publication;
       for (const store of [...stores]) {
         for (const mirror of mirrors) {
+          if (accepted !== publication) return;
           store.applySessionMirror(mirror.sessionId, mirror.value);
         }
       }
