@@ -11,7 +11,7 @@ import {
 } from "../src/core/liveness.js";
 import { CHECK_ACTIVITY_CHARS, RECENT_RESULT_EXCERPT_CHARS } from "../src/core/report-clamp.js";
 import type { SettledEvent } from "../src/core/types.js";
-import type { DurableWorkerMarker } from "../src/core/durability.js";
+import type { DurableWorkerMarker, DurabilityPort } from "../src/core/durability.js";
 import { createWorkerAgentDef } from "../src/worker/agent-def.js";
 import { WORKER_PERSONA_SECTION } from "../src/worker/preset.js";
 import { EMPTY_WORKER_REPORT_PLACEHOLDER } from "../src/worker/report.js";
@@ -1562,7 +1562,22 @@ describe("defect fixes: wake, interrupt, dormancy and worker lifecycle", () => {
       origin?: "subagent" | "top-level";
     }>;
     workers?: Array<{ sessionId: string; parentSessionId: string }>;
-    workerMarkers?: Array<{ workerId: string; parentSessionId: string; status: string }>;
+    /**
+     * Ticket 190: a real marker carries the whole record, not only its
+     * identity — a rebuild of an adopted worker restores title, stream key,
+     * transcript pointer and ledger link from these fields.
+     */
+    workerMarkers?: Array<{
+      workerId: string;
+      parentSessionId: string;
+      status: string;
+      streamKey?: string;
+      title?: string;
+      transcriptRef?: string | null;
+      todoId?: string | null;
+      startedAtMs?: number;
+      updatedAtMs?: number;
+    }>;
   }) {
     const dispatchers = new Map(
       (options?.dispatchers ?? []).map((row) => [row.sessionId, { ...row }]),
@@ -1626,6 +1641,27 @@ describe("defect fixes: wake, interrupt, dormancy and worker lifecycle", () => {
       },
       followup() {},
     };
+  }
+
+  /**
+   * Ticket 190: park the rebuild's durable-marker read until released, so the
+   * adopt-before-rebuild window is driven deterministically instead of racing
+   * a real store round-trip.
+   */
+  function holdMarkerReads(
+    base: ReturnType<typeof createMarkStore>,
+    parentSessionId: string,
+  ): { store: DurabilityPort; release: () => void } {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const store: DurabilityPort = {
+      ...base,
+      readWorkerMarkers: () =>
+        held.then(() => base.readWorkerMarkers(parentSessionId)),
+    };
+    return { store, release: () => release() };
   }
 
   it("a throwing dispatcher followup does not escape the listener, and the wake is re-parked", async () => {
@@ -2539,6 +2575,145 @@ describe("defect fixes: wake, interrupt, dormancy and worker lifecycle", () => {
       false,
       "a terminal worker is not adopted",
     );
+  });
+
+  /**
+   * Ticket 190: the exact host ordering the ticket describes -- the host adopts
+   * a resumed worker and observes its running turn while the fresh core's
+   * marker read is still pending. The rebuild then restores the record.
+   */
+  async function coldResumeRig() {
+    const ctx = createStubCtx();
+    const base = createMarkStore({
+      workers: [{ sessionId: "w-cold", parentSessionId: "disp-1" }],
+      workerMarkers: [
+        {
+          workerId: "w-cold",
+          parentSessionId: "disp-1",
+          status: "running",
+          streamKey: "cold-stream",
+          title: "Cold worker",
+          transcriptRef: "w-cold",
+          todoId: "todo-cold",
+        },
+      ],
+    });
+    const { store, release } = holdMarkerReads(base, "disp-1");
+    let multitask!: ReturnType<typeof createMultitask>;
+    const host = createCordisDshHost(ctx, {
+      markers: store,
+      onWorkerReattached: (workerId, parentSessionId) => {
+        multitask.reclaimWorker(workerId, parentSessionId);
+      },
+    });
+    multitask = createMultitask(host, { durability: store });
+    bindDispatcherLifecycle(ctx, host, multitask);
+    // The live host knows the worker (durable wake mirror written at spawn)
+    // before it announces the resumed session, so workerIdOf answers on the
+    // running edge. Not refreshWorkerSessionMarks: that reads the marker table
+    // too, and the table read is deliberately parked below.
+    host.rememberWorkerWake?.("w-cold", "disp-1");
+    host.bindParent(createAgent("disp-1"), "disp-1");
+    const rebuild = multitask.rebuildFromDurability("disp-1");
+    await tick();
+    return { ctx, host, multitask, release, rebuild };
+  }
+
+  it("ticket 190: a running edge observed during the cold-resume marker read survives the rebuild", async () => {
+    const { ctx, host, multitask, release, rebuild } = await coldResumeRig();
+
+    const child = createChildAgent("w-cold", "disp-1");
+    ctx.bindAgent(child);
+    ctx.fire("agent/created", { agent: child, source: "resume" });
+    assert.equal(host.owns("w-cold"), true, "the host adopted the worker");
+    assert.equal(
+      multitask.getWorker("w-cold"),
+      undefined,
+      "the core has no record until the marker read resolves",
+    );
+
+    // The resumed turn is already running: the edge the bug dropped.
+    ctx.fire("agent/status", { agent: child, status: "running" });
+    assert.equal(multitask.getWorker("w-cold"), undefined);
+
+    release();
+    const report = await rebuild;
+
+    const record = multitask.getWorker("w-cold");
+    assert.ok(record, "the adopted worker is restored");
+    assert.equal(record.status, "running", "the running edge is preserved");
+    assert.equal(
+      multitask.listWorkers("disp-1")[0]?.status,
+      "running",
+      "check_workers projects the accurate lifecycle state",
+    );
+    assert.ok(
+      report.restored.some((entry) => entry.workerId === "w-cold"),
+      "the rebuild reports the restored worker",
+    );
+
+    const steer = await multitask.steerWorker("w-cold", "tighten it");
+    assert.deepEqual(
+      steer,
+      { ok: true },
+      "a mid-run correction is accepted through the existing steer path",
+    );
+  });
+
+  it("ticket 190: re-attachment with no observed running edge still rebuilds spawned", async () => {
+    const { ctx, host, multitask, release, rebuild } = await coldResumeRig();
+
+    const child = createChildAgent("w-cold", "disp-1");
+    ctx.bindAgent(child);
+    ctx.fire("agent/created", { agent: child, source: "resume" });
+    assert.equal(host.owns("w-cold"), true);
+
+    release();
+    await rebuild;
+
+    assert.equal(
+      multitask.getWorker("w-cold")?.status,
+      "spawned",
+      "adoption alone is not evidence that the worker started a turn",
+    );
+    assert.deepEqual(await multitask.steerWorker("w-cold", "tighten it"), {
+      ok: false,
+      reason: "not-running",
+      detail: "worker w-cold is not running; it may already be done",
+    });
+  });
+
+  it("ticket 190: a settle inside the window wins over the running observation", async () => {
+    const { ctx, multitask, release, rebuild } = await coldResumeRig();
+
+    const child = createChildAgent("w-cold", "disp-1");
+    ctx.bindAgent(child);
+    ctx.fire("agent/created", { agent: child, source: "resume" });
+    ctx.fire("agent/status", { agent: child, status: "running" });
+    // The worker finishes before its marker read resolves.
+    ctx.fire("subagent/end", {
+      id: "w-cold",
+      stopReason: "completed",
+      lastAssistantMessage: [{ type: "text", text: "done" }],
+    });
+    assert.equal(
+      multitask.getWorker("w-cold"),
+      undefined,
+      "the settle is buffered with no record to apply it to",
+    );
+
+    release();
+    await rebuild;
+
+    assert.equal(
+      multitask.getWorker("w-cold")?.status,
+      "completed",
+      "the terminal settle wins over the running observation",
+    );
+    // A late or duplicate running edge must not revive a finished worker.
+    multitask.noteTurnStarted("w-cold");
+    assert.equal(multitask.getWorker("w-cold")?.status, "completed");
+    assert.equal((await multitask.steerWorker("w-cold", "late")).ok, false);
   });
 
   it("a disposed parented dispatcher re-activates on re-announcement, exactly once", async () => {
