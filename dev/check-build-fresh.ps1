@@ -23,9 +23,16 @@ function Get-NewestSource {
     [string[]]$Include,
     [scriptblock]$Skip
   )
-  $files = Get-ChildItem -LiteralPath $Roots -Recurse -File -Include $Include -ErrorAction Stop |
+  # -Include only works with a wildcard in -Path, and silently matches
+  # everything under -LiteralPath, which made vendored lib\*.js and *.map
+  # files count as "sources" and marked every build stale forever. Filter by
+  # extension in Where-Object instead.
+  $patterns = @($Include | ForEach-Object { '*' + $_.TrimStart('*') })
+  $files = Get-ChildItem -LiteralPath $Roots -Recurse -File -ErrorAction Stop |
     Where-Object {
-      -not $_.Name.EndsWith('.d.ts', [System.StringComparison]::OrdinalIgnoreCase) -and
+      $name = $_.Name
+      ($patterns | Where-Object { $name -like $_ }) -and
+      -not $name.EndsWith('.d.ts', [System.StringComparison]::OrdinalIgnoreCase) -and
       -not ($Skip -and (& $Skip $_.FullName))
     }
   $newest = $files | Sort-Object LastWriteTime -Descending | Select-Object -First 1

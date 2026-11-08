@@ -4,10 +4,14 @@ rem  dsh-bot - launcher for the multitask dispatcher checkout.
 rem  Tracked source of truth; the Desktop dsh-bot.bat forwards here.
 rem
 rem  Usage:
-rem    dsh-bot.bat                  build, then boot the multitask profile
-rem    dsh-bot.bat web              build, then boot web + committed overlay
-rem    dsh-bot.bat -NoBuild         skip the build (refused if build is stale)
+rem    dsh-bot.bat                  build if stale, then boot the multitask profile
+rem    dsh-bot.bat web              build if stale, then boot web + committed overlay
+rem    dsh-bot.bat -NoBuild         skip the build (still checks build freshness)
+rem    dsh-bot.bat -SkipCheck       skip the build AND the freshness probe
+rem    dsh-bot.bat -Restart         stop a previous dsh still holding the port
+rem    dsh-bot.bat -Port <n>        listen on another port (default 3080)
 rem    dsh-bot.bat -DryRun          resolve and print the command, boot nothing
+rem    dsh-bot.bat -NoOpen          do not open the browser
 rem    extra arguments after the route are passed to dsh
 rem
 rem  Baseline: dev\dsh-baseline.txt (README "What you need")
@@ -28,8 +32,12 @@ if exist "%REPO%\dev\dsh-baseline.txt" for /f "usebackq delims=" %%V in ("%REPO%
 set "ROUTE=multitask"
 set "EXTRA="
 set "NOBUILD="
+set "SKIPFRESH="
 set "DRYRUN="
 set "NOOPEN="
+set "RESTART="
+set "PORT="
+set "PORTGIVEN="
 
 :parse
 if "%~1"=="" goto args_done
@@ -41,6 +49,10 @@ if /i "!ARG!"=="racoons" (
 )
 if /i "!ARG!"=="multitask" goto arg_multitask
 if /i "!ARG!"=="-NoBuild" goto arg_nobuild
+if /i "!ARG!"=="-SkipCheck" goto arg_skipcheck
+if /i "!ARG!"=="-Restart" goto arg_restart
+if /i "!ARG!"=="-Port" goto arg_port
+if /i "!ARG!"=="--port" goto arg_port
 if /i "!ARG!"=="-DryRun" goto arg_dryrun
 if /i "!ARG!"=="-NoOpen" goto arg_noopen
 if /i "!ARG!"=="-h" goto usage
@@ -60,6 +72,25 @@ goto parse
 set "NOBUILD=1"
 shift
 goto parse
+:arg_skipcheck
+set "NOBUILD=1"
+set "SKIPFRESH=1"
+shift
+goto parse
+:arg_restart
+set "RESTART=1"
+shift
+goto parse
+:arg_port
+if "%~2"=="" (
+  echo [dsh-bot] -Port needs a number
+  exit /b 1
+)
+set "PORT=%~2"
+set "PORTGIVEN=1"
+shift
+shift
+goto parse
 :arg_dryrun
 set "DRYRUN=1"
 set "NOBUILD=1"
@@ -75,10 +106,12 @@ shift
 goto parse
 
 :usage
-echo Usage: dsh-bot.bat [web^|multitask] [-NoBuild] [-DryRun] [-NoOpen] [dsh args]
+echo Usage: dsh-bot.bat [web^|multitask] [-NoBuild^|-SkipCheck] [-Restart] [-Port ^<n^>] [-DryRun] [-NoOpen] [dsh args]
 exit /b 1
 
 :args_done
+if not defined PORT set "PORT=3080"
+if defined PORTGIVEN set "EXTRA=!EXTRA! --port !PORT!"
 if defined NOOPEN set "EXTRA=!EXTRA! --no-open"
 
 if not exist "%REPO%" (
@@ -97,21 +130,36 @@ if not exist "%DSH%" (
 cd /d "%REPO%"
 
 if defined NOBUILD (
-  echo [dsh-bot] build skipped -NoBuild
-) else (
-  echo [dsh-bot] building lib ...
-  call npm run build
-  if not "!ERRORLEVEL!"=="0" (
-    echo [dsh-bot] npm run build failed
-    pause
-    exit /b 1
+  if defined SKIPFRESH (
+    echo [dsh-bot] build and freshness checks skipped -SkipCheck
+  ) else (
+    echo [dsh-bot] build skipped -NoBuild
   )
-  echo [dsh-bot] building client ...
-  call npm run build:client
-  if not "!ERRORLEVEL!"=="0" (
-    echo [dsh-bot] npm run build:client failed
-    pause
-    exit /b 1
+) else (
+  rem Rebuild only when something actually changed. The same probe used by
+  rem -NoBuild answers "is lib/ and client/ at least as new as the sources?";
+  rem a fresh tree boots straight away instead of paying the tsc build every run.
+  rem Its stderr is dropped here: on this path a nonzero exit just means
+  rem "rebuild", and the probe's own error text reads like a failed launch.
+  echo [dsh-bot] checking build freshness ...
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%REPO%\dev\check-build-fresh.ps1" -Repo "%REPO%" 2>nul
+  if "!ERRORLEVEL!"=="0" (
+    echo [dsh-bot] build is up to date; skipping rebuild
+  ) else (
+    echo [dsh-bot] building lib ...
+    call npm run build
+    if not "!ERRORLEVEL!"=="0" (
+      echo [dsh-bot] npm run build failed
+      pause
+      exit /b 1
+    )
+    echo [dsh-bot] building client ...
+    call npm run build:client
+    if not "!ERRORLEVEL!"=="0" (
+      echo [dsh-bot] npm run build:client failed
+      pause
+      exit /b 1
+    )
   )
 )
 
@@ -133,10 +181,12 @@ if not exist "%REPO%\lib\core\multitask.js" (
 
 rem Staleness guard: on the -NoBuild path, refuse to serve a build older
 rem than the newest source file (2026-10-30 incident: hours of stale lib/).
+rem -SkipCheck waives both the build and this probe, for a deliberately
+rem quick relaunch against whatever is already in lib/ and client/.
 rem -DryRun is exempt: it boots nothing, so a stale build cannot be served.
 rem The probe is fail-closed: ANY nonzero exit (stale, missing output, or a
 rem blocked/failed PowerShell probe) refuses the launch.
-if defined NOBUILD if not defined DRYRUN (
+if defined NOBUILD if not defined DRYRUN if not defined SKIPFRESH (
   powershell -NoProfile -ExecutionPolicy Bypass -File "%REPO%\dev\check-build-fresh.ps1" -Repo "%REPO%"
   if not "!ERRORLEVEL!"=="0" goto err_srcstale
 )
@@ -206,6 +256,16 @@ echo.
 if defined DRYRUN (
   echo [dsh-bot] -DryRun: nothing started
   exit /b 0
+)
+rem Closing a dsh console window does not free the port instantly, so a quick
+rem relaunch used to boot into "listen EADDRINUSE". Wait for the old listener
+rem to go away; -Restart stops a previous dsh that is still running.
+set "GUARD_ARGS=-Port !PORT! -WaitSeconds 15"
+if defined RESTART set "GUARD_ARGS=!GUARD_ARGS! -Restart"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%REPO%\dev\windows\port-guard.ps1" !GUARD_ARGS!
+if not "!ERRORLEVEL!"=="0" (
+  pause
+  exit /b 1
 )
 call "%DSH%" !CMDLINE! !EXTRA!
 set "EXITCODE=%ERRORLEVEL%"
