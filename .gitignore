@@ -43,3 +43,6 @@ lib/
 /cur/
 /fixA/
 /regress/
+
+# Throwaway live-check homes (contain credentials and session data) - NEVER commit.
+.scratch/night/live/
