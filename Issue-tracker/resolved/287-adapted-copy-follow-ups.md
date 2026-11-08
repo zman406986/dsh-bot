@@ -1,5 +1,5 @@
 # 287 — Eight adapted-copy follow-ups from the 2026-11-08 bounded review
-**Status:** open
+**Status:** resolved
 **Labels:** needs-owner-decision
 **Priority:** low-medium — F1 is a false channel claim; the rest are wording consistency.
 **Severity:** P3 / low
@@ -25,3 +25,18 @@ Owner rules on the F1 wording (reply channel) and approves or edits each remaini
 - No historical review record is rewritten; this ticket and the note carry the follow-up trail.
 ## Checks
 Filing only: line reads in the reviewed blob and the current tree. No tests, build, network or live session. See the note for the review method and its stated limits.
+
+## Comments
+
+2026-11-08 — **Owner approved the pass; closed.** The owner ruled F1 on the reply channel, approved F2–F7 as proposed, and chose 中途指示 as the one ZH word for steering (F8).
+
+- **F1** — the EN and ZH team-leader wake steps now say a direct user order is answered in the leader's reply ("that reply is the channel they read" / "用户读到的就是这条回复"). The claim that a user-facing send exists is gone; the peer and worker-reply prohibitions are unchanged.
+- **F2** — ZH peer step 4 points at the sender id shown above, not at parentheses that are usually absent.
+- **F3** — the three ZH handoff references quote the fixed `Summoning dispatcher session id` label.
+- **F4** — `deliver_result`'s `todo_id` is described as a "Todo entry".
+- **F5** — the delivery card says the result arrives in the reply in both faces.
+- **F6** — an accepted steer reads "Steer queued for …" / "已为 … 排队中途指示".
+- **F7** — the ZH priority fact is 优先级.
+- **F8** — 纠偏 was replaced by 中途指示 across the ZH steering copy: the steer command's success and refusal lines, the roster button, the model-facing policy, and F6's new sentence.
+
+Tests updated: `test/policy-assembler.test.ts` (EN team-leader wake pin and the ZH quoted-label allowance), `test/policy-zh-assets.test.ts` (quoted-label allowance in the untranslated-word sweep), `test/client-toolviews.test.ts` (delivery card and accepted-steer copy), `test/steer-command.test.ts` (ZH success copy). Full gate: `npm test` 1311/1311, `npm run typecheck` clean, `npm run lint:docs` clean.

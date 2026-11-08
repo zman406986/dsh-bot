@@ -1,6 +1,6 @@
 # 160 — Tracked diagram files name the un-licensable reference reconstruction; publication waits on the owner
 
-**Status:** open
+**Status:** resolved
 **Labels:** needs-owner-decision
 **Blocked by:** an owner decision — not by any implementation work. Nothing in the repo needs to change before that decision is made.
 **Origin:** found 2026-10-29 during the release-prep pass, by reading our own tracked diagram files. Filed as a ticket rather than edited in place, because attribution is not an agent's to delete. **The owner has not ruled on this.**
@@ -71,3 +71,14 @@ If the owner decides to remove it, the mechanical change is small and precise: d
 ## Comments
 
 2026-10-29: Filed during the release-prep pass. The instruction to file it rather than edit the files came from the coordinating agent, **not** from an owner ruling — the owner has not been asked and has not decided. The counts and line numbers above were measured in this working tree, not carried over from another report. No file was modified in this pass.
+
+2026-11-08 — **Owner approved removal; closed.** Removed exactly:
+
+- **`reference-agent-runtime.html`** — from the single `archify-source-evidence-data` JSON block: the `repository` object (`url`, `revision`, `shortRevision`) and all 11 per-node `href` fields (`https://github.com/…/blob/<revision>/<path>`). 37 upstream-name occurrences are gone from this file.
+- **`reference-agent-runtime.architecture.json`** — the `meta.repository` object (`url`, `revision`).
+
+**Kept:** `schemaVersion`, `verified`, `referenceCount: 11`, and all 11 node `path` values. The paths are the evidence that a node was derived from a named file; they do not name the upstream. The viewer's payload guard now accepts the block without a `repository`, and its evidence panel renders the remaining paths as plain, non-clickable entries; if a future payload carries a repository again, the old link rendering is still available. No replacement credit was added.
+
+**Checks:** both JSON payloads parse; the page loads and runs under jsdom with no new errors (the only jsdom gaps are the pre-existing canvas `toDataURL` notices); the SVG markup is byte-identical before and after — sha256 `6cd903082a1b5d8db300a0fe67b7fef393942def44a97bafb86e050e948b58da`, 11 `data-node-id` nodes, 14 `data-edge-key` edges, 15 paths, 24 groups. `reference-agent-runtime.visual-check.html` and its `.json` and four PNGs contained zero upstream occurrences and were not edited.
+
+**Scope note:** the two tracked artifacts that carried provenance were this HTML and the architecture JSON, not two HTML files. The other tracked HTML (`reference-agent-runtime.visual-check.html`) was already clean; it was rechecked, not rewritten.
