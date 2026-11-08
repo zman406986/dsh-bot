@@ -545,7 +545,7 @@ describe("toolview — steer_worker", () => {
       }),
     );
     assert.equal(view.state, "adjusting");
-    assert.equal(primaryOf(view), "Steering Rewrite auth docs");
+    assert.equal(primaryOf(view), "Steer queued for Rewrite auth docs");
     assert.equal(view.facts.length, 1);
     const instruction = factText(view.facts[0]!);
     assert.ok(instruction.length <= 161, "compact clamp applies");
@@ -561,7 +561,7 @@ describe("toolview — steer_worker", () => {
         result: { ok: true },
       }),
     );
-    assert.equal(primaryOf(view), "Steering worker 7f3a");
+    assert.equal(primaryOf(view), "Steer queued for worker 7f3a");
     assert.equal(view.subject, "worker 7f3a");
   });
 
@@ -672,7 +672,7 @@ describe("toolview — deliver_result", () => {
       }),
     );
     assert.equal(view.state, "done");
-    assert.equal(primaryOf(view), "Result recorded — say it in your reply");
+    assert.equal(primaryOf(view), "Result recorded — it arrives in the reply");
     assert.deepEqual(factsOf(view), ['todo "Rewrite auth docs" marked done']);
     assert.notEqual(primaryOf(view), "Delivered to you");
   });

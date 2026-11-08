@@ -102,10 +102,10 @@ export const DISPATCHER_STEER_COPY_EN: DispatcherSteerCopy = {
 export const DISPATCHER_STEER_COPY_ZH: DispatcherSteerCopy = {
   description: "向正在运行的工作者发送中途指示。最新的指示生效。",
   inputHint: "工作者 ID，然后是你要说的指示",
-  success: (workerId) => `已为 ${workerId} 排队纠偏。`,
+  success: (workerId) => `已为 ${workerId} 排队中途指示。`,
   notActive: "还没有激活的调度器。请先在顶层聊天中运行 /dsh-bot。",
   notDispatcher:
-    "纠偏在调度器聊天中进行。请在运行过 /dsh-bot 的聊天中发送 /dispatcher-steer。",
+    "中途指示在调度器聊天中进行。请在运行过 /dsh-bot 的聊天中发送 /dispatcher-steer。",
   usage:
     "请提供工作者 ID 和指示。示例：/dispatcher-steer worker-1 先处理失败的测试。",
   unknownWorker: (workerId) =>

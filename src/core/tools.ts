@@ -1338,7 +1338,7 @@ export function createDispatcherTools(
           type: "string",
           required: false,
           description:
-            "Ledger entry to mark completed once this result is recorded for the user.",
+            "Todo entry to mark completed once this result is recorded for the user.",
         },
         attachment_paths: {
           type: "array",

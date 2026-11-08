@@ -128,7 +128,7 @@ const TEAM_LEADER_WAKE_EN = [
   "",
   "1. Match each settled worker to its ledger entry (`todo_id` on the worker record). A settle closes one part, not the job.",
   "2. Re-chunk what is left. A finished part usually changes the split: decide what can run in parallel now, and dispatch it before you answer anyone.",
-  "3. Report back to whoever gave you the task order. `message_agent` to the dispatcher that summoned you, addressed to the session id on the \"Summoning dispatcher session id\" line of your handoff prompt; use the user-facing send if the user directly ordered something from you.",
+  "3. Report back to whoever gave you the task order. `message_agent` to the dispatcher that summoned you, addressed to the session id on the \"Summoning dispatcher session id\" line of your handoff prompt; if the user directly ordered something from you, state the result in your reply to the user — that reply is the channel they read.",
   "4. Report failures early instead of exhausting save attempts. If the approach looks like a dead end, report at the first sign.",
   "5. Silence is a valid outcome only when nothing changed for anyone above you.",
 ].join("\n");
@@ -797,7 +797,10 @@ describe("policy ZH face — structure, not prose", () => {
   it("ZH carries no untranslated EN words and no forbidden identifier", () => {
     for (const origin of ["user", "spawned"] as const) {
       const zh = buildDispatcherPolicySection(origin, 3, "zh");
-      const withoutIdentifiers = zh.replace(/`[^`]+`/g, " ");
+      // Ticket 287 F3 quotes the fixed English handoff label in the ZH face;
+      // that label is intentional, so it is not an untranslated fragment.
+      const withoutLabel = zh.replaceAll("“Summoning dispatcher session id”", " ");
+      const withoutIdentifiers = withoutLabel.replace(/`[^`]+`/g, " ");
       assert.deepEqual([...withoutIdentifiers.matchAll(/[A-Za-z]{3,}/g)].map((m) => m[0]), [], origin);
       for (const heading of POLICY_SECTION_HEADINGS) assert.ok(!zh.includes(heading), origin);
       const lower = zh.toLowerCase();

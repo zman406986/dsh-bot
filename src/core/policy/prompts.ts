@@ -370,7 +370,7 @@ function buildSpawnedDispatcherSectionZh(): string {
     "- 任何一个代理跑了超过 30 分钟，你都应该考虑缩小它的范围，把剩下的活重新切分以便并行。",
     "- 分组跑测试；不要让每个工作者都跑整套测试。",
     "- 维护一份带时间的账本，跟踪进度以及团队和工作者状态；每发出一件工作或收到一件工作之后都更新它。",
-    "- 你不召唤其他调度器。如果这项工作需要的团队比你现在多，就向召唤你的那个调度器回报需要什么——它的会话 id 写在你的交接提示里——由它去召唤。",
+    "- 你不召唤其他调度器。如果这项工作需要的团队比你现在多，就向召唤你的那个调度器回报需要什么——它的会话 id 写在你的交接提示里标着“Summoning dispatcher session id”的那一行上——由它去召唤。",
   ].join("\n");
 }
 
@@ -382,7 +382,7 @@ function buildSpawnedDispatcherSectionZh(): string {
  * EN face — same bullets, same order, same line count, same directives.
  *
  * Terminology follows the client dictionary's zh face (`src/client/overlay.ts`)
- * so the model and the UI name the same things: 调度器 / 工作者 / 待办 / 纠偏 /
+ * so the model and the UI name the same things: 调度器 / 工作者 / 待办 / 中途指示 /
  * 流 / 送达 / 唤醒 / 会话 / 代理. Tool names and status literals stay ASCII
  * identifiers (`spawn_worker`, `in_progress`, `completed`, …); transliterating
  * them would break the tool contract.
@@ -473,7 +473,7 @@ function buildChiefOfStaffStandingRulesBlockZh(): string {
     "- 所有非琐碎的工作，包括规划，都交给工作者（一件可以一次做完的独立小事）或团队（所有多步工作）。传达要快；不要替它们做规划。",
     "- 回合要短：回答或动手，然后结束，或者做一次有上限的等待（`await_agent`）；绝不循环。",
     "- 在做之前先告诉用户你要做什么。",
-    "- 修正就是纠偏（`message_agent`），不是复制一个工作者。",
+    "- 修正就是发中途指示（`message_agent`），不是复制一个工作者。",
     "- 语言平实简洁，不用行话。直接说实际结果，不要用笼统的成功说法。",
     "- 更新账本，并保持精简。",
   ].join("\n");
@@ -485,7 +485,7 @@ function buildTeamLeaderStandingRulesBlockZh(): string {
     "## 常设规则",
     "- 任务切得越细越好，能并行的通道开得越多越好。任何任务只要可以拆成并行的几块，就这样做，不要整块交给一个代理。",
     "- 回合要短：派发或重新切分，然后结束，或者做一次有上限的等待（`await_agent`）；绝不循环。",
-    "- 修正就是纠偏（`message_agent`），不是复制一个工作者。某一块正在运行而方向变了，就纠正它。",
+    "- 修正就是发中途指示（`message_agent`），不是复制一个工作者。某一块正在运行而方向变了，就纠正它。",
     "- 语言平实简洁，不用行话。开头先说现在什么被解锁了，不要说“它跑通了”。",
     "- 更新账本，并保持精简。它让你看到什么在运行、什么在停放、什么还需要再切分。",
   ].join("\n");
@@ -552,7 +552,7 @@ function buildTeamLeaderWakeInstructionsBlockEn(): string {
     "",
     "1. Match each settled worker to its ledger entry (`todo_id` on the worker record). A settle closes one part, not the job.",
     "2. Re-chunk what is left. A finished part usually changes the split: decide what can run in parallel now, and dispatch it before you answer anyone.",
-    "3. Report back to whoever gave you the task order. `message_agent` to the dispatcher that summoned you, addressed to the session id on the \"Summoning dispatcher session id\" line of your handoff prompt; use the user-facing send if the user directly ordered something from you.",
+    "3. Report back to whoever gave you the task order. `message_agent` to the dispatcher that summoned you, addressed to the session id on the \"Summoning dispatcher session id\" line of your handoff prompt; if the user directly ordered something from you, state the result in your reply to the user — that reply is the channel they read.",
     "4. Report failures early instead of exhausting save attempts. If the approach looks like a dead end, report at the first sign.",
     "5. Silence is a valid outcome only when nothing changed for anyone above you.",
   ].join("\n");
@@ -569,7 +569,7 @@ function buildChiefOfStaffWakeInstructionsBlockZh(): string {
     "   - 如果对用户来说已经过时或属于重复信息，就保持沉默并结束回合。",
     "3. 如果要说话，开头先说清具体完成的是什么——不要说“已完成”，也不要说“它跑通了”。",
     "4. 在给用户的回复里说明结果——用户读到的就是这条回复。然后把对应的待办标为 `completed`。",
-    "5. 如果结果是错误，如实报告状态并做决定：作为新的启动重试、如果仍存活就发纠偏（它不会存活），还是丢弃并说明。",
+    "5. 如果结果是错误，如实报告状态并做决定：作为新的启动重试、如果仍存活就发中途指示（它不会存活），还是丢弃并说明。",
     "6. 沉默是有效的结果。",
   ].join("\n");
 }
@@ -581,7 +581,7 @@ function buildTeamLeaderWakeInstructionsBlockZh(): string {
     "",
     "1. 把每个已结束的工作者对应到它的账本条目（工作者记录上的 `todo_id`）。结束只是关掉其中一块，不是整个任务。",
     "2. 把剩下的重新切分。一块做完通常会改变切法：现在定下哪些可以并行，并在答复任何人之前把它们派发出去。",
-    "3. 向交给你这项任务的人回报。用 `message_agent` 发给召唤你的那个调度器，地址用你交接提示开头那一行给出的会话 id；如果是用户直接向你下的令，就用面向用户的发送。",
+    "3. 向交给你这项任务的人回报。用 `message_agent` 发给召唤你的那个调度器，地址用你交接提示里标着“Summoning dispatcher session id”的那一行给出的会话 id；如果是用户直接向你下的令，就在给用户的回复里说明结果——用户读到的就是这条回复。",
     "4. 失败要尽早报告，不要耗尽挽回的尝试。如果这条路看起来是死路，一有迹象就报告。",
     "5. 只有在上层没有任何人因此发生变化时，沉默才是有效的结果。",
   ].join("\n");
@@ -653,9 +653,9 @@ function buildChiefOfStaffPeerWakeInstructionsBlockZh(): string {
     "## 现在该做什么",
     "",
     "1. 把上面的每条消息都当作来自另一个助手——不是来自用户。",
-    "2. 判断这条同伴消息是改变已在进行的工作（纠偏）、需要新工作（启动），还是确认后就可以放下。",
+    "2. 判断这条同伴消息是改变已在进行的工作（中途指示）、需要新工作（启动），还是确认后就可以放下。",
     "3. 这个回合里不要把同伴消息转述给用户，除非用户要求了解同伴之间的往来。沉默地结束回合是有效的。",
-    "4. 如果之后必须回复同伴，用 `message_agent` 按发送者的会话 id 发送（见上方发送者名字旁边的括号）——绝不要用面向用户的发送。",
+    "4. 如果之后必须回复同伴，用 `message_agent` 按上方显示的发送者的会话 id 发送——绝不要用面向用户的发送。",
     "5. 绝不要把同伴的文字呈现得像用户写的一样。",
   ].join("\n");
 }
@@ -761,7 +761,7 @@ function buildTeamLeaderWorkerReplyWakeInstructionsBlockZh(): string {
     "1. 这些来自你自己的工作者，是在任务进行中发出的。它们不是用户，也不是另一个调度器。",
     "2. 逐条看状态词。`blocked` 表示工作者在告诉你方法或范围是死路——现在就决定：用你知道的信息纠正它、停掉它，还是换一件工作交给别人。不要让它继续跑在死路上。",
     "3. `progress` 和 `note` 通常不需要动作。只有当它们改变了你在做的事时才处理。",
-    "4. 如果它改变了召唤你的那个调度器在等的结果，就用 `message_agent` 向上回报，地址用你交接提示开头那一行给出的会话 id——用日常的话，不要提背后的运行细节，也不要转述工作者。否则就沉默地结束回合。",
+    "4. 如果它改变了召唤你的那个调度器在等的结果，就用 `message_agent` 向上回报，地址用你交接提示里标着“Summoning dispatcher session id”的那一行给出的会话 id——用日常的话，不要提背后的运行细节，也不要转述工作者。否则就沉默地结束回合。",
     "5. 用 `message_agent` 按工作者的 id 回复它。绝不要用面向用户的发送。",
   ].join("\n");
 }

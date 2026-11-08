@@ -56,9 +56,21 @@ function assertNewCopy(text: string): void {
  */
 const ALLOWED_ZH_LATIN = new Set(["Markdown", "JSON"]);
 
+/**
+ * Ticket 287 F3: the ZH handoff copy quotes the fixed English label the
+ * handoff line is actually written with. It is intentional English, not an
+ * untranslated fragment, so it is removed before the leftover sweep.
+ */
+const FIXED_EN_HANDOFF_LABEL = "“Summoning dispatcher session id”";
+
 /** Latin words outside backticks that would be untranslated EN fragments. */
 function leftoversIn(text: string): string[] {
-  return [...text.replace(/`[^`]+`/g, " ").matchAll(LATIN_WORD)]
+  return [
+    ...text
+      .replaceAll(FIXED_EN_HANDOFF_LABEL, " ")
+      .replace(/`[^`]+`/g, " ")
+      .matchAll(LATIN_WORD),
+  ]
     .map((match) => match[0])
     .filter((word) => !ALLOWED_ZH_LATIN.has(word));
 }

@@ -508,7 +508,7 @@ describe("steer command — localized copy (EN + ZH)", () => {
       kind: "success",
       text: DISPATCHER_STEER_COPY_ZH.success("w-1"),
     });
-    assert.equal(DISPATCHER_STEER_COPY_ZH.success("w-1"), "已为 w-1 排队纠偏。");
+    assert.equal(DISPATCHER_STEER_COPY_ZH.success("w-1"), "已为 w-1 排队中途指示。");
   });
 
   it("answers a refusal with ZH copy and never a raw reason enum", async () => {

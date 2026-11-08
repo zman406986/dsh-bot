@@ -185,7 +185,7 @@ export const localeDictionary: LocaleDictionary = {
     "toolview.check.summary.other": "Checked {count} workers",
     "toolview.check.refused": "Couldn't check the roster — {cause}.",
     "toolview.steer.pending": "Steering {subject}",
-    "toolview.steer.sent": "Steering {subject}",
+    "toolview.steer.sent": "Steer queued for {subject}",
     "toolview.steer.refused":
       "Couldn't steer {subject} — {cause}. Nothing was queued.",
     "toolview.stop.pending": "Stopping {subject}",
@@ -195,7 +195,7 @@ export const localeDictionary: LocaleDictionary = {
       "Couldn't stop {subject} — {cause}. Nothing changed.",
     "toolview.deliver.pending": "Delivering",
     "toolview.deliver.done": "Delivered to you",
-    "toolview.deliver.recorded": "Result recorded — say it in your reply",
+    "toolview.deliver.recorded": "Result recorded — it arrives in the reply",
     "toolview.deliver.refused":
       "Couldn't deliver — {cause}. Nothing reached the user.",
     "toolview.message.pending": "Messaging {subject}",
@@ -489,10 +489,10 @@ export const localeDictionary: LocaleDictionary = {
     "toolview.subject.dispatcher": "该调度器",
     "toolview.subject.todo": "该待办",
     // Ticket 180：人类可读的事实。布尔值不会显示成 true/false——只有为真时
-    // 才出现“优先”，送达由整句表达，零值/假值/空值在进入行之前就被省略。
+    // 才出现“优先级”，送达由整句表达，零值/假值/空值在进入行之前就被省略。
     "toolview.fact.attachments.one": "{count} 个附件",
     "toolview.fact.attachments.other": "{count} 个附件",
-    "toolview.fact.priority": "优先",
+    "toolview.fact.priority": "优先级",
     "toolview.fact.via-steer": "走工作者通道",
     "toolview.fact.via-peer": "走同伴通道",
     "toolview.fact.dormant": "其会话正在恢复",
@@ -517,7 +517,7 @@ export const localeDictionary: LocaleDictionary = {
     "toolview.check.summary.other": "已查看 {count} 位工作者",
     "toolview.check.refused": "无法查看名单——{cause}。",
     "toolview.steer.pending": "正在调整 {subject}",
-    "toolview.steer.sent": "正在调整 {subject}",
+    "toolview.steer.sent": "已为 {subject} 排队中途指示",
     "toolview.steer.refused": "无法调整 {subject}——{cause}。没有排队任何内容。",
     "toolview.stop.pending": "正在停止 {subject}",
     "toolview.stop.stopped": "已停止 {subject}",
@@ -525,7 +525,7 @@ export const localeDictionary: LocaleDictionary = {
     "toolview.stop.refused": "无法停止 {subject}——{cause}。没有任何更改。",
     "toolview.deliver.pending": "正在送达",
     "toolview.deliver.done": "已送达给你",
-    "toolview.deliver.recorded": "结果已记录——请在你的回复中告知用户",
+    "toolview.deliver.recorded": "结果已记录——会以回复送达",
     "toolview.deliver.refused": "无法送达——{cause}。用户没有收到任何内容。",
     "toolview.message.pending": "正在给 {subject} 发消息",
     "toolview.message.sent": "消息已发送给 {subject}",
@@ -576,7 +576,7 @@ export const localeDictionary: LocaleDictionary = {
     "toolview.cause.failed": "出了点问题",
     "activation.presence-hint":
       "调度器会在工作中随时汇报进度；结果完成后会直接送达本聊天。",
-    "roster.steer.button": "纠偏",
+    "roster.steer.button": "中途指示",
     "roster.steer.hint": "已为 {worker} 填入输入框——请检查后发送。",
     "roster.steer.copy-fallback":
       "此处无法访问输入框——请在本聊天中输入 /dispatcher-steer {worker} 加上你的指示。",
