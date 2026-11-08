@@ -8,7 +8,8 @@ rem    dsh-bot.bat                  build if stale, then boot the multitask prof
 rem    dsh-bot.bat web              build if stale, then boot web + committed overlay
 rem    dsh-bot.bat -NoBuild         skip the build (still checks build freshness)
 rem    dsh-bot.bat -SkipCheck       skip the build AND the freshness probe
-rem    dsh-bot.bat -Restart         stop a previous dsh still holding the port
+rem    dsh-bot.bat -Keep            leave a running dsh alone; close this launch
+rem    dsh-bot.bat -Restart         same as the default: replace a running dsh
 rem    dsh-bot.bat -Port <n>        listen on another port (default 3080)
 rem    dsh-bot.bat -DryRun          resolve and print the command, boot nothing
 rem    dsh-bot.bat -NoOpen          do not open the browser
@@ -35,7 +36,6 @@ set "NOBUILD="
 set "SKIPFRESH="
 set "DRYRUN="
 set "NOOPEN="
-set "RESTART="
 set "PORT="
 set "PORTGIVEN="
 
@@ -51,6 +51,7 @@ if /i "!ARG!"=="multitask" goto arg_multitask
 if /i "!ARG!"=="-NoBuild" goto arg_nobuild
 if /i "!ARG!"=="-SkipCheck" goto arg_skipcheck
 if /i "!ARG!"=="-Restart" goto arg_restart
+if /i "!ARG!"=="-Keep" goto arg_keep
 if /i "!ARG!"=="-Port" goto arg_port
 if /i "!ARG!"=="--port" goto arg_port
 if /i "!ARG!"=="-DryRun" goto arg_dryrun
@@ -78,7 +79,11 @@ set "SKIPFRESH=1"
 shift
 goto parse
 :arg_restart
-set "RESTART=1"
+set "KEEP="
+shift
+goto parse
+:arg_keep
+set "KEEP=1"
 shift
 goto parse
 :arg_port
@@ -106,7 +111,7 @@ shift
 goto parse
 
 :usage
-echo Usage: dsh-bot.bat [web^|multitask] [-NoBuild^|-SkipCheck] [-Restart] [-Port ^<n^>] [-DryRun] [-NoOpen] [dsh args]
+echo Usage: dsh-bot.bat [web^|multitask] [-NoBuild^|-SkipCheck] [-Restart] [-Keep] [-Port ^<n^>] [-DryRun] [-NoOpen] [dsh args]
 exit /b 1
 
 :args_done
@@ -257,13 +262,19 @@ if defined DRYRUN (
   echo [dsh-bot] -DryRun: nothing started
   exit /b 0
 )
-rem Closing a dsh console window does not free the port instantly, so a quick
-rem relaunch used to boot into "listen EADDRINUSE". Wait for the old listener
-rem to go away; -Restart stops a previous dsh that is still running.
+rem Keep exactly one dsh: by default a running dsh is replaced, and the
+rem launcher window that owned it is closed with it, so a relaunch leaves one
+rem window rather than a paused one plus a new one. -Keep leaves the running
+rem dsh alone and closes this launch instead.
 set "GUARD_ARGS=-Port !PORT! -WaitSeconds 15"
-if defined RESTART set "GUARD_ARGS=!GUARD_ARGS! -Restart"
+if defined KEEP set "GUARD_ARGS=!GUARD_ARGS! -Keep"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%REPO%\dev\windows\port-guard.ps1" !GUARD_ARGS!
-if not "!ERRORLEVEL!"=="0" (
+set "GUARD_EXIT=!ERRORLEVEL!"
+if "!GUARD_EXIT!"=="5" (
+  echo [dsh-bot] closing this window; the running dsh keeps serving port !PORT!
+  exit /b 0
+)
+if not "!GUARD_EXIT!"=="0" (
   pause
   exit /b 1
 )

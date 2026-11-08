@@ -13,6 +13,8 @@ use its patch file only for isolated testing.
 
 `-SkipCheck` is the quick relaunch: it runs no TypeScript build and no
 freshness probe, so it serves whatever is already in `lib/` and `client/`.
-`port-guard.ps1` waits for a just-closed dsh to release the port before
-booting, which is what stops the old `EADDRINUSE` failure on every launch;
-`-Restart` replaces a dsh that is still running.
+`port-guard.ps1` keeps exactly one dsh: by default a running dsh is
+replaced, and the launcher window that owned it is closed with it, so a
+relaunch never leaves a paused window beside a live one. `-Keep` leaves the
+running dsh alone and closes the new launch instead. A port held by
+something that is not dsh is refused, never killed.

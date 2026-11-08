@@ -29,12 +29,12 @@ the report was the type checker's output.
 **`dev/windows/port-guard.ps1`** (new) — runs before boot:
 
 - If the port is free, boot immediately.
-- If held, wait up to 15 s for it to free (the just-closed-console case).
-- If it stays held and `-Restart` was not passed, print the PID and command
-  line and exit 2 instead of letting dsh abort.
-- `-Restart` kills the listener only when its command line looks like dsh
-  (`dsh` and `bin.js`); any other process is refused with exit 3. Exit 4
-  covers a kill that did not free the port.
+- If a dsh is already serving (the reported "two windows" case), replace it
+  by default: kill it, and also close the launcher `cmd.exe` window that owns
+  it, so a relaunch leaves one window instead of a paused one plus a live one.
+- `-Keep` leaves the running dsh alone and closes the new launch (exit 5).
+- A listener that is not dsh is refused with exit 3 and never killed.
+- Exit 4 covers a kill that did not free the port.
 - The probe fails closed: any internal error exits 1 rather than booting
   into the race.
 
@@ -44,7 +44,8 @@ the report was the type checker's output.
   (measured ~0.5 s instead of ~5 s).
 - `-SkipCheck` skips both the build and the probe (was `-NoBuild` plus a
   probe; that combination still exists).
-- `-Restart` and `-Port <n>` added; `-NoOpen` documented in the header.
+- `-Keep`, `-Restart` (explicit spelling of the default) and `-Port <n>`
+  added; `-NoOpen` documented in the header.
 - The probe's stderr is suppressed on the auto-rebuild path only, so a
   stale tree rebuilds quietly instead of printing a message that looks like
   a failed launch. The `-NoBuild` refusal path is unchanged and still loud.
@@ -59,12 +60,16 @@ checkout looked stale forever. Extension filtering now happens in
 
 Offline only; no dsh boot, no model contact, no browser:
 
-- Port guard, exit 0/2/3/4 paths exercised with a real listener; a
-  fake dsh-shaped process was killed by `-Restart`, a plain node server
-  was refused.
-- Wait-for-free path exercised with a server that closes after 2.5 s.
-- Launcher `-DryRun` on both routes; `-SkipCheck`, `-Port`, `-NoOpen`
-  argument handling; `-Port` without a value exits 1.
+- Port guard, every exit path exercised with a real listener: free (0),
+  keep (5), non-dsh holder refused (3), killed holder frees the port (0).
+- Replacement tested end to end through a fake launcher-shaped batch file:
+  first run serves, second run stops it and closes its window, and exactly
+  one listener plus one `cmd.exe` window remain. `-Keep` on a running
+  instance leaves exactly one of each.
+- Ancestor detection checked against the owner's live dsh: it resolves to
+  the launcher window (`cmd /c dsh-bot.bat`), not the terminal.
+- Launcher `-DryRun` on both routes; `-SkipCheck`, `-Keep`, `-Restart`,
+  `-Port`, `-NoOpen` argument handling; `-Port` without a value exits 1.
 - Fresh tree: probe exit 0, launcher reports "build is up to date".
 - Touched source: probe exit 1, launcher rebuilds, second run skips.
 - `-NoBuild` on a stale tree still refuses with the documented message.
