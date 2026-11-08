@@ -6,10 +6,6 @@
     "locale": "en",
     "quality_profile": "showcase",
     "viewBox": [1200, 470],
-    "repository": {
-      "url": "https://github.com/b-nnett/grok-bot-0.18-reconstructed.git",
-      "revision": "a9f633e09d49a85829b8236331b9e21f7e612634"
-    },
     "views": [
       {
         "id": "dispatchloop",
