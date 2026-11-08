@@ -102,3 +102,15 @@ is no longer true. Ticket 157 landed in `1b259db` and is resolved; the
 Problem, acceptance and constraints are updated to match. This ticket stays
 **open** for the full-suite sweep (§3), the by-eye UI check (§4) and the live
 restart probe (§5); none of those has been run.
+
+2026-11-07 (shipping audit, HEAD `3d08313`): Full configured release test
+selection ran once via installed Node v24.15.0 / tsx v4.23.13:
+`.\node_modules\.bin\tsx.cmd --tsconfig tsconfig.client.json --test --test-reporter=tap 'test/**/*.test.ts'`.
+The package's recursive glob selected all 80 current test files; there are currently no nested matches.
+Observed: **1116 tests, 332 suites, 1116 pass, 0 fail, 0 skipped, 0 cancelled,
+0 todo; exit 0; 4607.6928 ms.** Bypassed the artifact-emitting `pretest` hook;
+no build, typecheck, freshness or client byte comparison was repeated. Tests
+left git unchanged; this evidence comment is the only added tracked change,
+with 11 pre-existing untracked issue files. No background jobs or failures.
+Ticket remains **open**; the by-eye UI check (§4) and live restart probe (§5)
+were not run by this execution-only task.

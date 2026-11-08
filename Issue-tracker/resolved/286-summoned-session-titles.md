@@ -1,6 +1,6 @@
 # 286 — Summoned team-leader sessions show “Untitled” in the sidebar
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-human
 **Blocked by:** nothing. The adapter change and its offline tests are normal agent work; the manual Web check needs a plugin build and a dsh restart, so it is left staged for a human.
 **Related:** `.scratch/auto-title/PLAN.md` (the plan and its evidence index), ticket 285 (plan 1, merged at `2e2e551`), ticket 159 (recorded that the spawn title was never persisted), ADR-0032 (a summoned dispatcher is a top-level session), ADR-0027 decisions 2–3 (`subagent.label` is the worker label).
@@ -85,3 +85,7 @@ No client build is needed (no client code changes).
 ## Comments
 
 - 2026-11-08 — Filed as plan step 7. Records route 2, the owner-unanswered wording question, the accepted limitations, and the staged manual Web check. Docs only: this ticket, the `src/core/types.ts` comment, ticket 285's move, open-index regeneration. No tests, no builds, no source behaviour change.
+
+## Comments
+
+2026-11-08 — Owner confirmed on a live instance after the rebuild and restart. The no-op team leader `eab9905e-1937-46b5-927e-076c4743c177` ("Title check — nothing to do") shows its summoned title in the sidebar, not the fallback. Route 2 stands: the dispatcher's title is used as given, pinned, no model cost; humans can still rename. Model-generated wording remains available later if wanted, but needs a dsh change and is not part of this ticket.

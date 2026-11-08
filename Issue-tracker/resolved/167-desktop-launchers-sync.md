@@ -1,6 +1,6 @@
 # 167 — Desktop launchers re-sync to the vendored repo
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-human
 **Related:** 127 (the RACOONS launcher and its `%~dp0` resolution rule); 144 (the earlier dsh rc.3 baseline — now superseded by `dev/dsh-baseline.txt`, currently `0.2.2-rc.1`); 145 (racoons is opt-in since ADR-0033/ticket 174: `racoonsEnabled` gates the mount, and `racoonsRecordOnly` / `racoonsStorageRoot` / `racoonsContextWindowTokens` apply only while it is enabled); owner request, 2026-10-29.
 
@@ -107,3 +107,12 @@ The separate `dsh-bot-RACOONS.bat` was deleted; the single launcher has no
 racoons switch, and that feature stays off by default (its patch file remains
 for isolated testing only). DoD rows about the second launcher are retired
 with it. The human launch check is now one file, not two.
+
+## Comments
+
+2026-11-08 — Closed as already satisfied by the tree, verified before closing:
+- `dev/windows/dsh-bot.bat` resolves the checkout from its own location (`%~dp0..\..`) and contains no `C:\Users` path.
+- It reads the baseline from `dev/dsh-baseline.txt` (currently `0.2.2-rc.1`) and only keeps a literal as the incomplete-checkout fallback.
+- Its header no longer claims to be the only launcher; it says it is the tracked source and the Desktop file forwards here.
+- `dsh-bot-RACOONS.bat` no longer exists: the racoons route was removed (ADR-0033, ticket 174), so its `-NoOpen` item has no target.
+- Desktop `dsh-bot.bat` is a forwarder into this file, checked today.
