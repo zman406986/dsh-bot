@@ -46,3 +46,18 @@ lib/
 
 # Throwaway live-check homes (contain credentials and session data) - NEVER commit.
 .scratch/night/live/
+
+# Quarantine for stray artifacts swept out of the tree (e.g. badly expanded env paths).
+# Junk binaries, never deliverables - NEVER commit.
+.scratch/quarantine/
+
+# Secret material is never committed: a credentials file leaked this way before.
+.env
+.env.*
+credentials.json
+credentials*.yml
+*.pem
+*.key
+
+# Throwaway probe/test homes hold credentials and session data - NEVER commit.
+.scratch/**/home
