@@ -447,3 +447,19 @@ book follows ticket 145's resolution: the value that `git rev-parse HEAD` return
 the one recorded.
 
 Corrections are welcome and cheap: each chapter names the files that own its claims.
+
+---
+
+## Test-run verdicts kept from the November mock runs (recorded 2026-11-10)
+
+The compiled `out/`/`out-all/` trees, suite logs and per-stage throwaway session homes under
+`.scratch/testing/` were removed on 2026-11-10 (all gitignored, all regenerable; the logs carried
+local paths and the homes carried private dsh session content). Only these verdict lines survive,
+one per run:
+
+| run | date | verdict |
+|---|---|---|
+| preset-fix | 2026-11-06 | all-suite run failed with ENOENT on the missing `out-all/src/client/panel.tsx` build |
+| dsh 0.2.2-rc.1 e2e | 2026-11-05 | s1 fail (dsh-s1 exited early); `result.json` also recorded s3 fail, s2 and s4 pass, overall `ok=false` |
+| mock-llm (web profile + dev overlay) | 2026-11-06 | pass — all 7 assertions passed, `ok=true` (the newer of two duplicate runs, 16:53:55) |
+| racoons-off | 2026-11-05 | pass — all 7 assertions passed, `ok=true`, dispatcher drove 3 requests |
