@@ -1,6 +1,6 @@
 # 292 — The isolated proof that the approval seam exists but is pinned shut
 
-**Status:** open
+**Status:** resolved
 **Type:** research
 **Labels:** ready-for-agent
 **Severity:** P2 / medium
@@ -81,3 +81,9 @@ What the child received in (i) was the listener's own fixed outcome string (`all
 
 2026-11-09: Filed from the design lane as a build task, then rewritten the same day into the record of the probe. The un-pin approach it was originally blocked on is dead (see 295 and 296), but the seam question itself is worth an honest observation, and the probe already exists at `.scratch/night/live/asks/`. The result blanks were deliberately empty at filing.
 2026-11-09: The three observations are now filled from `.scratch/night/live/asks/probe-out/probe.jsonl` (17 lines), pasted as log lines; the constraints above are unchanged, and the "What the probe did not show" section states the one thing the run cannot support.
+
+## Comments
+
+2026-11-10 — Owner closed this from the dispatcher: no further work wanted.
+
+Recorded as evidence, not as work. The probe lines stay in the ADR (docs/adr/0036) and the research note; nothing else depends on this ticket staying open.

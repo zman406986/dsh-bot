@@ -1,5 +1,5 @@
 # 289 — Windows launcher cannot find dsh when npm's global bin is not `%APPDATA%\npm`
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-human
 **Priority:** low — the launcher refuses to start on this device; the fix is a path fallback.
 **Severity:** P2 / medium (blocks the only launch path on one of the owner's two devices)
@@ -52,3 +52,9 @@ rewrote the launcher (port guard, rebuild only when stale) but kept the two hard
 locations, so the fallback was added again at the same spot. Same dry-run checks pass:
 `dsh-bot.bat -DryRun` prints `dsh --profile multitask`, `web` route prints the web overlay
 command; both exit 0.
+
+## Comments
+
+2026-11-10 — Owner closed this from the dispatcher: no further work wanted.
+
+The launcher already resolves correctly: `dev/windows/dsh-bot.bat` looks up `%APPDATA%\npm\dsh.cmd` then falls back to the profile path, and the desktop entry forwards to it. The live instance was started through this path on 2026-11-10. Owner closed it.

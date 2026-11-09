@@ -1,6 +1,6 @@
 # 293 — Worker questions and plan approval stay unreachable, and that is the recorded limit
 
-**Status:** open
+**Status:** resolved
 **Type:** task
 **Labels:** ready-for-human
 **Severity:** P3 / low
@@ -34,3 +34,7 @@ Plainly: a worker cannot ask its dispatcher or the user a question. Our worker t
 ## Comments
 
 2026-11-09: Filed from the design lane at the owner's channel. The evidence lines were re-read, not carried over from the research note.
+
+## Comments
+
+Owner's ruling 2026-11-10: this is accepted as designed, not a problem. A spawned worker cannot ask the user; that is the intended shape of the product. No follow-up work.

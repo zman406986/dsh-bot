@@ -1,6 +1,6 @@
 # 294 — Option for the owner — a host change to let a worker ask
 
-**Status:** open
+**Status:** resolved
 **Type:** task
 **Labels:** ready-for-human
 **Severity:** P3 / low
@@ -52,3 +52,7 @@ In one sentence: open a **bounded ask channel for an owned child** — let a del
 ## Comments
 
 2026-11-09: Filed at the owner's channel after 295/296/297 were cancelled. Evidence lines were re-read against the installed host in this pass, not carried over.
+
+## Comments
+
+Owner's ruling 2026-11-10: not wanted. The current behaviour stands — a worker carries on or stops on its own, and only the dispatcher talks to the user. The option is recorded for the future but is not to be implemented.

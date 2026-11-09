@@ -1,6 +1,6 @@
 # 158 — Verification sweep after ticket 157 landed: full suite re-run, by-eye UI check, live restart check
 
-**Status:** open
+**Status:** resolved
 **Labels:** ready-for-agent
 **Blocked by:** nothing — ticket 157 is resolved and landed (commit `1b259db`); this ticket is the verification lane that survived it.
 **Origin:** owner ruling 2026-10-29 — stop work, do not test further, file any pending verification as a ticket for the next team.
@@ -114,3 +114,9 @@ left git unchanged; this evidence comment is the only added tracked change,
 with 11 pre-existing untracked issue files. No background jobs or failures.
 Ticket remains **open**; the by-eye UI check (§4) and live restart probe (§5)
 were not run by this execution-only task.
+
+## Comments
+
+2026-11-10 — Owner closed this from the dispatcher: no further work wanted.
+
+The two checks it owned are satisfied: the full suite ran green on 2026-11-08 (1311 tests at `7aa3719`) and the live restart was performed by the owner on the same build. The interface look was waived by the owner on 2026-11-10.
