@@ -26,6 +26,14 @@ if "%REPO:~-1%"=="\" set "REPO=%REPO:~0,-1%"
 
 set "DSH=%APPDATA%\npm\dsh.cmd"
 if not exist "%DSH%" set "DSH=%USERPROFILE%\AppData\Roaming\npm\dsh.cmd"
+rem Fallback: a Node install that is not npm's default prefix keeps its global
+rem bins in the Node folder (this device: a WinGet Node LTS). `where` finds the
+rem dsh that is already on PATH; the first hit wins, the explicit paths above
+rem still win when they exist.
+if not exist "%DSH%" (
+  set "DSH_FOUND="
+  for /f "delims=" %%D in ('where dsh.cmd 2^>nul') do if not defined DSH_FOUND (set "DSH=%%D" & set "DSH_FOUND=1")
+)
 rem One shared version for every launcher: dev\dsh-baseline.txt. The literal
 rem fallback only covers a launcher kept beside an incomplete checkout.
 set "DSH_BASELINE=0.2.2-rc.1"
