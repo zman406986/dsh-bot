@@ -6,7 +6,7 @@
 **Severity:** P3 / low
 **Ship blocker:** no — the product ships without a worker ask channel; a blocked worker reports and stops (ADR-0033), which is the recorded limit.
 **Blocked by:** nothing, but see the last constraint: this cannot be done while the owner's instance is running.
-**Origin:** the 2026-11-09 owner-channel decision that killed the un-pin approach (tickets 289, 290, 291, now cancelled), recorded against `docs/research/child-ask-seams.md` findings 1–6.
+**Origin:** the 2026-11-09 owner-channel decision that killed the un-pin approach (tickets 295, 296, 297, now cancelled), recorded against `docs/research/child-ask-seams.md` findings 1–6.
 **Related:** 292 (the isolated proof that the seam exists but is pinned shut), 293 (the honest limit that stands today); ADR-0033 (asks removed), ADR-0036 (recorded by the cancellation).
 
 ## Why this ticket exists
@@ -32,7 +32,7 @@ In one sentence: open a **bounded ask channel for an owned child** — let a del
 
 ## What this ticket is not
 
-- Not a plugin change. No listener, no append, no policy rewrite, no contract text (that was 291, cancelled).
+- Not a plugin change. No listener, no append, no policy rewrite, no contract text (that was 297, cancelled).
 - Not a decision. It records the option and the evidence so the owner can rule.
 
 ## Acceptance criteria
@@ -51,4 +51,4 @@ In one sentence: open a **bounded ask channel for an owned child** — let a del
 
 ## Comments
 
-2026-11-09: Filed at the owner's channel after 289/290/291 were cancelled. Evidence lines were re-read against the installed host in this pass, not carried over.
+2026-11-09: Filed at the owner's channel after 295/296/297 were cancelled. Evidence lines were re-read against the installed host in this pass, not carried over.

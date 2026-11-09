@@ -1,4 +1,4 @@
-# 289 — Approve a worker's asks by un-pinning the child's approval policy
+# 295 — Approve a worker's asks by un-pinning the child's approval policy
 
 **Status:** cancelled
 **Type:** task
@@ -7,7 +7,7 @@
 **Ship blocker:** no — today a worker that needs an approval gets a hard error; this removes that dead end.
 **Blocked by:** nothing.
 **Origin:** `docs/research/child-ask-seams.md` (findings 1–3, 6) and the 2026-11-09 lane decision: answer child asks through the parent instead of accepting the host pin.
-**Related:** 290 (answers the request this ticket makes possible), 292 (live proof), 293 (the asks that stay unreachable); ADR-0033 (removed the old access-ask relay), ADR-0011 (the approval policy seam).
+**Related:** 296 (answers the request this ticket makes possible), 292 (live proof), 293 (the asks that stay unreachable); ADR-0033 (removed the old access-ask relay), ADR-0011 (the approval policy seam).
 
 ## Problem
 
@@ -32,7 +32,7 @@ The pin is overridable without host changes. The session store is a public servi
 - Leave sandbox inheritance alone; it already works and is not part of this change.
 - Extend the existing `agent/created` path in the adapter (`src/adapter/cordis-dsh-host.ts`); do not add a second listener that could double-append.
 - Scope is our worker spawns only. Answering root asks here would preempt the browser UI (`child-ask-seams.md` finding 8).
-- The append is a policy record, not a grant: no tool is allowed by this ticket, only the ask that 290 answers.
+- The append is a policy record, not a grant: no tool is allowed by this ticket, only the ask that 296 answers.
 
 ## Comments
 

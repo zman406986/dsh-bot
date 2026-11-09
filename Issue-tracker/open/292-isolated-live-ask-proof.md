@@ -5,9 +5,9 @@
 **Labels:** ready-for-agent
 **Severity:** P2 / medium
 **Ship blocker:** no — this is evidence for a seam nobody is changing any more; the product does not depend on it.
-**Blocked by:** nothing. The probe writes its own explicit approval policy at `agent/created`, so it needs neither 289 nor 290 (both cancelled); it is a standalone observation.
+**Blocked by:** nothing. The probe writes its own explicit approval policy at `agent/created`, so it needs neither 295 nor 296 (both cancelled); it is a standalone observation.
 **Origin:** 2026-11-09 design lane. `docs/research/child-ask-seams.md` settles the seams by reading; its finding 9 records what reading could not settle. The probe plugin and launch patch already exist at `.scratch/night/live/asks/`.
-**Related:** 293 (the honest limit that stays), 294 (the option for the owner — a host change); ADR-0033 (the ask feature was removed), ADR-0036 (recorded by 289/290/291's cancellation); `read-before-running-live-and-browser-tests.md`.
+**Related:** 293 (the honest limit that stays), 294 (the option for the owner — a host change); ADR-0033 (the ask feature was removed), ADR-0036 (recorded by 295/296/297's cancellation); `read-before-running-live-and-browser-tests.md`.
 
 ## What this ticket is
 
@@ -23,7 +23,7 @@ Boot dsh on port 3099 with `DSH_HOME` under `.scratch/night/live/asks/` and a lo
 
 - **direct** — a child created with `ctx.agents.create({ parentAgent })`, which the host does not pin.
 - **control** — a child spawned through the subagent path with the host pin left alone.
-- **treated** — a child spawned through the subagent path that receives an **explicit** `approval/policy: 'ask'` append in an `agent/created` listener. The policy is set outright by the probe; it is **not** inherited from the parent, and it is **not** a copy of the parent's policy. This is the point of the probe: it isolates the seam from the inheritance question (which is what 289 got wrong).
+- **treated** — a child spawned through the subagent path that receives an **explicit** `approval/policy: 'ask'` append in an `agent/created` listener. The policy is set outright by the probe; it is **not** inherited from the parent, and it is **not** a copy of the parent's policy. This is the point of the probe: it isolates the seam from the inheritance question (which is what 295 got wrong).
 
 ## The three things to observe
 
@@ -75,9 +75,9 @@ What the child received in (i) was the listener's own fixed outcome string (`all
 - Kill timer set at launch, not at teardown, per `read-before-running-live-and-browser-tests.md`. Trivial task only; never burn the human's tokens.
 - Throwaway home under `.scratch/night/live/asks/`. Do not copy the human's dsh key anywhere; use the installed host as-is.
 - No source change in this ticket and no commit of any artifact: the probe lives in `.scratch`, and this ticket records what was seen.
-- This ticket does not reinstate 289, 290 or 291. It observes a seam; it does not propose using it. Any use is 294's question and the owner's decision.
+- This ticket does not reinstate 295, 296 or 297. It observes a seam; it does not propose using it. Any use is 294's question and the owner's decision.
 
 ## Comments
 
-2026-11-09: Filed from the design lane as a build task, then rewritten the same day into the record of the probe. The un-pin approach it was originally blocked on is dead (see 289 and 290), but the seam question itself is worth an honest observation, and the probe already exists at `.scratch/night/live/asks/`. The result blanks were deliberately empty at filing.
+2026-11-09: Filed from the design lane as a build task, then rewritten the same day into the record of the probe. The un-pin approach it was originally blocked on is dead (see 295 and 296), but the seam question itself is worth an honest observation, and the probe already exists at `.scratch/night/live/asks/`. The result blanks were deliberately empty at filing.
 2026-11-09: The three observations are now filled from `.scratch/night/live/asks/probe-out/probe.jsonl` (17 lines), pasted as log lines; the constraints above are unchanged, and the "What the probe did not show" section states the one thing the run cannot support.

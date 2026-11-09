@@ -1,17 +1,17 @@
-# 291 — Worker contract: an approval ask may now be answered by the dispatcher
+# 297 — Worker contract: an approval ask may now be answered by the dispatcher
 
 **Status:** cancelled
 **Type:** task
 **Labels:** ready-for-agent
 **Severity:** P3 / low
-**Ship blocker:** no — behaviour is unchanged for the worker until 289 and 290 land; this is the text that keeps it honest.
+**Ship blocker:** no — behaviour is unchanged for the worker until 295 and 296 land; this is the text that keeps it honest.
 **Blocked by:** nothing.
-**Origin:** 2026-11-09 lane decision; the current wording in `src/worker/prompt.ts` predates 289/290 and ADR-0033.
-**Related:** 289, 290 (the behaviour this text describes), 292, 293 (the asks that stay impossible); ADR-0033.
+**Origin:** 2026-11-09 lane decision; the current wording in `src/worker/prompt.ts` predates 295/296 and ADR-0033.
+**Related:** 295, 296 (the behaviour this text describes), 292, 293 (the asks that stay impossible); ADR-0033.
 
 ## Problem
 
-The worker contract's `## Limits` section currently tells a worker that what it can reach is fixed when it starts and cannot be widened, and that a blocked task ends in a report instead of an ask (`src/worker/prompt.ts`, EN and ZH faces). That was true when it was written. After 289 and 290 an approval ask from a worker reaches its dispatcher, and may be answered with one attempt's worth of permission.
+The worker contract's `## Limits` section currently tells a worker that what it can reach is fixed when it starts and cannot be widened, and that a blocked task ends in a report instead of an ask (`src/worker/prompt.ts`, EN and ZH faces). That was true when it was written. After 295 and 296 an approval ask from a worker reaches its dispatcher, and may be answered with one attempt's worth of permission.
 
 Leaving the text as it is would be a lie with consequences: a worker that hits a gate will report blocked and stop, when the dispatcher could have allowed the attempt. Over-correcting is worse — the contract must not promise a question channel. Questions and plan approval stay unreachable (293).
 

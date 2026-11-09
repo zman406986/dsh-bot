@@ -1,17 +1,17 @@
-# 290 — Answer a worker's approval request from its parent dispatcher
+# 296 — Answer a worker's approval request from its parent dispatcher
 
 **Status:** cancelled
 **Type:** task
 **Labels:** ready-for-agent
 **Severity:** P2 / medium
 **Ship blocker:** no — without this the un-pinned child's ask ends in `unavailable`; nothing hangs today.
-**Blocked by:** nothing for the unit tests; the live effect needs 289 (see 292).
+**Blocked by:** nothing for the unit tests; the live effect needs 295 (see 292).
 **Origin:** `docs/research/child-ask-seams.md` finding 3 (the waterfall is answerable in-process) and the 2026-11-09 lane decision that a dispatcher answers its own workers' asks.
-**Related:** 289 (creates the request), 291 (contract wording), 292 (live proof), 293 (what stays unreachable); ADR-0033.
+**Related:** 295 (creates the request), 297 (contract wording), 292 (live proof), 293 (what stays unreachable); ADR-0033.
 
 ## Problem
 
-Once 289 replaces the pin, a worker's would-prompt action produces a real `approval/request` waterfall. Nobody answers it: the browser answerer is registered for root sessions and a worker is not a root. `decide()` races the waterfall against the request signal and normalizes a missing answerer to `unavailable` (`dsh-user-approval/lib/index.js:197-214`), so the worker gets a non-answer rather than a decision — and a listener that simply never returns would hang that worker's tool call.
+Once 295 replaces the pin, a worker's would-prompt action produces a real `approval/request` waterfall. Nobody answers it: the browser answerer is registered for root sessions and a worker is not a root. `decide()` races the waterfall against the request signal and normalizes a missing answerer to `unavailable` (`dsh-user-approval/lib/index.js:197-214`), so the worker gets a non-answer rather than a decision — and a listener that simply never returns would hang that worker's tool call.
 
 This ticket registers a listener on `approval/request`, scoped to the child agent scope of our worker sessions, that asks the owning parent (the dispatcher that spawned the worker) and returns exactly one outcome: `allowed-once` on an explicit yes, `rejected` on an explicit no, on a timeout, or on any read error. The bounded wait is **120 seconds**; when it expires the answer is `rejected`. Nothing in this path may wait forever.
 
