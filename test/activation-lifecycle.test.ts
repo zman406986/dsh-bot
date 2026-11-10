@@ -271,7 +271,7 @@ describe("activation lifecycle — flag matrix (design-16 §3.7)", () => {
   // the host commands with the passive listeners and no tool surface. The
   // negative assertions pin the absence, so a future ticket cannot quietly
   // register a dormant-visible surface.
-  it("tickets 27–31 add no dormant-visible registration: no tools, no listeners beyond the passive five", () => {
+  it("tickets 27–31 add no dormant-visible registration: no tools, no listeners beyond the passive seven", () => {
     const ctx = createFullCtx();
     apply(ctx, volatileConfig({ enabled: true }));
 
@@ -281,13 +281,15 @@ describe("activation lifecycle — flag matrix (design-16 §3.7)", () => {
       DISPATCHER_START_COMMAND,
     ]);
     assert.deepEqual(ctx.toolNames(), []);
-    // Two lifecycle listeners (agent/disposed, agent/status) + four host
+    // Three lifecycle listeners (agent/disposed, agent/status, and the
+    // ticket-296 `session/event` compaction/end policy restore) + four host
     // listeners (subagent/end, session/event, agent/created — the worker
     // composition seam, passive until a spawn is in flight — and agent/disposed,
     // the resumed-user-dispatcher release from ticket 163 defect 3). Owner
     // ruling 2026-11-05: the ticket-145 racoons mount adds four more, but only
     // when `racoonsEnabled` is on — the default product is racoons-free.
-    assert.equal(ctx.listenerCount(), 6);
+    const EXPECTED_DORMANT_LISTENERS = 7;
+    assert.equal(ctx.listenerCount(), EXPECTED_DORMANT_LISTENERS);
     // No dispatcher tool claims a dormant key: a stock caller sees stock.
     for (const name of [
       "spawn_worker",

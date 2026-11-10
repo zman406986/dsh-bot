@@ -86,6 +86,20 @@ export interface AgentLike {
      * for a summoned dispatcher's `agentOptions` when `Agent.model` is absent.
      */
     requestHeader?(): unknown;
+    /**
+     * Ticket 295: the host's model-free surface write
+     * (`dsh-session/lib/index.js:1524-1535`, installed package). With
+     * `surfaceOp: "append"` the message joins the visible surface and the
+     * next request's context WITHOUT entering the inbox and WITHOUT waking the
+     * driver (`:442-445`), which is the only way to show a notice without
+     * spending a model turn. Optional: a structural stub, or a host without
+     * the seam, simply gets no notice.
+     */
+    append?(
+      type: string,
+      data: unknown,
+      options?: { readonly surfaceOp?: "append" },
+    ): unknown;
   };
   /**
    * The agent's live model selection, when the structural view exposes it.

@@ -53,6 +53,14 @@ export const DISPATCHER_START_SUCCESS =
   "use /dispatcher-steer to nudge a running worker. " +
   ACTIVATION_PRESENCE_HINT;
 
+/**
+ * Ticket 295: the one-line account of the visible activation notice — the
+ * collapsed chat row's summary, above the full {@link DISPATCHER_START_SUCCESS}
+ * body. Server-side and therefore outside the client locale dictionary, so it
+ * is English only; the card's own text keeps its existing locale faces.
+ */
+export const ACTIVATION_NOTICE_SUMMARY = "Dispatcher active in this chat.";
+
 /** Same chat is already the dispatcher. */
 export const DISPATCHER_START_ALREADY_HERE =
   "The dispatcher is already active in this chat.";

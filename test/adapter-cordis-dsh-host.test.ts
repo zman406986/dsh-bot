@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {createCordisDshHost, listGlobalToolNames, mapStopReason, SPAWN_PROVIDER, type ActivationLike, type ActivationSpecLike, type AdapterContext, type AgentLike} from "../src/adapter/cordis-dsh-host.js";
 import { RESUME_WAKE_CUE } from "../src/adapter/wake-copy.js";
+import {
+  createDispatcherStartCommand,
+  DISPATCHER_START_SUCCESS,
+} from "../src/adapter/activation-command.js";
 import { bindDispatcherLifecycle, isTopLevel } from "../src/adapter/parent-agent.js";
 import { createMultitask } from "../src/core/multitask.js";
 import { assembleSessionPolicy } from "../src/core/policy/assembler.js";
@@ -18,6 +22,16 @@ import { EMPTY_WORKER_REPORT_PLACEHOLDER } from "../src/worker/report.js";
 
 interface RecordedCall {
   [key: string]: unknown;
+}
+
+/**
+ * Ticket 295: one recorded `Session.append(type, data, options)` call — the
+ * host's model-free surface write (`dsh-session/lib/index.js:1524-1535`).
+ */
+interface AppendCall {
+  type: unknown;
+  data: unknown;
+  options: unknown;
 }
 
 interface ComposedChild {
@@ -40,12 +54,40 @@ function createAgent(id: string, topLevel = true): AgentLike {
   };
 }
 
+/**
+ * Ticket 295: give a stub agent the live host's model-free surface write, so
+ * the activation notice can be counted. `createAgent` deliberately has no such
+ * seam: a host without it is the documented no-op case (the command card stays
+ * the only confirmation).
+ */
+function withRecordedAppend(
+  agent: AgentLike,
+  appendCalls: AppendCall[],
+): AgentLike {
+  const session = agent.session as {
+    append?: (type: string, data: unknown, options?: unknown) => unknown;
+  };
+  session.append = (type, data, options) => {
+    appendCalls.push({ type, data, options });
+    // The real `Session.append` answers with the committed event; only the
+    // fact that it landed matters here.
+    return { type, seq: appendCalls.length };
+  };
+  return agent;
+}
+
 function createStubCtx() {
   const startActivationCalls: RecordedCall[] = [];
   const disposedWorkerIds: string[] = [];
   const interruptCalls: RecordedCall[] = [];
   const sendMessageCalls: RecordedCall[] = [];
   const followupCalls: unknown[] = [];
+  /**
+   * Ticket 295: every surface append the adapter performs. A notice that shows
+   * up here reached the session WITHOUT a followup/inbox entry (which is what
+   * makes it free of a model turn), so the two counts are asserted together.
+   */
+  const appendCalls: AppendCall[] = [];
   const listeners = new Map<string, Array<(payload: never) => void>>();
   const jobListCalls: unknown[] = [];
   /**
@@ -177,6 +219,7 @@ function createStubCtx() {
     interruptCalls: RecordedCall[];
     sendMessageCalls: RecordedCall[];
     followupCalls: unknown[];
+    appendCalls: AppendCall[];
     jobListCalls: unknown[];
     sessionTitleCalls: Array<{ sessionId: unknown; title: string }>;
     get(name: string): unknown;
@@ -200,6 +243,7 @@ function createStubCtx() {
     interruptCalls,
     sendMessageCalls,
     followupCalls,
+    appendCalls,
     jobListCalls,
     sessionTitleCalls,
     activationSeams,
@@ -310,8 +354,25 @@ function createStubCtx() {
         const agent = agents.get(String(id));
         if (agent === undefined) return undefined;
         if (exactAgentIdentity) return agent;
+        const innerAppend =
+          typeof agent.session.append === "function"
+            ? agent.session.append.bind(agent.session)
+            : undefined;
         return {
           ...agent,
+          session: {
+            ...agent.session,
+            // Ticket 295: the host's surface write, recorded the same way
+            // `followup` is, so a test can prove a notice needed no turn.
+            append(
+              type: string,
+              data: unknown,
+              options?: { readonly surfaceOp?: "append" },
+            ) {
+              appendCalls.push({ type, data, options });
+              return innerAppend?.(type, data, options);
+            },
+          },
           followup(message: unknown) {
             followupCalls.push(message);
             // Preserve the driver's answer: a live driver may return a
@@ -3459,3 +3520,144 @@ describe("defect fixes: dispatcher lifecycle and policy idempotence", () => {
     assert.equal(followed.length, 1);
   });
 });
+/**
+ * Ticket 295: the activation confirmation must be READABLE, and reading it must
+ * cost nothing.
+ *
+ * The command card is the only other record of the confirmation, and the chat
+ * collapses any command text that has no newline into one clipped line
+ * (installed dsh-client-ui-chat/lib/client.js:8489). Activation therefore also
+ * appends a `notice` message to the session surface. That write must never
+ * become a followup: a followup is the next-turn inbox plus the wake driver,
+ * i.e. a model turn spent on printing a sentence.
+ */
+describe("ticket 295: activation confirmation is visible and turn-free", () => {
+  function textOfAppend(call: AppendCall): string {
+    const data = call.data as { content?: Array<{ text?: string }> };
+    return Array.isArray(data.content)
+      ? data.content.map((block) => block.text ?? "").join("")
+      : "";
+  }
+
+  it("a dormant activation appends exactly one notice and opens no turn", () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const multitask = createMultitask(host);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
+
+    const parent = withRecordedAppend(createAgent("disp-1"), ctx.appendCalls);
+    assert.deepEqual(lifecycle.activate(parent), { ok: true });
+
+    assert.equal(ctx.appendCalls.length, 1, "exactly one surface write");
+    const call = ctx.appendCalls[0];
+    assert.ok(call !== undefined);
+    assert.equal(call.type, "user/message");
+    assert.deepEqual(call.options, { surfaceOp: "append" });
+
+    const data = call.data as {
+      id?: unknown;
+      role?: string;
+      source?: { kind?: string; form?: string; summary?: string };
+    };
+    assert.equal(data.role, "user");
+    assert.equal(
+      typeof data.id,
+      "string",
+      "the host requires a message id on user/message",
+    );
+    assert.equal(data.source?.kind, "plugin:multitask-dispatcher");
+    assert.equal(data.source?.form, "notice", "the collapsed row needs a form");
+    assert.equal(typeof data.source?.summary, "string");
+    assert.ok(
+      (data.source?.summary ?? "").length > 0,
+      "a notice without a summary renders opaque",
+    );
+    assert.ok(
+      textOfAppend(call).includes(DISPATCHER_START_SUCCESS),
+      "the notice carries the full confirmation the card clips",
+    );
+
+    // The property that makes this route acceptable at all.
+    assert.equal(ctx.followupCalls.length, 0, "no inbox entry, no wake");
+  });
+
+  it("the command path returns the unchanged result AND the notice", () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const multitask = createMultitask(host);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
+    const command = createDispatcherStartCommand({
+      ctx,
+      activeSessionId: () => lifecycle.dispatcherSessionId(),
+      activate: (agent) => lifecycle.activate(agent),
+    });
+
+    const parent = withRecordedAppend(createAgent("disp-1"), ctx.appendCalls);
+    assert.deepEqual(command.handler({ commandId: "c1", agent: parent }), {
+      kind: "success",
+      text: DISPATCHER_START_SUCCESS,
+    });
+    assert.equal(ctx.appendCalls.length, 1);
+    assert.equal(ctx.followupCalls.length, 0);
+  });
+
+  it("an already-active session appends nothing", () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const multitask = createMultitask(host);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
+
+    const parent = withRecordedAppend(createAgent("disp-1"), ctx.appendCalls);
+    assert.deepEqual(lifecycle.activate(parent), { ok: true });
+    assert.deepEqual(lifecycle.activate(parent), {
+      ok: false,
+      reason: "already-active-here",
+    });
+
+    assert.equal(ctx.appendCalls.length, 1, "only the first activation");
+    assert.equal(ctx.followupCalls.length, 0);
+  });
+
+  it("a child chat and an unbound lifecycle append nothing", () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const multitask = createMultitask(host);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
+
+    const child = createAgent("child-1", false);
+    assert.deepEqual(lifecycle.activate(child), {
+      ok: false,
+      reason: "not-top-level",
+    });
+    assert.equal(ctx.appendCalls.length, 0, "refused activation writes nothing");
+
+    lifecycle.unbind();
+    const later = createAgent("disp-2");
+    assert.deepEqual(lifecycle.activate(later), { ok: false, reason: "unbound" });
+    assert.equal(
+      ctx.appendCalls.length,
+      0,
+      "a torn-down lifecycle writes nothing",
+    );
+    assert.equal(ctx.followupCalls.length, 0);
+  });
+
+  it("a host without the append seam still activates, with no invented wake", () => {
+    const ctx = createStubCtx();
+    const host = createCordisDshHost(ctx);
+    const multitask = createMultitask(host);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask);
+
+    // createAgent has no session.append: the pre-295 host shape.
+    const parent = createAgent("disp-1");
+    assert.deepEqual(lifecycle.activate(parent), { ok: true });
+    assert.equal(ctx.appendCalls.length, 0);
+    assert.equal(
+      ctx.followupCalls.length,
+      0,
+      "the missing seam must not be faked with a followup",
+    );
+    assert.equal(lifecycle.dispatcherSessionId(), "disp-1");
+  });
+});
+

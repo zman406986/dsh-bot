@@ -107,10 +107,50 @@ export interface WakeUserMessage {
     readonly kind: string;
     readonly form?: string;
     readonly senderSessionId?: string;
+    /**
+     * Ticket 295: the one-line account a `form: "notice"` message puts on its
+     * collapsed chat row (the host's own `model-selection` / `action-cards`
+     * notices carry this field). Ignored for every other form.
+     */
+    readonly summary?: string;
   };
 }
 
+/**
+ * Ticket 295: the visible, MODEL-FREE notice that carries activation
+ * confirmation.
+ *
+ * WHY this shape: `/dsh-bot` announced success only as a command result, and
+ * the chat renders a command result as one collapsed line whose body exists
+ * solely when the text contains a newline
+ * (`dsh-client-ui-chat/lib/client.js:8489`, installed package). Our 208-char
+ * confirmation has none, so the user could never read it. A `user/message`
+ * with `form: "notice"` and a `summary` renders as a compact context row
+ * whose one-line account is always visible and whose body is the full text
+ * (`:5690-5696`, `:5652-5655`).
+ *
+ * WHY `session.append` and not a wake: `agent.followup` is the next-turn
+ * inbox plus the wake driver (`dsh-agent-loop/lib/index.js:570-572`,
+ * `:618-632`), i.e. it starts a model turn. `session.append("user/message",
+ * …, { surfaceOp: "append" })` is the same surface write the loop performs
+ * (`:865`) without the inbox and without the wake
+ * (`dsh-session/lib/index.js:1524-1535`, `:442-445`); ADR-0032:56 records
+ * exactly that property. Nothing derives origin or intent from this text.
+ */
 let wakeMessageSeq = 0;
+
+export function activationNoticeMessage(
+  text: string,
+  summary: string,
+): WakeUserMessage {
+  wakeMessageSeq += 1;
+  return {
+    id: `multitask-activation-notice-${Date.now()}-${wakeMessageSeq}`,
+    role: "user",
+    content: textBlocks(text),
+    source: { kind: WAKE_SOURCE_KIND, form: "notice", summary },
+  };
+}
 
 /**
  * Build the wake follow-up message. Fresh id per call.

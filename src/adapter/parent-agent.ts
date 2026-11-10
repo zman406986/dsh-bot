@@ -6,7 +6,15 @@ import {
 } from "../core/policy/assembler.js";
 import { textBlocks } from "./content-blocks.js";
 import type { AdapterContext, AgentLike, CordisDshHost } from "./cordis-dsh-host.js";
-import { WAKE_SOURCE_KIND, wakeUserMessage } from "./wake-copy.js";
+import {
+  activationNoticeMessage,
+  WAKE_SOURCE_KIND,
+  wakeUserMessage,
+} from "./wake-copy.js";
+import {
+  ACTIVATION_NOTICE_SUMMARY,
+  DISPATCHER_START_SUCCESS,
+} from "./activation-command.js";
 import type { DispatcherOrigin, PolicyLanguage } from "../core/policy/prompts.js";
 
 /**
@@ -318,6 +326,82 @@ function transcriptCarriesPolicy(
   return false;
 }
 
+/** Structural view of the host's live session surface (ticket 296). */
+interface SessionSurfaceLike {
+  readonly nodes?: unknown;
+}
+
+/** The two synchronous reads a surface probe needs from a session. */
+interface SurfaceSessionLike {
+  readonly surface?: SessionSurfaceLike | null;
+  readonly eventAt?: (seq: never) => unknown;
+}
+
+/** Answer from the live-surface probe; `unknown` means "cannot read it". */
+type SurfacePolicyState = "present" | "absent" | "unknown";
+
+/**
+ * Whether the exact session-policy bytes sit on this session's LIVE surface
+ * (ticket 296).
+ *
+ * WHY: the policy is one user-role message injected at activation. Host
+ * compaction replaces the whole non-system range with a summary checkpoint
+ * (`dsh-compaction-basic/lib/index.js` line 415), so the system head survives
+ * while our message is shadowed, and a compacted dispatcher runs policy-less
+ * for the rest of the session. `transcriptCarriesPolicy` above cannot answer
+ * this: it asks "did anything after the node invalidate it?" and a compaction
+ * makes that permanently false, so a per-turn reuse would inject every turn
+ * forever.
+ *
+ * This probe asks the only question that matters: is a committed
+ * `user/message` carrying exactly these bytes a CURRENT surface node?
+ * `surface.nodes` already excludes every shadowed node, so no seq arithmetic
+ * and no compaction history is involved. A readable surface with no such node
+ * is `"absent"`; a missing/throwing seam is `"unknown"` and leaves the caller's
+ * existing fallback in charge.
+ *
+ * Read-only by construction: `eventAt` is a read, and this function never
+ * appends or injects.
+ */
+function policyOnLiveSurface(
+  agent: AgentLike,
+  policy: string,
+): SurfacePolicyState {
+  const session = agent.session as unknown as SurfaceSessionLike;
+  const surface = session.surface;
+  if (surface === undefined || surface === null) return "unknown";
+  const nodes = surface.nodes;
+  if (!Array.isArray(nodes)) return "unknown";
+  if (typeof session.eventAt !== "function") return "unknown";
+  for (const node of nodes) {
+    let event: unknown;
+    try {
+      event = session.eventAt(node as never);
+    } catch {
+      return "unknown";
+    }
+    if (typeof event !== "object" || event === null) return "unknown";
+    if (!isCommittedProducerMessage(event as TranscriptEventLike)) continue;
+    const data = (event as TranscriptEventLike).data as {
+      readonly content?: unknown;
+    };
+    // Exact bytes, not a substring: a checkpoint summary that quotes the
+    // policy is not the policy, and only our own inject produces this text.
+    if (messageText(data.content) === policy) return "present";
+  }
+  return "absent";
+}
+
+/** Read one session reference from a two-arg `session/event` payload. */
+function sessionIdOfRef(ref: unknown): string | null {
+  if (typeof ref === "object" && ref !== null) {
+    const id = (ref as { readonly id?: unknown }).id;
+    if (id !== undefined && id !== null) return String(id);
+  }
+  if (typeof ref === "string" && ref.length > 0) return ref;
+  return null;
+}
+
 /**
  * Best-effort *waking* delivery (ticket 57, register D-4).
  *
@@ -343,6 +427,43 @@ function tryWake(agent: AgentLike, text: string): void {
     });
   } catch {
     // Waking is best-effort; never break activation on it.
+  }
+}
+
+/**
+ * Ticket 295: put the activation confirmation on the session's VISIBLE
+ * surface — model-free, turn-free.
+ *
+ * `agent.followup` would print the same text but spends a model turn (see
+ * {@link tryWake}); `session.append("user/message", …, { surfaceOp: "append" })`
+ * adds the message to the surface and the next request's context without an
+ * inbox entry and without waking the driver (`dsh-session/lib/index.js:1524-1535`,
+ * `:442-445`; ADR-0032:56 records the property). The chat then renders a
+ * `form: "notice"` row whose summary is the collapsed one-liner and whose body
+ * is the full confirmation — which the command card could never show
+ * (`dsh-client-ui-chat/lib/client.js:8489` collapses any text without a
+ * newline).
+ *
+ * Best-effort by construction: a session without the seam keeps the pre-295
+ * behavior (the command card only) rather than faking a wake.
+ */
+function tryActivationNotice(agent: AgentLike): void {
+  const append = agent.session.append;
+  if (typeof append !== "function") return;
+  try {
+    const event = append.call(
+      agent.session,
+      "user/message",
+      activationNoticeMessage(DISPATCHER_START_SUCCESS, ACTIVATION_NOTICE_SUMMARY),
+      { surfaceOp: "append" },
+    );
+    // A structural stub may answer with a promise; own it so a rejection can
+    // never surface as fatal (the append is best-effort).
+    void Promise.resolve(event).catch(() => {
+      // Visible confirmation is best-effort; never break activation on it.
+    });
+  } catch {
+    // Visible confirmation is best-effort; never break activation on it.
   }
 }
 
@@ -626,10 +747,37 @@ export function bindDispatcherLifecycle(
   let activationSeq = 0;
   let unbound = false;
   const disposers: Array<() => void> = [];
+  /**
+   * Sessions with a policy copy QUEUED but not yet committed — by activation
+   * or by a `compaction/end` boundary (ticket 296). The running edge fires
+   * before the step claims queued input, so the surface probe cannot see a
+   * queued copy; without this mark the first turn after either path would
+   * queue a second identical block. Cleared at turn end and whenever the
+   * probe sees the policy present.
+   */
+  const policyInjectInFlight = new Set<string>();
+
+  /**
+   * The exact policy bytes for ONE activated session (ticket 296).
+   *
+   * Deliberately the same call activation makes — enabled, the stored class,
+   * the stored spawn generation, the activation-wide language — so the
+   * surface probe's exact-text match cannot drift from the injected text.
+   * Callers only reach it for a session already in `sessions`.
+   */
+  function policyBytes(sessionId: string): string {
+    return assembleSessionPolicy(
+      true,
+      origins.get(sessionId) ?? "user",
+      spawnGenerations.get(sessionId) ?? 1,
+      policyLanguage,
+    );
+  }
 
   function deactivateSession(sessionId: string): void {
     if (!sessions.has(sessionId)) return;
     sessions.delete(sessionId);
+    policyInjectInFlight.delete(sessionId);
     // Ticket 155: `spawnTitles` is NOT dropped here — the title is a property
     // of the session ID, exactly like `generations`, so a peer that is
     // deactivated and later re-activated keeps the label its peers render.
@@ -718,6 +866,30 @@ export function bindDispatcherLifecycle(
       if (boundAgent !== undefined) {
         if (status === "running") {
           multitask.wakeBus.noteTurnStarted(agentSessionId);
+          // Ticket 296: the policy is ONE user-role message, and host
+          // compaction shadows the whole non-system range — the system head
+          // survives but our message does not. Probe the LIVE surface and put
+          // the exact same bytes back when it is gone. Injected BEFORE the
+          // reminder so the reminder stays the newest tail (ticket 121).
+          if (policyEnabled) {
+            const policy = policyBytes(agentSessionId);
+            const state = policyOnLiveSurface(boundAgent, policy);
+            if (state === "present") {
+              // The queued copy (if any) is now committed; a later boundary
+              // may queue again.
+              policyInjectInFlight.delete(agentSessionId);
+            } else if (state === "absent") {
+              // A copy already queued by activation or a compaction boundary
+              // is claimed by THIS step's inbox drain (after the running
+              // event), so it is not absent from context for long. Queueing a
+              // second copy here would put two identical blocks in one step;
+              // the turn-end clear leaves the next turn to judge the surface.
+              if (!policyInjectInFlight.has(agentSessionId)) {
+                tryInject(boundAgent, policy);
+                policyInjectInFlight.add(agentSessionId);
+              }
+            }
+          }
           // Per-turn reminder: re-inject ledger + standing rules (T11), then
           // the peer roster as the TAIL section (ticket 121). Tail placement is
           // load-bearing: everything above it stays byte-stable so the cached
@@ -748,6 +920,9 @@ export function bindDispatcherLifecycle(
           if (policyEnabled) {
             multitask.redriveUndelivered(agentSessionId);
           }
+          // Ticket 296: a closed turn settles any boundary queued during it;
+          // the next turn's probe decides from the committed surface.
+          policyInjectInFlight.delete(agentSessionId);
           multitask.wakeBus.noteTurnEnded(agentSessionId);
         }
         return;
@@ -764,6 +939,40 @@ export function bindDispatcherLifecycle(
         // Steer delivery point: core pops a parked last-wins steer.
         host.emitStepBoundary(workerId);
       }
+    }),
+  );
+
+  // Ticket 296: a host compaction closes with `compaction/end` AFTER the
+  // replacement user message has entered the surface (`dsh-compaction` types:
+  // "the actual surface replacement is performed by the immediately following
+  // `user/message` event"). This is the earliest honest moment to put the
+  // policy back inside the SAME turn. The listener is deliberately narrow:
+  // a bound dispatcher session only, so the worker branch above and every
+  // worker transcript stay untouched.
+  disposers.push(
+    ctx.on("session/event", (...args: never[]) => {
+      const [sessionRef, rawEvent] = args as unknown as [unknown, unknown];
+      if (typeof rawEvent !== "object" || rawEvent === null) return;
+      if ((rawEvent as { readonly type?: unknown }).type !== "compaction/end") {
+        return;
+      }
+      if (!policyEnabled) return;
+      const sessionId = sessionIdOfRef(sessionRef);
+      if (sessionId === null) return;
+      const agent = sessions.get(sessionId);
+      if (agent === undefined) return;
+      const policy = policyBytes(sessionId);
+      // A failed compaction leaves the surface unchanged; the probe then sees
+      // the policy and this boundary injects nothing.
+      if (policyOnLiveSurface(agent, policy) === "present") {
+        policyInjectInFlight.delete(sessionId);
+        return;
+      }
+      // A copy is already queued (activation or an earlier boundary in this
+      // same turn). Two boundaries in one turn must not queue two blocks.
+      if (policyInjectInFlight.has(sessionId)) return;
+      policyInjectInFlight.add(sessionId);
+      tryInject(agent, policy);
     }),
   );
 
@@ -824,10 +1033,28 @@ export function bindDispatcherLifecycle(
         generation,
         policyLanguage,
       );
-      if (!transcriptCarriesPolicy(ctx, agent, policy)) {
+      // Ticket 296: the LIVE surface is the authority when it is readable —
+      // a committed producer message is in context, a compaction-shadowed one
+      // is not. The transcript probe stays the fallback for a host/stub whose
+      // surface cannot be read, so the pre-296 dedupe is unchanged there.
+      const state = policyOnLiveSurface(agent, policy);
+      if (
+        state === "absent" ||
+        (state === "unknown" && !transcriptCarriesPolicy(ctx, agent, policy))
+      ) {
         tryInject(agent, policy);
+        // The loop claims queued input at the NEXT step (after this
+        // activation's own status edge, if any). The per-turn probe must not
+        // queue a second copy before that claim; turn end clears the mark.
+        policyInjectInFlight.add(sessionId);
       }
     }
+    // Ticket 295: the command card collapses to one clipped line (the chat
+    // only renders a command body when its text contains a newline), so the
+    // SAME confirmation also lands as a visible surface notice. This is the
+    // binding path: every refusal returns above, and a worker session never
+    // reaches this function at all.
+    tryActivationNotice(agent);
     onActivated?.(sessionId);
   }
 

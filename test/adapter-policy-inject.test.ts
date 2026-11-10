@@ -1,23 +1,142 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createMultitask } from "../src/core/multitask.js";
+import { assembleSessionPolicy } from "../src/core/policy/assembler.js";
 import {
   bindDispatcherLifecycle,
   subagentLabelOf,
   type AgentLike,
 } from "../src/adapter/index.js";
 import type { AdapterContext, CordisDshHost } from "../src/adapter/cordis-dsh-host.js";
+import { WAKE_SOURCE_KIND } from "../src/adapter/wake-copy.js";
 
 interface CaptureAgent extends AgentLike {
   readonly injected: unknown[];
   readonly followed: unknown[];
 }
 
-function createAgent(sessionId: string, withInject = true): CaptureAgent {
+/** One committed session event, as the live surface and eventAt expose it. */
+interface FakeSurfaceEvent {
+  readonly seq: number;
+  readonly type: string;
+  readonly data: {
+    readonly role?: string;
+    readonly source?: { readonly kind?: string };
+    readonly content?: ReadonlyArray<{ readonly type: string; readonly text: string }>;
+  };
+}
+
+/**
+ * A minimal event-sourced session (ticket 296): an append-only event list plus
+ * a live surface node list, which is exactly what `policyOnLiveSurface`
+ * reads. Compaction shadows nodes; nothing is ever removed from the log.
+ */
+interface FakeSurface {
+  readonly session: {
+    readonly id: string;
+    readonly header: { readonly parentSession: null; readonly delegationDepth: number };
+    readonly surface: { readonly nodes: readonly number[] };
+    eventAt(seq: number): FakeSurfaceEvent | undefined;
+  };
+  appendSystem(text: string): number;
+  appendToolResult(text: string): number;
+  appendProducerUserMessage(text: string): number;
+  compact(summary: string): void;
+  pruneToolResult(seq: number, replacementText: string): void;
+  nodes(): readonly number[];
+}
+
+function textBlock(text: string): ReadonlyArray<{ readonly type: string; readonly text: string }> {
+  return [{ type: "text", text }];
+}
+
+function createFakeSurface(sessionId: string): FakeSurface {
+  const events: FakeSurfaceEvent[] = [];
+  let nodes: number[] = [];
+  function append(event: Omit<FakeSurfaceEvent, "seq">): number {
+    const seq = events.length;
+    events.push({ seq, ...event });
+    nodes.push(seq);
+    return seq;
+  }
+  const session = {
+    id: sessionId,
+    header: { parentSession: null, delegationDepth: 0 },
+    surface: {
+      get nodes(): readonly number[] {
+        return [...nodes];
+      },
+    },
+    eventAt(seq: number): FakeSurfaceEvent | undefined {
+      return events[seq];
+    },
+  };
+  return {
+    session,
+    appendSystem(text: string): number {
+      return append({
+        type: "system/message",
+        data: { role: "system", content: textBlock(text) },
+      });
+    },
+    appendToolResult(text: string): number {
+      return append({
+        type: "tool/result",
+        data: { role: "tool", content: textBlock(text) },
+      });
+    },
+    appendProducerUserMessage(text: string): number {
+      return append({
+        type: "user/message",
+        data: {
+          role: "user",
+          source: { kind: WAKE_SOURCE_KIND },
+          content: textBlock(text),
+        },
+      });
+    },
+    compact(summary: string): void {
+      const systemSeqs = nodes.filter(
+        (seq) => events[seq]?.type === "system/message",
+      );
+      const checkpointSeq = append({
+        type: "user/message",
+        data: {
+          role: "user",
+          source: { kind: "plugin:compaction-basic" },
+          content: textBlock(summary),
+        },
+      });
+      // Host compaction keeps the system head and replaces everything else
+      // with the summary checkpoint.
+      nodes.splice(0, nodes.length, ...systemSeqs, checkpointSeq);
+    },
+    pruneToolResult(seq: number, replacementText: string): void {
+      const at = nodes.indexOf(seq);
+      if (at >= 0) nodes.splice(at, 1);
+      append({
+        type: "tool/result",
+        data: { role: "tool", content: textBlock(replacementText) },
+      });
+    },
+    nodes(): readonly number[] {
+      return [...nodes];
+    },
+  };
+}
+
+function createAgent(
+  sessionId: string,
+  withInject = true,
+  surface?: FakeSurface,
+  commitInjects = true,
+): CaptureAgent {
   const injected: unknown[] = [];
   const followed: unknown[] = [];
   const agent: CaptureAgent = {
-    session: { id: sessionId, header: { parentSession: null, delegationDepth: 0 } },
+    session:
+      surface?.session ??
+      { id: sessionId, header: { parentSession: null, delegationDepth: 0 } },
     injected,
     followed,
     followup(message: unknown) {
@@ -27,6 +146,10 @@ function createAgent(sessionId: string, withInject = true): CaptureAgent {
       ? {
           inject(message: unknown) {
             injected.push(message);
+            // The host loop commits an injected user message at the next
+            // step; the fake commits synchronously so a probe can be proven
+            // to see its own inject on the next turn.
+            if (commitInjects) surface?.appendProducerUserMessage(textOf(message));
           },
         }
       : {}),
@@ -46,18 +169,18 @@ function createChildAgent(sessionId: string): CaptureAgent {
 }
 
 function createCtx(): AdapterContext & {
-  listeners: Map<string, Array<(payload: never) => void>>;
-  emit(name: string, payload: unknown): void;
+  listeners: Map<string, Array<(...args: never[]) => void>>;
+  emit(name: string, ...payload: unknown[]): void;
 } {
-  const listeners = new Map<string, Array<(payload: never) => void>>();
+  const listeners = new Map<string, Array<(...args: never[]) => void>>();
   return {
     listeners,
-    emit(name: string, payload: unknown) {
+    emit(name: string, ...payload: unknown[]) {
       for (const cb of listeners.get(name) ?? []) {
-        cb(payload as never);
+        cb(...(payload as never[]));
       }
     },
-    on(name: string, cb: (payload: never) => void) {
+    on(name: string, cb: (...args: never[]) => void) {
       const list = listeners.get(name) ?? [];
       list.push(cb);
       listeners.set(name, list);
@@ -457,5 +580,209 @@ describe("subagentLabelOf — the ADR-0027 label read (ticket 155)", () => {
       ),
       null,
     );
+  });
+});
+
+
+describe("dispatcher policy re-injection after host compaction (ticket 296)", () => {
+  /** The exact bytes activation injects for a user-started dispatcher. */
+  const USER_POLICY = assembleSessionPolicy(true, "user", 1, "en");
+
+  function policyMessages(agent: CaptureAgent, policy: string): unknown[] {
+    return agent.injected.filter((message) => textOf(message) === policy);
+  }
+
+  /**
+   * Activate one dispatcher on a fake event-sourced session. The system head
+   * is present before activation, exactly as the host assembles it.
+   */
+  function activateDispatcher(options?: {
+    origin?: "user" | "spawned";
+    generation?: number;
+  }) {
+    const ctx = createCtx();
+    const host = createHostStub();
+    const multitask = createMultitask(host);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask, {
+      policyEnabled: true,
+    });
+    const surface = createFakeSurface("session-1");
+    surface.appendSystem("You are the dsh agent.");
+    const agent = createAgent("session-1", true, surface);
+    const outcome = lifecycle.activate(agent, options);
+    assert.deepEqual(outcome, { ok: true });
+    return { ctx, host, multitask, lifecycle, surface, agent };
+  }
+
+  it("surface after compaction (system head + checkpoint, policy gone) gets exactly one inject, byte-identical", () => {
+    const { ctx, surface, agent } = activateDispatcher();
+    // A normal activation turn settles the queued-copy mark and commits the
+    // policy, as it does live. Compaction comes later, in a session that has
+    // already been running.
+    ctx.emit("agent/status", { agent, status: "running" });
+    ctx.emit("agent/status", { agent, status: "idle" });
+    assert.equal(policyMessages(agent, USER_POLICY).length, 1);
+
+    surface.compact("Summary of the earlier conversation.");
+    assert.equal(
+      surface.nodes().length,
+      2,
+      "the live surface is now the system head plus the checkpoint",
+    );
+    assert.equal(policyMessages(agent, USER_POLICY).length, 1);
+
+    ctx.emit("agent/status", { agent, status: "running" });
+
+    const injected = policyMessages(agent, USER_POLICY);
+    assert.equal(injected.length, 2, "exactly one re-inject after compaction");
+    assert.equal(textOf(injected.at(-1)), USER_POLICY);
+    assert.equal(
+      textOf(agent.injected.at(-2)),
+      USER_POLICY,
+      "the policy lands before the turn reminder",
+    );
+    assert.ok(
+      textOf(agent.injected.at(-1)).includes("## Ledger"),
+      "the reminder remains the newest tail",
+    );
+  });
+
+  it("policy still on the surface: two consecutive turns inject zero policies", () => {
+    const { ctx, agent } = activateDispatcher();
+    const afterActivation = agent.injected.length;
+
+    ctx.emit("agent/status", { agent, status: "running" });
+    ctx.emit("agent/status", { agent, status: "running" });
+
+    assert.equal(
+      policyMessages(agent, USER_POLICY).length,
+      1,
+      "activation's copy is still present; no duplicate",
+    );
+    assert.equal(
+      agent.injected.length,
+      afterActivation + 2,
+      "each turn still gets its reminder",
+    );
+  });
+
+  it("two consecutive turns after compaction inject exactly one policy in total", () => {
+    const { ctx, surface, agent } = activateDispatcher();
+    ctx.emit("agent/status", { agent, status: "running" });
+    ctx.emit("agent/status", { agent, status: "idle" });
+    surface.compact("Summary of the earlier conversation.");
+
+    ctx.emit("agent/status", { agent, status: "running" });
+    ctx.emit("agent/status", { agent, status: "running" });
+
+    assert.equal(
+      policyMessages(agent, USER_POLICY).length,
+      2,
+      "one activation inject plus exactly one post-compaction re-inject, on the first turn back",
+    );
+  });
+
+  it("a spawned-origin session re-injects the spawned wording with its stored generation", () => {
+    const spawnedPolicy = assembleSessionPolicy(true, "spawned", 3, "en");
+    assert.notEqual(spawnedPolicy, USER_POLICY);
+    const { ctx, surface, agent } = activateDispatcher({
+      origin: "spawned",
+      generation: 3,
+    });
+    assert.equal(policyMessages(agent, spawnedPolicy).length, 1);
+    ctx.emit("agent/status", { agent, status: "running" });
+    ctx.emit("agent/status", { agent, status: "idle" });
+
+    surface.compact("Summary of the earlier conversation.");
+    ctx.emit("agent/status", { agent, status: "running" });
+
+    const injected = policyMessages(agent, spawnedPolicy);
+    assert.equal(injected.length, 2);
+    assert.equal(
+      textOf(injected.at(-1)),
+      spawnedPolicy,
+      'byte-identical to assembleSessionPolicy(true, "spawned", 3, policyLanguage)',
+    );
+    assert.equal(policyMessages(agent, USER_POLICY).length, 0);
+  });
+
+  it("a worker session receives no policy on agent/status or on compaction/end", () => {
+    const { ctx } = activateDispatcher();
+    const workerSurface = createFakeSurface("worker-1");
+    workerSurface.appendSystem("worker contract");
+    const worker = createAgent("worker-1", true, workerSurface);
+
+    ctx.emit("agent/status", { agent: worker, status: "running" });
+    ctx.emit("session/event", worker.session, { type: "compaction/end" });
+
+    assert.equal(worker.injected.length, 0);
+    assert.equal(worker.followed.length, 0);
+  });
+
+  it("a microcompact prune of a tool result keeps the policy node: zero injects", () => {
+    const { ctx, surface, agent } = activateDispatcher();
+    const toolSeq = surface.appendToolResult("a long tool result");
+    // Microcompact shadows the tool result and appends its cleared replacement.
+    surface.pruneToolResult(toolSeq, "[tool result cleared]");
+    assert.equal(policyMessages(agent, USER_POLICY).length, 1);
+
+    ctx.emit("agent/status", { agent, status: "running" });
+
+    assert.equal(
+      policyMessages(agent, USER_POLICY).length,
+      1,
+      "the policy node survived the prune; nothing to re-inject",
+    );
+  });
+
+  it("an activation inject still queued when the first turn starts is not duplicated", () => {
+    const ctx = createCtx();
+    const host = createHostStub();
+    const multitask = createMultitask(host);
+    const lifecycle = bindDispatcherLifecycle(ctx, host, multitask, {
+      policyEnabled: true,
+    });
+    const surface = createFakeSurface("session-1");
+    surface.appendSystem("You are the dsh agent.");
+    // Activation queues the copy; the host loop has not committed it yet.
+    const agent = createAgent("session-1", true, surface, false);
+    lifecycle.activate(agent);
+    assert.equal(policyMessages(agent, USER_POLICY).length, 1);
+
+    // The running edge precedes the step's inbox drain, so the probe cannot
+    // see the queued copy yet. It must NOT queue a second one.
+    ctx.emit("agent/status", { agent, status: "running" });
+    assert.equal(policyMessages(agent, USER_POLICY).length, 1);
+
+    // The step drains the queue; the turn closes and the next turn sees it.
+    surface.appendProducerUserMessage(USER_POLICY);
+    ctx.emit("agent/status", { agent, status: "idle" });
+    ctx.emit("agent/status", { agent, status: "running" });
+    assert.equal(policyMessages(agent, USER_POLICY).length, 1);
+  });
+
+  it("compaction/end re-injects promptly for a bound dispatcher and only once", () => {
+    const { ctx, surface, agent } = activateDispatcher();
+    ctx.emit("agent/status", { agent, status: "running" });
+    ctx.emit("agent/status", { agent, status: "idle" });
+    surface.compact("Summary of the earlier conversation.");
+    assert.equal(policyMessages(agent, USER_POLICY).length, 1);
+
+    ctx.emit("session/event", agent.session, { type: "compaction/end" });
+
+    const injected = policyMessages(agent, USER_POLICY);
+    assert.equal(injected.length, 2, "the boundary re-injects inside the turn");
+    assert.equal(textOf(injected.at(-1)), USER_POLICY);
+
+    // The committed copy is on the surface now; a second boundary in the same
+    // turn must not queue another.
+    ctx.emit("session/event", agent.session, { type: "compaction/end" });
+    assert.equal(policyMessages(agent, USER_POLICY).length, 2);
+  });
+
+  it("compaction/end with the policy still present injects nothing", () => {
+    const { ctx, agent } = activateDispatcher();
+    ctx.emit("session/event", agent.session, { type: "compaction/end" });
+    assert.equal(policyMessages(agent, USER_POLICY).length, 1);
   });
 });
