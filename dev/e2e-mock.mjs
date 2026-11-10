@@ -1280,6 +1280,26 @@ async function scenario2() {
   return phase;
 }
 
+// Ticket 297: the spawn_dispatcher ack names the child dispatcher in prose.
+// Commit afe9846 retired `as a peer dispatcher (session <id>)` in favour of
+// `message_agent addressed to <id>`; this harness kept parsing only the old
+// shape, so s3 read childId === null and six assertions cascaded. Accept both
+// shapes so the harness tolerates either copy, and neither rewording silently
+// rots the id again.
+const CHILD_ID_PATTERNS = [
+  /as a peer dispatcher \(session ([^)\s]+)\)/,
+  /message_agent addressed to ([^\s;,.)]+)/,
+];
+
+/** The child dispatcher's session id from a spawn_dispatcher ack, or null. */
+function spawnAckChildId(ack) {
+  for (const pattern of CHILD_ID_PATTERNS) {
+    const id = pattern.exec(ack ?? '')?.[1];
+    if (id !== undefined && id !== '') return id;
+  }
+  return null;
+}
+
 /**
  * Ticket 120 scenario 3 — a dispatcher spawns a CHILD DISPATCHER; the child
  * spawns a worker; the child's result arrives at the creator as a peer message
@@ -1289,8 +1309,9 @@ async function scenario2() {
  * (`## Other agents — not the user`), which is how a real model would learn it.
  * Observable assertions:
  * - `spawn_dispatcher` returned a dispatcher id and the "peer dispatcher" note;
- * - the child session is a real dispatcher (spawn_dispatcher + await_agent on
- *   its tool surface) and its brief reached it;
+ * - the child session is a real dispatcher (spawn_worker + await_agent on its
+ *   tool surface, and NO spawn_dispatcher — ticket 176 withholds the summon
+ *   verb from the spawned class) and its brief reached it;
  * - the child spawned a worker and that worker ran;
  * - a LATER creator turn carries the peer-message heading and the child's text;
  * - the child's send was accepted for the creator's session.
@@ -1316,7 +1337,11 @@ async function scenario3() {
         },
         {
           // The child dispatcher's first turn: its brief is its only unique text.
-          match: { anyUserIncludes: 's3-child-brief', toolNames: ['spawn_dispatcher'] },
+          // Ticket 297 / 176: a summoned dispatcher is still a dispatcher, but
+          // `spawn_dispatcher` is deliberately withheld from its surface, so the
+          // gate must use the surface it DOES have. Gating on `spawn_dispatcher`
+          // made this step unmatchable, so the child never spawned its worker.
+          match: { anyUserIncludes: 's3-child-brief', toolNames: ['spawn_worker', 'await_agent'] },
           say: 's3-child-spawn',
           tool: {
             name: 'spawn_worker',
@@ -1373,10 +1398,18 @@ async function scenario3() {
     );
     const summonAck = toolResultTexts(summonResultRequest, 'spawn_dispatcher').at(-1) ?? '';
     phase.summonAck = summonAck.slice(0, 300);
-    assert('s3', 'spawn_dispatcher returned a peer dispatcher id', /as a peer dispatcher \(session [^)]+\)/.test(summonAck), { returned: phase.summonAck });
+    // Ticket 297: the ack is prose, and the id's position moved in afe9846
+    // (`(session <id>)` -> `message_agent addressed to <id>`). Both the phrase
+    // and an extractable id are still required — the check is not relaxed.
+    assert(
+      's3',
+      'spawn_dispatcher returned a peer dispatcher id',
+      summonAck.includes('as a peer dispatcher') && spawnAckChildId(summonAck) !== null,
+      { returned: phase.summonAck },
+    );
 
-    // The ack names the child as `(session <id>)`; the id is a bare uuid.
-    const childId = /as a peer dispatcher \(session ([^)\s]+)\)/.exec(summonAck)?.[1] ?? null;
+    // The id comes from whichever shipped ack shape is present (ticket 297).
+    const childId = spawnAckChildId(summonAck);
     phase.childId = childId;
     assert('s3', 'the returned child id is a session id', childId !== null, { childId });
 
@@ -1388,14 +1421,25 @@ async function scenario3() {
       SCENARIO_TIMEOUT_MS,
       [dsh, mock.entry],
     ).catch(() => null);
-    phase.childToolCount = childRequest?.toolNames?.length ?? 0;
+    const childToolNames = childRequest?.toolNames ?? [];
+    phase.childToolCount = childToolNames.length;
+    // Ticket 176: the spawned class is a dispatcher (own workers, ledger, inbox,
+    // team-leader policy) whose surface withholds `spawn_dispatcher`, so it
+    // cannot summon further dispatchers. Both halves are asserted: the
+    // dispatcher verbs it must carry, and the one verb it must not.
     assert(
       's3',
-      'the child is a dispatcher (its own surface offers spawn_dispatcher and await_agent)',
+      'the child is a dispatcher (its own surface offers spawn_worker and await_agent)',
       childRequest !== null &&
-        (childRequest.toolNames ?? []).includes('spawn_dispatcher') &&
-        (childRequest.toolNames ?? []).includes('await_agent'),
+        childToolNames.includes('spawn_worker') &&
+        childToolNames.includes('await_agent'),
       { toolCount: phase.childToolCount },
+    );
+    assert(
+      's3',
+      'the child cannot summon further dispatchers — its surface has no spawn_dispatcher (ticket 176)',
+      childRequest !== null && !childToolNames.includes('spawn_dispatcher'),
+      { hasSpawnDispatcher: childToolNames.includes('spawn_dispatcher'), toolCount: phase.childToolCount },
     );
     assert(
       's3',
