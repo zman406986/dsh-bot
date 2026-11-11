@@ -1,6 +1,6 @@
 # 298 — The activation notice becomes the surface head, so dsh cannot load the session log
 
-**Status:** open
+**Status:** resolved
 **Type:** bug
 **Labels:** ready-for-agent
 **Severity:** P1 / ship blocker — a fresh `/dsh-bot` chat writes a session log the host refuses to load.
@@ -38,7 +38,7 @@ Seven of 1 209 logs; `firstSurface` is the notice, `firstSystem` the seq the loo
 | `eab149a3-4b2c-43cf-bc4d-eaa86090ed4b` | `--C-Users-TZ-Desktop-miliastra-game-template--` | `{seq:1, user/message, notice:true}` | 12 |
 | `session-bea438f0-b9de-4d82-af23-9c99079579a7` | `--C-Users-TZ-Desktop-miliastra-game-template--` | `{seq:7, user/message, notice:true}` | 19 |
 
-Repairing those logs is a separate work item (a parallel worker owns it); this ticket stops NEW ones.
+All seven were repaired in place on 2026-11-11 (see Resolution at the bottom); this ticket stops NEW ones.
 
 ## Why the obvious routes are wrong
 
@@ -75,9 +75,23 @@ Same listener, different branch; the `compaction/end` path (policy probe, `polic
 
 The host-backed cases fail on the pre-298 code (`no surface node at activation` / `an empty surface defers the notice instead of making it node 0`) and pass after.
 
+## Resolution (2026-11-11)
+
+**Writer fix:** commit `1796a88`. `surfaceHeadState` + a held notice flushed once from the existing `session/event` listener on a microtask; `test/adapter-cordis-dsh-host.test.ts` describe `ticket 298: the activation notice can never be the surface head` (5 tests, real installed writer + `restoreReleasedV4Artifact`). Red before, green after; full suite 1330/1330, e2e s1..s4 pass.
+
+**Log repair (all 7, in place):** each notice event was demoted to the host's own non-surface plugin-record shape — `type: plugin:multitask-dispatcher/notice`, `surfaceOp` removed, `ignorable: true`, `data` byte-identical — so `system/message` becomes the protected head again. Sequence numbers were NOT renumbered (they are dense and referenced by `sourceEventSeqs`, `shadowedSeqs`, `throughSeq`). Three compacted sessions also needed the compaction checkpoint's `shadowedSeqs`/`shadowedRange.start` and the checkpoint `user/message` `surfaceOp.startSeq` moved past the notice (model-visible content unchanged; the notice was already inside that shadowed span).
+
+**Proof:** `node .scratch/testing/2026-11-11-log-repair/tools/validate.mjs <log>` runs the installed `sessionFormatCatalog.createRestore(...)` + `Session.fromRestore` + `foldSurface`. Before: all 7 failed with `SessionFormatError: system/message requires a protected first surface head`. After: all 7 PASS, e.g. bea438f0 `events=128`, `surface nodes=29`, `first=system/message@19, user/message@20`. Scan of 1 209 logs: 7 corrupt, 0 latent, 0 decode errors.
+
+**Backups:** `.scratch/testing/2026-11-11-log-repair/backups/<session-id>/` with `manifest.json` (size + sha256 before/after). Originals never deleted; installed hashes re-checked against the manifests.
+
+**Lossless except our own notice:** event counts identical; every `assistant/message`, `tool/result`, `system/message`, inbox and title payload byte-identical; every `user/message` except the notice byte-identical. The one "Dispatcher active in this chat…" bubble is gone from those 7 transcripts and their model context — its bytes survive as the ignorable record and inside the `agent/inbox/spliced` events. In the 3 compacted sessions the retained protective head means the pre-compaction system prompt stays in context alongside the later one (duplicate system prompt, context inflation only).
+
+**Live-server caveat:** the running dsh process still holds the pre-fix module in memory. Until it is restarted, a `/dsh-bot` activation on a fresh chat can still write a corrupt log. Not restarted here.
+
 ## Residual risks
 
 - The microtask lands after the loop's synchronous step preamble, so the notice currently arrives after the user's prompt message. A host that committed the prompt elsewhere would only change that ordering; the validator cares about the head alone.
 - An unreadable surface still takes the pre-298 append. Every real `Agent` exposes `session.surface`, so this is the structural-stub path only.
 - A chat that never runs a turn after activation loses the deferred notice by design; the command card remains.
-- The seven existing logs stay unloadable until the repair work item lands.
+- The seven existing logs were repaired in place on 2026-11-11 and pass the host validator; see Resolution.
