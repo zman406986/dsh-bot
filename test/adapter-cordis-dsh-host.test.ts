@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, it } from "node:test";
 import {createCordisDshHost, listGlobalToolNames, mapStopReason, SPAWN_PROVIDER, type ActivationLike, type ActivationSpecLike, type AdapterContext, type AgentLike} from "../src/adapter/cordis-dsh-host.js";
 import { RESUME_WAKE_CUE } from "../src/adapter/wake-copy.js";
@@ -3658,6 +3661,416 @@ describe("ticket 295: activation confirmation is visible and turn-free", () => {
       "the missing seam must not be faked with a followup",
     );
     assert.equal(lifecycle.dispatcherSessionId(), "disp-1");
+  });
+});
+
+/**
+ * Ticket 298 (P1, ship blocker): the ticket-295 activation notice must never be
+ * the surface HEAD.
+ *
+ * The host's format v4 validator refuses a `system/message` that appends to a
+ * non-empty surface whose first node is not itself a protected system head
+ * (`dsh-session-format-v3-to-v4/lib/index.js:599`; protection is granted only
+ * when the system message lands on an EMPTY surface, `:601`), and the loop
+ * commits that system message at the START of the first step
+ * (`dsh-agent-loop/lib/index.js:854`). On a fresh chat the surface is empty
+ * when `bindActivation` runs, so ticket 295's notice became node 0 and the
+ * FIRST turn made the log unloadable.
+ *
+ * The fix: keep the notice, but never let it be the head. With a readable
+ * surface the notice is deferred until a committed `system/message` occupies
+ * node 0 (one-shot, still model-free); with an unreadable surface the pre-298
+ * behaviour stands.
+ *
+ * These tests run the REAL log format through the host's own validator — the
+ * installed `Session` writer produces the events and the installed
+ * `restoreReleasedV4Artifact` accepts or rejects the artifact the way a load
+ * does. The fixture is not a mock of the log; it is the log.
+ */
+describe("ticket 298: the activation notice can never be the surface head", () => {
+  /** The installed host's own writer + validator, loaded from the dsh install. */
+  interface HostFormat {
+    Session: {
+      create(id: string, seed?: undefined, header?: unknown): RealSessionLike;
+    };
+    knownEventTypes: Set<string>;
+    restore(
+      artifact: {
+        header: Record<string, unknown>;
+        inheritedEventCount: number;
+        events: unknown[];
+      },
+      knownEventTypes: Set<string>,
+    ): unknown;
+    createSystemMessage(text: string): unknown;
+    createUserMessage(input: {
+      content: unknown[];
+      source: { kind: string };
+    }): unknown;
+    version: string;
+  }
+
+  interface RealSessionLike {
+    readonly header: Record<string, unknown>;
+    readonly inheritedEventCount: number;
+    readonly surface: { readonly nodes: readonly number[] };
+    eventAt(seq: number): { type?: unknown; data?: unknown } | undefined;
+    append(
+      type: string,
+      data: unknown,
+      options?: { surfaceOp: "append" },
+    ): { type: string; seq: number };
+    snapshotEvents(): unknown[];
+  }
+
+  let hostFormatPromise: Promise<HostFormat | null> | null = null;
+
+  /**
+   * The global dsh install, resolved the same way `dev/e2e-mock.mjs:468` does:
+   * an explicit override first, then the node prefix, then the Windows global
+   * npm root. Null (skip, never a silent pass) when dsh is not installed.
+   */
+  function locateInstalledDsh(): string | null {
+    const candidates: string[] = [];
+    const override = process.env["DSH_INSTALL_ROOT"];
+    if (override !== undefined && override.length > 0) candidates.push(override);
+    candidates.push(join(dirname(process.execPath), "node_modules"));
+    const appData = process.env["APPDATA"];
+    if (appData !== undefined && appData.length > 0) {
+      candidates.push(join(appData, "npm", "node_modules"));
+    }
+    for (const candidate of candidates) {
+      if (existsSync(join(candidate, "@deepseek-ai", "dsh", "lib", "bin.js"))) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  async function loadHostFormat(): Promise<HostFormat | null> {
+    const root = locateInstalledDsh();
+    if (root === null) return null;
+    const packages = join(root, "@deepseek-ai", "dsh", "node_modules", "@deepseek-ai");
+    const load = async (path: string): Promise<Record<string, unknown>> =>
+      (await import(pathToFileURL(path).href)) as Record<string, unknown>;
+    const sessionModule = await load(join(packages, "dsh-session", "lib", "index.js"));
+    const formatModule = await load(
+      join(packages, "dsh-session-format-v3-to-v4", "lib", "index.js"),
+    );
+    const llmModule = await load(join(packages, "dsh-llm", "lib", "index.js"));
+    const manifest = JSON.parse(
+      readFileSync(join(root, "@deepseek-ai", "dsh", "package.json"), "utf8"),
+    ) as { version: string };
+    return {
+      Session: sessionModule["Session"] as HostFormat["Session"],
+      knownEventTypes: sessionModule["KNOWN_SESSION_EVENT_TYPES"] as Set<string>,
+      restore: formatModule["restoreReleasedV4Artifact"] as HostFormat["restore"],
+      createSystemMessage: llmModule["createSystemMessage"] as HostFormat["createSystemMessage"],
+      createUserMessage: llmModule["createUserMessage"] as HostFormat["createUserMessage"],
+      version: manifest.version,
+    };
+  }
+
+  function hostFormat(): Promise<HostFormat | null> {
+    hostFormatPromise ??= loadHostFormat();
+    return hostFormatPromise;
+  }
+
+  /** Drain queued microtasks — the deferral's hand-off point. */
+  const flushMicrotasks = (): Promise<void> =>
+    new Promise((resolve) => setImmediate(resolve));
+
+  /** A fresh, unseeded V4 session header for the real writer. */
+  function newSession(host: HostFormat, id: string): RealSessionLike {
+    return host.Session.create(id, undefined, {
+      version: 4,
+      id,
+      createdAt: Date.now(),
+      isSeeded: false,
+      delegationDepth: 0,
+    });
+  }
+
+  /** The artifact a load validates: header + inherited cut + the event log. */
+  function artifactOf(session: RealSessionLike) {
+    return {
+      header: {
+        ...session.header,
+        version: 4,
+        delegationDepth: session.header["delegationDepth"] ?? 0,
+      },
+      inheritedEventCount: session.inheritedEventCount,
+      events: session.snapshotEvents(),
+    };
+  }
+
+  /** The type of the current surface head, for the "never the head" claim. */
+  function headType(session: RealSessionLike): string {
+    const seq = session.surface.nodes[0];
+    if (seq === undefined) return "(empty)";
+    return String(session.eventAt(seq)?.type);
+  }
+
+  /** Every activation notice currently on the surface. */
+  function noticeNodes(session: RealSessionLike): number[] {
+    const found: number[] = [];
+    for (const seq of session.surface.nodes) {
+      const event = session.eventAt(seq);
+      if (event?.type !== "user/message") continue;
+      const data = event.data as { source?: { kind?: unknown; form?: unknown } };
+      if (
+        data.source?.kind === "plugin:multitask-dispatcher" &&
+        data.source.form === "notice"
+      ) {
+        found.push(seq);
+      }
+    }
+    return found;
+  }
+
+  /**
+   * Append one event through the real writer and publish it the way the host's
+   * SessionStore does (`dsh-session/lib/index.js:1601`: listeners receive
+   * `(session, event)`). Without this the lifecycle's `session/event` hook —
+   * the deferral's trigger — would not run at all.
+   */
+  function commit(
+    session: RealSessionLike,
+    ctx: ReturnType<typeof createStubCtx>,
+    type: string,
+    data: unknown,
+    options?: { surfaceOp: "append" },
+  ) {
+    const event =
+      options === undefined
+        ? session.append(type, data)
+        : session.append(type, data, options);
+    ctx.fire("session/event", session, event);
+    return event;
+  }
+
+  /** One step, in the exact order the loop commits it. */
+  function firstStep(
+    host: HostFormat,
+    session: RealSessionLike,
+    ctx: ReturnType<typeof createStubCtx>,
+    prompt: string,
+  ): void {
+    commit(session, ctx, "turn/start", { turn: 1 });
+    commit(session, ctx, "step/start", { turn: 1, step: 1 });
+    commit(
+      session,
+      ctx,
+      "system/message",
+      { turn: 1, step: 1, message: host.createSystemMessage("rendered system prompt") },
+      { surfaceOp: "append" },
+    );
+    commit(
+      session,
+      ctx,
+      "user/message",
+      host.createUserMessage({
+        content: [{ type: "text", text: prompt }],
+        source: { kind: "user" },
+      }),
+      { surfaceOp: "append" },
+    );
+  }
+
+  function endStep(session: RealSessionLike, ctx: ReturnType<typeof createStubCtx>): void {
+    commit(session, ctx, "step/end", { turn: 1, step: 1 });
+    commit(session, ctx, "turn/end", { turn: 1, reason: { kind: "completed" } });
+  }
+
+  it("the host validator rejects the ticket-295 log shape (the bug is real)", async (t) => {
+    const host = await hostFormat();
+    if (host === null) return t.skip("no installed dsh to validate against");
+
+    // Reproduce the WRITE the pre-298 code performed: a notice on an empty
+    // surface, then the loop's first step.
+    const session = newSession(host, "sess-298-bug");
+    session.append(
+      "user/message",
+      {
+        id: "multitask-activation-notice-bug",
+        role: "user",
+        content: [{ type: "text", text: "Dispatcher active in this chat." }],
+        source: {
+          kind: "plugin:multitask-dispatcher",
+          form: "notice",
+          summary: "Dispatcher active in this chat.",
+        },
+      },
+      { surfaceOp: "append" },
+    );
+    assert.equal(headType(session), "user/message", "the notice became node 0");
+
+    // A turn is simulated only to log the shape; listeners are irrelevant here.
+    const ctx = createStubCtx();
+    firstStep(host, session, ctx, "first prompt");
+    endStep(session, ctx);
+
+    assert.throws(
+      () => host.restore(artifactOf(session), host.knownEventTypes),
+      /system\/message requires a protected first surface head/,
+      "dsh " + host.version + " rejects a log whose surface head is the notice",
+    );
+  });
+
+  it("a fresh activation defers the notice, then writes a log the host validator accepts", async (t) => {
+    const host = await hostFormat();
+    if (host === null) return t.skip("no installed dsh to validate against");
+
+    const ctx = createStubCtx();
+    const cordisHost = createCordisDshHost(ctx);
+    const multitask = createMultitask(cordisHost);
+    const lifecycle = bindDispatcherLifecycle(ctx, cordisHost, multitask);
+
+    const session = newSession(host, "sess-298-fixed");
+    const parent: AgentLike = {
+      session: session as unknown as AgentLike["session"],
+      followup() {},
+    };
+    assert.deepEqual(lifecycle.activate(parent), { ok: true });
+
+    // THE regression: activation on a fresh chat writes NOTHING, so the notice
+    // cannot be node 0 whatever the loop does next.
+    assert.equal(session.surface.nodes.length, 0, "no surface node at activation");
+    assert.equal(ctx.appendCalls.length, 0, "no append while the surface is empty");
+
+    // The loop's first step commits the system head; the notice follows it.
+    firstStep(host, session, ctx, "first prompt");
+    await flushMicrotasks();
+    endStep(session, ctx);
+
+    assert.equal(headType(session), "system/message", "the system head is node 0");
+    assert.deepEqual(noticeNodes(session), [4], "exactly one notice, after the head");
+
+    // The load path — the host's own validator, over the real log.
+    const artifact = artifactOf(session);
+    assert.doesNotThrow(
+      () => host.restore(artifact, host.knownEventTypes),
+      "the real log must load",
+    );
+    // 0 turn/start, 1 step/start, 2 system/message, 3 user/message (prompt),
+    // 4 user/message (notice), 5 step/end, 6 turn/end
+    assert.equal(artifact.events.length, 7);
+  });
+
+  it("the deferred notice still carries the full confirmation", async (t) => {
+    const host = await hostFormat();
+    if (host === null) return t.skip("no installed dsh to validate against");
+
+    const ctx = createStubCtx();
+    const cordisHost = createCordisDshHost(ctx);
+    const multitask = createMultitask(cordisHost);
+    const lifecycle = bindDispatcherLifecycle(ctx, cordisHost, multitask);
+
+    const session = newSession(host, "sess-298-copy");
+    const parent: AgentLike = {
+      session: session as unknown as AgentLike["session"],
+      followup() {},
+    };
+    lifecycle.activate(parent);
+    firstStep(host, session, ctx, "first prompt");
+    await flushMicrotasks();
+
+    const [noticeSeq] = noticeNodes(session);
+    assert.ok(noticeSeq !== undefined);
+    const event = session.eventAt(noticeSeq);
+    const data = event?.data as {
+      role?: unknown;
+      content?: Array<{ text?: string }>;
+      source?: { summary?: unknown };
+    };
+    assert.equal(data.role, "user");
+    const text = (data.content ?? []).map((block) => block.text ?? "").join("");
+    assert.ok(
+      text.includes(DISPATCHER_START_SUCCESS),
+      "the notice still carries the sentence the command card clips",
+    );
+    assert.equal(typeof data.source?.summary, "string");
+    assert.equal(ctx.followupCalls.length, 0, "still model-free and turn-free");
+  });
+
+  it("a second system commit does not duplicate the notice", async (t) => {
+    const host = await hostFormat();
+    if (host === null) return t.skip("no installed dsh to validate against");
+
+    const ctx = createStubCtx();
+    const cordisHost = createCordisDshHost(ctx);
+    const multitask = createMultitask(cordisHost);
+    const lifecycle = bindDispatcherLifecycle(ctx, cordisHost, multitask);
+
+    const session = newSession(host, "sess-298-once");
+    const parent: AgentLike = {
+      session: session as unknown as AgentLike["session"],
+      followup() {},
+    };
+    lifecycle.activate(parent);
+    firstStep(host, session, ctx, "first prompt");
+    await flushMicrotasks();
+    assert.equal(noticeNodes(session).length, 1);
+
+    // Every later step may commit a further system node; the notice is one-shot.
+    commit(
+      session,
+      ctx,
+      "system/message",
+      { turn: 1, step: 2, message: host.createSystemMessage("appended history") },
+      { surfaceOp: "append" },
+    );
+    await flushMicrotasks();
+    assert.equal(noticeNodes(session).length, 1, "one notice per activation");
+    assert.equal(ctx.followupCalls.length, 0);
+  });
+
+  it("a readable empty surface defers; a committed head flushes it once", async () => {
+    // Host-free twin of the tests above: pins the rule without the install.
+    const ctx = createStubCtx();
+    const cordisHost = createCordisDshHost(ctx);
+    const multitask = createMultitask(cordisHost);
+    const lifecycle = bindDispatcherLifecycle(ctx, cordisHost, multitask);
+
+    const agent = createAgent("disp-298");
+    const events: Array<{ type: string; seq: number; data?: unknown }> = [];
+    const nodes: number[] = [];
+    const session = agent.session as unknown as Record<string, unknown>;
+    const append = (
+      type: string,
+      data: unknown,
+      options?: { surfaceOp?: "append" },
+    ) => {
+      ctx.appendCalls.push({ type, data, options });
+      const seq = events.length;
+      const event = { type, seq, data };
+      events.push(event);
+      if (options?.surfaceOp === "append") nodes.push(seq);
+      return event;
+    };
+    session["surface"] = { nodes };
+    session["eventAt"] = (seq: number) => events[seq];
+    session["append"] = append;
+
+    assert.deepEqual(lifecycle.activate(agent), { ok: true });
+    assert.equal(
+      ctx.appendCalls.length,
+      0,
+      "an empty surface defers the notice instead of making it node 0",
+    );
+
+    // The loop commits its system head; publish it like the store does.
+    const system = append(
+      "system/message",
+      { turn: 1, step: 1, message: {} },
+      { surfaceOp: "append" },
+    );
+    ctx.fire("session/event", { id: "disp-298" }, system);
+    await flushMicrotasks();
+    const notices = ctx.appendCalls.filter((call) => call.type === "user/message");
+    assert.equal(notices.length, 1, "flushed once, after the head");
+    assert.equal(nodes[0], 0, "the system head stayed node 0");
+    assert.equal(ctx.followupCalls.length, 0);
   });
 });
 

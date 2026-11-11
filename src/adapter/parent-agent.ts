@@ -392,6 +392,43 @@ function policyOnLiveSurface(
   return "absent";
 }
 
+/**
+ * What sits on the session surface's node 0 (ticket 298).
+ *
+ * WHY this exists: the host's format v4 validator accepts a `system/message`
+ * append only when the surface is EMPTY (it then becomes the protected head,
+ * `dsh-session-format-v3-to-v4/lib/index.js:599`, `:601`). The loop commits
+ * exactly one such message at the start of the first step
+ * (`dsh-agent-loop/lib/index.js:854`, chosen when no system node exists yet —
+ * `dsh-agent-loop/lib/index.js:263-269`). So the surface head is the only
+ * question that decides whether a plugin may append a visible message at all:
+ * on a fresh chat it must WAIT for that commit.
+ *
+ * `"unknown"` means the structural view has no readable surface; callers keep
+ * their pre-298 behaviour rather than inventing a decision.
+ */
+type SurfaceHeadState = "system" | "empty" | "other" | "unknown";
+
+function surfaceHeadState(agent: AgentLike): SurfaceHeadState {
+  const session = agent.session as unknown as SurfaceSessionLike;
+  const surface = session.surface;
+  if (surface === undefined || surface === null) return "unknown";
+  const nodes = surface.nodes;
+  if (!Array.isArray(nodes)) return "unknown";
+  if (typeof session.eventAt !== "function") return "unknown";
+  if (nodes.length === 0) return "empty";
+  let event: unknown;
+  try {
+    event = session.eventAt(nodes[0] as never);
+  } catch {
+    return "unknown";
+  }
+  if (typeof event !== "object" || event === null) return "unknown";
+  return (event as { readonly type?: unknown }).type === "system/message"
+    ? "system"
+    : "other";
+}
+
 /** Read one session reference from a two-arg `session/event` payload. */
 function sessionIdOfRef(ref: unknown): string | null {
   if (typeof ref === "object" && ref !== null) {
@@ -431,6 +468,14 @@ function tryWake(agent: AgentLike, text: string): void {
 }
 
 /**
+ * Ticket 298: activated agents whose confirmation notice is WAITING for the
+ * loop to commit a system head (a WeakSet, so a disposed agent cannot be kept
+ * alive or flushed late). Cleared on flush, on deactivation, and structurally
+ * when the agent is collected.
+ */
+const pendingActivationNotices = new WeakSet<AgentLike>();
+
+/**
  * Ticket 295: put the activation confirmation on the session's VISIBLE
  * surface — model-free, turn-free.
  *
@@ -446,8 +491,36 @@ function tryWake(agent: AgentLike, text: string): void {
  *
  * Best-effort by construction: a session without the seam keeps the pre-295
  * behavior (the command card only) rather than faking a wake.
+ *
+ * Ticket 298 adds the one legality constraint this write has: it must never be
+ * the surface HEAD (see {@link surfaceHeadState}), so on a fresh chat it waits
+ * for the loop's system-message commit. The user-visible cost is a DELAY: the
+ * confirmation row appears when the first turn starts, after the user's own
+ * message, not at the instant `/dsh-bot` returns (the command card is still
+ * immediate). A chat that never runs a turn after activation therefore keeps
+ * the card as its only confirmation.
  */
 function tryActivationNotice(agent: AgentLike): void {
+  // TICKET 298 (P1): a notice appended to an EMPTY surface becomes node 0, and
+  // the loop's `system/message` — committed at the start of the first step —
+  // then fails the format validator on the NEXT load ("system/message requires
+  // a protected first surface head"), i.e. the session log is unloadable. So
+  // the head decides: an empty readable surface DEFERS the notice until that
+  // commit; a surface already headed by a system message takes it now; an
+  // unreadable surface (structural stub) keeps the pre-298 best-effort append.
+  if (surfaceHeadState(agent) === "empty") {
+    pendingActivationNotices.add(agent);
+    return;
+  }
+  appendActivationNotice(agent);
+}
+
+/**
+ * The one append. Best-effort by construction: a session without the seam, a
+ * throwing append, or a rejected promise leaves the command card as the only
+ * confirmation — never a faked wake.
+ */
+function appendActivationNotice(agent: AgentLike): void {
   const append = agent.session.append;
   if (typeof append !== "function") return;
   try {
@@ -465,6 +538,23 @@ function tryActivationNotice(agent: AgentLike): void {
   } catch {
     // Visible confirmation is best-effort; never break activation on it.
   }
+}
+
+/**
+ * Flush one deferred notice, EXACTLY once (ticket 298).
+ *
+ * The append is deferred by a microtask on purpose: the host refuses an append
+ * reentered from inside its own publication boundary ("session append cannot
+ * reenter while another append is being published",
+ * `dsh-session/lib/index.js:1580`), and the flush is triggered by the
+ * `session/event` publication of the system message. Dropping the pending
+ * entry first makes a second system commit in the same turn a no-op.
+ */
+function flushActivationNotice(agent: AgentLike): void {
+  if (!pendingActivationNotices.delete(agent)) return;
+  queueMicrotask(() => {
+    appendActivationNotice(agent);
+  });
 }
 
 /**
@@ -776,8 +866,12 @@ export function bindDispatcherLifecycle(
 
   function deactivateSession(sessionId: string): void {
     if (!sessions.has(sessionId)) return;
+    const boundAgent = sessions.get(sessionId);
     sessions.delete(sessionId);
     policyInjectInFlight.delete(sessionId);
+    // Ticket 298: a notice still waiting for the system head dies with the
+    // activation — a later session must not inherit it.
+    if (boundAgent !== undefined) pendingActivationNotices.delete(boundAgent);
     // Ticket 155: `spawnTitles` is NOT dropped here — the title is a property
     // of the session ID, exactly like `generations`, so a peer that is
     // deactivated and later re-activated keeps the label its peers render.
@@ -953,7 +1047,24 @@ export function bindDispatcherLifecycle(
     ctx.on("session/event", (...args: never[]) => {
       const [sessionRef, rawEvent] = args as unknown as [unknown, unknown];
       if (typeof rawEvent !== "object" || rawEvent === null) return;
-      if ((rawEvent as { readonly type?: unknown }).type !== "compaction/end") {
+      const type = (rawEvent as { readonly type?: unknown }).type;
+      // Ticket 298: the loop has just committed the system head — the ONE
+      // moment a deferred activation notice becomes legal. Only a bound
+      // dispatcher session can be waiting, so the worker branch above and
+      // every worker transcript stay untouched, exactly as for the boundary.
+      if (type === "system/message") {
+        const headSessionId = sessionIdOfRef(sessionRef);
+        if (headSessionId === null) return;
+        const waiting = sessions.get(headSessionId);
+        if (waiting === undefined) return;
+        if (!pendingActivationNotices.has(waiting)) return;
+        // The head must BE that committed system message; anything else means
+        // the surface is not (yet) in the shape the validator requires.
+        if (surfaceHeadState(waiting) !== "system") return;
+        flushActivationNotice(waiting);
+        return;
+      }
+      if (type !== "compaction/end") {
         return;
       }
       if (!policyEnabled) return;
