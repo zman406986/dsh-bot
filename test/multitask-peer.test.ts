@@ -140,7 +140,7 @@ describe("multitask peer — priority interrupt vs user (AC)", () => {
     assert.equal(multitask.wakeBus.drain(SESSION)?.source, undefined);
   });
 
-  it("non-priority peer queues behind user and ahead of settled on the next flush", async () => {
+  it("non-priority peer waits behind user, then flushes as its own turn; the settle is a record, not a wake", async () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
     const workerId = await spawnRunning(multitask, SESSION, "s1", "Work");
@@ -149,14 +149,28 @@ describe("multitask peer — priority interrupt vs user (AC)", () => {
     host.fireSettled({ workerId, status: "completed", report: "done" });
     multitask.sendPeer(SESSION, envelope({ messageId: "n1" }));
 
+    // The user turn is never preempted: the peer waits, and the settle opens
+    // no wake of its own.
+    assert.deepEqual(host.wakeCalls, []);
+    assert.equal(multitask.wakeBus.drain(SESSION), undefined);
+
     multitask.wakeBus.noteTurnEnded(SESSION);
     const first = multitask.wakeBus.drain(SESSION);
     assert.equal(first?.source, "peer");
+    assert.equal(first?.peerMessages?.[0]?.messageId, "n1");
+    assert.deepEqual(host.wakeCalls, [SESSION]);
 
-    multitask.wakeBus.noteTurnStarted(SESSION, "peer");
+    // A turn opened without an explicit owner inherits the peer flush owner.
+    multitask.wakeBus.noteTurnStarted(SESSION);
+    assert.equal(multitask.wakeBus.getTurnOwner(SESSION), "peer");
     multitask.wakeBus.noteTurnEnded(SESSION);
-    const second = multitask.wakeBus.drain(SESSION);
-    assert.equal(second?.source, "worker-settled");
+    // No deleted settle wake sits behind the peer turn.
+    assert.equal(multitask.wakeBus.drain(SESSION), undefined);
+    // The settle itself is still readable by await_agent.
+    assert.equal(
+      multitask.settleRecords.lookup(SESSION, workerId)?.status,
+      "completed",
+    );
   });
 });
 

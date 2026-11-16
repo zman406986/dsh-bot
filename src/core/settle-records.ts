@@ -38,9 +38,9 @@ export const MAX_CONCURRENT_WAITS = 4;
 
 /**
  * Ticket 117: the one copy for a malformed timeout value (not a number).
- * Shared by {@link validateAwaitTimeout} and the `await_agent` tool so a
- * wrong-typed argument and an out-of-bounds number describe the bound
- * identically.
+ * Produced by {@link validateAwaitTimeout} so a wrong-typed argument and an
+ * out-of-bounds number describe the bound identically, wherever the refusal
+ * is surfaced.
  */
 export const AWAIT_INVALID_TIMEOUT_DETAIL =
   "timeout_ms must be a number between 0 and 120000 milliseconds";
@@ -436,7 +436,7 @@ export function validateAwaitTimeout(
  * sessions, then unknown. One dispatcher never awaits another session's
  * worker or a dispatcher: dispatchers are peers, and peer-to-peer await is
  * the deadlock the refusal exists to prevent (refused, not timed out).
- * The target's parent-session guard matches `check_workers`:
+ * The target's parent-session guard matches the worker roster's:
  * `record.parentSessionId === callerSessionId`.
  */
 export function resolveAwaitTarget(args: {

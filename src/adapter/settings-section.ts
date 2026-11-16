@@ -15,4 +15,4 @@
  */
 
 /** Profile row id and settings namespace for this plugin. */
-export const SETTINGS_NAMESPACE = "multitask-dispatcher";
+export const SETTINGS_NAMESPACE = "dsh-bot";

@@ -104,15 +104,17 @@ function buildWorkerSystemPromptEn(): string {
     "## Limits",
     "",
     "You have no way to message the user.",
-    "You have no way to message other agents.",
-    "Do not attempt to spawn helpers or other agents; you are a leaf worker.",
-    "Your only channels back are your final answer and the mid-task reply described below.",
+    "The only agent you may address is your parent dispatcher, through the stock `send_message` verb, and only for an interim steer; never message any other agent.",
+    "Do not attempt to spawn helpers or other agents; you are a leaf worker. Never wait or poll — end your turn and let the runtime wake whoever needs to know.",
+    "Your only channels back are the final answer you close with and the interim `send_message` described below.",
     "What you can reach is fixed when you start; you cannot widen it from inside the session. If the task needs access you do not have, say what was blocked and why instead of asking for it. A mid-task reply with status `blocked` is the preferred exit; the final answer carries it only if the reply channel is not usable or the task is ending anyway.",
     "",
     "## Mid-task reply",
     "",
-    "If the parent should know something before you finish — a finding that changes the plan, an assumption you had to make, a blocker you are working around — call the reply_to_dispatcher tool with a short text and, if useful, a status of progress, blocked, or note. It reaches your parent dispatcher only: never the user, never another worker.",
-    "A reply does not finish the task and does not end your turn. Send one when it is genuinely useful, then keep working; the final answer is still required and is still the completion report.",
+    "The dispatcher sees your last non-empty assistant answer through the stock completion notice, so finish with the full answer: that is the report, and the dispatcher decides what reaches the user.",
+    "Use `send_message` to your dispatcher only for an interim steer: a finding that changes the plan, an assumption you had to make, or a blocker you are working around. Address it to the parent agent id you were given, and put a status word first — progress, blocked, or note.",
+    "Do not send the final answer that way, even though the stock spawn hint asks for it: a message to the dispatcher just before you finish replaces your closing answer in that notice.",
+    "A send does not finish the task and does not end your turn. Send one when it is genuinely useful, then keep working; the final answer is still required and is still the completion report.",
     "",
     "## Todo ledger",
     "",
@@ -152,9 +154,9 @@ function buildWorkerSystemPromptEn(): string {
  * Authored copy, not a translation of any reference text (ADR-0018 B9): the
  * rules are re-derived in Chinese from the same PRD rules the EN face states,
  * kept section-for-section and line-for-line. Tool names stay ASCII
- * (`reply_to_dispatcher`) and the status literals stay
+ * (`send_message`) and the status words stay
  * `progress` / `blocked` / `note` — transliterating them would break the
- * tool contract.
+ * dispatcher's reading of the text.
  *
  * Terminology follows the client dictionary's zh face so model and UI name
  * the same things: 调度器 / 工作者 / 待办 / 会话.
@@ -175,15 +177,17 @@ function buildWorkerSystemPromptZh(): string {
     "## 限制",
     "",
     "你无法给用户发消息。",
-    "你无法给其他代理发消息。",
-    "不要尝试启动助手或其他代理；你是叶子工作者。",
-    "你对外只有两条通道：最终答复和下面说的中途回复。",
+    "你可以指代的代理只有你的上级调度器，用原生的 `send_message` 工具，而且只用于中途的转向说明；绝不要给其他代理发消息。",
+    "不要尝试启动助手或其他代理；你是叶子工作者。绝不等待，也不要轮询——结束你的回合，让运行时去唤醒需要知道的人。",
+    "你对外只有两条通道：你收尾时给出的最终答复，以及下面说的中途 `send_message`。",
     "你能接触到什么在你开始时就已经固定；你无法在会话内部把它扩大。如果任务需要你没有的访问权限，就说明什么被拦住了以及为什么，而不是去申请它。用 `blocked` 状态发一条中途回复是首选出口；只有发不出回复、或者任务本来就要结束时，才由最终答复承载。",
     "",
     "## 中途回复",
     "",
-    "如果上级应该在你完成之前知道某件事——一个改变计划的发现、一个你不得不做的假设、一个你正在绕开的阻塞——就调用 `reply_to_dispatcher` 工具，传一段简短文字，必要时带上 `progress`、`blocked` 或 `note` 状态。它只到达你的上级调度器：绝不到达用户，也绝不到达其他工作者。",
-    "回复不会完成任务，也不会结束你的回合。在确实有用的时候发一条，然后继续工作；最终答复仍然是必需的，仍然是完成报告。",
+    "上级调度器通过原生的完成通知看到你最后一条非空的助手答复，所以用完整答复收尾：那就是报告，由上级决定其中哪些内容到达用户。",
+    "只在需要中途给上级调度器一个转向说明时，才用 `send_message`：一个改变计划的发现、一个你不得不做的假设，或一个你正在绕开的阻塞。按你拿到的上级代理 id 发送，并把状态词放在开头——`progress`、`blocked` 或 `note`。",
+    "不要用这条通道发送最终答复，即使原生启动提示要求你这么做：在你收尾前刚发给上级的消息，会替换掉完成通知里的收尾答复。",
+    "发送不会完成任务，也不会结束你的回合。在确实有用的时候发一条，然后继续工作；最终答复仍然是必需的，仍然是完成报告。",
     "",
     "## 待办账本",
     "",

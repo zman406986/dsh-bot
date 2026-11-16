@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "dsh-bot",
+    "description": "Always-on dispatcher for DeepSeek Harness: routes work to workers and teams and reports results in this chat."
+  }
+}

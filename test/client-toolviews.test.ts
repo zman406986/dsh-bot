@@ -1,6 +1,8 @@
 /**
  * Per-tool call views (`tool.call.toolview`) for the dispatcher tools —
- * readable-status anatomy.
+ * readable-status anatomy. The three live custom tools are `deliver_result`,
+ * `message_agent` and `spawn_dispatcher`; the five retired dispatcher verbs
+ * and `send_peer` are kept as historical parsers for old transcripts.
  *
  * Offline only (S8): no real Cordis, no browser, no DOM harness. Everything
  * asserted here is pure logic (registration options, payload → view model
@@ -289,17 +291,46 @@ function checkRow(overrides?: Partial<Record<string, unknown>>) {
 }
 
 describe("toolview — keyed registrations claim only our wire tool names", () => {
-  it("claims every dispatcher tool plus the retained historical send_peer key", () => {
-    const expected = [...DISPATCHER_TOOL_NAMES, SEND_PEER_TOOL];
-    assert.deepEqual([...TOOLVIEW_TOOL_NAMES], expected);
-    for (const name of TOOLVIEW_TOOL_NAMES) {
-      if (name === SEND_PEER_TOOL) continue;
-      assert.ok(isDispatcherToolName(name));
+  it("claims the three live dispatcher tools plus the historical keys", () => {
+    // The five dispatcher verbs removed by the stock-subagent refactor have no
+    // renderer on the dispatcher surface any more, but old transcripts still
+    // carry their rows. The client keeps parsing them (`send_peer` set the
+    // same precedent): a key that never fires simply degrades. Only the three
+    // live names may claim dispatcher-tool status.
+    const live = [...DISPATCHER_TOOL_NAMES];
+    const historical = [
+      SPAWN_WORKER_TOOL,
+      CHECK_WORKERS_TOOL,
+      STEER_WORKER_TOOL,
+      STOP_WORKER_TOOL,
+      AWAIT_AGENT_TOOL,
+      SEND_PEER_TOOL,
+    ];
+    assert.deepEqual(
+      [...TOOLVIEW_TOOL_NAMES].sort(),
+      [...live, ...historical].sort(),
+      "the claimed key set drifted from live + historical",
+    );
+    for (const name of live) {
+      assert.ok(
+        isDispatcherToolName(name),
+        `live dispatcher tool is not claimed: ${name}`,
+      );
     }
+    for (const name of historical) {
+      assert.equal(
+        isDispatcherToolName(name),
+        false,
+        `retired tool still claims dispatcher status: ${name}`,
+      );
+    }
+    // TODO(stock-subagent refactor): if src/client/toolviews.ts drops the five
+    // retired dispatcher keys from TOOLVIEW_TOOL_NAMES, shrink this fixture to
+    // the three live names + send_peer and delete the historical describes.
   });
 });
 
-describe("toolview — spawn_worker", () => {
+describe("toolview — spawn_worker (historical parser)", () => {
   it("leads with Started \"title\", one worker fact, and full ids in details", () => {
     const view = assertDetail(
       describeToolview(SPAWN_WORKER_TOOL, {
@@ -381,7 +412,7 @@ describe("toolview — spawn_worker", () => {
   });
 });
 
-describe("toolview — check_workers", () => {
+describe("toolview — check_workers (historical parser)", () => {
   it("renders a summary line and one readable row per worker", () => {
     const workers: WorkerStatus[] = [...ROSTER_STATUS_KEYS];
     const view = assertDetail(
@@ -535,7 +566,7 @@ describe("toolview — check_workers", () => {
   });
 });
 
-describe("toolview — steer_worker", () => {
+describe("toolview — steer_worker (historical parser)", () => {
   it("leads with the title, keeps the instruction as one fact", () => {
     const long = `${"focus on the failing test first, ".repeat(12)}then report`;
     const view = assertDetail(
@@ -590,7 +621,7 @@ describe("toolview — steer_worker", () => {
   });
 });
 
-describe("toolview — stop_worker", () => {
+describe("toolview — stop_worker (historical parser)", () => {
   it("renders the stopped sentence and the mode in details", () => {
     const view = assertDetail(
       describeToolview(STOP_WORKER_TOOL, {
@@ -855,7 +886,7 @@ describe("toolview — message_agent", () => {
   });
 });
 
-describe("toolview — await_agent", () => {
+describe("toolview — await_agent (historical parser)", () => {
   it("is about wait state only: never echoes a result excerpt", () => {
     const view = assertDetail(
       describeToolview(AWAIT_AGENT_TOOL, {

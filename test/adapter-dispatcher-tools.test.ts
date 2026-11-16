@@ -194,7 +194,7 @@ describe("adapter dispatcher tool registration", () => {
   it("the capture registry throws the host duplicate-tool error (ticket 91 pin)", () => {
     const ctx = createToolsCaptureCtx();
     const tool = {
-      name: "spawn_worker",
+      name: SPAWN_DISPATCHER_TOOL,
       description: "d",
       parameters: {},
       execute: async () => ({}),
@@ -203,7 +203,7 @@ describe("adapter dispatcher tool registration", () => {
 
     assert.throws(
       () => ctx.tools.register(tool),
-      /tool "spawn_worker" is already registered/,
+      new RegExp(`tool "${SPAWN_DISPATCHER_TOOL}" is already registered`),
     );
   });
 
@@ -239,9 +239,9 @@ describe("adapter dispatcher tool registration", () => {
    * further dispatchers, so `spawn_dispatcher` is never registered on its
    * scope — the model does not see the name at all (ADR-0019: visibility is
    * the fence, not a refusal copy). The user-started chief of staff keeps the
-   * full eight.
+   * full custom set; a leader keeps the other two.
    */
-  it("a spawned-class registration withholds spawn_dispatcher and keeps the other seven", () => {
+  it("a spawned-class registration withholds spawn_dispatcher and keeps the other two", () => {
     const ctx = createToolsCaptureCtx();
     const multitask = createMultitask(new FakeDshHost());
     const disposers = registerDispatcherTools({
@@ -262,7 +262,7 @@ describe("adapter dispatcher tool registration", () => {
     assert.equal(ctx.registered.length, 0);
   });
 
-  it("an explicit user class keeps all eight, exactly like an omitted one", () => {
+  it("an explicit user class keeps all three, exactly like an omitted one", () => {
     const multitask = createMultitask(new FakeDshHost());
     const omitted = createToolsCaptureCtx();
     registerDispatcherTools({ ctx: omitted, multitask, getSessionId: () => "s" });
@@ -284,13 +284,15 @@ describe("adapter dispatcher tool registration", () => {
   });
 
   /**
-   * Ticket 179: the composition `src/plugin.ts` performs on a real host —
-   * withhold the inherited host verbs, then register our tools on the same
-   * scoped surface. The restriction filters the INHERITED layer only
-   * (`dsh-tools/lib/index.js:3040-3072`), so the eight stay while the preset's
-   * spawn verbs and their route-discovery companion disappear.
+   * Ticket 179, narrowed by the stock-subagent refactor: the composition
+   * `src/plugin.ts` performs on a real host — withhold the inherited fork
+   * verb, then register our tools on the same scoped surface. The restriction
+   * filters the INHERITED layer only (`dsh-tools/lib/index.js:3040-3072`), so
+   * the custom tools stay while `subagent_fork` disappears. Plain
+   * `subagent` is the supported way to start a worker now, and
+   * `list_subagent_models` stays visible.
    */
-  it("withholding the host spawn verbs leaves our eight tools untouched", () => {
+  it("withholding the host fork verb leaves our custom tools untouched", () => {
     const inherited = new Map<string, RegisterableTool>();
     const restrictions: Array<{ deny?: readonly string[] }> = [];
     for (const name of [
@@ -340,9 +342,7 @@ describe("adapter dispatcher tool registration", () => {
       getSessionId: () => "session-1",
     });
 
-    assert.deepEqual(restrictions, [
-      { deny: ["subagent", "subagent_fork", "list_subagent_models"] },
-    ]);
+    assert.deepEqual(restrictions, [{ deny: ["subagent_fork"] }]);
     const visible = surface.schemas().map((schema) => schema.name);
     assert.deepEqual(
       [...own.keys()],
@@ -350,11 +350,17 @@ describe("adapter dispatcher tool registration", () => {
     );
     assert.deepEqual(
       visible.sort(),
-      [...DISPATCHER_TOOL_NAMES, "bash", "read"].sort(),
+      [
+        ...DISPATCHER_TOOL_NAMES,
+        "bash",
+        "read",
+        "subagent",
+        "list_subagent_models",
+      ].sort(),
     );
-    assert.ok(!visible.includes("subagent"));
-    assert.ok(!visible.includes("subagent_fork"));
-    assert.ok(!visible.includes("list_subagent_models"));
+    assert.ok(!visible.includes("subagent_fork"), "the fork verb is withheld");
+    assert.ok(visible.includes("subagent"), "workers start with the stock subagent");
+    assert.ok(visible.includes("list_subagent_models"));
 
     // The restriction is owned by the activation, like every registered tool.
     assert.ok(withholdDisposer);
@@ -364,24 +370,34 @@ describe("adapter dispatcher tool registration", () => {
     assert.deepEqual([...own.keys()], []);
   });
 
-  it("execute on a registerable tool hits the Multitask core", async () => {    const ctx = createToolsCaptureCtx();
+  it("execute on a registerable tool hits the Multitask core", async () => {
+    const ctx = createToolsCaptureCtx();
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
+    multitask.createTodo({
+      sessionId: "session-1",
+      id: "todo-core",
+      title: "Ship the fix",
+    });
     registerDispatcherTools({
       ctx,
       multitask,
       getSessionId: () => "session-1",
     });
-    const spawn = ctx.registered.find((tool) => tool.name === "spawn_worker");
-    assert.ok(spawn);
-    const value = (await spawn.execute({
-      stream_key: "s-1",
-      title: "Title",
-      prompt: "Prompt.",
-    })) as { ok: boolean; ack: string };
+    // `deliver_result` is the retained handler that writes through to the
+    // core: the obsolete `spawn_worker` probe became this ledger close.
+    const deliver = ctx.registered.find((tool) => tool.name === "deliver_result");
+    assert.ok(deliver);
+    const value = (await deliver.execute({
+      text: "Fixed the parser.",
+      todo_id: "todo-core",
+    })) as { ok: boolean; delivered: boolean; channel?: string };
     assert.equal(value.ok, true);
-    assert.ok(value.ack.includes("background"));
-    assert.equal(host.spawnCalls.length, 1);
+    assert.equal(value.delivered, true);
+    const entry = multitask.todos.get("todo-core");
+    assert.equal(entry?.status, "completed");
+    assert.equal(entry?.delivered, true);
+    assert.equal(host.spawnCalls.length, 0, "nothing spawned a worker");
   });
 
   // Ticket 81 (live pass 5, Session B-2 FINDING 2): the durable `tool/result`
@@ -419,28 +435,32 @@ describe("adapter dispatcher tool registration", () => {
       ctx,
       multitask,
       getSessionId: () => "session-1",
+      spawnDispatcher: async (opts) => host.spawnDispatcher(opts),
     });
-    const spawn = ctx.registered.find((tool) => tool.name === "spawn_worker");
+    // The retained `spawn_dispatcher` replaces the retired spawn probe: its
+    // subject is the summoned peer, still only core identity (kind/id/title).
+    const spawn = ctx.registered.find(
+      (tool) => tool.name === SPAWN_DISPATCHER_TOOL,
+    );
     assert.ok(spawn);
     const args = {
-      stream_key: "s-display",
       title: "Parser hardening",
       prompt: "(never projected)",
     };
     const value = (await spawn.execute(args)) as {
-      worker_id: string;
-      ack: string;
+      dispatcher_id: string;
+      note: string;
     };
     const meta = spawn.output.presentationMeta?.(args, value) as {
-      ack?: unknown;
+      note?: unknown;
       display?: {
         subject?: { kind?: string; id?: string; title?: string };
       };
     };
-    assert.equal(meta.ack, undefined, "the model-facing ack stays out");
+    assert.equal(meta.note, undefined, "the model-facing note stays out");
     assert.deepEqual(meta.display?.subject, {
-      kind: "worker",
-      id: value.worker_id,
+      kind: "dispatcher",
+      id: value.dispatcher_id,
       title: "Parser hardening",
     });
     // Losslessly JSON-serializable (the host snapshots presentationMeta).
@@ -491,35 +511,11 @@ describe("adapter dispatcher tool registration", () => {
     assert.equal(messageMeta.display?.subject?.title, undefined);
   });
 
-  it("passes recentActivity through to check rows (ticket 29)", async () => {
-    const ctx = createToolsCaptureCtx();
-    const host = new FakeDshHost();
-    const multitask = createMultitask(host);
-    registerDispatcherTools({
-      ctx,
-      multitask,
-      getSessionId: () => "session-1",
-      recentActivity: (workerId) =>
-        workerId.startsWith("fake-worker") ? "bash: npm test" : null,
-    });
-    const result = (await multitask.spawnWorker({
-      parentSessionId: "session-1",
-      streamKey: "t-1",
-      title: "Summarize RFCs",
-      prompt: "Go.",
-    })) as { ok: true; workerId: string };
-    assert.ok(result.ok);
-    const check = ctx.registered.find((tool) => tool.name === "check_workers");
-    assert.ok(check);
-    const value = (await check.execute({})) as {
-      ok: boolean;
-      rows: Array<{ worker_id: string; recent_activity: string | null }>;
-    };
-    assert.equal(value.ok, true);
-    assert.equal(value.rows.length, 1);
-    assert.equal(value.rows[0]?.worker_id, result.workerId);
-    assert.equal(value.rows[0]?.recent_activity, "bash: npm test");
-  });
+  // DELETED with the `check_workers` handler: "passes recentActivity through
+  // to check rows (ticket 29)" read the roster through a tool this plugin no
+  // longer registers. The stock `list_agents` has no recent-activity field,
+  // and inventing one here would pin a contract that does not exist. The
+  // activity ring itself stays core state, covered where it is written.
 });
 
 describe("per-session routing (ADR-0019)", () => {
@@ -531,28 +527,33 @@ describe("per-session routing (ADR-0019)", () => {
       ctx,
       multitask,
       getSessionId: () => "disp-1",
+      spawnDispatcher: async (opts) => host.spawnDispatcher(opts),
     });
-    const spawn = ctx.registered.find((tool) => tool.name === "spawn_worker");
+    const spawn = ctx.registered.find(
+      (tool) => tool.name === SPAWN_DISPATCHER_TOOL,
+    );
     assert.ok(spawn);
 
     // No execute-time gate (ADR-0019): the closed-over session id is the
-    // authority; visibility is the fence, not a refusal copy.
+    // authority; visibility is the fence, not a refusal copy. The retained
+    // `spawn_dispatcher` is the probe: its core call carries the closure's
+    // parent session, never the exec's.
     const routed = (await spawn.execute(
-      { stream_key: "s", title: "T", prompt: "P" },
+      { title: "T", prompt: "P" },
       { agent: { session: { id: "someone-else" } } },
     )) as { ok: boolean };
     assert.equal(routed.ok, true);
-    assert.equal(host.spawnCalls.length, 1);
-    assert.equal(host.spawnCalls[0]?.opts.parentSessionId, "disp-1");
+    assert.equal(host.dispatcherSpawnCalls.length, 1);
+    assert.equal(host.dispatcherSpawnCalls[0]?.opts.parentSessionId, "disp-1");
 
     // Unresolvable exec: same routing, same session.
     const again = (await spawn.execute(
-      { stream_key: "s2", title: "T", prompt: "P" },
+      { title: "T2", prompt: "P" },
       undefined,
     )) as { ok: boolean };
     assert.equal(again.ok, true);
-    assert.equal(host.spawnCalls.length, 2);
-    assert.equal(host.spawnCalls[1]?.opts.parentSessionId, "disp-1");
+    assert.equal(host.dispatcherSpawnCalls.length, 2);
+    assert.equal(host.dispatcherSpawnCalls[1]?.opts.parentSessionId, "disp-1");
   });
 
   it("two registrations route independently per session", async () => {
@@ -564,37 +565,32 @@ describe("per-session routing (ADR-0019)", () => {
       ctx: ctxA,
       multitask,
       getSessionId: () => "disp-a",
+      spawnDispatcher: async (opts) => host.spawnDispatcher(opts),
     });
     registerDispatcherTools({
       ctx: ctxB,
       multitask,
       getSessionId: () => "disp-b",
+      spawnDispatcher: async (opts) => host.spawnDispatcher(opts),
     });
-    const spawnA = ctxA.registered.find((tool) => tool.name === "spawn_worker");
-    const spawnB = ctxB.registered.find((tool) => tool.name === "spawn_worker");
+    const spawnA = ctxA.registered.find(
+      (tool) => tool.name === SPAWN_DISPATCHER_TOOL,
+    );
+    const spawnB = ctxB.registered.find(
+      (tool) => tool.name === SPAWN_DISPATCHER_TOOL,
+    );
     assert.ok(spawnA);
     assert.ok(spawnB);
 
-    await spawnA.execute(
-      { stream_key: "shared", title: "A", prompt: "P" },
-      undefined,
-    );
-    await spawnB.execute(
-      { stream_key: "shared", title: "B", prompt: "P" },
-      undefined,
-    );
+    await spawnA.execute({ title: "A", prompt: "P" }, undefined);
+    await spawnB.execute({ title: "B", prompt: "P" }, undefined);
     assert.deepEqual(
-      host.spawnCalls.map((call) => call.opts.parentSessionId),
+      host.dispatcherSpawnCalls.map((call) => call.opts.parentSessionId),
       ["disp-a", "disp-b"],
     );
-
-    // Same stream key within ONE session still refuses.
-    const refused = (await spawnA.execute(
-      { stream_key: "shared", title: "A2", prompt: "P" },
-      undefined,
-    )) as { ok: boolean; reason: string };
-    assert.equal(refused.ok, false);
-    assert.equal(refused.reason, "duplicate-stream-key");
+    // (The duplicate-stream-key half went with `spawn_worker`: a summoned
+    // dispatcher has no stream key, and nothing on this surface spawns a
+    // worker any more.)
   });
 });
 
@@ -624,51 +620,12 @@ describe("ticket 117 — exec passthrough (the host's second argument reaches th
     assert.equal(seen[1], undefined);
   });
 
-  it("registerDispatcherTools' wrapper forwards the host exec to await_agent", async () => {
-    const ctx = createToolsCaptureCtx();
-    const host = new FakeDshHost();
-    const seams = manualSeams();
-    const multitask = createMultitask(host, {
-      awaits: { now: seams.now, schedule: seams.schedule },
-    });
-    registerDispatcherTools({ ctx, multitask, getSessionId: () => "disp-1" });
-
-    const spawned = await multitask.spawnWorker({
-      parentSessionId: "disp-1",
-      streamKey: "s",
-      title: "T",
-      prompt: "P",
-    });
-    assert.ok(spawned.ok);
-    if (!spawned.ok) throw new Error("unreachable");
-
-    const awaitAgent = ctx.registered.find((t) => t.name === "await_agent");
-    assert.ok(awaitAgent);
-
-    // The host invokes a registered tool as `execute(args, exec)`
-    // (`dsh-tools/lib/index.js:3406`). Aborting that signal must release the
-    // wait — this is the whole point of the passthrough: without it the wait
-    // has only its 120 s cap.
-    const controller = new AbortController();
-    const pending = awaitAgent.execute(
-      { target: spawned.workerId, timeout_ms: 30_000 },
-      { agent: { session: { id: "disp-1" } }, signal: controller.signal },
-    ) as Promise<{ ok: boolean; status?: string; reason?: string }>;
-    assert.equal(seams.scheduled.length, 1);
-    assert.equal(multitask.settleRecords.waiterCount("disp-1"), 1);
-
-    seams.advance(12);
-    controller.abort();
-
-    const result = await pending;
-    assert.equal(result.ok, true);
-    assert.equal(result.status, "released");
-    assert.equal(result.reason, "stopped");
-    // The losing racer cleaned up: timer cancelled, waiter gone.
-    assert.equal(seams.scheduled[0]?.cancelled, true);
-    assert.equal(multitask.settleRecords.waiterCount("disp-1"), 0);
-  });
-
+  // DELETED with the `await_agent` handler: "registerDispatcherTools' wrapper
+  // forwards the host exec to await_agent" exercised the deleted handler's
+  // exec/signal passthrough. There is no wait primitive on the surface any
+  // more (stock completion is push-only), so the abort-releases-the-wait case
+  // it pinned cannot be re-expressed against a registered tool. The generic
+  // wrapper passthrough above still covers `execute(args, exec)`.
 });
 
 describe("ticket 117 — structured user-message detection (source, never text)", () => {
@@ -741,9 +698,13 @@ describe("ticket 117 — user-message release, end to end over the real host sea
    * Wire the shipped path: the REAL `createCordisDshHost` `session/event`
    * subscription (the detection under test) feeding the plugin's exact
    * subscription body (`onDispatcherUserMessage` → `multitask.releaseWaits`),
-   * over a `FakeDshHost` core so no parent agent must be bound. The registered
-   * `await_agent` is the adapter wrapper (exec passthrough exercised too), and
-   * every timer is manual.
+   * over a `FakeDshHost` core so no parent agent must be bound. Every timer
+   * is manual.
+   *
+   * The waiter is registered through `multitask.settleRecords.wait` — the
+   * core seam the deleted `await_agent` handler called — because no tool on
+   * the surface waits any more (stock completion is push-only). The release
+   * wiring itself is still shipped, so its semantics stay pinned here.
    */
   function createLiveRig(sessionId = "disp-1") {
     const bus = createHostCtx();
@@ -756,11 +717,7 @@ describe("ticket 117 — user-message release, end to end over the real host sea
     eventHost.onDispatcherUserMessage((id) => {
       multitask.releaseWaits(id, "user-message");
     });
-    const tools = createToolsCaptureCtx();
-    registerDispatcherTools({ ctx: tools, multitask, getSessionId: () => sessionId });
-    const awaitAgent = tools.registered.find((t) => t.name === "await_agent");
-    assert.ok(awaitAgent);
-    return { bus, coreHost, eventHost, seams, multitask, awaitAgent };
+    return { bus, coreHost, eventHost, seams, multitask, sessionId };
   }
 
   async function spawnFor(firstRig: ReturnType<typeof createLiveRig>, sessionId = "disp-1") {
@@ -779,10 +736,12 @@ describe("ticket 117 — user-message release, end to end over the real host sea
     const r = createLiveRig();
     const workerId = await spawnFor(r);
 
-    const pending = r.awaitAgent.execute(
-      { target: workerId, timeout_ms: 120_000 },
-      { signal: new AbortController().signal },
-    ) as Promise<{ ok: boolean; status?: string; reason?: string; waited_ms?: number }>;
+    const pending = r.multitask.settleRecords.wait(
+      "disp-1",
+      workerId,
+      120_000,
+      new AbortController().signal,
+    ) as Promise<{ ok: boolean; status?: string; reason?: string; waitedMs?: number }>;
     assert.equal(r.multitask.settleRecords.waiterCount("disp-1"), 1);
     r.seams.advance(250);
 
@@ -794,7 +753,7 @@ describe("ticket 117 — user-message release, end to end over the real host sea
     assert.equal(result.ok, true);
     assert.equal(result.status, "released");
     assert.equal(result.reason, "user-message");
-    assert.equal(result.waited_ms, 250);
+    assert.equal(result.waitedMs, 250);
     assert.equal(r.seams.scheduled[0]?.ms, 120_000);
     assert.equal(r.seams.scheduled[0]?.cancelled, true);
     assert.equal(r.multitask.settleRecords.waiterCount("disp-1"), 0);
@@ -807,9 +766,11 @@ describe("ticket 117 — user-message release, end to end over the real host sea
     const r = createLiveRig();
     const workerId = await spawnFor(r);
 
-    const pending = r.awaitAgent.execute(
-      { target: workerId, timeout_ms: 30_000 },
-      { signal: new AbortController().signal },
+    const pending = r.multitask.settleRecords.wait(
+      "disp-1",
+      workerId,
+      30_000,
+      new AbortController().signal,
     ) as Promise<{ ok: boolean; status?: string; reason?: string }>;
 
     // Plugin wake (`plugin:multitask-dispatcher`), peer wake (`agent-message`),
@@ -833,9 +794,11 @@ describe("ticket 117 — user-message release, end to end over the real host sea
     const r = createLiveRig("disp-1");
     const workerId = await spawnFor(r);
 
-    const pending = r.awaitAgent.execute(
-      { target: workerId, timeout_ms: 30_000 },
-      { signal: new AbortController().signal },
+    const pending = r.multitask.settleRecords.wait(
+      "disp-1",
+      workerId,
+      30_000,
+      new AbortController().signal,
     ) as Promise<{ ok: boolean; status?: string; reason?: string }>;
 
     r.bus.fire("session/event", { id: "someone-else" }, inboxSpliced([userMessage()]));
@@ -853,13 +816,15 @@ describe("ticket 117 — user-message release, end to end over the real host sea
     // The host submits a spawned child's task with `source: {kind:"user"}`
     // (`dsh-subagent/lib/index.js:1461`), so a spawn DURING a dispatcher wait
     // delivers a user-sourced message on the CHILD's session. Waiters are
-    // keyed by the awaiting dispatcher's session id and workers are denied
-    // `await_agent`, so that delivery must release nothing here.
+    // keyed by the awaiting dispatcher's session id, so that delivery must
+    // release nothing here.
     const r = createLiveRig();
     const workerId = await spawnFor(r);
-    const pending = r.awaitAgent.execute(
-      { target: workerId, timeout_ms: 30_000 },
-      { signal: new AbortController().signal },
+    const pending = r.multitask.settleRecords.wait(
+      "disp-1",
+      workerId,
+      30_000,
+      new AbortController().signal,
     ) as Promise<{ ok: boolean; status?: string; reason?: string }>;
     assert.equal(r.multitask.settleRecords.waiterCount("disp-1"), 1);
 
@@ -877,30 +842,9 @@ describe("ticket 117 — user-message release, end to end over the real host sea
     assert.equal(result.reason, "user-message");
   });
 
-  it("the released/user-message wire shape carries the model-facing copy", async () => {
-    const r = createLiveRig();
-    const workerId = await spawnFor(r);
-    const pending = r.awaitAgent.execute(
-      { target: workerId, timeout_ms: 30_000 },
-      { signal: new AbortController().signal },
-    ) as Promise<Record<string, unknown>>;
-    r.bus.fire("session/event", { id: "disp-1" }, inboxSpliced([userMessage()]));
-    const result = await pending;
-
-    assert.deepEqual(Object.keys(result).sort(), [
-      "ok",
-      "reason",
-      "status",
-      "summary",
-      "target",
-      "waited_ms",
-    ]);
-    assert.equal(result.reason, "user-message");
-    const summary = String(result.summary);
-    assert.ok(summary.includes("the user said something"));
-    assert.ok(summary.includes("answer them now"));
-    // The worker keeps running — the copy must say so.
-    assert.ok(summary.includes("keeps running"));
-  });
+  // DELETED with the `await_agent` handler: "the released/user-message wire
+  // shape carries the model-facing copy" pinned result formatters
+  // (`summary`/`target`/`waited_ms`) that left the tree with the tool. The
+  // core outcome's own shape is asserted by the four release cases above.
 });
 

@@ -102,6 +102,13 @@ export interface AgentLike {
     ): unknown;
   };
   /**
+   * The live Agent's turn status, when the structural view exposes it. The
+   * stock `list_agents` reader asks only whether it is exactly `"running"`;
+   * anything else reads as `inactive`. Optional so structural stubs stay
+   * minimal — an absent status is `inactive`, never an invented `running`.
+   */
+  readonly status?: string;
+  /**
    * The agent's live model selection, when the structural view exposes it.
    * `current()` answers the route the NEXT request will use (a selection made
    * in the UI is reflected here), which is what a summoned peer must inherit —
@@ -320,6 +327,29 @@ export interface ToolsLike {
 }
 
 /**
+ * Structural view of one row from the host's subagent listing seams
+ * (`ctx.subagents.listChildren` / `listDescendants`,
+ * `dsh-subagent/lib/types/list-children.d.ts`). Only the fields the
+ * `list_agents` fence reads are declared: the wrapper filters, projects and
+ * renders; it never re-derives catalog state of its own.
+ *
+ * A descendant row carries `parentId` and `depth`; a diagnostic row carries
+ * `kind: "diagnostic"` and a `reason`. `mode` is `"continuable"` for a child
+ * this plugin may keep messaging; stock `list_agents` drops every other mode.
+ * Optional throughout so stub seams (and hosts with no listing support) need
+ * only what they actually answer.
+ */
+export interface SubagentListEntryLike {
+  readonly id: string;
+  readonly label?: string;
+  readonly mode?: string;
+  readonly kind?: "diagnostic";
+  readonly reason?: string;
+  readonly parentId?: string;
+  readonly depth?: number;
+}
+
+/**
  * Structural host slash-command invocation (ticket 19). The handler runs
  * instead of sending the line to the model; the result is user-visible copy.
  */
@@ -386,6 +416,31 @@ export interface AdapterContext {
       content: ContentBlock[],
       options: { signal: AbortSignal },
     ): Promise<unknown>;
+    /**
+     * Direct children of one session, in the host's catalog order
+     * (`listChildren(parentSessionId, signal?)`). This is the SAME seam the
+     * stock `list_agents` tool calls; the dispatcher's same-name wrapper reads
+     * it rather than inventing a second catalog.
+     *
+     * Optional so stub contexts stay minimal: on a host without it the wrapper
+     * is not registered at all and the stock tool stays exactly as shipped.
+     */
+    listChildren?(
+      parentSessionId: string,
+      signal?: AbortSignal,
+    ): Promise<readonly SubagentListEntryLike[]>;
+    /**
+     * The whole tree below one session, each row carrying its catalog
+     * `parentId` and edge `depth` (`listDescendants(rootSessionId, signal?)`).
+     * The wrapper clamps this to the caller's direct children; the host keeps
+     * the full-tree read for every other consumer.
+     *
+     * Optional for the same reason as {@link AdapterContext.subagents.listChildren}.
+     */
+    listDescendants?(
+      rootSessionId: string,
+      signal?: AbortSignal,
+    ): Promise<readonly SubagentListEntryLike[]>;
   };
   agents: {
     get(id: unknown): AgentLike | undefined;
@@ -605,6 +660,33 @@ export interface CordisDshHostOptions {
    * must not turn the host's create path into an error.
    */
   onWorkerReattached?: (workerId: string, parentSessionId: string) => void;
+  /**
+   * Lane A2a: a child the STOCK `subagent` tool spawned under a dispatcher
+   * session this host has bound. Unlike {@link onWorkerReattached}, this child
+   * was never reserved by us: the stock tool calls `startActivation` without a
+   * `childId`, so the `pendingSpawns` counter stays zero and the legacy
+   * `agent/created` branch never composed or registered it.
+   *
+   * The host identifies the child at `agent/created` (its header, its parent
+   * binding, and the absence of any reservation/mark), registers it in the
+   * SAME `workers` map a spawn reserves — which is what makes `workerIdOf`
+   * answer, the status handler accept its edges, and the `subagent/end`
+   * ownership gate accept its settle — then calls this hook so the core can
+   * register a `WorkerRecord`, create and link its todo, and write the durable
+   * marker/wake row.
+   *
+   * `childSession` is the child's own live Session, passed for the
+   * `subagent.label` read (the same projection the peer roster uses); the
+   * adapter never interprets it. Fired synchronously, inside the host's
+   * create call, before the child's first turn. Errors thrown here are logged
+   * and swallowed — the child is already live and composed, so a core-side
+   * bookkeeping failure must not turn the host's create path into an error.
+   */
+  onStockWorkerAdopted?: (
+    workerId: string,
+    parentSessionId: string,
+    childSession: unknown,
+  ) => void;
 }
 /**
  * Live `DshHost` over Cordis dsh services.
@@ -693,6 +775,37 @@ export interface CordisDshHost extends DshHost {
    * a mark, so widening the fence cannot accept an arbitrary id.
    */
   isDurablyMarkedDispatcher(sessionId: string): boolean;
+  /**
+   * Lane C4: the summoning dispatcher's SESSION id for a session that is a
+   * spawned team leader — the value the final-answer push needs to address the
+   * parent. Undefined for a user-started dispatcher and for an unknown session.
+   *
+   * No second store: this reads the SAME record the spawn already wrote.
+   * - in process, the `dispatcherMarks` mirror carries the parent from the
+   *   reserve-time seed (before the child exists) and from
+   *   `writeDispatcherMark`;
+   * - after a restart, `refreshDispatcherMarks` warms that mirror from the
+   *   durable `dispatcher_sessions` row's `parentSessionId`;
+   * - before that warm-up, the synchronous `peekDispatcherMark` reads the same
+   *   row, so a restored session answers without one more in-memory copy.
+   *
+   * The durable field IS a session id (`parentSessionId`), not a parent agent
+   * id, so nothing is mapped or invented here. A pre-138 row carries no parent
+   * and answers undefined (its summoner was never recorded); so does a host
+   * with no marker seam at all.
+   */
+  dispatcherParentOf(sessionId: string): string | undefined;
+  /**
+   * The workspace of one dispatcher session for the shared visibility
+   * predicate: the LIVE session header's `cwd`, or `undefined` when the
+   * session is not live / the header is unreadable / it carries none.
+   *
+   * Read-only and narrow on purpose. There is no durable cwd field and none
+   * is invented: a dormant session answers `undefined`, which the predicate
+   * treats as "cannot prove the same workspace" (fail closed). The host keeps
+   * no second copy of this value.
+   */
+  dispatcherCwdOf(sessionId: string): string | undefined;
   /**
    * Ticket 140 (review fix): the tri-state answer the `sessionKind` projection
    * unit consumes from `init` and from every fold step of an unresolved cell.
@@ -1690,6 +1803,7 @@ export function createCordisDshHost(
   const onDispatcherSpawned = options?.onDispatcherSpawned;
   const dispatcherGenerationOf = options?.dispatcherGenerationOf;
   const onWorkerReattachedRaw = options?.onWorkerReattached;
+  const onStockWorkerAdoptedRaw = options?.onStockWorkerAdopted;
   const onUserDispatcherResumed = options?.onUserDispatcherResumed;
   const sessionKindOfSession = options?.sessionKindOf;
   const dispatcherClassOfSession = options?.dispatcherClassOf;
@@ -3475,6 +3589,98 @@ export function createCordisDshHost(
   }
 
   /**
+   * Lane A2a: is this `agent/created` child a STOCK-spawned worker of a
+   * dispatcher session this host has BOUND?
+   *
+   * The stock `subagent` tool calls `ctx.subagents.startActivation` without a
+   * `childId`, so none of the identity machinery the legacy path relies on
+   * exists: `pendingSpawns` is 0, `workers` has no reservation, and
+   * `spawnedWorkerIds`/the worker-session mirror carry nothing. What DOES
+   * exist at `agent/created` is the child's own header, written by the host's
+   * `childSessionMeta` before announcement:
+   *
+   * - `header.parentSession` — the stock tool spawns from an exact live
+   *   parent Agent, so it is always the bound dispatcher session;
+   * - `header.origin === "subagent"` — the durable ownership marker;
+   * - `header.delegationDepth >= 1` — absent reads as 0 (a top-level
+   *   session), the same reading `isTopLevel` and the resume branch use.
+   *
+   * FAIL-CLOSED fences, in order:
+   * - the parent must be a session THIS host bound (a stock child of the
+   *   user's ordinary chat or of an arbitrary session is never adopted);
+   * - a reserved dispatcher id or a durable dispatcher mark is a PEER, never
+   *   a worker (the listener returns before this helper for those, and the
+   *   checks stay as belt-and-braces);
+   * - an id already in `workers`, `workerSessions` or `spawnedWorkerIds` is
+   *   ours through the legacy spawn/re-attach paths — never re-adopted here;
+   * - a settled tombstone is final (ticket 04: stop is for good).
+   */
+  function isStockWorkerChild(
+    childSessionId: string,
+    parentSessionId: string,
+    header:
+      | { origin?: unknown; delegationDepth?: unknown }
+      | undefined,
+  ): boolean {
+    if (childSessionId === "" || parentSessionId === "") return false;
+    if (!parents.has(parentSessionId)) return false;
+    if (header?.origin !== "subagent") return false;
+    // Absent reads as 0; a non-numeric depth is unreadable and must fail
+    // closed rather than slip through a NaN comparison.
+    const depth = Number(header.delegationDepth ?? 0);
+    if (!Number.isFinite(depth) || depth < 1) return false;
+    if (reservedDispatcherIds.has(childSessionId)) return false;
+    if (dispatcherMarks.has(childSessionId)) return false;
+    if (workers.has(childSessionId)) return false;
+    if (workerSessions.has(childSessionId)) return false;
+    if (spawnedWorkerIds.has(childSessionId)) return false;
+    if (settledWorkerIds.has(childSessionId)) return false;
+    return true;
+  }
+
+  /**
+   * Lane A2a: publish a stock child as an OWNED worker in the one registry the
+   * host already has. `WorkerEntry` is deliberately the same shape a
+   * `spawnWorker` reservation writes — `workerIdOf` (via `ownsSession`), the
+   * status handler, `interruptWorker`/`sendMessage`, and the `subagent/end`
+   * ownership gate all read this map.
+   *
+   * `spawnedWorkerIds` is added for the same reason a reservation adds it: it
+   * is the in-process settle proof, so a child disposed before its terminal
+   * event cannot lose the settle. The durable wake identity is the core's
+   * write (through `rememberWorkerWake` inside `adoptSpawnedWorker`).
+   *
+   * CALL ORDER MATTERS: the caller composes the child FIRST (ticket 200 —
+   * a failed barrier must not leave a reclaimable worker behind) and only
+   * then registers. Everything here is synchronous, so it still lands before
+   * the child's first status edge.
+   */
+  function registerStockWorker(
+    childSession: unknown,
+    childSessionId: string,
+    parentSessionId: string,
+  ): void {
+    workers.set(childSessionId, {
+      parentSessionId,
+      agentSessionId: childSessionId,
+    });
+    spawnedWorkerIds.add(childSessionId);
+    if (onStockWorkerAdoptedRaw === undefined) return;
+    try {
+      onStockWorkerAdoptedRaw(childSessionId, parentSessionId, childSession);
+    } catch (error) {
+      try {
+        console.warn(
+          `[multitask-dispatcher] stock worker ${childSessionId} could not be adopted by the core:`,
+          error,
+        );
+      } catch {
+        // A broken console must not break the create path either.
+      }
+    }
+  }
+
+  /**
    * Worker composition for a child we are about to publish, plus (ticket
    * 118) dispatcher activation for a child WE reserved.
    *
@@ -3501,7 +3707,11 @@ export function createCordisDshHost(
     const record = payload as {
       agent?: {
         session?: {
-          header?: { parentSession?: unknown; delegationDepth?: unknown };
+          header?: {
+            parentSession?: unknown;
+            delegationDepth?: unknown;
+            origin?: unknown;
+          };
           id?: unknown;
         };
         ctx?: unknown;
@@ -3576,8 +3786,18 @@ export function createCordisDshHost(
       // which is what composes it.
       if (adopted) return;
     }
+    // Lane A2a: a child the STOCK `subagent` tool spawned under this bound
+    // dispatcher. It carries no reservation, so the counter below is 0 and the
+    // legacy gate would drop it — no persona, no barrier, no worker identity.
+    // Identity is the child's own header plus the absence of every
+    // reservation/mark this host already owns (see isStockWorkerChild).
+    const stockWorker =
+      childSessionId !== "" &&
+      isStockWorkerChild(childSessionId, parentSessionId, child.session?.header);
     if (workerAgentDef === undefined) return;
-    if ((pendingSpawns.get(parentSessionId) ?? 0) === 0) return;
+    // The legacy path stays exactly as it was for the ids OUR spawn reserved;
+    // the stock child is the only new admission.
+    if (!stockWorker && (pendingSpawns.get(parentSessionId) ?? 0) === 0) return;
     if (typeof child.ctx !== "object" || child.ctx === null) return;
     // Ticket 200: this listener is SYNCHRONOUS and runs inside the host's
     // create call, so a composition throw rejects the announcement. The host's
@@ -3596,6 +3816,13 @@ export function createCordisDshHost(
       );
     } catch (error) {
       refuseWorkerComposition(child as AgentLike, childSessionId, error);
+    }
+    // Lane A2a: compose FIRST, publish AFTER (the ticket-200 discipline) — a
+    // failed barrier throws above, so no worker the host would keep and settle
+    // is registered. Everything here is synchronous, so the entry exists
+    // before the child's first status edge and before any settle.
+    if (stockWorker) {
+      registerStockWorker(child.session, childSessionId, parentSessionId);
     }
   });
 
@@ -3717,6 +3944,47 @@ export function createCordisDshHost(
 
     isDurablyMarkedDispatcher(sessionId: string): boolean {
       return dispatcherMarks.has(sessionId);
+    },
+
+    dispatcherParentOf(sessionId: string): string | undefined {
+      // The mirror is the in-process truth (spawn-time seed, spawn-time write,
+      // or the boot warm-up from the durable rows) and it never downgrades a
+      // known parent, so a mirror HIT is final — including an explicit
+      // `undefined` for a pre-138 row that recorded no summoner.
+      if (dispatcherMarks.has(sessionId)) {
+        const parent = dispatcherMarks.get(sessionId);
+        return parent === "" ? undefined : parent;
+      }
+      // Cold path: a session restored in an earlier process and not warmed yet.
+      // `peekDispatcherMark` is synchronous and reads the SAME row; an
+      // unopened/unreadable table cannot prove a parent, so it answers
+      // undefined rather than guessing one.
+      const store = markers;
+      if (store === undefined || store.peekDispatcherMark === undefined) {
+        return undefined;
+      }
+      try {
+        const answer = store.peekDispatcherMark(sessionId);
+        if (answer.kind !== "dispatcher") return undefined;
+        const parent = answer.mark.parentSessionId;
+        return parent === "" ? undefined : parent;
+      } catch {
+        return undefined;
+      }
+    },
+
+    dispatcherCwdOf(sessionId: string): string | undefined {
+      // The live header is the only cwd source (no durable cwd field exists).
+      // `liveAgentOf` already guards the registry read; the header access is
+      // guarded too, because a structural stub may expose a partial session.
+      const agent = liveAgentOf(sessionId);
+      if (agent === undefined) return undefined;
+      try {
+        const cwd = agent.session?.header?.cwd;
+        return typeof cwd === "string" && cwd.trim() !== "" ? cwd : undefined;
+      } catch {
+        return undefined;
+      }
     },
 
     recordDispatcherClass(sessionId: string, origin: DispatcherOrigin): void {

@@ -6,9 +6,9 @@ A plugin for DeepSeek Harness (`dsh`). It turns one dsh chat into a dispatcher.
 
 In dsh, one agent turn does the work, so a long job blocks the chat. This plugin adds a dispatcher: a chat agent that stays free to talk to you and hands long jobs to background workers. A worker starts blank. It sees only the prompt the dispatcher writes for it, never your chat. When a worker finishes, it wakes the dispatcher, and the dispatcher tells you the result in the chat.
 
-The dispatcher has eight tools: `spawn_worker`, `check_workers`, `steer_worker`, `stop_worker`, `deliver_result`, `message_agent`, `await_agent`, and `spawn_dispatcher`.
+The dispatcher has three tools of its own: `deliver_result`, `message_agent`, and `spawn_dispatcher`. Workers, status, steering, and stopping use dsh's own tools: `subagent`, `list_agents`, `send_message`, and `interrupt_agent`.
 
-Workers are leaves. They never talk to you. A worker returns a final answer and can send the dispatcher a note with `reply_to_dispatcher`. When a worker needs access it does not have, it says so in its final answer and stops; there is no ask channel.
+Workers are leaves. They never talk to you. A worker returns a final answer, which arrives in dsh's completion notice, and can send the dispatcher an interim note with `send_message`. When a worker needs access it does not have, it says so in its final answer and stops; there is no ask channel.
 
 Status: version 0.1.0. It is not published to npm. Install it from a checkout.
 
@@ -81,10 +81,10 @@ The dispatcher can call `spawn_dispatcher` to summon another dispatcher.
 
 ### Choosing models
 
-Both spawn tools take an optional model.
+The summon tool and dsh's worker spawn both take an optional model.
 
 - `spawn_dispatcher` takes `model` for the summoned team leader and `worker_model` for the default model of the workers that leader later spawns.
-- `spawn_worker` takes `model` for that one worker. An explicit value wins; the leader's stored `worker_model` applies when the argument is omitted.
+- A worker's `model` argument on dsh's `subagent` call chooses that one worker's route where the host offers the slot. An explicit value wins; the leader's stored `worker_model` applies when the argument is omitted.
 - Write the value as provider/model-id. For example:
 
   ```text

@@ -609,9 +609,9 @@ describe("client face scaffold — apply over fake client seams", () => {
     apply(ctx);
 
     // Locale namespace registered with the shipped dictionary.
-    assert.ok(ctx.locales.has("multitask-dispatcher"));
+    assert.ok(ctx.locales.has("dsh-bot"));
     assert.deepEqual(
-      validateLocaleDictionary(ctx.locales.get("multitask-dispatcher")),
+      validateLocaleDictionary(ctx.locales.get("dsh-bot")),
       [],
     );
 

@@ -1,11 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { FakeDshHost } from "../src/core/fake-host.js";
-import { createMultitask } from "../src/core/multitask.js";
-import { CHECK_WORKERS_TOOL } from "../src/core/policy/prompts.js";
-import type { CheckWorkersToolResult } from "../src/core/tool-results.js";
-import { createDispatcherTools } from "../src/core/tools.js";
-import type { SpawnResult, WorkerStatus } from "../src/core/types.js";
+import type { WorkerStatus } from "../src/core/types.js";
 import {
   deriveWorkerStage,
   WORKER_STAGES,
@@ -15,8 +10,9 @@ import {
 
 /**
  * Ticket 171. The derivation is pure, so the table test below covers every
- * branch of it; the second test proves `check_workers` actually passes the
- * argument and renders it. No host, no clock, no LLM, no live run.
+ * branch of it. The former `check_workers` wiring cases are gone with the
+ * tool: stock `list_agents` has no stage field, and the derivation itself is
+ * still the contract. No host, no clock, no LLM, no live run.
  */
 
 type LinkedTodo = WorkerStageInput["linkedTodo"];
@@ -151,139 +147,5 @@ describe("worker stage — the derivation table", () => {
       }),
       "waiting-for-delivery",
     );
-  });
-});
-
-describe("worker stage — check_workers wiring", () => {
-  it("renders waiting-for-delivery until the result is delivered, then ended", async () => {
-    const host = new FakeDshHost();
-    const multitask = createMultitask(host);
-    const tools = createDispatcherTools({
-      multitask,
-      getSessionId: () => "session-1",
-    });
-    multitask.createTodo({
-      sessionId: "session-1",
-      id: "t-1",
-      title: "Rewrite auth docs",
-    });
-    const spawn: SpawnResult = await multitask.spawnWorker({
-      parentSessionId: "session-1",
-      streamKey: "t-1",
-      title: "Rewrite auth docs",
-      prompt: "Go.",
-      todoId: "t-1",
-    });
-    assert.ok(spawn.ok, spawn.ok ? "" : spawn.detail);
-    if (!spawn.ok) return;
-    multitask.noteTurnStarted(spawn.workerId);
-    host.fireSettled({
-      workerId: spawn.workerId,
-      status: "completed",
-      report: "Done.",
-    });
-
-    const check = tools.find((tool) => tool.name === CHECK_WORKERS_TOOL);
-    assert.ok(check, `missing tool: ${CHECK_WORKERS_TOOL}`);
-    if (check === undefined) return;
-
-    const owed = (await check.execute({})) as CheckWorkersToolResult;
-    assert.ok(owed.ok);
-    if (!owed.ok) return;
-    assert.equal(owed.rows.length, 1);
-    assert.equal(owed.rows[0]?.stage, "waiting-for-delivery");
-    assert.ok(owed.summary.includes("stage: waiting-for-delivery"));
-
-    // Two calls prove the join is live, not hard-coded.
-    assert.ok(multitask.markDelivered("t-1"));
-    const settled = (await check.execute({})) as CheckWorkersToolResult;
-    assert.ok(settled.ok);
-    if (!settled.ok) return;
-    assert.equal(settled.rows[0]?.stage, "ended");
-    assert.ok(settled.summary.includes("stage: ended"));
-    assert.ok(!settled.summary.includes("stage: waiting-for-delivery"));
-  });
-
-  /**
-   * Both `check_workers` branches must derive the stage. The roster branch is
-   * covered above; this is the single-`worker_id` branch — same derivation,
-   * different call site, so a regression there would otherwise go unseen.
-   */
-  it("derives the stage on the single-worker branch too", async () => {
-    const host = new FakeDshHost();
-    const multitask = createMultitask(host);
-    const tools = createDispatcherTools({
-      multitask,
-      getSessionId: () => "session-1",
-    });
-    multitask.createTodo({
-      sessionId: "session-1",
-      id: "t-1",
-      title: "Rewrite auth docs",
-    });
-    const spawn: SpawnResult = await multitask.spawnWorker({
-      parentSessionId: "session-1",
-      streamKey: "t-1",
-      title: "Rewrite auth docs",
-      prompt: "Go.",
-      todoId: "t-1",
-    });
-    assert.ok(spawn.ok, spawn.ok ? "" : spawn.detail);
-    if (!spawn.ok) return;
-    multitask.noteTurnStarted(spawn.workerId);
-    host.fireSettled({
-      workerId: spawn.workerId,
-      status: "completed",
-      report: "Done.",
-    });
-
-    const check = tools.find((tool) => tool.name === CHECK_WORKERS_TOOL);
-    assert.ok(check, `missing tool: ${CHECK_WORKERS_TOOL}`);
-    if (check === undefined) return;
-
-    const owed = (await check.execute({
-      worker_id: spawn.workerId,
-    })) as CheckWorkersToolResult;
-    assert.ok(owed.ok);
-    if (!owed.ok) return;
-    assert.equal(owed.rows.length, 1);
-    assert.equal(owed.rows[0]?.stage, "waiting-for-delivery");
-    assert.ok(owed.summary.includes("stage: waiting-for-delivery"));
-  });
-
-  /**
-   * A worker with no ledger link has nothing recorded as owed. The stage must
-   * say `ended` — NOT `waiting-for-delivery` — because `undefined` means "no
-   * obligation was ever created", not "an obligation exists unknown to us".
-   */
-  it("a terminal worker with no linked todo reads ended, not owed", async () => {
-    const host = new FakeDshHost();
-    const multitask = createMultitask(host);
-    const tools = createDispatcherTools({
-      multitask,
-      getSessionId: () => "session-1",
-    });
-    const spawn: SpawnResult = await multitask.spawnWorker({
-      parentSessionId: "session-1",
-      streamKey: "s-1",
-      title: "Quick lookup",
-      prompt: "Go.",
-    });
-    assert.ok(spawn.ok, spawn.ok ? "" : spawn.detail);
-    if (!spawn.ok) return;
-    multitask.noteTurnStarted(spawn.workerId);
-    host.fireSettled({
-      workerId: spawn.workerId,
-      status: "completed",
-      report: "Done.",
-    });
-
-    const check = tools.find((tool) => tool.name === CHECK_WORKERS_TOOL);
-    assert.ok(check, `missing tool: ${CHECK_WORKERS_TOOL}`);
-    if (check === undefined) return;
-    const result = (await check.execute({})) as CheckWorkersToolResult;
-    assert.ok(result.ok);
-    if (!result.ok) return;
-    assert.equal(result.rows[0]?.stage, "ended");
   });
 });

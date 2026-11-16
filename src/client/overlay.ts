@@ -44,7 +44,7 @@ export const ROSTER_ENTRY_ID = "multitask-dispatcher-roster";
 export const ROSTER_OVERLAY_ORDER = -10;
 
 /** Locale namespace = plugin id (Finding 6 / design-16 §5). */
-export const LOCALE_NAMESPACE = "multitask-dispatcher";
+export const LOCALE_NAMESPACE = "dsh-bot";
 
 /** One slot entry's registration options (Finding 5 options shape, narrowed). */
 export interface SlotRegistrationOptions {

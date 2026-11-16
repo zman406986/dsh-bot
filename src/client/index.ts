@@ -18,7 +18,7 @@
  * dormant shell resolves its own faces at the mount point.
  *
  * What registers (design-16 §4.2/§5):
- * 1. the `multitask-dispatcher` locale namespace ({en, zh});
+ * 1. the `dsh-bot` locale namespace ({en, zh});
  * 2. the per-tool call views (ticket 24): keyed `tool.call.toolview` entries
  *    for the eight dispatcher wire tool names plus the retained historical
  *    `send_peer` key (five at 24; `send_peer` joined under ticket 70;

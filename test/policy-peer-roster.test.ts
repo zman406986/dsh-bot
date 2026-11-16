@@ -12,8 +12,13 @@ import {
   type PeerRosterSnapshot,
 } from "../src/core/policy/assembler.js";
 import {
+  PEER_ROSTER_EMPTY_LINE,
+  PEER_ROSTER_EMPTY_LINE_ZH,
+  PEER_ROSTER_FRESHNESS_LINE,
+  PEER_ROSTER_FRESHNESS_LINE_ZH,
   PEER_ROSTER_INTRO,
   PEER_ROSTER_SECTION_HEADING,
+  PEER_ROSTER_SECTION_HEADING_ZH,
   PEER_WAKE_SECTION_HEADINGS,
 } from "../src/core/policy/prompts.js";
 
@@ -182,12 +187,68 @@ describe("renderPeerRoster — prefix stays byte-stable (tail placement)", () =>
       peers: [peer({ sessionId: "s-1", liveness: "idle" })],
     });
     assert.equal(withRoster, `${body}\n\n${renderPeerRoster({ peers: [peer({ sessionId: "s-1", liveness: "idle" })] })}`);
-    assert.ok(withRoster.endsWith("- s-1 — idle"));
+    assert.ok(withRoster.includes("- s-1 — idle"));
+    // The fixed supersede marker closes the appended section.
+    assert.ok(withRoster.endsWith(PEER_ROSTER_FRESHNESS_LINE));
     // Two renders of the same state are byte-identical.
     assert.equal(
       appendPeerRosterTail(body, { peers: [peer({ sessionId: "s-1", liveness: "idle" })] }),
       withRoster,
     );
+  });
+});
+
+describe("roster freshness marker — the newest turn is authoritative", () => {
+  it("a non-empty roster carries the fixed supersede line after its rows", () => {
+    const snapshot = { peers: [peer({ sessionId: "s-1", liveness: "idle" })] };
+    const text = assembleTurnReminder([], snapshot);
+    assert.ok(text.includes(PEER_ROSTER_SECTION_HEADING));
+    assert.ok(text.includes(PEER_ROSTER_FRESHNESS_LINE), text);
+    assert.ok(
+      text.indexOf("- s-1 — idle") < text.indexOf(PEER_ROSTER_FRESHNESS_LINE),
+      "the line must follow the rows it supersedes",
+    );
+    assert.ok(text.trimEnd().endsWith(PEER_ROSTER_FRESHNESS_LINE));
+    // Byte-stable: the same state renders identical bytes — the marker carries
+    // no clock, counter, or turn number.
+    assert.equal(assembleTurnReminder([], snapshot), text);
+    assert.doesNotMatch(PEER_ROSTER_FRESHNESS_LINE, /\d/);
+    // ZH face of the same marker.
+    const zh = assembleTurnReminder([], snapshot, "zh");
+    assert.ok(zh.includes(PEER_ROSTER_FRESHNESS_LINE_ZH), zh);
+    assert.ok(!zh.includes(PEER_ROSTER_FRESHNESS_LINE), "no EN marker in ZH");
+  });
+
+  it("an empty roster still emits a fresh zero-row section with the same instruction", () => {
+    // A replayed old roster block sits ABOVE this turn; a reminder that renders
+    // no section at all supersedes nothing, so the empty case must speak.
+    for (const peers of [undefined, null, { peers: [] }] as const) {
+      const text = assembleTurnReminder([], peers);
+      assert.ok(text.includes(PEER_ROSTER_SECTION_HEADING), text);
+      assert.ok(text.includes(PEER_ROSTER_EMPTY_LINE), text);
+      assert.ok(
+        text.trimEnd().endsWith(PEER_ROSTER_EMPTY_LINE),
+        "the empty section is the reminder's tail",
+      );
+      const section = text.slice(text.indexOf(PEER_ROSTER_SECTION_HEADING));
+      assert.deepEqual(
+        section.split("\n").filter((line) => line.startsWith("- ")),
+        [],
+        "zero rows: the empty section lists no peer",
+      );
+    }
+    // Both cases state the SAME supersede instruction.
+    assert.ok(
+      PEER_ROSTER_EMPTY_LINE.includes('ignore every earlier "Other agents" section'),
+    );
+    // The renderer itself still answers null: the empty section belongs to the
+    // assembler, so a bare roster never grows a heading with no rows.
+    assert.equal(renderPeerRoster({ peers: [] }), null);
+    // ZH face of the empty section.
+    const zh = assembleTurnReminder([], { peers: [] }, "zh");
+    assert.ok(zh.includes(PEER_ROSTER_SECTION_HEADING_ZH), zh);
+    assert.ok(zh.includes(PEER_ROSTER_EMPTY_LINE_ZH), zh);
+    assert.ok(!zh.includes(PEER_ROSTER_SECTION_HEADING), "no EN heading in ZH");
   });
 });
 

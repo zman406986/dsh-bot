@@ -24,7 +24,7 @@ import { FakeDshHost } from "../src/core/fake-host.js";
 import { createInMemoryDurability } from "../src/core/durability.js";
 import { createMultitask, type Multitask } from "../src/core/multitask.js";
 import { createDispatcherTools, type DispatcherToolDef } from "../src/core/tools.js";
-import { MESSAGE_AGENT_TOOL, STEER_WORKER_TOOL } from "../src/core/policy/prompts.js";
+import { MESSAGE_AGENT_TOOL } from "../src/core/policy/prompts.js";
 import type { MessageAgentToolResult } from "../src/core/tool-results.js";
 
 const SENDER = "chat-1";
@@ -36,7 +36,6 @@ interface Rig {
   readonly exec: (
     args: Record<string, unknown>,
   ) => Promise<MessageAgentToolResult>;
-  readonly steer: DispatcherToolDef;
 }
 
 function rig(durability = createInMemoryDurability()): Rig {
@@ -59,14 +58,14 @@ function rig(durability = createInMemoryDurability()): Rig {
     now: () => 1_000_000,
   });
   const messageAgent = tools.find((tool) => tool.name === MESSAGE_AGENT_TOOL);
-  const steer = tools.find((tool) => tool.name === STEER_WORKER_TOOL);
   assert.ok(messageAgent, "message_agent is registered");
-  assert.ok(steer, "steer_worker is registered");
+  // Workers are steered through the stock `send_message` now; the retired
+  // dispatcher-side `steer_worker` is not part of this rig's surface. The
+  // dormant/steer assertions below exercise the CORE seam directly.
   return {
     host,
     multitask,
     tools,
-    steer,
     exec: (args) => messageAgent.execute(args) as Promise<MessageAgentToolResult>,
   };
 }

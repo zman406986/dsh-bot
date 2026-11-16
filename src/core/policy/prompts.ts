@@ -4,14 +4,23 @@
  * Full prose lives here so both language faces stay in one module: every
  * asset in this module ships EN + ZH (ticket 153) — the policy section, the
  * standing rules, the wake/access/peer blocks, the peer roster, and the
- * eight tool descriptions. The worker contract keeps its two faces beside
+ * three tool descriptions. The worker contract keeps its two faces beside
  * this module in `src/worker/prompt.ts`.
  *
  * The ZH face is authored copy re-derived from the PRD rules, never a
  * translation of the reference tree's text (ADR-0018 exception B9).
  */
 
-/** Tool names registered for the dispatcher only. */
+/**
+ * Names registered for the dispatcher before the stock-subagent refactor.
+ *
+ * `spawn_worker`, `check_workers`, `steer_worker` and `stop_worker` are
+ * RETIRED from the surface: workers now start with the stock `subagent` tool
+ * and are handled with `list_agents` / `send_message` / `interrupt_agent`.
+ * The names stay exported because the public barrel (`src/index.ts`) and the
+ * client's toolview registry still key historical rows by them — nothing
+ * registers these tools.
+ */
 export const SPAWN_WORKER_TOOL = "spawn_worker";
 export const CHECK_WORKERS_TOOL = "check_workers";
 export const STEER_WORKER_TOOL = "steer_worker";
@@ -35,18 +44,16 @@ export const SEND_PEER_TOOL = "send_peer";
  */
 export const MESSAGE_AGENT_TOOL = "message_agent";
 /**
- * Ticket 117 / ADR-0025: the one bounded wait. It exposes ticket 115's
- * `Multitask.awaitWorker` — worker targets only, `timeout_ms` 0–120,000
- * (default 30,000), at most 4 concurrent waiters per dispatcher session.
- * Dispatchers are peers, never awaitable, so the await cycle is not
- * constructible: workers have no await tool and a dispatcher target is
- * refused (`not-awaitable`), never timed out.
+ * RETIRED (ticket 117's bounded wait). Completion is push-only now: the
+ * worker's stock completion notice starts the dispatcher's next turn and
+ * carries its closing message, so nothing waits in-turn. The name stays
+ * exported for historical toolview rows only — nothing registers it.
  */
 export const AWAIT_AGENT_TOOL = "await_agent";
 /**
- * Ticket 118 / ADR-0025 mitosis: summon another DISPATCHER. The child is a
- * peer — a team-leader dispatcher with its own workers, ledger, inbox and
- * user — not a worker: no stream key, no ledger entry, no worker composition.
+ * MITOSIS: summon another DISPATCHER. The child is a peer — a team-leader
+ * dispatcher with its own workers, ledger, inbox and user — not a worker:
+ * no stream key, no ledger entry, no worker composition.
  * Ticket 176: it gets the team-leader policy and NOT `spawn_dispatcher`, so it
  * cannot summon further dispatchers.
  * ADR-0032: it is a TOP-LEVEL session (the host's `spawnDispatcher` seam
@@ -92,39 +99,25 @@ export function formatSummoningDispatcherHandoffLine(
 }
 
 /**
- * Dispatcher tool names, in registration order — eight tools after ticket
- * 118 added `spawn_dispatcher` (ticket 117 added `await_agent`; ticket 116
- * retired `send_peer`).
+ * Dispatcher tool names, in registration order — the three verbs stock DSH
+ * does not cover: user delivery, peer-dispatcher messaging, and summoning
+ * another dispatcher. Workers, status, steering and stopping are the stock
+ * `subagent` / `list_agents` / `send_message` / `interrupt_agent` tools.
  */
 export const DISPATCHER_TOOL_NAMES = [
-  SPAWN_WORKER_TOOL,
-  CHECK_WORKERS_TOOL,
-  STEER_WORKER_TOOL,
-  STOP_WORKER_TOOL,
   DELIVER_RESULT_TOOL,
   MESSAGE_AGENT_TOOL,
-  AWAIT_AGENT_TOOL,
   SPAWN_DISPATCHER_TOOL,
 ] as const;
 
 /** Model-facing tool descriptions (new copy). */
 export const TOOL_DESCRIPTIONS = {
-  [SPAWN_WORKER_TOOL]:
-    "Start a background worker for one stream. Give it the problem, constraints and context it cannot look up — it cannot see this conversation, and it decides the method. Returns at once; its result arrives later. One live worker per stream_key. Each spawn records a todo entry, so title it clearly. Optional model chooses this worker's model; omit it to inherit your default worker route.",
-  [CHECK_WORKERS_TOOL]:
-    "List your running and recent workers, or inspect one by id: status, elapsed, tool count, transcript, recent activity. A snapshot — never a wait loop.",
-  [STEER_WORKER_TOOL]:
-    "Send a correction into a running worker. Context is kept; only the latest undelivered correction applies. A dormant worker with a resumable session is accepted and resumed; a finished or never-started worker is refused.",
-  [STOP_WORKER_TOOL]:
-    "Stop a worker for good. Its later result and any parked correction are dropped. Nothing reaches the user from this tool. A worker that was live before a restart cannot be reached: stopping it releases the stream key it holds, and you are told so.",
   [DELIVER_RESULT_TOOL]:
     "Send a result to the user. Use it on wake turns only when the work is new and relevant; otherwise stay silent. Start with the specific outcome, in plain terms. Optionally mark the matching todo completed.",
   [MESSAGE_AGENT_TOOL]:
-    "Send text to a worker or another dispatcher, by id. A worker id parks it as that worker's next correction (latest wins; folds in at its next step). A dispatcher id drops it in that peer's inbox for its next turn; priority may interrupt only that peer's background work, never its user's turn. Fire-and-forget: you get an ack, and any reply arrives later on a fresh turn — never wait or hold a turn open. A refused send is reported and dropped.",
-  [AWAIT_AGENT_TOOL]:
-    "Wait once, bounded, for one worker to finish; return its terminal status and result. Use it only when your next step is blocked on that worker. timeout_ms 0–120000 (default 30000); 0 reads the current state. still-running and released are normal: the worker keeps going and its result still arrives. Workers only — a dispatcher is not awaitable.",
+    "Send text to another dispatcher, by id — a peer session, never one of your workers. It drops the text in that peer's inbox for its next turn; priority may interrupt only that peer's background work, never its user's turn. Fire-and-forget: you get an ack, and any reply arrives later on a fresh turn — never wait or hold a turn open. For your own workers use send_message; to stop one use interrupt_agent. A refused send is reported and dropped.",
   [SPAWN_DISPATCHER_TOOL]:
-    "Summon another dispatcher: a team-leader dispatcher with its own workers, ledger, inbox and user — not a worker. Give it the problem and the wanted outcome; it cannot see this conversation. It answers its own user directly and reports back to you. It cannot summon further dispatchers. Returns its session id at once. Message it with message_agent; never wait on it. Being top-level, it is not bound by the subagent depth limit or the live-child pool. Optional model chooses the team leader's model; optional worker_model sets the default for its workers.",
+    "Summon another dispatcher: a team-leader dispatcher with its own workers, ledger, inbox and user — not a worker. Give it the problem and the wanted outcome; it cannot see this conversation. It answers its own user directly and reports back to you. It cannot summon further dispatchers. Returns its session id at once. Message it with message_agent; do not wait or poll — its next message starts a new turn. Being top-level, it is not bound by the subagent depth limit or the live-child pool. Optional model chooses the team leader's model; optional worker_model sets the default for its workers.",
 } as const;
 
 /**
@@ -136,22 +129,12 @@ export const TOOL_DESCRIPTIONS_ZH: Record<
   (typeof DISPATCHER_TOOL_NAMES)[number],
   string
 > = {
-  [SPAWN_WORKER_TOOL]:
-    "为一条工作流启动一个后台工作者。把问题、约束，以及它自己查不到的背景交给它——它看不到这个对话，方法由它自己定。工具立即返回；结果稍后送到。每条 `stream_key` 只允许一个在运行的工作者。每次启动都会记下待办条目，所以标题要写清楚。可选的 `model` 用来指定这个工作者使用的模型；省略它就沿用你默认的工作者路由。",
-  [CHECK_WORKERS_TOOL]:
-    "列出在运行和最近的工作者，或按 id 查看其中一个：状态、已用时间、工具调用次数、记录、最近活动。这是快照，不是等待循环。",
-  [STEER_WORKER_TOOL]:
-    "向仍在运行的工作者发一次修正。上下文保留；只有最新一条尚未送达的修正生效。仍可恢复会话的休眠工作者会被接受并恢复；已结束或从未启动的工作者会被拒绝。",
-  [STOP_WORKER_TOOL]:
-    "永久停止一个工作者。它之后的结果和已停放的修正都会被丢弃。这个工具不会向用户发送任何东西。在上次重启时还活着的工作者联系不到：停止它会释放它占用的流键，并会明确告诉你。",
   [DELIVER_RESULT_TOOL]:
     "把结果送给用户。只在唤醒回合里、完成的工作是新的且相关时用它；否则保持沉默。开头先说清具体完成的是什么。可以选择把对应的待办标为完成。",
   [MESSAGE_AGENT_TOOL]:
-    "按 id 给某个工作者或另一个调度器发文本。工作者 id 会把文本停放为它的下一条修正（以最新一条为准，在它的下一个步骤折入）。调度器 id 会把文本送进那个同伴的收件箱，等它下一个回合处理；`priority` 只能打断同伴的后台工作，绝不打断它用户的回合。发完即走：你只拿到受理回执，答复之后会作为新回合上的独立消息到达——绝不等待，也不要为它保持回合打开。被拒绝的发送会报告并丢弃。",
-  [AWAIT_AGENT_TOOL]:
-    "对一个工作者做一次有上限的等待，等它结束，返回最终状态和结果。只在你下一步卡在那个工作者上时使用。`timeout_ms` 为 0 到 120000（默认 30000）；0 表示只读当前状态。`still-running` 和 `released` 都是正常结果：工作者继续运行，结果之后仍会送到。只能等工作者——调度器不能被等待。",
+    "按 id 给另一个调度器发文本——那是同伴会话，绝不是你的工作者。调度器 id 会把文本送进那个同伴的收件箱，等它下一个回合处理；`priority` 只能打断同伴的后台工作，绝不打断它用户的回合。发完即走：你只拿到受理回执，答复之后会作为新回合上的独立消息到达——绝不等待，也不要为它保持回合打开。给你自己的工作者发消息用 `send_message`；要停掉一个用 `interrupt_agent`。被拒绝的发送会报告并丢弃。",
   [SPAWN_DISPATCHER_TOOL]:
-    "召唤另一个调度器：一个团队负责人调度器，有自己的工作者、账本、收件箱和用户——不是工作者。把问题和你要的结果交给它；它看不到这个对话。它直接答复自己的用户，并向你回报。它不能再次召唤调度器。立即返回它的会话 id。用 `message_agent` 给它发消息；绝不要等它。它是顶层会话，不受子代理深度上限和存活子会话池的限制。可选的 `model` 用来指定团队负责人的模型；可选的 `worker_model` 为它的工作者设定默认模型。",
+    "召唤另一个调度器：一个团队负责人调度器，有自己的工作者、账本、收件箱和用户——不是工作者。把问题和你要的结果交给它；它看不到这个对话。它直接答复自己的用户，并向你回报。它不能再次召唤调度器。立即返回它的会话 id。用 `message_agent` 给它发消息；不要等它，也不要轮询——它的下一条消息会开启新回合。它是顶层会话，不受子代理深度上限和存活子会话池的限制。可选的 `model` 用来指定团队负责人的模型；可选的 `worker_model` 为它的工作者设定默认模型。",
 };
 
 /**
@@ -197,6 +180,27 @@ export const WAKE_SECTION_HEADINGS_ZH = [
 ] as const;
 
 /**
+ * Re-presentation block for a landed-but-undelivered result shown again.
+ * Distinct from the first-time "Settled workers" section on purpose: the same
+ * result must never read as a new settle, and it must carry the real report
+ * instead of the empty-report placeholder.
+ */
+export const WAKE_RE_PRESENTED_HEADING =
+  "## Re-presented — already shown, not yet delivered";
+
+/** ZH counterpart of {@link WAKE_RE_PRESENTED_HEADING}. */
+export const WAKE_RE_PRESENTED_HEADING_ZH =
+  "## 再次呈现——已经展示过，尚未送达";
+
+/** One-line orientation under the re-presentation heading. */
+export const WAKE_RE_PRESENTED_INTRO =
+  "These results were already shown in an earlier wake and are still not delivered. Treat them as re-presented, not as new settles; use each report below to decide whether to deliver it or stay silent.";
+
+/** ZH counterpart of {@link WAKE_RE_PRESENTED_INTRO}. */
+export const WAKE_RE_PRESENTED_INTRO_ZH =
+  "这些结果在之前的唤醒里已经展示过，目前仍未送达。把它们当作再次呈现，而不是新的结束；根据下面的报告决定是送达还是保持沉默。";
+
+/**
  * Stable cue tokens for a peer hidden turn (ticket 14).
  * Concept, not a copied literal: the turn must never present as the user.
  */
@@ -235,6 +239,44 @@ export const PEER_ROSTER_INTRO =
 /** ZH counterpart of {@link PEER_ROSTER_INTRO} (ticket 153). */
 export const PEER_ROSTER_INTRO_ZH =
   "这些是你能用 message_agent 按会话 id 发消息的其他助手会话。它们不是用户。状态是本会话能观察到的东西：idle 表示没有回合、没有停放的请求、也没有排队的唤醒。";
+
+/**
+ * Freshness / supersede marker that closes the tail roster, once per turn.
+ *
+ * Why this exists: the host REPLAYS committed user messages after a restart,
+ * so a roster block from an earlier turn can still sit in the live context
+ * above this turn's reminder. The plugin cannot delete a committed user
+ * message, and compaction never touches user messages, so the newest reminder
+ * is the only lever left — it says, in fixed bytes, that it supersedes every
+ * earlier "Other agents" section.
+ *
+ * Constant text on purpose: no clock, counter, turn number, or random id, so
+ * an unchanged roster still renders byte-identical across turns (the tail is
+ * the part cache invalidation can afford, and even that is kept stable).
+ */
+export const PEER_ROSTER_FRESHNESS_LINE =
+  'This roster is current as of this turn; ignore every earlier "Other agents" section.';
+
+/** ZH counterpart of {@link PEER_ROSTER_FRESHNESS_LINE}. */
+export const PEER_ROSTER_FRESHNESS_LINE_ZH =
+  "这份名册以本回合为准；请忽略此前任何“其他代理”小节。";
+
+/**
+ * Body of the EMPTY roster section.
+ *
+ * The case that made this necessary: after a restart the root session's fresh
+ * reminder had no roster at all (no visible peers), while a 7-row block from
+ * an earlier turn was still above it in the replayed log. A reminder that
+ * renders nothing supersedes nothing, so the empty case now emits a fresh
+ * "Other agents" section with zero rows plus the same supersede instruction.
+ * Fixed text: the section must not move for unchanged state.
+ */
+export const PEER_ROSTER_EMPTY_LINE =
+  'No other agents are visible to this session right now. This section is current as of this turn; ignore every earlier "Other agents" section.';
+
+/** ZH counterpart of {@link PEER_ROSTER_EMPTY_LINE}. */
+export const PEER_ROSTER_EMPTY_LINE_ZH =
+  "本会话现在看不到其他代理。本小节以本回合为准；请忽略此前任何“其他代理”小节。";
 
 /** Empty-ledger marker in the per-turn reminder. */
 export const EMPTY_LEDGER_LINE = "(empty)";
@@ -298,7 +340,7 @@ export function buildDispatcherPolicySection(
     : buildDispatcherPolicySectionEn(origin, generation);
 }
 
-/** EN face of the dispatcher policy section — one text for every dispatcher. */
+/** EN face of the chief-of-staff policy section. */
 function buildDispatcherPolicySectionEn(
   _origin: DispatcherOrigin = "user",
   _generation = 2,
@@ -307,7 +349,8 @@ function buildDispatcherPolicySectionEn(
     "# Multitask dispatcher",
     "",
     "- You are the user's chief of staff for a large project.",
-    "- You stay responsive. All work goes to workers and teams (`spawn_dispatcher`) you spawn. Do not do anything yourself unless extremely trivial.",
+    "- You stay responsive. All work goes to workers you start with the stock `subagent` tool, and a whole large job goes to a team you summon with `spawn_dispatcher`. Do not do anything yourself unless extremely trivial.",
+    "- Start a worker with `subagent`: `description` is a short title, `prompt` is the full self-contained task. Use `list_agents` when you need status, `send_message` to steer a running worker or continue a finished one, and `interrupt_agent` to stop one. Never wait or poll — end the turn; the worker's completion notice starts a new turn and carries its closing message.",
     "- Keep a timed ledger to track both progress and team/worker state and update it after any dispatch you send or receive.",
     "- Talk to the user in plain language, do not use invented jargon, and order your team to do the same.",
   ].join("\n");
@@ -316,15 +359,11 @@ function buildDispatcherPolicySectionEn(
 /**
  * A dispatcher another dispatcher summoned: a team leader for one large job.
  *
- * Owner-directed copy, 2026-11-02. Two tool names in the source text are the
- * host's, not ours, and are mapped here rather than dropped:
- *
- * - "subagents you dispatch with the `subagent` tool" → a worker created with
- *   `spawn_worker`. The host's raw spawn verbs exist, but their children skip
- *   the worker contract, the tool barrier and the ledger entry (see
- *   `src/worker/preset.ts`), so a team leader using them would create children
- *   this plugin cannot see. `spawn_worker` is the same call plus that
- *   composition.
+ * Owner-directed copy. The rules name the stock agent verbs directly: a team
+ * leader starts every worker with `subagent` (`description` = short title,
+ * `prompt` = the full self-contained task) and uses `list_agents` /
+ * `send_message` / `interrupt_agent` for status, corrections and stops. It
+ * never gets `spawn_dispatcher`, so it cannot summon further dispatchers.
  *
  * The owner's 2026-11-03 rewrite replaced the text wholesale and dropped the
  * 45-minute health-check block that used to follow the rules. The scheduling
@@ -341,6 +380,8 @@ function buildSpawnedDispatcherSectionEn(): string {
     "## Rules",
     "",
     "- Don't read or write files yourself unless trivially small.",
+    "- Start every worker with the stock `subagent` tool: `description` is a short title, `prompt` is the full self-contained task. Use `list_agents` when you need status, `send_message` to steer a running worker or continue a finished one, and `interrupt_agent` to stop one.",
+    "- Never wait or poll. End the turn; the worker's completion notice starts a new turn and carries its closing message.",
     "- Remember workers start blank, don't make them read the whole repo. Your prompt should carry context including file paths, prior findings, acceptance criteria, and what to report back.",
     "- Tell workers to not overcomplicate, do not invent a blockage for themselves, and do as little testing as possible.",
     "- If any agent ran for more than 30min, you should consider whether to reduce its scope and rechunk remaining for parallel work.",
@@ -365,6 +406,8 @@ function buildSpawnedDispatcherSectionZh(): string {
     "## 规则",
     "",
     "- 除非极其琐碎，不要自己读写文件。",
+    "- 每个工作者都用原生的 `subagent` 工具启动：`description` 是短标题，`prompt` 是完整、自成一体的任务。需要状态时用 `list_agents`，要纠正正在运行的工作者或让已结束的继续做时用 `send_message`，要停掉一个时用 `interrupt_agent`。",
+    "- 绝不等待，也不要轮询。结束回合；工作者的完成通知会开启新回合，并带上它的收尾消息。",
     "- 记住工作者是从空白开始的，不要让他们去读整个仓库。你的提示要带上背景，包括文件路径、已有发现、验收标准，以及要回报什么。",
     "- 告诉工作者不要把事情搞复杂，不要自己给自己发明阻碍，测试尽量少做。",
     "- 任何一个代理跑了超过 30 分钟，你都应该考虑缩小它的范围，把剩下的活重新切分以便并行。",
@@ -384,7 +427,7 @@ function buildSpawnedDispatcherSectionZh(): string {
  * Terminology follows the client dictionary's zh face (`src/client/overlay.ts`)
  * so the model and the UI name the same things: 调度器 / 工作者 / 待办 / 中途指示 /
  * 流 / 送达 / 唤醒 / 会话 / 代理. Tool names and status literals stay ASCII
- * identifiers (`spawn_worker`, `in_progress`, `completed`, …); transliterating
+ * identifiers (`subagent`, `in_progress`, `completed`, …); transliterating
  * them would break the tool contract.
  */
 function buildDispatcherPolicySectionZh(
@@ -395,7 +438,8 @@ function buildDispatcherPolicySectionZh(
     "# 多任务调度器",
     "",
     "- 你是用户在一个大型项目上的幕僚长。",
-    "- 你保持随时响应。所有工作都交给你启动的工作者和团队（`spawn_dispatcher`）。除非极其琐碎，否则不要自己做任何事。",
+    "- 你保持随时响应。所有工作都交给你用原生的 `subagent` 工具启动的工作者；整项庞大的工作则交给你用 `spawn_dispatcher` 召唤的团队。除非极其琐碎，否则不要自己做任何事。",
+    "- 用 `subagent` 启动工作者：`description` 是短标题，`prompt` 是完整、自成一体的任务。需要状态时用 `list_agents`，要纠正正在运行的工作者或让已结束的继续做时用 `send_message`，要停掉一个时用 `interrupt_agent`。绝不等待，也不要轮询——结束回合；工作者的完成通知会开启新回合，并带上它的收尾消息。",
     "- 维护一份带时间的账本，跟踪进度以及团队和工作者状态；每发出一件工作或收到一件工作之后都更新它。",
     "- 用日常语言和用户说话，不要用自造的行话，并要求你的团队也这样做。",
   ].join("\n");
@@ -433,14 +477,14 @@ function buildStandingRulesBlockZh(origin: DispatcherOrigin): string {
     : buildChiefOfStaffStandingRulesBlockZh();
 }
 
-/** Chief of staff: the human's own chat. Six rules, unchanged bytes. */
+/** Chief of staff: the human's own chat. Six rules. */
 function buildChiefOfStaffStandingRulesBlockEn(): string {
   return [
     "## Standing rules",
-    "- All non-trivial work, including planning, goes to a worker (an independent small item suitable for one-shotting) or a team (all multi-step work). Convey fast; do not plan for them.",
-    "- Keep turns short: reply or act, then end or wait bounded (`await_agent`); never loop.",
+    "- All non-trivial work, including planning, goes to a worker you start with `subagent` (an independent small item suitable for one-shotting) or a team (all multi-step work). Convey fast; do not plan for them.",
+    "- Keep turns short: reply or act, then end the turn. Do not wait or poll — a worker's completion notice starts a new turn and carries its closing message.",
     "- Tell the user what you are doing before you do it.",
-    "- A correction is a steer (`message_agent`), not a cloned worker.",
+    "- A correction is `send_message` to the worker, not a cloned worker.",
     "- Plain and concise language, no jargon. Name the actual outcome instead of a vague success claim.",
     "- Update the ledger and keep it lean.",
   ].join("\n");
@@ -459,8 +503,8 @@ function buildTeamLeaderStandingRulesBlockEn(): string {
   return [
     "## Standing rules",
     "- Chunk down tasks as much as you can, run as many lanes in parallel as you can. If any task can be run in parallel chunks, do that instead of giving to a single agent.",
-    "- Keep turns short: dispatch or re-chunk, then end or wait bounded (`await_agent`); never loop.",
-    "- A correction is a steer (`message_agent`), not a cloned worker. When a part is running and the direction changes, steer it.",
+    "- Keep turns short: dispatch or re-chunk, then end the turn. Do not wait or poll — a worker's completion notice starts a new turn and carries its closing message.",
+    "- A correction is `send_message` to the worker, not a cloned worker. When a part is running and the direction changes, send it the new direction.",
     "- Plain and concise language, no jargon. Lead with what is now unblocked, not \"it worked\".",
     "- Update the ledger and keep it lean. It is how you see what is running, what is parked, and what still needs splitting.",
   ].join("\n");
@@ -470,10 +514,10 @@ function buildTeamLeaderStandingRulesBlockEn(): string {
 function buildChiefOfStaffStandingRulesBlockZh(): string {
   return [
     "## 常设规则",
-    "- 所有非琐碎的工作，包括规划，都交给工作者（一件可以一次做完的独立小事）或团队（所有多步工作）。传达要快；不要替它们做规划。",
-    "- 回合要短：回答或动手，然后结束，或者做一次有上限的等待（`await_agent`）；绝不循环。",
+    "- 所有非琐碎的工作，包括规划，都交给你用 `subagent` 启动的工作者（一件可以一次做完的独立小事）或团队（所有多步工作）。传达要快；不要替它们做规划。",
+    "- 回合要短：回答或动手，然后结束回合。不要等待，也不要轮询——工作者的完成通知会开启新回合，并带上它的收尾消息。",
     "- 在做之前先告诉用户你要做什么。",
-    "- 修正就是发中途指示（`message_agent`），不是复制一个工作者。",
+    "- 修正就是用 `send_message` 给那个工作者发消息，不是复制一个工作者。",
     "- 语言平实简洁，不用行话。直接说实际结果，不要用笼统的成功说法。",
     "- 更新账本，并保持精简。",
   ].join("\n");
@@ -484,8 +528,8 @@ function buildTeamLeaderStandingRulesBlockZh(): string {
   return [
     "## 常设规则",
     "- 任务切得越细越好，能并行的通道开得越多越好。任何任务只要可以拆成并行的几块，就这样做，不要整块交给一个代理。",
-    "- 回合要短：派发或重新切分，然后结束，或者做一次有上限的等待（`await_agent`）；绝不循环。",
-    "- 修正就是发中途指示（`message_agent`），不是复制一个工作者。某一块正在运行而方向变了，就纠正它。",
+    "- 回合要短：派发或重新切分，然后结束回合。不要等待，也不要轮询——工作者的完成通知会开启新回合，并带上它的收尾消息。",
+    "- 修正就是用 `send_message` 给那个工作者发消息，不是复制一个工作者。某一块正在运行而方向变了，就把新方向发给它。",
     "- 语言平实简洁，不用行话。开头先说现在什么被解锁了，不要说“它跑通了”。",
     "- 更新账本，并保持精简。它让你看到什么在运行、什么在停放、什么还需要再切分。",
   ].join("\n");
@@ -521,7 +565,7 @@ function buildWakeInstructionsBlockZh(origin: DispatcherOrigin): string {
     : buildChiefOfStaffWakeInstructionsBlockZh();
 }
 
-/** Chief of staff: six steps, unchanged bytes. */
+/** Chief of staff: six steps. */
 function buildChiefOfStaffWakeInstructionsBlockEn(): string {
   return [
     "## What to do now",
@@ -531,8 +575,8 @@ function buildChiefOfStaffWakeInstructionsBlockEn(): string {
     "   - Tell them if the result is new, relevant, or they asked to be told.",
     "   - Stay silent and end the turn if it is stale or duplicate info for the user.",
     "3. If you speak, state the specific outcome. A vague claim that work finished tells the user nothing.",
-    "4. State the result in your reply to the user — that reply is the channel they read. Then mark the matching todo `completed`.",
-    "5. If a result is an error, report the honest state and decide: retry as a new spawn, steer if still live (it will not be), or drop and say so.",
+    "4. State the result in your reply to the user — that reply is the channel they read. Then close the matching ledger entry with `deliver_result(todo_id=...)`.",
+    "5. If a result is an error, report the honest state and decide: continue that worker with `send_message`, start the retry as a new `subagent`, or drop it and say so.",
     "6. Silence is a valid outcome.",
   ].join("\n");
 }
@@ -542,9 +586,10 @@ function buildChiefOfStaffWakeInstructionsBlockEn(): string {
  *
  * The job is a plan of many parts, so a settle is a re-chunking trigger, not
  * a delivery decision. The audience test replaces the chief-of-staff "should
- * the user hear it": report to whoever gave the order, upward by
- * `message_agent`, and to the user only when the user ordered it directly
- * (ADR-0032 question 1 still stands — the leader is not mute).
+ * the user hear it": the final answer is pushed to the summoner automatically
+ * when the leader goes idle, so `message_agent` is reserved for interim
+ * upward notes, and the user hears the leader only when the user ordered it
+ * directly (ADR-0032 question 1 still stands — the leader is not mute).
  */
 function buildTeamLeaderWakeInstructionsBlockEn(): string {
   return [
@@ -552,13 +597,13 @@ function buildTeamLeaderWakeInstructionsBlockEn(): string {
     "",
     "1. Match each settled worker to its ledger entry (`todo_id` on the worker record). A settle closes one part, not the job.",
     "2. Re-chunk what is left. A finished part usually changes the split: decide what can run in parallel now, and dispatch it before you answer anyone.",
-    "3. Report back to whoever gave you the task order. `message_agent` to the dispatcher that summoned you, addressed to the session id on the \"Summoning dispatcher session id\" line of your handoff prompt; if the user directly ordered something from you, state the result in your reply to the user — that reply is the channel they read.",
+    "3. Report back to whoever gave the task order: your final answer is pushed to the dispatcher that summoned you automatically when you go idle, so do not resend it with `message_agent`. Use `message_agent` (to the session id on the \"Summoning dispatcher session id\" line of your handoff prompt) only for interim upward notes that the summoner needs before you are done; if the user directly ordered something from you, state the result in your reply to the user — that reply is the channel they read — and close its ledger entry with `deliver_result(todo_id=...)`.",
     "4. Report failures early instead of exhausting save attempts. If the approach looks like a dead end, report at the first sign.",
     "5. Silence is a valid outcome only when nothing changed for anyone above you.",
   ].join("\n");
 }
 
-/** ZH face of the wake instructions (ticket 153) — same six steps, same bounds. */
+/** ZH face of the wake instructions (ticket 153) — same six steps, same shape. */
 function buildChiefOfStaffWakeInstructionsBlockZh(): string {
   return [
     "## 现在该做什么",
@@ -568,8 +613,8 @@ function buildChiefOfStaffWakeInstructionsBlockZh(): string {
     "   - 如果结果是新的、相关的，或用户要求被告知，就告诉他们。",
     "   - 如果对用户来说已经过时或属于重复信息，就保持沉默并结束回合。",
     "3. 如果要说话，开头先说清具体完成的是什么——不要说“已完成”，也不要说“它跑通了”。",
-    "4. 在给用户的回复里说明结果——用户读到的就是这条回复。然后把对应的待办标为 `completed`。",
-    "5. 如果结果是错误，如实报告状态并做决定：作为新的启动重试、如果仍存活就发中途指示（它不会存活），还是丢弃并说明。",
+    "4. 在给用户的回复里说明结果——用户读到的就是这条回复。然后用 `deliver_result(todo_id=...)` 关闭对应的账本条目。",
+    "5. 如果结果是错误，如实报告状态并做决定：用 `send_message` 让那个工作者继续、用 `subagent` 重新启动重试，还是丢弃并说明。",
     "6. 沉默是有效的结果。",
   ].join("\n");
 }
@@ -581,7 +626,7 @@ function buildTeamLeaderWakeInstructionsBlockZh(): string {
     "",
     "1. 把每个已结束的工作者对应到它的账本条目（工作者记录上的 `todo_id`）。结束只是关掉其中一块，不是整个任务。",
     "2. 把剩下的重新切分。一块做完通常会改变切法：现在定下哪些可以并行，并在答复任何人之前把它们派发出去。",
-    "3. 向交给你这项任务的人回报。用 `message_agent` 发给召唤你的那个调度器，地址用你交接提示里标着“Summoning dispatcher session id”的那一行给出的会话 id；如果是用户直接向你下的令，就在给用户的回复里说明结果——用户读到的就是这条回复。",
+    "3. 向交给你这项任务的人回报：你空闲时，最终答复会自动推送给召唤你的那个调度器，所以不要再用 `message_agent` 重发一遍。`message_agent` 只用于在你做完之前、上层中途就需要知道的笔记（地址用你交接提示里标着“Summoning dispatcher session id”的那一行给出的会话 id）；如果是用户直接向你下的令，就在给用户的回复里说明结果——用户读到的就是这条回复——并用 `deliver_result(todo_id=...)` 关闭对应的账本条目。",
     "4. 失败要尽早报告，不要耗尽挽回的尝试。如果这条路看起来是死路，一有迹象就报告。",
     "5. 只有在上层没有任何人因此发生变化时，沉默才是有效的结果。",
   ].join("\n");
@@ -618,7 +663,7 @@ function buildPeerWakeInstructionsBlockZh(origin: DispatcherOrigin): string {
     : buildChiefOfStaffPeerWakeInstructionsBlockZh();
 }
 
-/** Chief of staff: five steps, unchanged bytes. */
+/** Chief of staff: five steps. */
 function buildChiefOfStaffPeerWakeInstructionsBlockEn(): string {
   return [
     "## What to do now",
@@ -626,7 +671,7 @@ function buildChiefOfStaffPeerWakeInstructionsBlockEn(): string {
     "1. Treat every message above as coming from another assistant — not from the user.",
     "2. Decide whether this peer note changes work already in flight (steer), needs new work (spawn), or can be acknowledged and dropped.",
     "3. Do not paraphrase the peer note to the user on this turn unless the user asked to hear about peer traffic. Ending the turn in silence is valid.",
-    "4. If you must reply to the peer later, use message_agent addressed to the sender's session id shown above — never the user-facing send.",
+    "4. If you must reply to the peer later, use message_agent addressed to the sender's session id shown above; for one of your own workers use send_message to its id. Never the user-facing send.",
     "5. Never present peer text as if the user wrote it.",
   ].join("\n");
 }
@@ -655,7 +700,7 @@ function buildChiefOfStaffPeerWakeInstructionsBlockZh(): string {
     "1. 把上面的每条消息都当作来自另一个助手——不是来自用户。",
     "2. 判断这条同伴消息是改变已在进行的工作（中途指示）、需要新工作（启动），还是确认后就可以放下。",
     "3. 这个回合里不要把同伴消息转述给用户，除非用户要求了解同伴之间的往来。沉默地结束回合是有效的。",
-    "4. 如果之后必须回复同伴，用 `message_agent` 按上方显示的发送者的会话 id 发送——绝不要用面向用户的发送。",
+    "4. 如果之后必须回复同伴，用 `message_agent` 按上方显示的发送者的会话 id 发送；如果发送者是你自己的工作者，就用 `send_message` 按它的 id 回复。绝不要用面向用户的发送。",
     "5. 绝不要把同伴的文字呈现得像用户写的一样。",
   ].join("\n");
 }
@@ -709,16 +754,16 @@ function buildWorkerReplyWakeInstructionsBlockZh(
     : buildChiefOfStaffWorkerReplyWakeInstructionsBlockZh();
 }
 
-/** Chief of staff: five steps, unchanged bytes. */
+/** Chief of staff: five steps. */
 function buildChiefOfStaffWorkerReplyWakeInstructionsBlockEn(): string {
   return [
     "## What to do now",
     "",
     "1. These come from your own workers, mid-task. They are not the user, and they are not another dispatcher.",
-    "2. Read the status word on each. `blocked` means the worker is telling you the method or the scope is a dead end — decide now: steer it with what you know, stop it, or spawn different work. Do not leave it running on a dead end.",
+    "2. Read the status word on each. `blocked` means the worker is telling you the method or the scope is a dead end — decide now: send it the correction with `send_message`, stop it with `interrupt_agent`, or spawn different work. Do not leave it running on a dead end.",
     "3. `progress` and `note` usually need nothing. Act only if they change what you are doing.",
     "4. Tell the user when it changes what they are waiting for, in plain language, without naming the machinery or quoting the worker. Otherwise end the turn in silence.",
-    "5. Reply to the worker with message_agent addressed to its id. Never the user-facing send.",
+    "5. Reply to the worker with `send_message` addressed to its id. Never the user-facing send.",
   ].join("\n");
 }
 
@@ -733,10 +778,10 @@ function buildTeamLeaderWorkerReplyWakeInstructionsBlockEn(): string {
     "## What to do now",
     "",
     "1. These come from your own workers, mid-task. They are not the user, and they are not another dispatcher.",
-    "2. Read the status word on each. `blocked` means the worker is telling you the method or the scope is a dead end — decide now: steer it with what you know, stop it, or spawn different work. Do not leave it running on a dead end.",
+    "2. Read the status word on each. `blocked` means the worker is telling you the method or the scope is a dead end — decide now: send it the correction with `send_message`, stop it with `interrupt_agent`, or spawn different work. Do not leave it running on a dead end.",
     "3. `progress` and `note` usually need nothing. Act only if they change what you are doing.",
     "4. If it changes what the dispatcher that summoned you is waiting for, report it upward with message_agent addressed to the session id on the \"Summoning dispatcher session id\" line of your handoff prompt — in plain language, without naming the machinery or quoting the worker. Otherwise end the turn in silence.",
-    "5. Reply to the worker with message_agent addressed to its id. Never the user-facing send.",
+    "5. Reply to the worker with `send_message` addressed to its id. Never the user-facing send.",
   ].join("\n");
 }
 
@@ -746,10 +791,10 @@ function buildChiefOfStaffWorkerReplyWakeInstructionsBlockZh(): string {
     "## 现在该做什么",
     "",
     "1. 这些来自你自己的工作者，是在任务进行中发出的。它们不是用户，也不是另一个调度器。",
-    "2. 逐条看状态词。`blocked` 表示工作者在告诉你方法或范围是死路——现在就决定：用你知道的信息纠正它、停掉它，还是换一件工作交给别人。不要让它继续跑在死路上。",
+    "2. 逐条看状态词。`blocked` 表示工作者在告诉你方法或范围是死路——现在就决定：用 `send_message` 把修正发给它、用 `interrupt_agent` 停掉它，还是换一件工作交给别人。不要让它继续跑在死路上。",
     "3. `progress` 和 `note` 通常不需要动作。只有当它们改变了你在做的事时才处理。",
     "4. 如果它改变了用户在等的结果，就用日常的话告诉用户，不要提背后的运行细节，也不要转述工作者。否则就沉默地结束回合。",
-    "5. 用 `message_agent` 按工作者的 id 回复它。绝不要用面向用户的发送。",
+    "5. 用 `send_message` 按工作者的 id 回复它。绝不要用面向用户的发送。",
   ].join("\n");
 }
 
@@ -759,9 +804,9 @@ function buildTeamLeaderWorkerReplyWakeInstructionsBlockZh(): string {
     "## 现在该做什么",
     "",
     "1. 这些来自你自己的工作者，是在任务进行中发出的。它们不是用户，也不是另一个调度器。",
-    "2. 逐条看状态词。`blocked` 表示工作者在告诉你方法或范围是死路——现在就决定：用你知道的信息纠正它、停掉它，还是换一件工作交给别人。不要让它继续跑在死路上。",
+    "2. 逐条看状态词。`blocked` 表示工作者在告诉你方法或范围是死路——现在就决定：用 `send_message` 把修正发给它、用 `interrupt_agent` 停掉它，还是换一件工作交给别人。不要让它继续跑在死路上。",
     "3. `progress` 和 `note` 通常不需要动作。只有当它们改变了你在做的事时才处理。",
     "4. 如果它改变了召唤你的那个调度器在等的结果，就用 `message_agent` 向上回报，地址用你交接提示里标着“Summoning dispatcher session id”的那一行给出的会话 id——用日常的话，不要提背后的运行细节，也不要转述工作者。否则就沉默地结束回合。",
-    "5. 用 `message_agent` 按工作者的 id 回复它。绝不要用面向用户的发送。",
+    "5. 用 `send_message` 按工作者的 id 回复它。绝不要用面向用户的发送。",
   ].join("\n");
 }

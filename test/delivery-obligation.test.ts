@@ -7,6 +7,7 @@ import {
 import { FakeDshHost } from "../src/core/fake-host.js";
 import { createMultitask, type Multitask } from "../src/core/multitask.js";
 import { formatLedgerLine } from "../src/core/policy/assembler.js";
+import { emptyReportPlaceholder } from "../src/core/report-clamp.js";
 import { composeWakeText } from "../src/plugin.js";
 import {
   MAX_DELIVERY_REDRIVES,
@@ -51,12 +52,19 @@ async function spawnForTodo(
   });
   assert.equal(result.ok, true);
   assert.ok(result.ok);
+  // Model the host's running edge: a worker that settles has taken a turn, so
+  // its linked todo is already in_progress when the terminal event lands.
+  multitask.noteTurnStarted(result.workerId);
   return result.workerId;
 }
 
 /** Take the item from settle to "still undelivered after its first chance". */
-function settleUndelivered(host: FakeDshHost, workerId: string): void {
-  host.fireSettled({ workerId, status: "completed", report: "done" });
+function settleUndelivered(
+  host: FakeDshHost,
+  workerId: string,
+  report = "done",
+): void {
+  host.fireSettled({ workerId, status: "completed", report });
 }
 
 function todoOf(multitask: Multitask, todoId = "todo-1"): TodoItem {
@@ -65,35 +73,33 @@ function todoOf(multitask: Multitask, todoId = "todo-1"): TodoItem {
   return todo;
 }
 
-describe("delivery obligation — the settle wake is the first chance (D-5)", () => {
-  it("draining a settle wake redrives nothing: that wake IS the delivery opportunity", async () => {
+describe("delivery obligation — no plugin settle wake; the first turn end is the first chance (D-5)", () => {
+  it("a settle opens no plugin wake and spends no attempt until the first turn end", async () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
     const workerId = await spawnForTodo(multitask, host);
 
     settleUndelivered(host, workerId);
-    const drained = multitask.drainWake(SESSION);
-    assert.ok(drained, "the settle produced a wake");
-
-    // The worker that settled in this very wake must not be treated as a
-    // missed delivery — otherwise the happy path would silently spend part of
-    // the retry budget and the bound would mean something weaker than it says.
+    // The stock completion notice is the parent-visible turn now; the plugin
+    // opens no wake of its own for a settle, and the ledger is untouched
+    // until the accounting point at the end of that turn.
     assert.equal(
-      drained.reconcile.toRedrive.length,
-      0,
-      "a first-chance settle is not a redrive",
+      multitask.drainWake(SESSION),
+      undefined,
+      "the settle enqueues no plugin wake",
     );
-    assert.equal(
-      drained.reconcile.mutations.some((m) => m.type === "record-redrive"),
-      false,
-      "no attempt is spent on the settle that carries the result",
-    );
-    assert.equal(
-      drained.reconcile.landedUndelivered.length,
-      1,
-      "it is still owed, and visible as owed",
-    );
+    assert.equal(composeWakeText(multitask, SESSION), null, "nothing to present");
     assert.equal(todoOf(multitask).redriveAttempts, 0);
+
+    // The end of that first turn is the first opportunity the plugin can see.
+    // Failing to deliver there costs exactly one attempt — the previously
+    // uncharged settle-wake chance has moved to the stock-notice turn.
+    const report = multitask.redriveUndelivered(SESSION);
+    assert.equal(report.redriven.length, 1);
+    assert.equal(report.lost.length, 0);
+    assert.equal(todoOf(multitask).redriveAttempts, 1);
+    assert.equal(todoOf(multitask).status, "in_progress");
+    assert.equal(todoOf(multitask).delivered, false);
   });
 });
 
@@ -103,8 +109,8 @@ describe("delivery obligation — bounded redrive opens a turn (D-5)", () => {
     const multitask = createMultitask(host);
     const workerId = await spawnForTodo(multitask, host);
     settleUndelivered(host, workerId);
-    multitask.drainWake(SESSION);
-
+    // The settle opens no plugin wake; the first turn end is the accounting
+    // point and must charge the miss.
     const wakesBefore = host.wakeCalls.length;
     const report = multitask.redriveUndelivered(SESSION);
 
@@ -150,14 +156,22 @@ describe("delivery obligation — the bound is terminal (D-5)", () => {
     const multitask = createMultitask(host);
     const workerId = await spawnForTodo(multitask, host);
     settleUndelivered(host, workerId);
-    multitask.drainWake(SESSION);
 
     // Spend the budget. Each pass that still finds the result undelivered
     // costs one attempt; the pass that finds the budget exhausted escalates.
+    // The wake each pass opens is drained first: an undrained redrive turn is
+    // the opportunity its already-spent attempt paid for, so a second pass
+    // before delivery must not charge it again (peekPending).
     for (let attempt = 1; attempt <= MAX_DELIVERY_REDRIVES; attempt += 1) {
       const report = multitask.redriveUndelivered(SESSION);
       assert.equal(report.lost.length, 0, `attempt ${attempt} is inside the bound`);
       assert.equal(todoOf(multitask).redriveAttempts, attempt);
+      assert.ok(multitask.drainWake(SESSION), `attempt ${attempt} opens a turn`);
+      assert.equal(
+        todoOf(multitask).redriveAttempts,
+        attempt,
+        "draining the paid turn spends no extra attempt",
+      );
     }
 
     const wakesBefore = host.wakeCalls.length;
@@ -186,7 +200,6 @@ describe("delivery obligation — the bound is terminal (D-5)", () => {
     const multitask = createMultitask(host, { maxRedrives: 0 });
     const workerId = await spawnForTodo(multitask, host);
     settleUndelivered(host, workerId);
-    multitask.drainWake(SESSION);
 
     const report = multitask.redriveUndelivered(SESSION);
     assert.equal(report.lost.length, 1, "maxRedrives 0 escalates immediately");
@@ -244,7 +257,6 @@ describe("delivery obligation — the budget is a lifetime one (D-5)", () => {
     const coreA = createMultitask(hostA, { durability });
     const workerId = await spawnForTodo(coreA, hostA);
     settleUndelivered(hostA, workerId);
-    coreA.drainWake(SESSION);
     assert.equal(coreA.redriveUndelivered(SESSION).redriven.length, 1);
 
     const marker = durability.markers.get(workerId);
@@ -275,7 +287,6 @@ describe("delivery obligation — the budget is a lifetime one (D-5)", () => {
     const coreA = createMultitask(hostA, { durability });
     const workerId = await spawnForTodo(coreA, hostA);
     settleUndelivered(hostA, workerId);
-    coreA.drainWake(SESSION);
 
     // Activation: rebuild from markers only, then redrive — the two calls the
     // plugin makes, in order.
@@ -363,6 +374,15 @@ describe("delivery obligation — telemetry (D-6)", () => {
 
     // The first worker finally reports. Nobody is waiting for it any more.
     settleUndelivered(host, first.workerId);
+    // The plugin no longer enqueues a settle wake, so feed the notice straight
+    // onto the bus to pin the reconciler's superseded telemetry.
+    multitask.wakeBus.enqueueWorkerSettled({
+      parentSessionId: SESSION,
+      workerId: first.workerId,
+      status: "completed",
+      title: "Research",
+      resultText: "done",
+    });
     const drained = multitask.drainWake(SESSION);
     assert.ok(drained);
 
@@ -427,9 +447,8 @@ describe("delivery obligation — one redrive turn costs one attempt (ticket 197
     const multitask = createMultitask(host, { durability });
     const workerId = await spawnForTodo(multitask, host);
     settleUndelivered(host, workerId);
-    // The settle wake is the first delivery opportunity, not a redrive.
-    multitask.drainWake(SESSION);
-
+    // The settle opens no plugin wake; the first turn end is the accounting
+    // point, so this pass spends the first attempt.
     const report = multitask.redriveUndelivered(SESSION);
     assert.equal(report.redriven.length, 1);
     assert.equal(todoOf(multitask).redriveAttempts, 1);
@@ -464,7 +483,6 @@ describe("delivery obligation — one redrive turn costs one attempt (ticket 197
       report: "result",
       transcriptRef: "worker-transcript",
     });
-    coreA.drainWake(SESSION);
     assert.equal(coreA.redriveUndelivered(SESSION).redriven.length, 1);
     coreA.drainWake(SESSION);
 
@@ -505,7 +523,6 @@ describe("delivery obligation — one redrive turn costs one attempt (ticket 197
     const multitask = createMultitask(host, { durability });
     const workerId = await spawnForTodo(multitask, host);
     settleUndelivered(host, workerId);
-    multitask.drainWake(SESSION);
 
     for (let attempt = 1; attempt <= MAX_DELIVERY_REDRIVES; attempt += 1) {
       assert.equal(multitask.redriveUndelivered(SESSION).redriven.length, 1);
@@ -534,6 +551,214 @@ describe("delivery obligation — one redrive turn costs one attempt (ticket 197
     assert.equal(final.lost.length, 1);
     assert.equal(todoOf(recovered).status, "lost");
     assert.equal(todoOf(recovered).dispositionReason, "max-redrives");
+  });
+});
+
+describe("delivery obligation — a queued settle is the first opportunity (duplicate-wake repair)", () => {
+  const REAL_REPORT =
+    "Migration finished: 42 handlers audited, 7 fixes landed, and the smoke suite is green.";
+
+  // The core no longer enqueues a settle wake (the stock completion notice
+  // opens the turn). These pins are about the bus/reconcile accounting for a
+  // settle notice, so they supply that notice on the bus directly.
+  function queueSettleNotice(
+    multitask: Multitask,
+    workerId: string,
+    resultText = REAL_REPORT,
+  ): void {
+    multitask.wakeBus.enqueueWorkerSettled({
+      parentSessionId: SESSION,
+      workerId,
+      status: "completed",
+      title: "Research",
+      resultText,
+    });
+  }
+
+  it("a settle queued mid-turn is not charged as a missed redrive", async () => {
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host);
+    const workerId = await spawnForTodo(multitask, host);
+    // The dispatcher turn is still running, so the settle notice lands in the
+    // bus's pending batch instead of a ready wake.
+    multitask.wakeBus.noteTurnStarted(SESSION);
+    settleUndelivered(host, workerId, REAL_REPORT);
+    queueSettleNotice(multitask, workerId);
+
+    // peekPending sees that queued settle; redrive must reconcile against it
+    // rather than a fabricated empty wake.
+    const queued = multitask.wakeBus.peekPending(SESSION);
+    assert.ok(queued, "the queued settle is visible to the redrive pass");
+    assert.equal(queued.settledWorkers.length, 1);
+    assert.equal(queued.settledWorkers[0]?.workerId, workerId);
+
+    const report = multitask.redriveUndelivered(SESSION);
+    assert.equal(report.redriven.length, 0, "the queued settle is its own chance");
+    assert.equal(report.lost.length, 0);
+    assert.equal(todoOf(multitask).redriveAttempts, 0, "no attempt is spent");
+    assert.equal(host.wakeCalls.length, 0, "a mid-turn redrive does not interrupt");
+  });
+
+  it("turn end flushes the queued settle with the real report", async () => {
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host);
+    const workerId = await spawnForTodo(multitask, host);
+    multitask.wakeBus.noteTurnStarted(SESSION);
+    settleUndelivered(host, workerId, REAL_REPORT);
+    queueSettleNotice(multitask, workerId);
+    multitask.redriveUndelivered(SESSION);
+
+    multitask.wakeBus.noteTurnEnded(SESSION);
+    assert.equal(host.wakeCalls.length, 1, "turn end opens the queued settle wake");
+
+    const text = composeWakeText(multitask, SESSION);
+    assert.ok(text, "the flushed settle composes a wake");
+    assert.ok(text.includes(REAL_REPORT), "the wake carries the real report");
+    assert.ok(text.includes("## Settled workers"), "it is a first-time settle");
+    assert.ok(
+      !text.includes("Re-presented — already shown, not yet delivered"),
+      "a first presentation is not re-presented",
+    );
+    assert.ok(
+      !text.includes(emptyReportPlaceholder()),
+      "the empty-report placeholder never stands in for a real report",
+    );
+    assert.equal(todoOf(multitask).redriveAttempts, 0);
+  });
+
+  it("the next redrive wake re-presents the real report, never the placeholder", async () => {
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host);
+    const workerId = await spawnForTodo(multitask, host);
+    settleUndelivered(host, workerId, REAL_REPORT);
+    queueSettleNotice(multitask, workerId);
+    // First presentation: the settle wake is drained but the result is not
+    // delivered to the user.
+    multitask.drainWake(SESSION);
+    assert.equal(todoOf(multitask).redriveAttempts, 0);
+
+    const redrive = multitask.redriveUndelivered(SESSION);
+    assert.equal(redrive.redriven.length, 1);
+    assert.equal(todoOf(multitask).redriveAttempts, 1);
+
+    const text = composeWakeText(multitask, SESSION);
+    assert.ok(text, "the redrive wake composes");
+    const representedAt = text.indexOf(
+      "## Re-presented — already shown, not yet delivered",
+    );
+    const reportAt = text.indexOf(REAL_REPORT);
+    assert.ok(representedAt >= 0, "the distinct re-presented block is present");
+    assert.ok(reportAt > representedAt, "the real report rides that block");
+    assert.ok(
+      text.indexOf("## Settled workers") < representedAt,
+      "it is not smuggled in as a first-time settle",
+    );
+    assert.ok(
+      !text.includes(emptyReportPlaceholder()),
+      "the placeholder is gone now that the settle record supplies the report",
+    );
+    assert.equal(
+      todoOf(multitask).redriveAttempts,
+      1,
+      "draining the paid redrive turn spends no second attempt",
+    );
+  });
+
+  it("a delivered todo drops its queued settle and opens no further wake", async () => {
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host);
+    const workerId = await spawnForTodo(multitask, host);
+    multitask.wakeBus.noteTurnStarted(SESSION);
+    settleUndelivered(host, workerId, REAL_REPORT);
+    queueSettleNotice(multitask, workerId);
+
+    // The core call deliver_result makes. The settle is queued but not yet
+    // delivered; closing the obligation must discard it.
+    assert.equal(multitask.markDelivered("todo-1"), true);
+    multitask.wakeBus.noteTurnEnded(SESSION);
+
+    assert.equal(host.wakeCalls.length, 0, "delivery drops the queued settle");
+    assert.equal(multitask.drainWake(SESSION), undefined);
+    const report = multitask.redriveUndelivered(SESSION);
+    assert.equal(report.redriven.length, 0, "a delivered result is never redriven");
+    assert.equal(report.lost.length, 0);
+    assert.equal(host.wakeCalls.length, 0, "no wake follows completion");
+    assert.equal(
+      composeWakeText(multitask, SESSION),
+      null,
+      "nothing remains to present",
+    );
+  });
+
+  it("a settle arriving after delivery is not presented", async () => {
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host);
+    const workerId = await spawnForTodo(multitask, host);
+    multitask.wakeBus.noteTurnStarted(SESSION);
+    assert.equal(multitask.markDelivered("todo-1"), true);
+
+    // The worker finishes after the ledger entry was already delivered.
+    settleUndelivered(host, workerId, REAL_REPORT);
+    multitask.wakeBus.noteTurnEnded(SESSION);
+
+    assert.equal(host.wakeCalls.length, 0, "a post-delivery settle stays silent");
+    assert.equal(multitask.drainWake(SESSION), undefined);
+    assert.equal(multitask.redriveUndelivered(SESSION).redriven.length, 0);
+    assert.equal(composeWakeText(multitask, SESSION), null);
+  });
+
+  it("a re-presented result never falls back to the empty-report placeholder", async () => {
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host);
+    const workerId = await spawnForTodo(multitask, host);
+    // A completed worker that genuinely produced no text: the settle record
+    // stores the placeholder, so the re-presentation path must re-word the
+    // absence instead of repeating "produced no text output" as if the result
+    // had never existed.
+    settleUndelivered(host, workerId, "");
+    queueSettleNotice(multitask, workerId, "");
+    multitask.drainWake(SESSION);
+
+    assert.equal(multitask.redriveUndelivered(SESSION).redriven.length, 1);
+    const text = composeWakeText(multitask, SESSION);
+    assert.ok(text, "the redrive wake composes");
+    assert.ok(
+      text.includes("## Re-presented — already shown, not yet delivered"),
+      "the distinct block is used",
+    );
+    assert.ok(
+      !text.includes(emptyReportPlaceholder()),
+      "the completed-report placeholder never stands in for a re-presentation",
+    );
+    assert.ok(
+      text.includes("no longer held in this process"),
+      "the honest fallback names why the stored text is absent",
+    );
+  });
+
+  it("a late abort cannot reopen or prune an already-delivered obligation", async () => {
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host);
+    const workerId = await spawnForTodo(multitask, host);
+    multitask.wakeBus.noteTurnStarted(SESSION);
+    assert.equal(multitask.markDelivered("todo-1"), true);
+
+    // deliver_result can land while the worker still runs. A later abort is
+    // post-completion: it must not wake, cancel, or prune the delivered row.
+    host.fireSettled({ workerId, status: "aborted", report: "" });
+    multitask.wakeBus.noteTurnEnded(SESSION);
+
+    assert.equal(host.wakeCalls.length, 0, "no wake after completion");
+    assert.equal(todoOf(multitask).status, "completed");
+    assert.equal(todoOf(multitask).delivered, true);
+    assert.equal(
+      multitask.todos
+        .listDeliveryEvents()
+        .some((event) => event.disposition === "dropped"),
+      false,
+      "a delivered result is never recorded as dropped",
+    );
+    assert.equal(multitask.redriveUndelivered(SESSION).redriven.length, 0);
   });
 });
 

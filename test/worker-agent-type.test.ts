@@ -21,16 +21,11 @@ import {
   withheldHostSpawnTools,
 } from "../src/core/tools.js";
 import {
-  AWAIT_AGENT_TOOL,
-  CHECK_WORKERS_TOOL,
-  SPAWN_DISPATCHER_TOOL,
   DELIVER_RESULT_TOOL,
   DISPATCHER_TOOL_NAMES,
   MESSAGE_AGENT_TOOL,
   SEND_PEER_TOOL,
-  SPAWN_WORKER_TOOL,
-  STEER_WORKER_TOOL,
-  STOP_WORKER_TOOL,
+  SPAWN_DISPATCHER_TOOL,
 } from "../src/core/policy/prompts.js";
 
 const FORBIDDEN_VOCAB = [
@@ -44,10 +39,12 @@ describe("worker tool barrier", () => {
   it("intersects deny candidates with known global tools", () => {
     const known = new Set(["todo_write", "present", "subagent", "send_message"]);
     const filter = buildWorkerToolFilter(known);
+    // `send_message` is the stock worker->parent reply lane: allowed.
     assert.deepEqual(
       [...filter.deny].sort(),
-      ["present", "send_message", "subagent", "todo_write"],
+      ["present", "subagent", "todo_write"],
     );
+    assert.equal(filter.deny.includes("send_message"), false);
   });
 
   it("omits unknown candidate names rather than throwing", () => {
@@ -60,13 +57,13 @@ describe("worker tool barrier", () => {
     }
   });
 
-  it("covers user, peer, spawn, job, todo, and dispatcher categories", () => {
+  it("covers user, peer, stock spawn/control, job, todo, and custom categories", () => {
     const names = new Set(WORKER_DENIED_TOOL_CANDIDATES);
     for (const required of [
       "present",
       "ask_user_question",
-      "send_message",
       "interrupt_agent",
+      "list_agents",
       "subagent",
       "subagent_fork",
       "list_subagent_models",
@@ -74,37 +71,38 @@ describe("worker tool barrier", () => {
       "job_output",
       "job_kill",
       "todo_write",
-      "spawn_worker",
-      "check_workers",
-      "steer_worker",
-      "stop_worker",
       "deliver_result",
       "send_peer",
       "message_agent",
-      "await_agent",
       "spawn_dispatcher",
       "workflow",
     ]) {
       assert.ok(names.has(required), `missing deny candidate: ${required}`);
     }
+    // The stock reply verb is deliberately NOT a deny candidate: a worker
+    // answers its parent through `send_message` (the parent sees the notice).
+    assert.equal(names.has("send_message"), false);
   });
 
-  it("denies the eight registered dispatcher tools on the spawned worker filter", () => {
+  it("denies the three registered custom tools on the spawned worker filter", () => {
     const dispatcherTools = [
-      SPAWN_WORKER_TOOL,
-      CHECK_WORKERS_TOOL,
-      STEER_WORKER_TOOL,
-      STOP_WORKER_TOOL,
       DELIVER_RESULT_TOOL,
       MESSAGE_AGENT_TOOL,
-      AWAIT_AGENT_TOOL,
       SPAWN_DISPATCHER_TOOL,
     ];
     // The declared surface, tool for tool (ticket 116 retired send_peer,
-    // which stays a deny candidate above; ticket 117 added await_agent;
-    // ticket 118 added spawn_dispatcher).
+    // which stays a deny candidate above; the stock-subagent refactor left
+    // exactly these three custom verbs).
     assert.deepEqual([...dispatcherTools], [...DISPATCHER_TOOL_NAMES]);
-    const known = new Set([...dispatcherTools, SEND_PEER_TOOL, "bash"]);
+    const known = new Set([
+      ...dispatcherTools,
+      SEND_PEER_TOOL,
+      "send_message",
+      "subagent",
+      "list_agents",
+      "interrupt_agent",
+      "bash",
+    ]);
     const filter = createWorkerAgentDef().resolveToolFilter(known);
     for (const name of dispatcherTools) {
       assert.ok(
@@ -115,7 +113,46 @@ describe("worker tool barrier", () => {
     // The retired name stays denied too — a historical row must never become
     // visible on a worker surface.
     assert.ok(filter.deny.includes(SEND_PEER_TOOL));
+    // Stock spawn/control verbs stay closed; the stock reply verb is open.
+    for (const name of ["subagent", "list_agents", "interrupt_agent"]) {
+      assert.ok(
+        filter.deny.includes(name),
+        `worker can still resolve stock verb: ${name}`,
+      );
+    }
+    assert.ok(!filter.deny.includes("send_message"));
     assert.ok(!filter.deny.includes("bash"));
+  });
+
+  it("allows stock send_message upward but no stock spawn or control verb", () => {
+    const known = new Set([
+      "send_message",
+      "subagent",
+      "subagent_fork",
+      "list_subagent_models",
+      "list_agents",
+      "interrupt_agent",
+      "read",
+    ]);
+    const deny = new Set(buildWorkerToolFilter(known).deny);
+    assert.equal(
+      deny.has("send_message"),
+      false,
+      "the worker reply lane was closed",
+    );
+    for (const blocked of [
+      "subagent",
+      "subagent_fork",
+      "list_subagent_models",
+      "list_agents",
+      "interrupt_agent",
+    ]) {
+      assert.ok(
+        deny.has(blocked),
+        `worker isolation weakened: ${blocked} allowed`,
+      );
+    }
+    assert.equal(deny.has("read"), false, "work tools survive");
   });
 
   // Ticket 182: the installed standard preset mounts `workflow`
@@ -138,10 +175,10 @@ describe("worker tool barrier", () => {
     assert.ok(!HOST_SPAWN_TOOL_CANDIDATES.includes("workflow"));
   });
 
-  // Ticket 179: the worker barrier shares the dispatcher-side candidate list,
-  // so every host spawn verb the dispatcher surface withholds (including
-  // `subagent_fork`) is denied on a worker too. A worker must never create an
-  // unaccounted child through a verb this plugin cannot see.
+  // Ticket 179: the worker barrier keeps its OWN spawn candidate list —
+  // `subagent` and `list_subagent_models` are allowed on the dispatcher
+  // surface now, but a worker must never create an unaccounted child through
+  // any of them.
   it("denies every host spawn verb candidate, subagent_fork included", () => {
     const candidates = new Set(WORKER_DENIED_TOOL_CANDIDATES);
     for (const name of HOST_SPAWN_TOOL_CANDIDATES) {
@@ -155,8 +192,8 @@ describe("worker tool barrier", () => {
   });
 
   // Ticket 119: the durable form of the rule above. Derived from the declared
-  // surface rather than a hand-kept list, so a ninth dispatcher tool cannot
-  // ship without a matching deny candidate — the failure mode is a
+  // surface rather than a hand-kept list, so a fourth custom dispatcher tool
+  // cannot ship without a matching deny candidate — the failure mode is a
   // dispatcher-only verb silently reaching a worker.
   it("every declared dispatcher tool is a deny candidate (structural, not a list)", () => {
     const candidates = new Set(WORKER_DENIED_TOOL_CANDIDATES);
@@ -210,15 +247,16 @@ describe("worker prompt assembly", () => {
     const prompt = buildWorkerSystemPrompt();
     assert.ok(prompt.includes("delegated worker"));
     assert.ok(prompt.includes("no way to message the user"));
-    assert.ok(prompt.includes("no way to message other agents"));
+    assert.ok(prompt.includes("never message any other agent"));
     assert.ok(/spawn/i.test(prompt));
+    assert.ok(prompt.includes("Never wait or poll"));
     assert.ok(prompt.includes("do not maintain a todo list"));
     assert.ok(prompt.includes("final answer"));
   });
 
   // Ticket 174 / ADR-0033 removed the worker access-ask feature in full. The
-  // contract teaches exactly ONE worker->parent channel now (the mid-task
-  // reply), and `## Limits` states the surviving rule in our own words —
+  // contract teaches only the interim `send_message` and the closing answer,
+  // and `## Limits` states the surviving rule in our own words —
   // scope is fixed, it cannot be widened from inside the session, so a task
   // that needs more ends with an honest report. The host's
   // `subagent:delegation` wording is still NOT restated (the pin above).
@@ -238,11 +276,11 @@ describe("worker prompt assembly", () => {
     );
   });
 
-  it("Limits names only the final answer and the mid-task reply", () => {
+  it("Limits names only the final answer and the interim send_message", () => {
     const prompt = buildWorkerSystemPrompt();
     assert.ok(
       prompt.includes(
-        "Your only channels back are your final answer and the mid-task reply described below.",
+        "Your only channels back are the final answer you close with and the interim `send_message` described below.",
       ),
       "Limits names exactly the two surviving channels",
     );
@@ -273,11 +311,33 @@ describe("worker prompt assembly", () => {
     );
   });
 
-  it("still teaches the mid-task reply as the surviving worker->parent channel", () => {
+  // Stock-subagent refactor (lane A2b): the worker-local `reply_to_dispatcher`
+  // tool is GONE, so the contract names the stock reply verb and the stock
+  // completion notice instead. Both facts are pinned, because the whole worker
+  // ->parent channel now rests on them.
+  it("teaches stock send_message as the interim steer and the closing answer as the report", () => {
     const prompt = buildWorkerSystemPrompt();
     assert.ok(prompt.includes("## Mid-task reply"));
-    assert.ok(prompt.includes("reply_to_dispatcher"));
     assert.ok(prompt.includes("progress, blocked, or note"));
+    assert.ok(
+      prompt.includes("`send_message`"),
+      "the interim steer must name the stock verb",
+    );
+    assert.ok(
+      prompt.includes("completion notice"),
+      "the contract must say where the dispatcher reads the worker's answer",
+    );
+    assert.ok(prompt.includes("last non-empty assistant answer"));
+    assert.ok(
+      !prompt.includes("reply_to_dispatcher"),
+      "the removed worker-local tool must not be taught",
+    );
+
+    // The ZH face is where the old tool name survived last; it must teach the
+    // stock verb and drop the removed one too.
+    const zh = buildWorkerSystemPrompt("zh");
+    assert.ok(zh.includes("`send_message`"));
+    assert.ok(!zh.includes("reply_to_dispatcher"));
   });
 
   // Ticket 55 (register D-1/D-2): the contract is delivered in a system
@@ -379,7 +439,7 @@ describe("worker tool barrier — audit hardening (second-round)", () => {
         ? {}
         : {
             tools: {
-              schemas: options.schemas ?? (() => [{ name: "spawn_worker" }, { name: "read" }]),
+              schemas: options.schemas ?? (() => [{ name: "deliver_result" }, { name: "read" }]),
               restrict: options.restrict ?? (() => () => {}),
             },
           }),
@@ -419,7 +479,7 @@ describe("worker tool barrier — audit hardening (second-round)", () => {
   it("throws when restrict() is unavailable on a surface with denied verbs", () => {
     const ctx: WorkerCompositionContext = {
       tools: {
-        schemas: () => [{ name: "spawn_worker" }],
+        schemas: () => [{ name: "deliver_result" }],
       } as never,
     };
     assert.throws(
@@ -451,7 +511,7 @@ describe("worker tool barrier — audit hardening (second-round)", () => {
   it("applies the extended deny list on a real scoped surface", () => {
     const restrictions: Array<{ readonly deny: readonly string[] }> = [];
     const ctx = compositionCtx({
-      schemas: () => [...OPTIONAL_AGENT_VERBS, "spawn_worker", "read"].map((name) => ({ name })),
+      schemas: () => [...OPTIONAL_AGENT_VERBS, "deliver_result", "send_message", "read"].map((name) => ({ name })),
       restrict: (filter) => {
         restrictions.push(filter);
         return () => {};
@@ -461,9 +521,10 @@ describe("worker tool barrier — audit hardening (second-round)", () => {
     assert.equal(applied, 2, "contract section + tool restriction");
     assert.equal(restrictions.length, 1);
     const deny = new Set(restrictions[0]?.deny ?? []);
-    for (const name of [...OPTIONAL_AGENT_VERBS, "spawn_worker"]) {
+    for (const name of [...OPTIONAL_AGENT_VERBS, "deliver_result"]) {
       assert.ok(deny.has(name), `missing from the applied deny list: ${name}`);
     }
+    assert.ok(!deny.has("send_message"), "the stock reply lane stays open");
     assert.ok(!deny.has("read"));
   });
 });

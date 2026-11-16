@@ -1,7 +1,7 @@
 /**
  * One stage per worker (ticket 171).
  *
- * `check_workers` already projects status, elapsed time, tool-call count,
+ * The worker roster reports status, elapsed time, tool-call count,
  * activity, and a liveness verdict. None of those answer the question the
  * dispatcher acts on: is this finished result still OWED to the user. That
  * fact is already in core state — this module is a read-only projection over

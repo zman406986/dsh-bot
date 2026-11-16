@@ -24,13 +24,15 @@
  * 2. The child registers the dispatcher tool set on ITS OWN scope (not the
  *    creator's, not the global layer) and receives the dispatcher policy.
  * 3. `isDispatcherSession(child)` is true (observable through peer-send
- *    liveness and `await_agent`'s `not-awaitable`), and the child spawns a
- *    worker under its own session while keeping wake state separate.
+ *    liveness), and the child spawns a worker under its own session through
+ *    the stock `subagent` verb the preset mounts while keeping wake state
+ *    separate.
  * 4. No recursion gate of ours: a dispatcher summoned by a dispatcher is
  *    admitted and is ITSELF parentless. The subagent depth rule stays where
  *    it belongs — on the worker hop, which still rides `startActivation`.
- * 5. Deactivating the child tears down its tool surface and cancels its
- *    awaits (ticket 115's `cancelWaits` rides the same path).
+ * 5. Deactivating the child tears down its tool surface (ticket 115's
+ *    `cancelWaits` rides the same path; the bounded-wait half of the old
+ *    case has no model-facing surface left — see the case's own note).
  * 6. Identity, not a counter: a dispatcher spawn racing a worker spawn from
  *    the same parent composes the worker and activates the dispatcher. A
  *    summoned dispatcher never touches `pendingSpawns` at all now, so the
@@ -51,6 +53,7 @@ import {
   DISPATCHER_START_COMMAND,
   DISPATCHER_START_NOT_TOP_LEVEL,
   RESUME_WAKE_CUE,
+  textBlocks,
   type ActivationSpecLike,
   type AgentLike,
   type CommandDefinitionLike,
@@ -67,7 +70,11 @@ import type {
 import type { DurableWorkerMarker } from "../src/core/durability.js";
 
 import { DISPATCHER_SESSION_TABLE_NAME, WORKER_SESSION_TABLE_NAME } from "../src/adapter/durable-marker.js";
-import {SPAWN_DISPATCHER_TOOL} from "../src/core/policy/prompts.js";
+import {
+  DISPATCHER_TOOL_NAMES,
+  SPAWN_DISPATCHER_TOOL,
+} from "../src/core/policy/prompts.js";
+import { workerSpawnMaxDepth } from "../src/worker/agent-def.js";
 import { WORKER_PERSONA_SECTION } from "../src/worker/preset.js";
 
 function tick(): Promise<void> {
@@ -94,12 +101,26 @@ interface ScopedTool {
 type ScopedTools = ToolsLike & {
   names(): string[];
   get(name: string): ScopedTool | undefined;
+  /**
+   * The host's inherited-surface filter (dsh-tools `restrict`). Only a
+   * session that inherits the stock preset gets one: worker children carry a
+   * registration-only scope in this fake, and the worker barrier's stub-host
+   * carve-out (`src/worker/preset.ts`) depends on `restrict` being absent
+   * there.
+   */
+  restrict?(filter: { deny?: readonly string[] }): () => void;
 };
 
-function createScopedTools(): ScopedTools {
+function createScopedTools(restrictable: boolean): ScopedTools {
   const scoped = new Map<string, ScopedTool>();
-  return {
-    schemas: () => [...scoped.keys()].map((name) => ({ name })),
+  // Tools the preset mounted but this scope is told to hide. The host keeps
+  // inherited definitions in place and filters them per scope; a disposer
+  // lifts the filter (which is what activation teardown must do).
+  const withheld = new Set<string>();
+  const visible = (): string[] =>
+    [...scoped.keys()].filter((name) => !withheld.has(name));
+  const tools: ScopedTools = {
+    schemas: () => visible().map((name) => ({ name })),
     register(definition: unknown) {
       const def = definition as ScopedTool;
       // Shipped rule (ticket 91): duplicates within one scope fail loud
@@ -115,9 +136,19 @@ function createScopedTools(): ScopedTools {
         scoped.delete(def.name);
       };
     },
-    names: () => [...scoped.keys()],
-    get: (name: string) => scoped.get(name),
+    names: () => visible(),
+    get: (name: string) => (withheld.has(name) ? undefined : scoped.get(name)),
   };
+  if (restrictable) {
+    tools.restrict = (filter) => {
+      const denied = (filter.deny ?? []).filter((name) => scoped.has(name));
+      for (const name of denied) withheld.add(name);
+      return () => {
+        for (const name of denied) withheld.delete(name);
+      };
+    };
+  }
+  return tools;
 }
 
 interface ScopedAgent extends AgentLike {
@@ -159,7 +190,10 @@ function createScopedAgent(id: string, opts?: ScopedAgentOptions): ScopedAgent {
   const injected: unknown[] = [];
   const followed: unknown[] = [];
   const sections: string[] = [];
-  const scopedTools = createScopedTools();
+  // Top-level sessions inherit the stock preset, so their scope can be
+  // restricted; a subagent child in this fake is composed by the plugin's
+  // worker barrier through the bare-scope carve-out.
+  const scopedTools = createScopedTools(topLevel);
   // A real session header carries its own id (`sessionIdOfHeader` reads it, and
   // the ticket-147 resume check goes through the projection unit's `init`).
   //
@@ -604,6 +638,9 @@ function createActivationCtx(storage: StorageTables = new Map()) {
           ...(cwd !== undefined ? { cwd } : {}),
           ...(route !== undefined ? { route } : {}),
         });
+        // A top-level session is created ON the stock preset; the plugin's
+        // layer is what the create `setup` adds below.
+        mountStockPreset(ctx, child);
         children.push({ id: childId, agent: child });
         agentsById.set(childId, child);
         if (holdNext) {
@@ -739,6 +776,9 @@ async function activateDispatcher(
   agent: ScopedAgent,
 ): Promise<void> {
   ctx.agentsById.set(String(agent.session.id), agent);
+  // The session is born on the host's stock preset; activation adds our
+  // layer on top of it (and withholds the preset's fork verb).
+  mountStockPreset(ctx, agent);
   const result = ctx.runCommand({
     commandId: DISPATCHER_START_COMMAND,
     agent,
@@ -767,20 +807,36 @@ async function spawnPeer(
   return callScoped(creator, SPAWN_DISPATCHER_TOOL, { title, prompt });
 }
 
-// The scoped dispatcher surface: the eight dispatcher tools. Owner ruling
-// 2026-11-05: the ticket-145 per-session `recall` is absent — racoons is off
-// unless a manual overlay turns it on. This is the USER-STARTED (chief of
-// staff) set — the human's own chat.
-const DISPATCHER_TOOL_SET = [
-  "await_agent",
-  "check_workers",
-  "deliver_result",
-  "message_agent",
-  "spawn_dispatcher",
-  "spawn_worker",
-  "steer_worker",
-  "stop_worker",
+/**
+ * The stock preset verbs a dispatcher session inherits. In the live host the
+ * agent preset mounts them (never us); the fake `subagent` below is the
+ * worker spawn path now, and the other four exist only to be seen — or, for
+ * the fork, to be withheld by the plugin's own restriction (ADR-0003: workers
+ * start blank, so a dispatcher cannot fork).
+ */
+const STOCK_DISPATCHER_TOOL_SET = [
+  "subagent",
+  "list_agents",
+  "send_message",
+  "interrupt_agent",
+] as const;
+
+/** Everything the preset mounts on a dispatcher scope, fork included. */
+const STOCK_PRESET_TOOL_SET: readonly string[] = [
+  ...STOCK_DISPATCHER_TOOL_SET,
+  "subagent_fork",
 ];
+
+/**
+ * The USER-STARTED (chief of staff) surface: the three verbs stock DSH does
+ * not cover (`DISPATCHER_TOOL_NAMES`), on top of the preset's visible stock
+ * tools. Owner ruling 2026-11-05: the ticket-145 per-session `recall` is
+ * absent — racoons is off unless a manual overlay turns it on.
+ */
+const DISPATCHER_TOOL_SET: readonly string[] = [
+  ...DISPATCHER_TOOL_NAMES,
+  ...STOCK_DISPATCHER_TOOL_SET,
+].sort();
 
 /**
  * Ticket 176 (owner ruling 2026-11-03): a summoned dispatcher is a TEAM
@@ -788,9 +844,98 @@ const DISPATCHER_TOOL_SET = [
  * minus `spawn_dispatcher` — the tool is not registered at all, so the model
  * never sees the name (ADR-0019: visibility is the fence).
  */
-const SPAWNED_DISPATCHER_TOOL_SET = DISPATCHER_TOOL_SET.filter(
-  (name) => name !== "spawn_dispatcher",
-);
+const SPAWNED_DISPATCHER_TOOL_SET: readonly string[] = [
+  ...DISPATCHER_TOOL_NAMES.filter((name) => name !== SPAWN_DISPATCHER_TOOL),
+  ...STOCK_DISPATCHER_TOOL_SET,
+].sort();
+
+/**
+ * Mount the stock preset verbs on a dispatcher session, the way the agent
+ * preset does before the plugin's activation adds its layer.
+ *
+ * The `subagent` fake is the worker spawn path now (the T3b pattern): it
+ * drives the host's `startActivation` seam — the same call the stock tool
+ * makes — so the child is announced on `agent/created` with the header the
+ * real host writes (`origin: "subagent"`, parent, depth + 1), and the plugin
+ * adopts it from that header. Never a plugin spawn handler.
+ */
+function mountStockPreset(ctx: ActivationCtx, agent: ScopedAgent): void {
+  if (agent.scopedTools.get("subagent") !== undefined) return;
+  // `ToolsLike.register` is optional (a stub context need not expose it), but
+  // this is the fake's own always-registrable scope: bind it once and fail
+  // loud rather than losing the stock surface if that invariant ever breaks.
+  const register = agent.scopedTools.register;
+  if (register === undefined) {
+    throw new Error("stock preset mount needs a registrable agent scope");
+  }
+  register({
+    name: "subagent",
+    async execute(args: unknown) {
+      const call = (args ?? {}) as { description?: string; prompt?: string };
+      const parentDepth = agent.session.header?.delegationDepth ?? 0;
+      const activation = await ctx.subagents.startActivation({
+        provider: "stub",
+        label: call.description ?? "Worker",
+        request: {
+          prompt: textBlocks(call.prompt ?? ""),
+          parent: agent,
+          // The child's ABSOLUTE ceiling: parent depth + one hop + the
+          // worker's own (leaf) budget.
+          maxDepth: workerSpawnMaxDepth(parentDepth),
+        },
+        signal: new AbortController().signal,
+        delivery: "parent",
+      });
+      return { ok: true, childId: String(activation.childId) };
+    },
+  });
+  for (const name of STOCK_PRESET_TOOL_SET) {
+    if (name === "subagent") continue;
+    register({
+      name,
+      async execute() {
+        return { ok: true };
+      },
+    });
+  }
+}
+
+/**
+ * Start one worker through the stock `subagent` verb — the only spawn path a
+ * dispatcher has now. The plugin adopts the announced child (persona, barrier,
+ * roster, durable wake row) from its header.
+ */
+async function spawnWorker(
+  dispatcher: ScopedAgent,
+  label = "Migration",
+  prompt = "Do the migration.",
+): Promise<string> {
+  const spawned = await callScoped(dispatcher, "subagent", {
+    description: label,
+    prompt,
+  });
+  assert.equal(spawned.ok, true, JSON.stringify(spawned));
+  await drain();
+  return String(spawned.childId);
+}
+
+/**
+ * The kept replacement for `check_workers`: `message_agent` routes an id
+ * with a roster record on THIS session to the worker-steer branch
+ * (`not-running` for a worker that has not taken a turn) and an id with none
+ * to the peer branch (`unknown-target`). A refusal records nothing and
+ * spends no budget, so the probe is read-only.
+ */
+async function workerOnRoster(
+  dispatcher: ScopedAgent,
+  workerId: string,
+): Promise<boolean> {
+  const probed = await callScoped(dispatcher, "message_agent", {
+    target: workerId,
+    text: "roster probe",
+  });
+  return probed.ok === false && probed.reason === "not-running";
+}
 
 describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", () => {
   it("spawns through the host seam and activates the child without the top-level gate", async () => {
@@ -849,15 +994,29 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     // both queues a turn and wakes the driver.
     assert.equal(child.agent.followed.length, 1);
     assert.ok(textOf(child.agent.followed[0]).includes("Own the second half."));
-    // The child's OWN scope holds the spawned-class dispatcher set — everything
-    // the user-started class has EXCEPT `spawn_dispatcher` (ticket 176).
+    // The child's OWN scope holds the spawned-class dispatcher set — the two
+    // dispatcher verbs it keeps on top of the stock preset. `spawn_dispatcher`
+    // is not registered at all (ticket 176).
     assert.deepEqual(
       child.agent.scopedTools.names().sort(),
       SPAWNED_DISPATCHER_TOOL_SET,
     );
     assert.ok(!child.agent.scopedTools.names().includes(SPAWN_DISPATCHER_TOOL));
+    // The stock preset surface stays visible (workers, status, steering and
+    // stopping are stock verbs now); only the fork spawn is withheld.
+    for (const name of STOCK_DISPATCHER_TOOL_SET) {
+      assert.ok(
+        child.agent.scopedTools.names().includes(name),
+        "stock " + name + " stays visible on the team leader",
+      );
+    }
+    assert.equal(
+      child.agent.scopedTools.names().includes("subagent_fork"),
+      false,
+      "only the fork verb is withheld",
+    );
     // …nothing leaked into the creator's scope or the global layer…
-    assert.equal(creator.scopedTools.names().length, 8);
+    assert.equal(creator.scopedTools.names().length, DISPATCHER_TOOL_SET.length);
     // Ticket 174 / ADR-0033 removed `request_access`, the one global name.
     assert.deepEqual(ctx.globalToolNames(), []);
     // …and the dispatcher policy was injected (ADR-0025 decision 1-2).
@@ -903,6 +1062,13 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
       child.agent.scopedTools.names().sort(),
       SPAWNED_DISPATCHER_TOOL_SET,
     );
+    // Both classes see the stock verbs; neither sees the fork.
+    for (const surface of [creator, child.agent]) {
+      for (const name of STOCK_DISPATCHER_TOOL_SET) {
+        assert.ok(surface.scopedTools.names().includes(name), name);
+      }
+      assert.equal(surface.scopedTools.names().includes("subagent_fork"), false);
+    }
     assert.deepEqual(
       creator.scopedTools
         .names()
@@ -941,15 +1107,9 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     const child = ctx.children[0] as StubChild;
     assert.equal(child.id, String(spawn.dispatcher_id));
 
-    // The host resolves the bound parent from `parentSessionId`, so a wrong
-    // binding would throw "no parent agent bound for session …".
-    const worker = await callScoped(child.agent, "spawn_worker", {
-      stream_key: "migrate",
-      title: "Migration",
-      prompt: "Do the migration.",
-    });
-    assert.equal(worker.ok, true, JSON.stringify(worker));
-    const workerId = String(worker.worker_id);
+    // The stock `subagent` verb is the spawn path now; the child dispatcher
+    // is the bound parent, so the host adopts the announced child as a worker.
+    const workerId = await spawnWorker(child.agent);
 
     // ADR-0032: the dispatcher spawn did NOT ride the subagent runtime, so
     // this worker hop is the FIRST and only `startActivation` call.
@@ -962,45 +1122,44 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     // Ceiling for the worker hop: parent depth 0 + 1 hop + leaf budget 0.
     assert.equal(workerSpec.request.maxDepth, 1);
 
-    // Per-session rosters: the creator sees no worker; the child sees its own.
-    const creatorRoster = await callScoped(creator, "check_workers", {});
-    assert.deepEqual(
-      (creatorRoster.rows as Array<{ worker_id: string }>).map((r) => r.worker_id),
-      [],
+    // Per-session rosters, read through the kept probe: the creator does not
+    // own this worker (unknown-target), the child does (a roster record, so
+    // the steer branch answers not-running until the worker's first turn).
+    assert.equal(
+      await workerOnRoster(creator, workerId),
+      false,
+      "the creator sees no worker",
     );
-    const childRoster = await callScoped(child.agent, "check_workers", {});
-    assert.deepEqual(
-      (childRoster.rows as Array<{ worker_id: string }>).map((r) => r.worker_id),
-      [workerId],
+    assert.equal(
+      await workerOnRoster(child.agent, workerId),
+      true,
+      "the child sees its own worker",
     );
 
-    // The settle wake targets the owning dispatcher only.
+    // The settle opens no plugin wake for either session; the stock notice
+    // goes to the owning dispatcher's parent channel.
     ctx.fire("subagent/end", {
       id: workerId,
       stopReason: "completed",
       lastAssistantMessage: [{ type: "text", text: "Migration done." }],
     });
     await drain();
-    // ADR-0032 re-based this count. Under the subagent shape the child's first
-    // turn came from the subagent runtime, so `followed` held the wake alone
-    // (1). A top-level summoned dispatcher is handed its first turn through
-    // `agent.followup` — the same seam every wake uses — so the spawn prompt is
-    // followup #1 and the settle wake is #2. Asserting 1 here would pin the
-    // retired shape; the wake is still owned by the child, which is what the
-    // second entry proves.
-    assert.equal(child.agent.followed.length, 2, "spawn prompt, then the child's own worker wake");
-    assert.ok(
-      textOf(child.agent.followed[0]).includes("Own the second half."),
-      "followup #1 is the spawn prompt",
+    // No plugin settle wake follows. `followed` holds only the spawn prompt
+    // the child dispatcher received when it was created; the stock completion
+    // notice is delivered through the host's own parent channel.
+    assert.equal(
+      child.agent.followed.length,
+      1,
+      "spawn prompt only — no plugin settle wake",
     );
     assert.ok(
-      textOf(child.agent.followed[1]).includes(workerId),
-      "followup #2 is the settle wake for the child's own worker",
+      textOf(child.agent.followed[0]).includes("Own the second half."),
+      "followup #1 is the dispatcher spawn prompt",
     );
     assert.equal(creator.followed.length, 0, "the creator is not woken");
   });
 
-  it("deactivating the child tears down its tool surface and releases its awaits", async () => {
+  it("deactivating the child tears down its tool surface", async () => {
     const ctx = createActivationCtx();
     apply(ctx, volatileConfig({ enabled: true }));
     const creator = createScopedAgent("chat-1");
@@ -1012,30 +1171,36 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
       SPAWNED_DISPATCHER_TOOL_SET,
     );
 
-    const worker = await callScoped(child.agent, "spawn_worker", {
-      stream_key: "k",
-      title: "T",
-      prompt: "P",
-    });
-    const workerId = String(worker.worker_id);
-
-    // Park a real bounded await on the child's own worker.
-    const pending = callScoped(child.agent, "await_agent", {
-      target: workerId,
-      timeout_ms: 60_000,
-    });
+    // A live child exists under the child dispatcher (the earlier release
+    // half of this case parked a bounded await on it; `await_agent` is
+    // retired and the stock completion path is push-only, so there is no
+    // model-facing wait left to release here — the activation teardown is
+    // what remains assertable from the tool surface).
+    const workerId = await spawnWorker(child.agent, "T", "P");
+    assert.equal(await workerOnRoster(child.agent, workerId), true);
 
     // The host dispose path — the same one the UI delete affordance takes.
     ctx.fire("agent/disposed", { agent: child.agent });
 
-    const awaited = await pending;
-    assert.equal(awaited.ok, true);
-    assert.equal(awaited.status, "released");
-    assert.equal(awaited.reason, "stopped");
-
-    // That session's surface is gone; the creator's is untouched (ADR-0019).
-    assert.deepEqual(child.agent.scopedTools.names(), []);
-    assert.equal(creator.scopedTools.names().length, 8);
+    // Our layer is gone with the activation: the two dispatcher verbs AND the
+    // withhold restriction were disposed together. The preset's own stock
+    // surface remains, fork included — this session is a plain stock session
+    // again, and the creator's surface is untouched (ADR-0019).
+    const remaining = child.agent.scopedTools.names();
+    for (const name of DISPATCHER_TOOL_NAMES) {
+      assert.equal(
+        remaining.includes(name),
+        false,
+        `${name} was disposed with the activation`,
+      );
+    }
+    assert.equal(remaining.includes(SPAWN_DISPATCHER_TOOL), false);
+    assert.deepEqual(
+      remaining.sort(),
+      [...STOCK_PRESET_TOOL_SET].sort(),
+      "only the preset's stock surface is left, fork restored",
+    );
+    assert.deepEqual(creator.scopedTools.names().sort(), DISPATCHER_TOOL_SET);
   });
 
   it("activates the child exactly once even when the host announces it (no double registration)", async () => {
@@ -1050,9 +1215,12 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     // fallback also looked at `ctx.agents` — two candidate call sites, ONE
     // activation. A second one would throw on the scoped registry's duplicate
     // name rule (and would double-inject the policy). Ticket 176: the spawned
-    // class withholds `spawn_dispatcher`, and racoons is off by default, so
-    // the child carries 7 scoped tools.
-    assert.equal(child.agent.scopedTools.names().length, 7);
+    // class withholds `spawn_dispatcher`, racoons is off by default, and the
+    // preset's four visible stock verbs stay — six tools in all.
+    assert.deepEqual(
+      child.agent.scopedTools.names().sort(),
+      SPAWNED_DISPATCHER_TOOL_SET,
+    );
     assert.equal(child.agent.injected.length, 1);
   });
 
@@ -1097,7 +1265,7 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     );
   });
 
-  it("a cold-resumed child marked as a dispatcher is re-activated: role, 8 scoped tools, one policy inject (ticket 130)", async () => {
+  it("a cold-resumed child marked as a dispatcher is re-activated: role, spawned-class surface, one policy inject (ticket 130)", async () => {
     const storage: StorageTables = new Map();
     const first = createActivationCtx(storage);
     apply(first, volatileConfig({ enabled: true }));
@@ -1120,10 +1288,16 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
       topLevel: true,
       agentPreset: "standard",
     });
+    // A resumed top-level session is composed from its preset again, before
+    // the plugin's activation re-adds our layer.
+    mountStockPreset(second, resumedChild);
     second.agentsById.set(dispatcherId, resumedChild);
     // The host's boot order: the user's own chat activates first, which warms
     // the durable mark mirror; only then is the resumed session announced.
-    const creatorTwo = createScopedAgent("chat-2");
+    // The SAME summoner id comes back: dispatcher visibility is lineage-scoped
+    // (a different root's chat does not see another root's team leader, even
+    // with the same cwd), and the peer probe below must be an allowed edge.
+    const creatorTwo = createScopedAgent("chat-1");
     await activateDispatcher(second, creatorTwo);
 
     second.fire("agent/created", {
@@ -1132,13 +1306,23 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     });
     await drain();
 
-    // Role: the session is a live dispatcher again — the core's peer fence
-    // and its await classification both say so.
-    const awaited = await callScoped(creatorTwo, "await_agent", {
+    // Role: the session is a live dispatcher again. `await_agent` (the old
+    // not-awaitable probe) is retired; the equivalent model-facing probe is a
+    // PEER send — the core accepts it as a dispatcher message and delivers it
+    // to the resumed session's own turn, which a dormant row cannot do.
+    const poked = await callScoped(creatorTwo, "message_agent", {
       target: dispatcherId,
-      timeout_ms: 0,
+      text: "Welcome back.",
     });
-    assert.equal(awaited.reason, "not-awaitable", JSON.stringify(awaited));
+    assert.equal(poked.ok, true, JSON.stringify(poked));
+    assert.equal(poked.delivered_as, "peer");
+    await drain();
+    assert.ok(
+      resumedChild.followed.some((message) =>
+        textOf(message).includes("Welcome back."),
+      ),
+      "the peer message reached the live resumed dispatcher",
+    );
 
     // Tool surface: the spawned-class dispatcher tools re-registered in the
     // CHILD's own scope. Ticket 176: 8, not 9 — the resumed session comes back
@@ -1306,6 +1490,9 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
       topLevel: true,
       agentPreset: "standard",
     });
+    // The resumed session is composed from its preset again before the
+    // announcement re-activates the dispatcher layer.
+    mountStockPreset(second, resumedChild);
     second.agentsById.set(dispatcherId, resumedChild);
     second.children.push({ id: dispatcherId, agent: resumedChild });
     second.fire("agent/created", { agent: resumedChild, source: "resume" });
@@ -1410,13 +1597,7 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     // Nothing is written before a worker exists.
     assert.deepEqual([...(storage.get(WORKER_SESSIONS_TABLE) ?? [])], []);
 
-    const spawned = await callScoped(creator, "spawn_worker", {
-      stream_key: "migrate",
-      title: "Migration",
-      prompt: "Do it.",
-    });
-    assert.equal(spawned.ok, true, JSON.stringify(spawned));
-    const workerId = String(spawned.worker_id);
+    const workerId = await spawnWorker(creator);
 
     const rows = await readWorkerSessions(storage);
     assert.deepEqual([...rows.keys()], [workerId]);
@@ -1433,12 +1614,7 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     const creator = createScopedAgent("chat-1");
     await activateDispatcher(ctx, creator);
 
-    const spawned = await callScoped(creator, "spawn_worker", {
-      stream_key: "migrate",
-      title: "Migration",
-      prompt: "Do it.",
-    });
-    const workerId = String(spawned.worker_id);
+    const workerId = await spawnWorker(creator);
     assert.equal((await readWorkerSessions(storage)).size, 1);
 
     ctx.fire("agent/status", {
@@ -1529,6 +1705,7 @@ describe("ticket 141 — spawn generation through the real wiring", () => {
       topLevel: true,
       agentPreset: "standard",
     });
+    mountStockPreset(second, resumed);
     second.agentsById.set(childId, resumed);
     second.fire("agent/created", { agent: resumed, source: "resume" });
     await drain();
@@ -1558,13 +1735,7 @@ describe("ticket 142 — a durably marked worker is wake-able by a send", () => 
     apply(first, volatileConfig({ enabled: true }));
     const creator = createScopedAgent("chat-1");
     await activateDispatcher(first, creator);
-    const spawned = await callScoped(creator, "spawn_worker", {
-      stream_key: "migrate",
-      title: "Migration",
-      prompt: "Do the migration.",
-    });
-    assert.equal(spawned.ok, true, JSON.stringify(spawned));
-    const workerId = String(spawned.worker_id);
+    const workerId = await spawnWorker(creator);
     const workerDepth = first.children[0]?.agent.session.header
       ?.delegationDepth;
 
@@ -1577,9 +1748,10 @@ describe("ticket 142 — a durably marked worker is wake-able by a send", () => 
     const creatorTwo = createScopedAgent("chat-1");
     await activateDispatcher(second, creatorTwo);
     // The rebuild ran: the live marker is an unknown-state hold, not a roster
-    // record, which is exactly why the id needs the durable wake row.
-    const holdsBefore = await callScoped(creatorTwo, "check_workers", {});
-    assert.deepEqual(holdsBefore.rows, []);
+    // record, which is exactly why the id needs the durable wake row. The
+    // `check_workers` roster view is retired; the send below is the probe that
+    // distinguishes the two (a roster record would answer `not-running`, a
+    // dormant durable row accepts and wakes — and says so with `dormant`).
     assert.equal(second.children.length, 0, "the worker is not live yet");
 
     const sent = await callScoped(creatorTwo, "message_agent", {
@@ -1589,6 +1761,11 @@ describe("ticket 142 — a durably marked worker is wake-able by a send", () => 
     assert.equal(sent.ok, true, JSON.stringify(sent));
     if (!sent.ok) return;
     assert.equal(sent.delivered_as, "steer");
+    assert.equal(
+      sent.dormant,
+      true,
+      "the durable hold was the only thing left, so the send resumed it",
+    );
     await drain();
 
     // (a) One cold resume, through the host seam, from the SPAWNER, carrying
@@ -1608,13 +1785,32 @@ describe("ticket 142 — a durably marked worker is wake-able by a send", () => 
     );
     assert.ok(!resume.text.includes("Pick the migration back up."));
 
-    // (b) The worker exists again and was composed as a WORKER: no dispatcher
-    // tools, its own reply tool, and the contract section on its scope.
+    // (b) The worker exists again and was composed as a WORKER: the plugin
+    // registers NO tool of its own on the worker's scope any more. The
+    // interim steer is the stock `send_message` and the report is the closing
+    // answer, both inherited from the preset, so the retired
+    // `reply_to_dispatcher` and every dispatcher verb stay absent. The stock
+    // barrier (send_message allowed, spawn/control denied) is pinned in
+    // `test/worker-composition.test.ts`; this fake models scoped
+    // registrations only, which is exactly what the plugin still owns here.
     const resumed = second.children.find((child) => child.id === workerId);
     assert.ok(resumed, "the host's sendMessage resumed the worker");
-    assert.deepEqual(resumed.agent.scopedTools.names().sort(), [
+    assert.deepEqual(
+      resumed.agent.scopedTools.names(),
+      [],
+      "no plugin-local tool on a worker's scope",
+    );
+    for (const retired of [
       "reply_to_dispatcher",
-    ]);
+      "deliver_result",
+      "message_agent",
+      "spawn_dispatcher",
+    ]) {
+      assert.ok(
+        !resumed.agent.scopedTools.names().includes(retired),
+        `a worker must not see ${retired}`,
+      );
+    }
     assert.deepEqual(resumed.agent.scopedSections, [WORKER_PERSONA_SECTION]);
     assert.equal(resumed.agent.injected.length, 0, "no dispatcher policy");
 
@@ -1626,11 +1822,16 @@ describe("ticket 142 — a durably marked worker is wake-able by a send", () => 
     assert.equal(delivered.length, 1);
     assert.ok(delivered[0]?.text.includes("[Parent correction]"));
 
-    // (d) The core's unknown-state hold became a live roster record.
-    const roster = await callScoped(creatorTwo, "check_workers", {});
-    assert.deepEqual(
-      (roster.rows as Array<{ worker_id: string }>).map((row) => row.worker_id),
-      [workerId],
+    // (d) The core's unknown-state hold became a live roster record. The
+    // `message_agent` probe answers from that record now: the steer branch
+    // refuses `not-running` on the live id instead of resuming it a second
+    // time (a still-dormant durable row would have been accepted again).
+    const sendsBeforeProbe = second.sendMessageCalls.length;
+    assert.equal(await workerOnRoster(creatorTwo, workerId), true);
+    assert.equal(
+      second.sendMessageCalls.length,
+      sendsBeforeProbe,
+      "a live roster record, not another cold resume",
     );
 
     // Depth is the persisted one, not recomputed.
@@ -1640,21 +1841,15 @@ describe("ticket 142 — a durably marked worker is wake-able by a send", () => 
     );
   });
 
-  it("an UNMARKED dead worker keeps the fence: unknown-worker from steer_worker, nothing resumed", async () => {
+  it("an UNMARKED dead worker keeps the fence: unknown-target from message_agent, nothing resumed", async () => {
     const ctx = createActivationCtx();
     apply(ctx, volatileConfig({ enabled: true }));
     const creator = createScopedAgent("chat-1");
     await activateDispatcher(ctx, creator);
 
-    const steered = await callScoped(creator, "steer_worker", {
-      worker_id: "never-spawned-worker",
-      message: "try harder",
-    });
-    assert.equal(steered.ok, false);
-    assert.equal(steered.reason, "unknown-worker");
-    assert.equal(ctx.sendMessageCalls.length, 0);
-    assert.equal(ctx.children.length, 0);
-
+    // `steer_worker` is retired; its worker branch lives on `message_agent`,
+    // and the fence is unchanged: an id with neither a roster record nor a
+    // durable worker row refuses `unknown-target` and nothing is resumed.
     const messaged = await callScoped(creator, "message_agent", {
       target: "never-spawned-worker",
       text: "hello?",
@@ -1662,6 +1857,7 @@ describe("ticket 142 — a durably marked worker is wake-able by a send", () => 
     assert.equal(messaged.ok, false);
     assert.equal(messaged.reason, "unknown-target");
     assert.equal(ctx.sendMessageCalls.length, 0);
+    assert.equal(ctx.children.length, 0);
   });
 
   it("a LIVE worker takes the unchanged steer path — no resume, no re-composition", async () => {
@@ -1670,13 +1866,7 @@ describe("ticket 142 — a durably marked worker is wake-able by a send", () => 
     apply(ctx, volatileConfig({ enabled: true }));
     const creator = createScopedAgent("chat-1");
     await activateDispatcher(ctx, creator);
-    const spawned = await callScoped(creator, "spawn_worker", {
-      stream_key: "migrate",
-      title: "Migration",
-      prompt: "Do the migration.",
-    });
-    const workerId = String(spawned.worker_id);
-    await drain();
+    const workerId = await spawnWorker(creator);
     const child = ctx.children.find((entry) => entry.id === workerId);
     assert.ok(child);
     const toolsBefore = [...child.agent.scopedTools.names()];

@@ -393,7 +393,8 @@ describe("durable roster marker — restart rebuild", () => {
     // key that comes back every restart.
     assert.equal(durability.markers.has(pre.workerId), false);
     // Unknown id → false, not a throw: release is idempotent from the caller's
-    // side so a repeated stop_worker cannot fail loudly.
+    // side so a repeated restart sweep (the retired stop path's core half)
+    // cannot fail loudly.
     assert.equal(await after.releaseUnknownStateHold(pre.workerId), false);
 
     const redispatch = await after.spawnWorker({

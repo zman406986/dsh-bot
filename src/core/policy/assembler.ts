@@ -17,6 +17,10 @@ import {
   buildWakeInstructionsBlock,
   buildWorkerReplyWakeInstructionsBlock,
   EMPTY_LEDGER_LINE,
+  PEER_ROSTER_EMPTY_LINE,
+  PEER_ROSTER_EMPTY_LINE_ZH,
+  PEER_ROSTER_FRESHNESS_LINE,
+  PEER_ROSTER_FRESHNESS_LINE_ZH,
   PEER_ROSTER_INTRO,
   PEER_ROSTER_INTRO_ZH,
   PEER_ROSTER_SECTION_HEADING,
@@ -25,6 +29,10 @@ import {
   PEER_WAKE_SECTION_HEADINGS_ZH,
   REMINDER_SECTION_HEADINGS,
   REMINDER_SECTION_HEADINGS_ZH,
+  WAKE_RE_PRESENTED_HEADING,
+  WAKE_RE_PRESENTED_HEADING_ZH,
+  WAKE_RE_PRESENTED_INTRO,
+  WAKE_RE_PRESENTED_INTRO_ZH,
   WAKE_SECTION_HEADINGS,
   WAKE_SECTION_HEADINGS_ZH,
   type DispatcherOrigin,
@@ -36,6 +44,21 @@ import {
  * `transcriptRef` may be null when the host has not recorded one.
  */
 export interface WakeNotice {
+  readonly workerId: string;
+  readonly title: string;
+  readonly status: TerminalWorkerStatus;
+  readonly report: string;
+  readonly transcriptRef: string | null;
+}
+
+/**
+ * One landed-but-undelivered item shown again in a later wake. It carries
+ * the todo id so the dispatcher can close the right ledger entry, and the
+ * real report read from the settle record — never the empty-report
+ * placeholder that a synthesized first-time notice would render.
+ */
+export interface RePresentedNotice {
+  readonly todoId: string;
   readonly workerId: string;
   readonly title: string;
   readonly status: TerminalWorkerStatus;
@@ -91,6 +114,14 @@ export function formatLedgerLine(todo: TodoItem): string {
  * rule, and the bytes before it are produced by the same array join whether
  * or not peers exist. Adding the roster therefore cannot shift a single
  * byte of the cached prefix; removing it restores the exact old text.
+ *
+ * FRESHNESS: every output ends with the "Other agents" section, even when no
+ * peer is visible — the empty case emits the heading plus
+ * {@link PEER_ROSTER_EMPTY_LINE}, a zero-row section that still carries the
+ * supersede instruction. This is forward-only: the host replays committed
+ * user messages after a restart, so an old roster block can remain above this
+ * turn, and nothing here can delete, compact, or rewrite it. The newest
+ * reminder stating that it is current is the only correction available.
  */
 export function assembleTurnReminder(
   todos: readonly TodoItem[],
@@ -111,9 +142,21 @@ export function assembleTurnReminder(
     buildStandingRulesBlock(language, origin),
   ];
   const roster = renderPeerRoster(peers, language);
+  sections.push("");
   if (roster !== null) {
-    sections.push("");
     sections.push(roster);
+  } else {
+    // Empty or absent roster: still a FRESH section, with no rows, carrying
+    // the same "this one is current" instruction. A turn that rendered
+    // nothing used to supersede nothing, which is exactly the replayed
+    // old-block case.
+    sections.push(
+      language === "zh" ? PEER_ROSTER_SECTION_HEADING_ZH : PEER_ROSTER_SECTION_HEADING,
+    );
+    sections.push("");
+    sections.push(
+      language === "zh" ? PEER_ROSTER_EMPTY_LINE_ZH : PEER_ROSTER_EMPTY_LINE,
+    );
   }
   return sections.join("\n");
 }
@@ -274,7 +317,7 @@ export interface PeerRosterCandidate {
  *
  * Eligibility is the CALLER's choice; the recorded choice for ticket 121 is
  * **other activated dispatcher sessions only**. Workers are leaves (ADR-0003)
- * and are already visible in the ledger and through `check_workers`, so
+ * and are already visible in the ledger and through the stock `list_agents`, so
  * listing them would duplicate state and invite peer sends to sessions that
  * never drain a peer inbox.
  */
@@ -386,6 +429,15 @@ export function renderPeerRoster(
         : `- … and ${more} more (${entries.length} total; ${PEER_ROSTER_MAX_ROWS} shown).`,
     );
   }
+  // Fixed supersede marker, after the rows: this section is the current one,
+  // so every replayed "Other agents" block above it is stale. Constant bytes,
+  // so an unchanged roster still renders identically on every turn.
+  lines.push("");
+  lines.push(
+    language === "zh"
+      ? PEER_ROSTER_FRESHNESS_LINE_ZH
+      : PEER_ROSTER_FRESHNESS_LINE,
+  );
   return lines.join("\n");
 }
 
@@ -404,6 +456,48 @@ export function noticeFromSettled(
 }
 
 /**
+ * Distinct re-presentation section: these results were already shown, and
+ * are still not delivered. The block exists so a repeated wake cannot read
+ * as a fresh first-time settle and cannot fall back to the empty-report
+ * placeholder.
+ */
+function appendRePresentedSection(
+  sections: string[],
+  items: readonly RePresentedNotice[],
+  language: PolicyLanguage,
+): void {
+  if (items.length === 0) return;
+  const zh = language === "zh";
+  sections.push("");
+  sections.push(
+    zh ? WAKE_RE_PRESENTED_HEADING_ZH : WAKE_RE_PRESENTED_HEADING,
+  );
+  sections.push("");
+  sections.push(zh ? WAKE_RE_PRESENTED_INTRO_ZH : WAKE_RE_PRESENTED_INTRO);
+  for (const item of items) {
+    sections.push("");
+    sections.push(`### ${item.title} — ${item.status}`);
+    sections.push(`${zh ? "待办" : "Todo"}: ${item.todoId}`);
+    sections.push(`${zh ? "工作者" : "Worker"}: ${item.workerId}`);
+    sections.push(
+      item.transcriptRef !== null
+        ? `${zh ? "记录" : "Transcript"}: ${item.transcriptRef}`
+        : `${zh ? "记录" : "Transcript"}: ${zh ? "（无）" : "(none)"}`,
+    );
+    sections.push("");
+    // A completed report from the settle record is already clamped, with its
+    // truncation marker carrying the ORIGINAL shown/total counts. Re-clamping
+    // it here would append a second marker and understate the real report
+    // length. Error bodies still need their status-aware label.
+    sections.push(
+      item.status === "completed"
+        ? item.report
+        : formatWakeReportBody(item.status, item.report, item.transcriptRef),
+    );
+  }
+}
+
+/**
  * Wake-turn instructions for worker-settled hidden turns.
  * Silence is a valid outcome (stale / duplicate / irrelevant).
  *
@@ -415,6 +509,7 @@ export function noticeFromSettled(
   notices: readonly WakeNotice[],
   language: PolicyLanguage = "en",
   origin: DispatcherOrigin = "user",
+  rePresented: readonly RePresentedNotice[] = [],
 ): string {
   const zh = language === "zh";
   const headings = zh ? WAKE_SECTION_HEADINGS_ZH : WAKE_SECTION_HEADINGS;
@@ -446,6 +541,8 @@ export function noticeFromSettled(
       );
     }
   }
+
+  appendRePresentedSection(sections, rePresented, language);
 
   sections.push("");
   sections.push(buildWakeInstructionsBlock(language, origin));

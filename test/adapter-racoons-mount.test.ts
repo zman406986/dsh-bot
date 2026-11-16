@@ -68,6 +68,7 @@ import {
 import { DISPATCHER_START_COMMAND } from "../src/adapter/index.js";
 import type { AdapterContext, AgentLike } from "../src/adapter/cordis-dsh-host.js";
 import { volatileConfig } from "./support/plugin-config.js";
+import { DISPATCHER_TOOL_NAMES } from "../src/core/policy/prompts.js";
 
 // ── the journal (the mount's only evidence channel) ────────────────────────
 
@@ -923,7 +924,12 @@ describe("ticket 145 — the mount has no session filter", () => {
     const names = ctx.toolRegistrations.map(
       (tool) => (tool as { name?: string }).name,
     );
-    assert.ok(names.includes("spawn_worker"), "the dispatcher surface still exists");
+    // The custom surface still exists (the stock agent verbs belong to the
+    // preset, which this harness does not mount).
+    assert.ok(
+      names.includes("deliver_result"),
+      "the dispatcher surface still exists",
+    );
     assert.ok(!names.includes("recall"), "no recall tool without racoons");
   });
 
@@ -1013,24 +1019,17 @@ describe("ticket 145 — the mount has no session filter", () => {
 
     // The worker and the plain chat never activated, so they contributed no
     // tool registration of any kind: coverage is session-level, not lifecycle.
-    // Eight dispatcher tools + this one recall, all from the single activation
-    // — the mount added nothing globally. (Ticket 174 / ADR-0033 removed the
-    // global `request_access`.)
+    // The custom dispatcher tools + this one recall, all from the single
+    // activation — the mount added nothing globally. The stock agent verbs
+    // (`subagent`, `list_agents`, `send_message`, `interrupt_agent`) are
+    // the preset's, and this harness mounts no preset, so they are absent by
+    // construction. (Ticket 174 / ADR-0033 removed the global
+    // `request_access`.)
     assert.deepEqual(
       ctx.toolRegistrations
         .map((toolEntry) => (toolEntry as { name?: string }).name)
         .sort(),
-      [
-        "await_agent",
-        "check_workers",
-        "deliver_result",
-        "message_agent",
-        "recall",
-        "spawn_dispatcher",
-        "spawn_worker",
-        "steer_worker",
-        "stop_worker",
-      ],
+      [...DISPATCHER_TOOL_NAMES, "recall"].sort(),
     );
   });
 });

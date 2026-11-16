@@ -15,7 +15,7 @@
 # insert the row by hand. Two rows with one id make the settings form vanish
 # (the config editor drops non-unique entry ids).
 - insert:
-    - id: multitask-dispatcher
+    - id: dsh-bot
       name: 'dsh-multitask-dispatcher'
       config:
         enabled: true

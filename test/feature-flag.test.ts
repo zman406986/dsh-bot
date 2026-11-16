@@ -20,8 +20,8 @@ import { Config, apply } from "../src/plugin.js";
 import { volatileConfig } from "./support/plugin-config.js";
 import type { MutableRef } from "./support/plugin-config.js";
 
-import { SETTINGS_NAMESPACE } from "../src/adapter/settings-section.js";
 import { DISPATCHER_START_COMMAND } from "../src/adapter/activation-command.js";
+import { DELIVER_RESULT_TOOL } from "../src/core/policy/prompts.js";
 import { DISPATCHER_STEER_COMMAND } from "../src/adapter/steer-command.js";
 import type {
   AdapterContext,
@@ -297,10 +297,6 @@ describe("feature flag — volatile settings form (0.2.1)", () => {
     }
   });
 
-  it("the settings namespace is the Loader row id, not a registration argument", () => {
-    assert.equal(SETTINGS_NAMESPACE, "multitask-dispatcher");
-  });
-
   it("there is no path that flips the flag while a session runs", () => {
     // ADR-0005: apply reads the flag ONCE. No exported function mutates a
     // running Multitask's enabled state, and the command surface has no
@@ -336,11 +332,14 @@ describe("feature flag — host duplicate-registration rule (ticket 91)", () => 
     const tools = ctx.tools as unknown as {
       register(definition: { name: string }): () => void;
     };
-    tools.register({ name: "check_workers" });
+    // A KEPT dispatcher tool name (imported, not copied): the fixture is the
+    // stub registry, so the only thing that matters is a name the dispatcher
+    // really registers today.
+    tools.register({ name: DELIVER_RESULT_TOOL });
 
     assert.throws(
-      () => tools.register({ name: "check_workers" }),
-      /tool "check_workers" is already registered/,
+      () => tools.register({ name: DELIVER_RESULT_TOOL }),
+      new RegExp(`tool "${DELIVER_RESULT_TOOL}" is already registered`),
     );
   });
 });

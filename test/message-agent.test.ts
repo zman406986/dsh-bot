@@ -393,12 +393,19 @@ describe("ticket 116 — structured provenance on the peer wake", () => {
     r.multitask.wakeBus.noteTurnStarted(PEER);
     assert.equal(r.multitask.wakeBus.getTurnOwner(PEER), "peer");
 
-    // Contrast: a background settle wake carries NO origin — the stamp is
-    // specific to agent-caused wakes.
+    // Contrast: a background settle requests NO plugin wake at all — the
+    // host's stock completion notice is the only parent-visible signal — so
+    // the peer wake above stays the last origin request. The result is still
+    // recorded for the await lane.
+    const wakeOriginsBefore = r.host.wakeOrigins.length;
     const workerId = await spawnRunning(r.multitask);
     r.host.fireSettled({ workerId, status: "completed", report: "Done." });
-    const settle = r.host.wakeOrigins.at(-1);
-    assert.deepEqual(settle, { sessionId: SENDER, origin: undefined });
+    assert.equal(r.host.wakeOrigins.length, wakeOriginsBefore);
+    assert.deepEqual(r.host.wakeOrigins.at(-1), { sessionId: PEER, origin });
+    assert.equal(
+      r.multitask.settleRecords.lookup(SENDER, workerId)?.status,
+      "completed",
+    );
   });
 
 });

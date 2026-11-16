@@ -155,6 +155,17 @@ describe("roster snapshot — core observer fires on roster-affecting transition
       report: "done",
       transcriptRef: workerId,
     });
+    // The plugin no longer enqueues a settle wake: the host's stock completion
+    // notice opens the parent turn, and this rig has no notice. Feed the bus
+    // directly (its API is kept for redrive/external-job wakes) so the drain
+    // below still has a wake to observe.
+    multitask.wakeBus.enqueueWorkerSettled({
+      parentSessionId: "s-1",
+      workerId,
+      status: "completed",
+      title: "T",
+      resultText: "done",
+    });
     multitask.reconcileTodos("s-1");
     multitask.drainWake("s-1");
 
@@ -763,6 +774,60 @@ function topLevelAgent(id: string): AgentLike & {
   };
 }
 
+/**
+ * The child the STOCK `subagent` tool creates: no reserved id, so the host
+ * learns it at `agent/created` from the header its provider wrote. The scope
+ * records what the host's worker composition applies (persona + barrier).
+ */
+function stockWorkerChild(parentSessionId: string): {
+  agent: AgentLike;
+  sections: string[];
+  restrictions: Array<{ deny?: readonly string[] }>;
+} {
+  const sections: string[] = [];
+  const restrictions: Array<{ deny?: readonly string[] }> = [];
+  const agent = {
+    session: {
+      id: "stock-child-1",
+      header: {
+        parentSession: parentSessionId,
+        delegationDepth: 1,
+        origin: "subagent",
+      },
+    },
+    followup() {},
+    ctx: {
+      systemPrompt: {
+        section(section: { name: string }) {
+          sections.push(section.name);
+          return () => {};
+        },
+        getSectionOrder() {
+          return 0;
+        },
+      },
+      tools: {
+        schemas() {
+          return [
+            { name: "subagent" },
+            { name: "list_agents" },
+            { name: "deliver_result" },
+            { name: "read" },
+          ];
+        },
+        restrict(filter: { deny?: readonly string[] }) {
+          restrictions.push(filter);
+          return () => {};
+        },
+        register() {
+          return () => {};
+        },
+      },
+    },
+  } as unknown as AgentLike;
+  return { agent, sections, restrictions };
+}
+
 describe("roster snapshot — no settings-document publish (0.2.1)", () => {
   /**
    * 0.2.1 rejects undeclared settings keys, so the plugin no longer mirrors
@@ -777,7 +842,7 @@ describe("roster snapshot — no settings-document publish (0.2.1)", () => {
     }
   }
 
-  it("activation and spawn succeed on a host with no settings service at all", async () => {
+  it("activation and a stock worker spawn succeed on a host with no settings service at all", async () => {
     const ctx = createSettingsAwareCtx();
     pluginApply(ctx, volatileConfig({ enabled: true }));
 
@@ -789,14 +854,21 @@ describe("roster snapshot — no settings-document publish (0.2.1)", () => {
     assert.equal(result.kind, "success");
     await flushActivation();
 
-    const spawn = agent.scopedTools.get("spawn_worker");
-    assert.ok(spawn);
-    const spawned = (await spawn.execute(
-      { stream_key: "k", title: "Parser worker", prompt: "P" },
-      { agent: { session: { id: "s-1" } } },
-    )) as { ok: boolean; worker_id: string };
-    assert.equal(spawned.ok, true);
-    assert.equal(typeof spawned.worker_id, "string");
+    // The model-facing spawn is the host's stock `subagent`: model its
+    // announcement the way that provider does — `agent/created` with the
+    // child header it wrote. The host recognises and adopts it as a worker;
+    // no custom spawn tool exists, and no settings namespace is touched.
+    const child = stockWorkerChild("s-1");
+    ctx.fire("agent/created", { agent: child.agent });
+
+    // Composition is the proof the announcement was adopted: the worker
+    // persona section and the tool barrier landed on the child's own scope.
+    assert.deepEqual(child.sections, ["deployment:persona-prefix"]);
+    assert.equal(child.restrictions.length, 1);
+    assert.ok(
+      child.restrictions[0]?.deny?.includes("deliver_result"),
+      "the child is barriered against the dispatcher surface",
+    );
   });
 
 });

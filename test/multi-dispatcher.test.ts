@@ -41,6 +41,9 @@ import {
   type ToolsLike,
 } from "../src/adapter/index.js";
 import { ROSTER_SETTINGS_KEY } from "../src/core/roster-snapshot.js";
+import { FakeDshHost } from "../src/core/fake-host.js";
+import { createMultitask, type Multitask } from "../src/core/multitask.js";
+import type { SpawnResult } from "../src/core/types.js";
 import { volatileConfig } from "./support/plugin-config.js";
 
 function tick(): Promise<void> {
@@ -385,20 +388,31 @@ async function activate(
   }
 }
 
-async function spawnVia(
-  agent: ScopedAgent,
-  streamKey: string,
-): Promise<{ ok: boolean; worker_id?: string; reason?: string }> {
-  const spawn = agent.scopedTool("spawn_worker");
-  assert.ok(spawn, `no scoped spawn_worker on ${String(agent.session.id)}`);
-  return (await spawn.execute(
-    { stream_key: streamKey, title: "T", prompt: "P" },
-    undefined,
-  )) as { ok: boolean; worker_id?: string; reason?: string };
+/**
+ * Spawn one worker through the CORE seam — the method the removed
+ * `spawn_worker` handler called. The model-facing spawn is now the host's
+ * stock `subagent`, which this fake does not mount. `createTodo` first keeps
+ * the todo↔worker link the old handler established.
+ */
+async function spawnForTest(
+  multitask: Multitask,
+  input: { parentSessionId: string; streamKey: string },
+): Promise<SpawnResult> {
+  const todo = multitask.createTodo({
+    sessionId: input.parentSessionId,
+    title: `Work ${input.streamKey}`,
+  });
+  return multitask.spawnWorker({
+    parentSessionId: input.parentSessionId,
+    streamKey: input.streamKey,
+    title: "T",
+    prompt: "P",
+    todoId: todo.id,
+  });
 }
 
 describe("multi-dispatcher — scoped surfaces (ADR-0019)", () => {
-  it("each dispatcher sees only its own eight tools, and no global tool", async () => {
+  it("each dispatcher sees only its own three tools, and no global tool", async () => {
     const multi = createMultiCtx();
     apply(multi.ctx, volatileConfig({ enabled: true }));
     const a = createScopedAgent("s-a");
@@ -407,54 +421,47 @@ describe("multi-dispatcher — scoped surfaces (ADR-0019)", () => {
     await activate(multi, a);
     await activate(multi, b);
 
-    // Eight dispatcher tools. Owner ruling 2026-11-05: the ticket-145
-    // per-session `recall` is absent by default — racoons is off.
-    assert.deepEqual(a.scopedToolNames().sort(), [
-      "await_agent",
-      "check_workers",
-      "deliver_result",
-      "message_agent",
-      "spawn_dispatcher",
-      "spawn_worker",
-      "steer_worker",
-      "stop_worker",
-    ]);
-    assert.deepEqual(b.scopedToolNames().sort(), [
-      "await_agent",
-      "check_workers",
-      "deliver_result",
-      "message_agent",
-      "spawn_dispatcher",
-      "spawn_worker",
-      "steer_worker",
-      "stop_worker",
-    ]);
+    // Three CUSTOM dispatcher tools. Workers are spawned, listed, messaged and
+    // interrupted through the host's stock `subagent` / `list_agents` /
+    // `send_message` / `interrupt_agent` verbs, mounted on the agent plane by
+    // the host — this plugin never registers them. Owner ruling 2026-11-05:
+    // the ticket-145 per-session `recall` is absent by default — racoons off.
+    const customTools = ["deliver_result", "message_agent", "spawn_dispatcher"];
+    assert.deepEqual(a.scopedToolNames().sort(), customTools);
+    assert.deepEqual(b.scopedToolNames().sort(), customTools);
     // The global registry is empty: ticket 174 / ADR-0033 removed the worker
     // ask tool, the only global name this plugin ever claimed.
     assert.deepEqual(multi.ctx.globalToolNames(), []);
   });
 
   it("the same stream_key in two sessions does not collide; within one session it still refuses", async () => {
-    const multi = createMultiCtx();
-    apply(multi.ctx, volatileConfig({ enabled: true }));
-    const a = createScopedAgent("s-a");
-    const b = createScopedAgent("s-b");
-    await activate(multi, a);
-    await activate(multi, b);
+    // The plugin registers no spawn tool now, so the per-session stream-key
+    // fence is pinned at the CORE seam — the same `spawnWorker` the removed
+    // handler called. One core, two dispatcher session ids.
+    const multitask = createMultitask(new FakeDshHost());
 
     // Both models pick "build": both spawn.
-    const first = await spawnVia(a, "build");
-    const second = await spawnVia(b, "build");
+    const first = await spawnForTest(multitask, {
+      parentSessionId: "s-a",
+      streamKey: "build",
+    });
+    const second = await spawnForTest(multitask, {
+      parentSessionId: "s-b",
+      streamKey: "build",
+    });
     assert.ok(first.ok);
     assert.ok(second.ok);
 
     // A second "build" within session A still refuses.
-    const dup = await spawnVia(a, "build");
-    assert.equal(dup.ok, false);
+    const dup = await spawnForTest(multitask, {
+      parentSessionId: "s-a",
+      streamKey: "build",
+    });
+    assert.ok(!dup.ok);
     assert.equal(dup.reason, "duplicate-stream-key");
   });
 
-  it("roster reads are per-session and no settings mirror is written (0.2.1)", async () => {
+  it("no settings mirror is written on activation (0.2.1)", async () => {
     const multi = createMultiCtx();
     apply(multi.ctx, volatileConfig({ enabled: true }));
     const a = createScopedAgent("s-a");
@@ -462,13 +469,8 @@ describe("multi-dispatcher — scoped surfaces (ADR-0019)", () => {
     await activate(multi, a);
     await activate(multi, b);
 
-    await spawnVia(a, "k-a");
-    await spawnVia(b, "k-b");
-
     // 0.2.1 port: the roster settings mirror is GONE — there is no settings
     // registry to publish into, so nothing writes `ROSTER_SETTINGS_KEY`.
-    // The live roster read is the per-session `check_workers` tool, which
-    // stays scoped to the calling dispatcher.
     const mirrorUpdates = multi.ctx.updates.filter(
       (update) => ROSTER_SETTINGS_KEY in update,
     );
@@ -477,57 +479,66 @@ describe("multi-dispatcher — scoped surfaces (ADR-0019)", () => {
       [],
       "no roster mirror exists to publish into",
     );
-
-    for (const [session, agent] of [
-      ["s-a", a],
-      ["s-b", b],
-    ] as const) {
-      const check = agent.scopedTool("check_workers");
-      assert.ok(check, `${session} can read its own roster`);
-      const roster = (await check.execute({}, undefined)) as {
-        ok: boolean;
-        rows: Array<{ worker_id: string }>;
-      };
-      assert.equal(roster.ok, true);
-      // Isolation is enforced by the SURFACE: each session's tool sees only
-      // the workers that session spawned (the row carries no dispatcher id).
-      assert.equal(roster.rows.length, 1, `${session} sees exactly its own worker`);
-    }
   });
 
-  it("deactivating session A drops only A's roster view (ticket 79)", async () => {
+  it("roster reads are per-session: each session lists only its own workers", async () => {
+    // The removed `check_workers` roster tool is replaced by the core's
+    // `listWorkers` here and by the host's stock `list_agents` live.
+    const multitask = createMultitask(new FakeDshHost());
+    const a = await spawnForTest(multitask, {
+      parentSessionId: "s-a",
+      streamKey: "k-a",
+    });
+    const b = await spawnForTest(multitask, {
+      parentSessionId: "s-b",
+      streamKey: "k-b",
+    });
+    assert.ok(a.ok);
+    assert.ok(b.ok);
+
+    // Isolation is enforced by the SESSION KEY: each session's roster sees
+    // only the workers that session spawned.
+    assert.equal(multitask.listWorkers("s-a").length, 1);
+    assert.equal(multitask.listWorkers("s-b").length, 1);
+
+    await spawnForTest(multitask, { parentSessionId: "s-b", streamKey: "k-b2" });
+    assert.equal(
+      multitask.listWorkers("s-b").length,
+      2,
+      "B's roster keeps advancing",
+    );
+    assert.equal(
+      multitask.listWorkers("s-a").length,
+      1,
+      "A is untouched by B's later spawn",
+    );
+  });
+
+  it("deactivating session A drops only A's tool surface (ticket 79)", async () => {
     const multi = createMultiCtx();
     apply(multi.ctx, volatileConfig({ enabled: true }));
     const a = createScopedAgent("s-a");
     const b = createScopedAgent("s-b");
     await activate(multi, a);
     await activate(multi, b);
-    await spawnVia(a, "k-a");
-    await spawnVia(b, "k-b");
 
-    // Deactivate A: its tool surface is torn down with it. There is no
-    // per-session mirror key to clear on 0.2.1 — the surface IS the read
-    // path, so its absence is the honest signal.
+    // Deactivate A: its tool surface is torn down with it.
     multi.ctx.fire("agent/disposed", { agent: a });
     await tick();
     await tick();
-    assert.equal(a.scopedTool("check_workers"), undefined, "A's surface is gone");
+    assert.equal(
+      a.scopedTool("deliver_result"),
+      undefined,
+      "A's surface is gone",
+    );
 
-    // B keeps its own surface and its own roster.
-    const checkB = b.scopedTool("check_workers");
-    assert.ok(checkB, "B's surface survives A's deactivation");
-    const rosterB = (await checkB.execute({}, undefined)) as {
+    // B keeps its own surface, and it still answers for B.
+    const deliverB = b.scopedTool("deliver_result");
+    assert.ok(deliverB, "B's surface survives A's deactivation");
+    const result = (await deliverB.execute({ text: "done" }, undefined)) as {
       ok: boolean;
-      rows: Array<{ worker_id: string }>;
     };
-    assert.equal(rosterB.rows.length, 1);
-
-    // A later transition in B still answers through B's own surface.
-    await spawnVia(b, "k-b2");
-    const after = (await checkB.execute({}, undefined)) as {
-      rows: Array<{ worker_id: string }>;
-    };
-    assert.equal(after.rows.length, 2, "B's roster keeps advancing");
+    assert.equal(result.ok, true, "B's surface still executes");
   });
 });
 
@@ -622,26 +633,36 @@ describe("ticket 159 — two simultaneous summons keep their own titles", () => 
       return textOf(agent.injected.at(-1));
     };
 
-    // Direction 1: A's roster row for B carries Beta's title.
+    // Visibility rule: a root sees its OWN child, never another root's child,
+    // so each summoner's roster carries exactly its own team leader.
+    // Direction 1: A's roster row for its own child carries Alpha's title.
     const rosterA = rosterOf(a);
     assert.ok(
-      rosterA.includes(`- Beta job (${String(betaId)})`),
-      `A's roster must label B with Beta's title:\n${rosterA}`,
+      rosterA.includes(`- Alpha job (${String(alphaId)})`),
+      `A's roster must label its own child with Alpha's title:\n${rosterA}`,
     );
     assert.ok(
-      !rosterA.includes(`Alpha job (${String(betaId)})`),
-      `A's roster labelled B with A's own title (the swap):\n${rosterA}`,
+      !rosterA.includes(`Beta job (${String(alphaId)})`),
+      `A's roster labelled its child with B's title (the swap):\n${rosterA}`,
+    );
+    assert.ok(
+      !rosterA.includes(String(betaId)),
+      `A's roster must not list another root's child:\n${rosterA}`,
     );
 
-    // Direction 2: B's roster row for A carries Alpha's title.
+    // Direction 2: B's roster row for its own child carries Beta's title.
     const rosterB = rosterOf(b);
     assert.ok(
-      rosterB.includes(`- Alpha job (${String(alphaId)})`),
-      `B's roster must label A with Alpha's title:\n${rosterB}`,
+      rosterB.includes(`- Beta job (${String(betaId)})`),
+      `B's roster must label its own child with Beta's title:\n${rosterB}`,
     );
     assert.ok(
-      !rosterB.includes(`Beta job (${String(alphaId)})`),
-      `B's roster labelled A with B's own title (the swap):\n${rosterB}`,
+      !rosterB.includes(`Alpha job (${String(betaId)})`),
+      `B's roster labelled its child with A's title (the swap):\n${rosterB}`,
+    );
+    assert.ok(
+      !rosterB.includes(String(alphaId)),
+      `B's roster must not list another root's child:\n${rosterB}`,
     );
   });
 
@@ -667,15 +688,18 @@ describe("ticket 159 — two simultaneous summons keep their own titles", () => 
     assert.equal(real.ok, true, JSON.stringify(real));
     const realId = String(real.dispatcher_id);
 
-    multi.ctx.fire("agent/status", { agent: a, status: "running" });
-    const rosterA = textOf(a.injected.at(-1));
+    // The summoner's own roster carries its own child; checking IT (not the
+    // unrelated root's roster, which now correctly hides that child) is what
+    // proves the later summons's title was bound to the later child.
+    multi.ctx.fire("agent/status", { agent: b, status: "running" });
+    const rosterB = textOf(b.injected.at(-1));
     assert.ok(
-      rosterA.includes(`- Real job (${realId})`),
-      `the later summon keeps its own title:\n${rosterA}`,
+      rosterB.includes(`- Real job (${realId})`),
+      `the later summon keeps its own title:\n${rosterB}`,
     );
     assert.ok(
-      !rosterA.includes("Never happened"),
-      `a refused summon's title leaked into the roster:\n${rosterA}`,
+      !rosterB.includes("Never happened"),
+      `a refused summon's title leaked into the roster:\n${rosterB}`,
     );
   });
 });

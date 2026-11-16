@@ -131,9 +131,15 @@ describe("two-dispatcher peer isolation (ticket 70 §4, one core, sessions A/B)"
     const multitask = createMultitask(host);
     const workerB = await spawnRunning(multitask, B, "build-b");
 
-    // B goes mid background turn (a settled wake is ready, turn started).
+    // A settle opens no PLUGIN wake: the host's stock completion notice
+    // (source `subagent-settled`) is the turn opener now, and this fake
+    // models no notice. Re-pinned to zero plugin wakes; the background-turn
+    // owner is then set directly to model the turn that notice opens.
     host.fireSettled({ workerId: workerB, status: "completed", report: "r" });
-    multitask.wakeBus.noteTurnStarted(B);
+    assert.deepEqual(host.wakeCalls, [], "a settle enqueues no plugin wake");
+    assert.equal(multitask.wakeBus.peek(B), undefined);
+    assert.equal(multitask.wakeBus.isBusy(B), false);
+    multitask.wakeBus.noteTurnStarted(B, "worker-settled");
     assert.equal(multitask.wakeBus.getTurnOwner(B), "worker-settled");
     assert.equal(multitask.wakeBus.isBusy(B), true);
 

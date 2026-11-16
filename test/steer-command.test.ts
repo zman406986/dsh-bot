@@ -64,7 +64,7 @@ function createScopedTools(): ScopedToolSurface {
 
 function createAgent(
   id: string,
-  opts?: { topLevel?: boolean },
+  opts?: { topLevel?: boolean; parentSession?: string },
 ): ScopedAgent {
   const topLevel = opts?.topLevel ?? true;
   return {
@@ -72,7 +72,11 @@ function createAgent(
       id,
       header: topLevel
         ? { parentSession: null, delegationDepth: 0 }
-        : { parentSession: "parent-x", delegationDepth: 1 },
+        : {
+            parentSession: opts?.parentSession ?? "parent-x",
+            delegationDepth: 1,
+            origin: "subagent",
+          },
     },
     followup() {},
     inject() {},
@@ -94,6 +98,7 @@ function createFullCtx() {
   >();
   const disposers: Array<() => void> = [];
   const sentMessages: SentMessage[] = [];
+  const boundAgents = new Map<string, AgentLike>();
   let nextChild = 1;
   /**
    * ADR-0019: the plugin registers the dispatcher tools on the activated
@@ -200,7 +205,7 @@ function createFullCtx() {
         return "msg-stub";
       },
     },
-    agents: { get: () => undefined },
+    agents: { get: (id: string) => boundAgents.get(id) },
     jobs: { list: () => [] },
     storageDomain: {
       async open() {
@@ -241,17 +246,45 @@ function createFullCtx() {
     /** Remember the agent whose scoped surface this activation serves. */
     setActiveAgent: (agent: ScopedAgent): void => {
       scopedAgent = agent;
+      boundAgents.set(agent.session.id as string, agent);
     },
-    /** Spawn a worker through the real dispatcher tool surface. */
+    /**
+     * The preset mounts the stock agent verbs on the dispatcher's scope; this
+     * fake `subagent` announces the child exactly the way the host's stock
+     * tool does (`agent/created` with the child header), never through a
+     * plugin spawn handler.
+     */
+    mountStockTools: (agent: ScopedAgent): void => {
+      if (agent.ctx.tools.get("subagent") !== undefined) return;
+      agent.ctx.tools.register({
+        name: "subagent",
+        async execute() {
+          const childId = `child-${nextChild++}`;
+          const child = createAgent(childId, {
+            topLevel: false,
+            parentSession: "s-1",
+          });
+          boundAgents.set(childId, child);
+          fire("agent/created", { agent: child, source: "startup" });
+          return { ok: true, childId };
+        },
+      });
+    },
+    /** Start a worker through the stock `subagent` tool. */
     spawnWorker: async (sessionId: string): Promise<string> => {
-      const spawn = scopedAgent?.ctx.tools.get("spawn_worker");
-      assert.ok(spawn);
-      const value = (await spawn.execute(
-        { stream_key: "k", title: "T", prompt: "P" },
-        { agent: { session: { id: sessionId } } },
-      )) as { ok: boolean; worker_id: string };
+      const subagent = scopedAgent?.ctx.tools.get("subagent");
+      assert.ok(subagent);
+      const value = (await subagent.execute({
+        description: "T",
+        prompt: "P",
+      })) as { ok: boolean; childId: string };
       assert.equal(value.ok, true);
-      return value.worker_id;
+      assert.equal(
+        boundAgents.get(value.childId)?.session.header?.parentSession,
+        sessionId,
+        "the stock child is announced under this dispatcher",
+      );
+      return value.childId;
     },
     /** Drive the worker FSM spawned → running through the status wiring. */
     startWorkerTurn: (workerId: string): void => {
@@ -267,23 +300,6 @@ function createFullCtx() {
         status: "idle",
       });
     },
-    /** Read the live roster row for a worker through check_workers. */
-    workerStatus: async (
-      workerId: string,
-      sessionId: string,
-    ): Promise<string> => {
-      const check = scopedAgent?.ctx.tools.get("check_workers");
-      assert.ok(check);
-      const value = (await check.execute(
-        { worker_id: workerId },
-        { agent: { session: { id: sessionId } } },
-      )) as { ok: boolean; rows: Array<{ status: string }> };
-      assert.equal(value.ok, true);
-      assert.equal(value.rows.length, 1);
-      const row = value.rows[0];
-      assert.ok(row);
-      return row.status;
-    },
     sentMessages,
   };
   return ctx as typeof ctx & AdapterContext;
@@ -291,6 +307,7 @@ function createFullCtx() {
 
 async function activateWithRunningWorker(ctx: ReturnType<typeof createFullCtx>) {
   const agent = createAgent("s-1");
+  ctx.mountStockTools(agent);
   ctx.setActiveAgent(agent);
   const activation = await ctx.runCommand({
     commandId: DISPATCHER_START_COMMAND,
@@ -299,7 +316,6 @@ async function activateWithRunningWorker(ctx: ReturnType<typeof createFullCtx>) 
   assert.equal(activation.kind, "success");
   const workerId = await ctx.spawnWorker("s-1");
   ctx.startWorkerTurn(workerId);
-  assert.equal(await ctx.workerStatus(workerId, "s-1"), "running");
   return { agent, workerId };
 }
 
@@ -388,7 +404,7 @@ describe("steer command — payload parsing", () => {
 });
 
 describe("steer command — routes into the existing core steer queue", () => {
-  it("queues the instruction, flips running → steering, returns success copy", async () => {
+  it("queues the instruction and returns success copy; delivery waits for the step boundary", async () => {
     const ctx = createFullCtx();
     apply(ctx, volatileConfig({ enabled: true }));
     const { workerId } = await activateWithRunningWorker(ctx);
@@ -403,8 +419,9 @@ describe("steer command — routes into the existing core steer queue", () => {
       kind: "success",
       text: dispatcherSteerSuccess(workerId),
     });
-    assert.equal(await ctx.workerStatus(workerId, "s-1"), "steering");
-    // Nothing delivered yet: delivery happens at the step boundary.
+    // Nothing delivered yet: delivery happens at the step boundary. The
+    // parked-steer state itself has no kept-tool reader (check_workers is
+    // retired); the boundary delivery below is its observable proof.
     assert.equal(ctx.sentMessages.length, 0);
   });
 
@@ -429,8 +446,21 @@ describe("steer command — routes into the existing core steer queue", () => {
     assert.equal(sent.targetId, workerId);
     assert.match(sent.text, /\[Parent correction\]/);
     assert.match(sent.text, /focus on the failing test first/);
-    // Delivery completes the steering step: back to running.
-    assert.equal(await ctx.workerStatus(workerId, "s-1"), "running");
+    // Delivery completes the steering step: the worker is back to running, so
+    // a second correction is accepted and delivered at the NEXT boundary.
+    const again = await ctx.runCommand({
+      commandId: DISPATCHER_STEER_COMMAND,
+      agent: createAgent("s-1"),
+      rawInput: `${workerId} second correction`,
+    });
+    assert.deepEqual(again, {
+      kind: "success",
+      text: dispatcherSteerSuccess(workerId),
+    });
+    ctx.endWorkerTurn(workerId);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(ctx.sentMessages.length, 2);
+    assert.match(ctx.sentMessages[1]?.text ?? "", /second correction/);
   });
 
 });
@@ -447,8 +477,9 @@ describe("steer command — core refusal vocabulary", () => {
       stopReason: "completed",
       lastAssistantMessage: [{ type: "text", text: "done" }],
     });
-    assert.equal(await ctx.workerStatus(workerId, "s-1"), "completed");
 
+    // The refusal itself proves the terminal state: a completed worker is no
+    // longer steerable (the retired check_workers row used to spell it out).
     const result = await ctx.runCommand({
       commandId: DISPATCHER_STEER_COMMAND,
       agent: createAgent("s-1"),

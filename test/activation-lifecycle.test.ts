@@ -16,10 +16,12 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { apply } from "../src/plugin.js";
 import { volatileConfig } from "./support/plugin-config.js";
-import {DISPATCHER_START_COMMAND, DISPATCHER_START_NOT_TOP_LEVEL, DISPATCHER_START_SUCCESS, DISPATCHER_START_UNRESOLVED, DISPATCHER_STEER_COMMAND, type AdapterContext, type AgentLike, type CommandDefinitionLike, type CommandResultLike, type ToolsLike} from "../src/adapter/index.js";
+import { DISPATCHER_TOOL_NAMES } from "../src/core/policy/prompts.js";
+import {ACTIVATION_COMMAND_CARD_TEXT, DISPATCHER_START_ALREADY_HERE, DISPATCHER_START_COMMAND, DISPATCHER_START_INPUT_HINT, DISPATCHER_START_NOT_TOP_LEVEL, DISPATCHER_START_UNRESOLVED, DISPATCHER_STEER_COMMAND, type AdapterContext, type AgentLike, type CommandDefinitionLike, type CommandResultLike, type ToolsLike} from "../src/adapter/index.js";
 
 interface TestAgent extends AgentLike {
   readonly injected: unknown[];
+  readonly followups: unknown[];
 }
 
 /**
@@ -82,6 +84,7 @@ function createAgent(
 ): TestAgent & { ctx?: { tools: ScopedToolSurface } } {
   const topLevel = opts?.topLevel ?? true;
   const injected: unknown[] = [];
+  const followups: unknown[] = [];
   const withScoped = opts?.withScopedTools ?? true;
   const agent: TestAgent & { ctx?: { tools: ScopedToolSurface } } = {
     session: {
@@ -90,8 +93,11 @@ function createAgent(
         ? { parentSession: null, delegationDepth: 0 }
         : { parentSession: "parent-x", delegationDepth: 1 },
     },
-    followup() {},
+    followup(message: unknown) {
+      followups.push(message);
+    },
     injected,
+    followups,
     ...(withScoped
       ? { ctx: { tools: createScopedTools() } }
       : {}),
@@ -238,6 +244,7 @@ function createFullCtx() {
     fire,
     disposers,
     commandNames: () => [...commands.keys()],
+    command: (name: string) => commands.get(name),
     toolNames: () => [...tools.keys()],
     tool: (name: string) => tools.get(name),
     listenerCount: () => {
@@ -246,7 +253,7 @@ function createFullCtx() {
       return total;
     },
     runCommand(
-      invocation: { commandId: string; agent?: AgentLike },
+      invocation: { commandId: string; agent?: AgentLike; rawInput?: string },
     ): CommandResultLike {
       const command = commands.get(invocation.commandId);
       if (command === undefined) {
@@ -291,16 +298,16 @@ describe("activation lifecycle — flag matrix (design-16 §3.7)", () => {
     const EXPECTED_DORMANT_LISTENERS = 7;
     assert.equal(ctx.listenerCount(), EXPECTED_DORMANT_LISTENERS);
     // No dispatcher tool claims a dormant key: a stock caller sees stock.
-    for (const name of [
-      "spawn_worker",
-      "check_workers",
-      "steer_worker",
-      "stop_worker",
-      "deliver_result",
-      "message_agent",
-      "await_agent",
-      "spawn_dispatcher",
-    ]) {
+    // The custom three come from the const; the four stock agent verbs are
+    // mounted by the PRESET (never by this plugin), and they must not be
+    // dormant claims of ours either.
+    const STOCK_AGENT_TOOL_NAMES = [
+      "subagent",
+      "list_agents",
+      "send_message",
+      "interrupt_agent",
+    ];
+    for (const name of [...DISPATCHER_TOOL_NAMES, ...STOCK_AGENT_TOOL_NAMES]) {
       assert.equal(ctx.tool(name), undefined, `${name} must not be dormant`);
     }
   });
@@ -317,26 +324,101 @@ describe("activation lifecycle — command behavior", () => {
       agent,
     });
 
-    assert.deepEqual(result, { kind: "success", text: DISPATCHER_START_SUCCESS });
+    assert.deepEqual(result, { kind: "success", text: ACTIVATION_COMMAND_CARD_TEXT });
     assert.equal(agent.injected.length, 1);
     assert.ok(textOf(agent.injected[0]).includes("# Multitask dispatcher"));
-    // Full dispatcher surface in the agent's OWN scope: eight tools (ticket
-    // 117 added await_agent, ticket 118 added spawn_dispatcher). Owner ruling
+    // Full CUSTOM dispatcher surface in the agent's OWN scope: the three
+    // verbs stock DSH does not cover (workers/status/steering/stopping are the
+    // preset's stock `subagent` / `list_agents` / `send_message` /
+    // `interrupt_agent`, so this fixture mounts none of them). Owner ruling
     // 2026-11-05: the ticket-145 per-session `recall` is absent by default —
     // racoons is off unless `racoonsEnabled` turns it on. Ticket 174 /
     // ADR-0033 removed the global `request_access`.
-    assert.deepEqual(agent.ctx?.tools.registeredNames().sort(), [
-      "await_agent",
-      "check_workers",
-      "deliver_result",
-      "message_agent",
-      "spawn_dispatcher",
-      "spawn_worker",
-      "steer_worker",
-      "stop_worker",
-    ]);
+    assert.deepEqual(
+      agent.ctx?.tools.registeredNames().sort(),
+      [...DISPATCHER_TOOL_NAMES].sort(),
+    );
     // Nothing claims a process-global name.
     assert.deepEqual(ctx.toolNames(), []);
+  });
+
+  it("the command advertises an optional message and sends it as exactly one user turn", () => {
+    const ctx = createFullCtx();
+    apply(ctx, volatileConfig({ enabled: true }));
+    const agent = createAgent("s-1");
+
+    const definition = ctx.command(DISPATCHER_START_COMMAND);
+    assert.equal(
+      definition?.input?.hint,
+      DISPATCHER_START_INPUT_HINT,
+      "the composer only recognizes an argument after an input descriptor",
+    );
+
+    const result = ctx.runCommand({
+      commandId: DISPATCHER_START_COMMAND,
+      agent,
+      // The host's rawInput carries the separator whitespace; it is not part
+      // of the message.
+      rawInput: "  Please triage the failing test.  ",
+    });
+
+    assert.deepEqual(result, { kind: "success", text: ACTIVATION_COMMAND_CARD_TEXT });
+    assert.equal(agent.followups.length, 1, "exactly one first turn");
+    const message = agent.followups[0] as {
+      role?: unknown;
+      content?: Array<{ text?: string }>;
+      source?: { kind?: unknown; form?: unknown };
+    };
+    assert.equal(message.role, "user");
+    assert.equal(textOf(message), "Please triage the failing test.");
+    assert.deepEqual(
+      message.source,
+      { kind: "user" },
+      "the human source kind renders it as the user's message, not a notice",
+    );
+
+    // Already active: the same command with another argument must not open a
+    // second turn or send a second message.
+    const again = ctx.runCommand({
+      commandId: DISPATCHER_START_COMMAND,
+      agent,
+      rawInput: "a second message",
+    });
+    assert.deepEqual(again, {
+      kind: "success",
+      text: DISPATCHER_START_ALREADY_HERE,
+    });
+    assert.equal(agent.followups.length, 1, "no duplicate user message");
+  });
+
+  it("plain /dsh-bot and a whitespace-only argument stay turn-free", () => {
+    const ctx = createFullCtx();
+    apply(ctx, volatileConfig({ enabled: true }));
+
+    const bare = createAgent("s-bare");
+    const bareResult = ctx.runCommand({
+      commandId: DISPATCHER_START_COMMAND,
+      agent: bare,
+    });
+    assert.deepEqual(bareResult, {
+      kind: "success",
+      text: ACTIVATION_COMMAND_CARD_TEXT,
+    });
+    assert.equal(bare.followups.length, 0, "no argument means no turn");
+    assert.equal(bare.injected.length, 1, "activation itself still happened");
+    assert.equal(bare.ctx?.tools.registeredNames().length, DISPATCHER_TOOL_NAMES.length);
+
+    const blank = createAgent("s-blank");
+    const blankResult = ctx.runCommand({
+      commandId: DISPATCHER_START_COMMAND,
+      agent: blank,
+      rawInput: "   \n\t ",
+    });
+    assert.deepEqual(blankResult, {
+      kind: "success",
+      text: ACTIVATION_COMMAND_CARD_TEXT,
+    });
+    assert.equal(blank.followups.length, 0, "whitespace is not a message");
   });
 
   it("the context-less path refuses the global fallback instead of leaking tools", () => {
@@ -368,6 +450,7 @@ describe("activation lifecycle — command behavior", () => {
     const result = ctx.runCommand({
       commandId: DISPATCHER_START_COMMAND,
       agent: child,
+      rawInput: "this must not become a turn",
     });
 
     assert.deepEqual(result, {
@@ -375,6 +458,7 @@ describe("activation lifecycle — command behavior", () => {
       text: DISPATCHER_START_NOT_TOP_LEVEL,
     });
     assert.equal(child.injected.length, 0);
+    assert.equal(child.followups.length, 0, "activation failure sends no message");
     assert.deepEqual(ctx.toolNames(), []);
   });
 
@@ -402,7 +486,7 @@ describe("activation lifecycle — deactivation and HMR", () => {
     const agent = createAgent("s-1");
 
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
-    assert.equal(agent.ctx?.tools.registeredNames().length, 8);
+    assert.equal(agent.ctx?.tools.registeredNames().length, DISPATCHER_TOOL_NAMES.length);
 
     ctx.fire("agent/disposed", { agent });
     assert.deepEqual(agent.ctx?.tools.registeredNames(), []);
@@ -414,10 +498,10 @@ describe("activation lifecycle — deactivation and HMR", () => {
     });
     assert.deepEqual(again, {
       kind: "success",
-      text: DISPATCHER_START_SUCCESS,
+      text: ACTIVATION_COMMAND_CARD_TEXT,
     });
     assert.equal(agent.injected.length, 2);
-    assert.equal(agent.ctx?.tools.registeredNames().length, 8);
+    assert.equal(agent.ctx?.tools.registeredNames().length, DISPATCHER_TOOL_NAMES.length);
   });
 
   it("dispose-all (HMR simulation) leaves no lingering binding or surface", () => {
@@ -425,7 +509,7 @@ describe("activation lifecycle — deactivation and HMR", () => {
     apply(ctx, volatileConfig({ enabled: true }));
     const agent = createAgent("s-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
-    assert.equal(agent.ctx?.tools.registeredNames().length, 8);
+    assert.equal(agent.ctx?.tools.registeredNames().length, DISPATCHER_TOOL_NAMES.length);
 
     for (const dispose of [...ctx.disposers]) {
       dispose();
@@ -448,7 +532,7 @@ describe("activation lifecycle — deactivation and HMR", () => {
 });
 
 describe("activation lifecycle — dispatcher tool surface (ADR-0019)", () => {
-  it("activation registers the eight tools in the agent's SCOPED surface, with no global tool", () => {
+  it("activation registers the custom tools in the agent's SCOPED surface, with no global tool", () => {
     const ctx = createFullCtx();
     apply(ctx, volatileConfig({ enabled: true }));
     const agent = createScopedAgent("s-1");
@@ -457,23 +541,16 @@ describe("activation lifecycle — dispatcher tool surface (ADR-0019)", () => {
       commandId: DISPATCHER_START_COMMAND,
       agent,
     });
-    assert.deepEqual(result, { kind: "success", text: DISPATCHER_START_SUCCESS });
+    assert.deepEqual(result, { kind: "success", text: ACTIVATION_COMMAND_CARD_TEXT });
 
-    // The eight dispatcher tools live in THIS agent's scope only. Owner
-    // ruling 2026-11-05: the ticket-145 per-session `recall` is absent by
-    // default — racoons is off unless `racoonsEnabled` turns it on.
+    // The three CUSTOM dispatcher tools live in THIS agent's scope only; the
+    // stock agent verbs are the preset's (not mounted in this fixture, so the
+    // exact set here is the custom three). Owner ruling 2026-11-05: the
+    // ticket-145 per-session `recall` is absent by default — racoons is off
+    // unless `racoonsEnabled` turns it on.
     assert.deepEqual(
       agent.ctx?.tools.registeredNames().sort(),
-      [
-        "await_agent",
-        "check_workers",
-        "deliver_result",
-        "message_agent",
-        "spawn_dispatcher",
-        "spawn_worker",
-        "steer_worker",
-        "stop_worker",
-      ],
+      [...DISPATCHER_TOOL_NAMES].sort(),
     );
     // …and nothing claims a global name (ticket 174 / ADR-0033 removed the
     // one global `request_access`).
@@ -491,7 +568,7 @@ describe("activation lifecycle — dispatcher tool surface (ADR-0019)", () => {
     ctx.fire("agent/disposed", { agent: first });
 
     assert.deepEqual(first.ctx?.tools.registeredNames(), []);
-    assert.equal(second.ctx?.tools.registeredNames().length, 8);
+    assert.equal(second.ctx?.tools.registeredNames().length, DISPATCHER_TOOL_NAMES.length);
     // The sibling's surface is untouched, and no global tool exists to leak
     // past a session (ticket 174 / ADR-0033 removed `request_access`).
     assert.deepEqual(ctx.toolNames(), []);
@@ -499,19 +576,11 @@ describe("activation lifecycle — dispatcher tool surface (ADR-0019)", () => {
     assert.deepEqual(ctx.toolNames(), []);
   });
 
-  it("workers spawned through the surface are host children of the activated chat", async () => {
-    const ctx = createFullCtx();
-    apply(ctx, volatileConfig({ enabled: true }));
-    const agent = createAgent("s-1");
-    ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
-
-    const spawn = agent.ctx?.tools.get("spawn_worker");
-    assert.ok(spawn);
-    const value = (await spawn.execute(
-      { stream_key: "k", title: "T", prompt: "P" },
-      { agent: { session: { id: "s-1" } } },
-    )) as { ok: boolean; worker_id: string };
-    assert.equal(value.ok, true);
-    assert.match(value.worker_id, /^child-/);
-  });
+  // DELETED with the `spawn_worker` handler: "workers spawned through the
+  // surface are host children of the activated chat" exercised only that
+  // retired tool's host-seam wiring. Workers now start with the stock
+  // `subagent` tool, which is the host's own spawn path — the adoption of
+  // such a child into this plugin's roster is the source lane's seam (A2a)
+  // and is pinned where it lands, not by a handler this plugin no longer
+  // registers.
 });

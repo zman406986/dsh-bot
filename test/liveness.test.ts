@@ -6,22 +6,15 @@ import {
   WORKER_STALL_THRESHOLD_MS,
   type WorkerLivenessInput,
 } from "../src/core/liveness.js";
-import { formatCheckRowLine, toCheckRow } from "../src/core/tool-results.js";
-import type { WorkerSummary } from "../src/core/types.js";
-import { FakeDshHost } from "../src/core/fake-host.js";
-import { createMultitask, type Multitask } from "../src/core/multitask.js";
-import {
-  createDispatcherTools,
-  type DispatcherToolDef,
-} from "../src/core/tools.js";
-import { CHECK_WORKERS_TOOL } from "../src/core/policy/prompts.js";
-import type { CheckWorkersToolResult } from "../src/core/tool-results.js";
-import type { SpawnResult } from "../src/core/types.js";
 
 /**
  * Ticket 61 (register A-8, ADR-0018 exception D22): the liveness verdict is
- * a pure derivation over the fields check_workers already projects. Every
- * test passes `nowMs` explicitly — no real clock anywhere (R1, S8).
+ * a pure derivation. Every test passes `nowMs` explicitly — no real clock
+ * anywhere (R1, S8).
+ *
+ * The former `check_workers` surfacing and end-to-end cases are gone with the
+ * tool: stock `list_agents` has no liveness or activity field, so there is no
+ * shipped projector left to pin. The derivation suite below is the contract.
  */
 
 const NOW = 1_000_000;
@@ -36,35 +29,6 @@ function input(
     lastActivityAtMs: NOW - 5_000,
     ...overrides,
   };
-}
-
-function summary(
-  overrides: Partial<WorkerSummary> = {},
-): WorkerSummary {
-  return {
-    workerId: "w-1",
-    parentSessionId: "session-1",
-    streamKey: "s-1",
-    title: "Summarize RFCs",
-    status: "running",
-    startedAtMs: NOW - 5 * 60_000,
-    elapsedMs: 5 * 60_000,
-    toolCallCount: 3,
-    transcriptRef: "w-1",
-    todoId: "t-1",
-    ...overrides,
-  };
-}
-
-function unwrapSpawn(result: SpawnResult): string {
-  assert.ok(result.ok, result.ok ? "" : result.detail);
-  return result.workerId;
-}
-
-function byName(tools: DispatcherToolDef[], name: string): DispatcherToolDef {
-  const tool = tools.find((t) => t.name === name);
-  assert.ok(tool, `missing tool: ${name}`);
-  return tool;
 }
 
 describe("liveness — verdict classes", () => {
@@ -166,68 +130,6 @@ describe("liveness — misclassification pins (R3)", () => {
       NOW,
     );
     assert.equal(verdict, "quiet");
-  });
-
-});
-
-describe("liveness — check-row surfacing", () => {
-  it("toCheckRow with a verdict carries it and the summary line shows it", () => {
-    const row = toCheckRow(summary(), "reading notes", "active");
-    assert.equal(row.liveness, "active");
-    const line = formatCheckRowLine(row);
-    assert.ok(line.includes("liveness: active"));
-    assert.ok(line.includes("activity: reading notes"));
-  });
-
-});
-
-describe("liveness — end to end through check_workers", () => {
-  async function setup(options?: {
-    lastActivityAtMs?: (workerId: string) => number | null;
-  }): Promise<{ host: FakeDshHost; multitask: Multitask; tools: DispatcherToolDef[] }> {
-    const host = new FakeDshHost();
-    // Ticket 174 / ADR-0033 removed the access-ask seam and its options;
-    // the core is constructed with defaults here.
-    const multitask = createMultitask(host);
-    const tools = createDispatcherTools({
-      multitask,
-      getSessionId: () => "session-1",
-      ...(options?.lastActivityAtMs !== undefined
-        ? { lastActivityAtMs: options.lastActivityAtMs }
-        : {}),
-    });
-    return { host, multitask, tools };
-  }
-
-  async function spawnRunning(
-    multitask: Multitask,
-    streamKey: string,
-  ): Promise<string> {
-    const workerId = unwrapSpawn(
-      await multitask.spawnWorker({
-        parentSessionId: "session-1",
-        streamKey,
-        title: "Summarize RFCs",
-        prompt: "Do the work.",
-      }),
-    );
-    multitask.noteTurnStarted(workerId);
-    return workerId;
-  }
-
-  it("a worker with only ancient observed activity reads stalled", async () => {
-    const { multitask, tools } = await setup({
-      lastActivityAtMs: () => 0, // observed long before any realistic now
-    });
-    const workerId = await spawnRunning(multitask, "s-1");
-    multitask.noteToolCall(workerId);
-    const result = (await byName(tools, CHECK_WORKERS_TOOL).execute(
-      {},
-    )) as CheckWorkersToolResult;
-    assert.ok(result.ok);
-    if (!result.ok) return;
-    assert.equal(result.rows[0]?.liveness, "stalled");
-    assert.ok(result.summary.includes("liveness: stalled"));
   });
 
 });

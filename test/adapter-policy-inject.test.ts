@@ -409,13 +409,23 @@ describe("dispatcher activation lifecycle (ticket 19)", () => {
       todoId: "todo-1",
     });
     assert.ok(spawned.ok);
+    // The worker actually ran: the adapter sees its `agent/status running`
+    // edge and promotes the linked todo to in_progress before the settle.
+    multitask.noteTurnStarted(spawned.workerId);
     host.fireSettled({
       workerId: spawned.workerId,
       status: "completed",
       report: "done",
     });
-    // The settle wake itself is the item's first delivery chance.
-    multitask.drainWake("session-1");
+    // The settle opens no plugin wake: the stock completion notice is the
+    // parent-visible result, and the turn's end is the first accounting point.
+    // The result is kept in the settle record so the redrive turn can
+    // re-present it instead of the empty-report placeholder.
+    assert.deepEqual(host.wakeups, [], "the settle opens no plugin turn");
+    assert.equal(
+      multitask.settleRecords.lookup("session-1", spawned.workerId)?.resultText,
+      "done",
+    );
     const wakeupsBefore = host.wakeups.length;
 
     // The turn that carried the result ends with the result still undelivered.

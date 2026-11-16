@@ -203,7 +203,18 @@ function createStubCtx(
         },
         tools: {
           schemas() {
-            return [{ name: "spawn_worker" }, { name: "todo_write" }];
+            // The preset's agent plane on a real summoned session: the stock
+            // agent verbs plus a work tool. `subagent_fork` is the one verb
+            // the dispatcher surface still withholds, so it is a candidate
+            // this fake must expose for the restriction to see (and drop).
+            return [
+              { name: "subagent" },
+              { name: "subagent_fork" },
+              { name: "list_agents" },
+              { name: "send_message" },
+              { name: "interrupt_agent" },
+              { name: "todo_write" },
+            ];
           },
           restrict(filter: unknown) {
             composed.restrictions.push(filter);
@@ -1914,10 +1925,10 @@ describe("ticket 118: FakeDshHost dispatcher spawn", () => {
 /**
  * DEFECT (summoned session came up with no work tools).
  *
- * Report: a spawned session's whole tool list was
- * `await_agent, check_workers, deliver_result, message_agent, spawn_worker,
- * steer_worker, stop_worker, working_directory` — the plugin's seven dispatched
- * tools plus the one HOST-PLANE tool, and nothing else.
+ * Report: a spawned session's whole tool list was the plugin's own dispatcher
+ * tools plus the one HOST-PLANE tool (`working_directory`), and nothing else —
+ * no fs, no shell, no subagent. (The reported list named the retired
+ * dispatcher verbs; the point was the missing preset, not their names.)
  *
  * Cause: this spawn path creates a TOP-LEVEL session through
  * `ctx.agents.create` and never joins it to an agent preset. Every work tool
@@ -2438,7 +2449,7 @@ describe("Ticket 285: spawnDispatcher applies the leader's model option", () => 
  * that stores a default, and refreshDispatcherMarks is the only restart path
  * that restores one. Every case here therefore drives that pair and then
  * observes the next spawnWorker request — the exact seam the leader's later
- * spawn_worker call reaches (plan §4.4).
+ * stock `subagent` spawn reaches (plan §4.4).
  */
 describe("Ticket 285: the leader's worker default is stored and restored", () => {
   /**

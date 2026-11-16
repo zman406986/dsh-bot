@@ -1,8 +1,8 @@
 /**
  * Host slash-command registration for mid-run steer input (ticket 22,
  * design-16 §4.3). The transport does not change: the handler routes into
- * the same core last-wins steer queue the `steer_worker` tool uses — the
- * command is an input path, not new steer semantics (no restart, context
+ * the same core last-wins steer queue `message_agent`'s worker branch uses —
+ * the command is an input path, not new steer semantics (no restart, context
  * preserved, last-wins).
  *
  * Registered at apply (flag ON) with an in-handler activation gate, per the
@@ -178,7 +178,8 @@ export interface RegisterDispatcherSteerCommandOptions {
   readonly activeSessionIds: () => readonly string[];
   /**
    * Enqueue a steer through the core's existing last-wins queue path —
-   * the same `Multitask.steerWorker` call the `steer_worker` tool makes.
+   * the same `Multitask.steerWorker` call `message_agent`'s worker branch
+   * makes.
    */
   readonly steer: (workerId: string, message: string) => Promise<SteerResult>;
   /**

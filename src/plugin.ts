@@ -1,4 +1,5 @@
 import z from "@deepseek-ai/schemastery";
+import { randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import {
@@ -6,12 +7,17 @@ import {
   type InboxJobResolution,
   type Multitask,
 } from "./core/multitask.js";
+import {
+  canSeeDispatcherPeer,
+  type DispatcherVisibilityNode,
+} from "./core/dispatcher-visibility.js";
 import type { DshHost } from "./core/dsh-host.js";
 import {
   assemblePeerWakeTurn,
   assembleTurnReminder,
   assembleWakeTurn,
   noticeFromSettled,
+  type RePresentedNotice,
   type WakeNotice,
 } from "./core/policy/assembler.js";
 import type {
@@ -30,7 +36,6 @@ import {
   registerDispatcherTools,
   registerSessionKindProjection,
   registerMicrocompact,
-  resolveExecSessionId,
   resolveInboxJobText,
   resolveSessionProjections,
   RESTART_DEGRADED_NOTICE,
@@ -49,6 +54,7 @@ import {
   type DispatcherSpawnOptions,
   type SessionProjectionChildLike,
   type DispatcherMarkProbe,
+  type TeamLeaderIdleSignal,
   type MicrocompactPassOutcome,
   type StorageDomainDurability,
   type TokenMeterLike,
@@ -68,8 +74,17 @@ import {
   registerRacoonsMount,
   type RacoonsMountHandle,
 } from "./adapter/racoons-mount.js";
-import { clampActivity } from "./core/report-clamp.js";
-import { createWorkerLocalToolDefs, withholdHostSpawnTools } from "./core/tools.js";
+import { registerListAgentsFence } from "./adapter/list-agents-fence.js";
+import { clampActivity, emptyReportPlaceholder } from "./core/report-clamp.js";
+import {
+  PEER_DIRECT_CONVERSATION_ID,
+  withholdHostSpawnTools,
+} from "./core/tools.js";
+import type {
+  AgentMessageWakeOrigin,
+  PeerEnvelope,
+  PeerSendAck,
+} from "./core/peer-types.js";
 import { createWorkerAgentDef } from "./worker/agent-def.js";
 import { resolveHostPolicyLanguage } from "./adapter/locale-preference.js";
 
@@ -486,6 +501,44 @@ function inProcessErrorReport(transcriptRef: string): string {
 }
 
 /**
+ * Body for a re-presented completed result whose settle record is gone.
+ *
+ * The placeholder says "produced no text", which is false when the report
+ * merely left the in-memory ring. Re-presentation must never lie about that,
+ * so the honest fallback names where the text still lives.
+ */
+function unavailableRepresentedReport(transcriptRef: string): string {
+  const pointer =
+    transcriptRef.length > 0
+      ? ` Transcript: ${transcriptRef}.`
+      : " See the transcript for details.";
+  return `(This result was already presented; its text is no longer held in this process.${pointer})`;
+}
+
+/**
+ * Report body for one landed-undelivered item shown again. The real text is
+ * read from the settle record written before the original wake was enqueued;
+ * an empty result is re-worded so the completed-report placeholder cannot be
+ * mistaken for a lost 13k-character deliverable. Errors keep their existing
+ * restored/in-process wording when no record survives.
+ */
+function representedReportBody(
+  status: "completed" | "error",
+  storedText: string | undefined,
+  transcriptRef: string,
+  restored: boolean,
+): string {
+  const text = (storedText ?? "").trim();
+  if (text.length > 0 && text !== emptyReportPlaceholder()) return text;
+  if (status === "error") {
+    return restored
+      ? restoredErrorReport(transcriptRef)
+      : inProcessErrorReport(transcriptRef);
+  }
+  return unavailableRepresentedReport(transcriptRef);
+}
+
+/**
  * Ticket 110: the "Recent worker activity" digest section for a wake turn.
  * Inline text only (U-F): for every worker referenced by the wake's settle
  * notices, up to {@link WAKE_DIGEST_ACTIVITY_COUNT} firehose-observed
@@ -591,29 +644,32 @@ export function composeWakeText(
     return noticeFromSettled(settled, transcriptRef);
   });
 
-  // Landed-undelivered items from an earlier rebuild may not be in this
-  // wake's settle list — surface them with a transcript pointer.
+  // Landed-undelivered items from an earlier wake are shown AGAIN. They are
+  // not new settles: putting them under "Settled workers" (with no report)
+  // produced the duplicate wake 458 that repeated wake 457's activity lines
+  // but carried the empty-report placeholder instead of the real result.
+  // Re-present them in their own block, with the report already captured in
+  // the settle record written before the original wake.
   const seen = new Set(notices.map((n) => n.workerId));
+  const rePresented: RePresentedNotice[] = [];
   for (const todo of drained.reconcile.landedUndelivered) {
     if (todo.workerId === null || seen.has(todo.workerId)) continue;
     const summary = byId.get(todo.workerId);
     if (summary === undefined) continue;
     if (summary.status !== "completed" && summary.status !== "error") continue;
+    const status = summary.status;
     const transcriptRef = summary.transcriptRef ?? todo.workerId;
-    notices.push({
+    rePresented.push({
+      todoId: todo.id,
       workerId: todo.workerId,
       title: summary.title,
-      status: summary.status,
-      // Completed keeps the report placeholder; an error must not read
-      // "worker failed with no message". The restored wording is only for a
-      // worker actually restored from a durable marker — an in-process error
-      // gets the neutral summary copy.
-      report:
-        summary.status === "error"
-          ? options?.restoredWorkerOf?.(todo.workerId) === true
-            ? restoredErrorReport(transcriptRef)
-            : inProcessErrorReport(transcriptRef)
-          : "",
+      status,
+      report: representedReportBody(
+        status,
+        multitask.settleRecords?.lookup(sessionId, todo.workerId)?.resultText,
+        transcriptRef,
+        options?.restoredWorkerOf?.(todo.workerId) === true,
+      ),
       transcriptRef,
     });
     seen.add(todo.workerId);
@@ -627,7 +683,11 @@ export function composeWakeText(
   // above is untouched: external jobs ride normal and background wakes only.
   const externalJobs = drained.wake.externalJobs ?? [];
 
-  if (notices.length === 0 && externalJobs.length === 0) {
+  if (
+    notices.length === 0 &&
+    rePresented.length === 0 &&
+    externalJobs.length === 0
+  ) {
     return null;
   }
 
@@ -637,7 +697,7 @@ export function composeWakeText(
     language,
     origin,
   );
-  const wake = assembleWakeTurn(notices, language, origin);
+  const wake = assembleWakeTurn(notices, language, origin, rePresented);
   const inboxSection = assembleInboxJobsSection(
     externalJobs,
     options?.inboxSourceOf,
@@ -1126,32 +1186,22 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
         },
       );
     },
-    // Ticket 122: the child's mid-task reply channel. Registered on the
-    // child's own scope at `agent/created`, so the dispatcher's surface never
-    // lists it. `multitaskRef` is initialized by the time a child exists.
+    // Stock-subagent refactor: the worker has no plugin-local reply tool. Its
+    // interim steer is the stock `send_message` (already on the child's
+    // inherited surface) and its report is the closing answer the stock
+    // completion notice carries to the dispatcher. What is still registered on
+    // the child's own scope at `agent/created` is the recall mount below.
     workerLocalTools: (workerSessionId) => {
-      if (multitaskRef === null) return [];
-      const tools = createWorkerLocalToolDefs({
-        multitask: multitaskRef,
-        // The exec session id IS the worker id once this host owns it. The
-        // reply addresses
-        // `getWorker(workerId).parentSessionId` — never a tool argument.
-        resolveWorkerId: (exec) => {
-          const sessionId = resolveExecSessionId(exec);
-          if (sessionId === null) return null;
-          return host.owns(sessionId) ? sessionId : null;
-        },
-      });
       // Ticket 145: the worker's OWN recall tool (ticket 145 step 4). The
       // composition registers these on the child's scope only, and the
       // handler reads THIS worker session's ledger — never another
       // session's, and never a global one. The mount is created during apply,
       // long before a child can exist; a missing mount means racoons is off
       // and no recall is offered.
-      if (racoonsMount === null) return tools;
+      if (racoonsMount === null) return [];
       const sessionId = typeof workerSessionId === "string" ? workerSessionId : "";
-      if (sessionId === "") return tools;
-      return [...tools, ...racoonsMount.recallToolDefs(sessionId)];
+      if (sessionId === "") return [];
+      return racoonsMount.recallToolDefs(sessionId);
     },
     // Ticket 118 chunk 3 / ADR-0025: the spawned-dispatcher activation path.
     // The host fires this once per successful `spawnDispatcher` — from the
@@ -1260,6 +1310,31 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     // A throwing hook is swallowed inside the host.
     onWorkerReattached: (workerId, parentSessionId) => {
       multitaskRef?.reclaimWorker(workerId, parentSessionId);
+      // Lane C3: the same hold-clear as the adoption hook above — a worker
+      // this leader owns came back, so a third-party peer hold must not
+      // suppress the next answer.
+      teamLeaderPush.noteEpisodeReset(parentSessionId);
+    },
+    // Lane A2a: the host identified a child the STOCK `subagent` tool spawned
+    // under a bound dispatcher, composed it, and put it in its own workers
+    // registry. Give it the core half — roster record, linked todo, durable
+    // marker/wake row — through the one narrow adoption method. The title is
+    // the same `subagent.label` read the peer roster uses; unreadable stays
+    // null and the core falls back to `Worker <short id>`.
+    onStockWorkerAdopted: (workerId, parentSessionId, childSession) => {
+      let label: string | null = null;
+      try {
+        label = subagentLabelOf(resolveSessionProjections(ctx), childSession);
+      } catch {
+        // A label is display text; an unreadable projection is null, never a
+        // reason to skip the adoption.
+        label = null;
+      }
+      multitaskRef?.adoptSpawnedWorker({ workerId, parentSessionId, label });
+      // Lane C3: a worker appearing under a leader clears any third-party peer
+      // hold. The text dedupe itself stays: a repeat of the already-pushed
+      // answer is still a no-op.
+      teamLeaderPush.noteEpisodeReset(parentSessionId);
     },
   });
   // Ticket 140: the projection unit's late-bound probe now resolves. Bound
@@ -1286,10 +1361,54 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   const multitaskHost = Object.create(host) as DshHost;
   multitaskHost.requestDispatcherWakeup = async (sessionId, origin) => {
     if (tearingDown) return;
+    // Lane C3: only a message from the leader's OWN summoner may re-arm the
+    // push. A third-party peer status/stop raises a one-idle hold instead, so
+    // the ack it provokes is never pushed upward; a settle/redrive wake (no
+    // origin) clears any stale hold.
+    teamLeaderPush.noteWakeOrigin(sessionId, origin);
     await host.requestDispatcherWakeup(sessionId, origin);
+  };
+  // Lane C2a/C3: a worker spawned for a leader (the legacy `spawn_worker`
+  // path, whose child the host does NOT route through
+  // `onStockWorkerAdopted`) is one of the hold-clear points. The wrapper only
+  // observes; the spawn and its id/callback contract are untouched.
+  const spawnWorkerOnHost = host.spawnWorker.bind(host);
+  multitaskHost.spawnWorker = async (prompt, opts) => {
+    const workerId = await spawnWorkerOnHost(prompt, opts);
+    teamLeaderPush.noteEpisodeReset(opts.parentSessionId);
+    return workerId;
+  };
+  /**
+   * The host facts the ONE dispatcher visibility predicate reads: the durable
+   * dispatcher parent (a SESSION id from the mark row — a summoned team leader
+   * has no stock `header.parentSession`), the live session header's cwd, and
+   * whether the session is durably marked as a dispatcher. All are
+   * already-resolved synchronous host reads; a missing cwd is `undefined` and
+   * hides root↔root edges (the predicate fails closed). The mark presence
+   * disambiguates a LEGACY/torn mark with no parent: unknown lineage, never a
+   * root (the warm mirror read is the same one the peer fence uses).
+   */
+  const dispatcherVisibilityNode = (
+    sessionId: string,
+  ): DispatcherVisibilityNode => {
+    const parentSessionId = host.dispatcherParentOf(sessionId);
+    const cwd = host.dispatcherCwdOf(sessionId);
+    return {
+      sessionId,
+      marked: host.isDurablyMarkedDispatcher(sessionId),
+      ...(parentSessionId === undefined ? {} : { parentSessionId }),
+      ...(cwd === undefined ? {} : { cwd }),
+    };
   };
   const multitask: Multitask = createMultitask(multitaskHost, {
     durability: markers,
+    // The roster (`peerRosterFor`) and `sendPeer`/`message_agent` share this
+    // ONE predicate; neither surface keeps a local copy of the rule.
+    canSeePeer: (fromSessionId, toSessionId) =>
+      canSeeDispatcherPeer(
+        dispatcherVisibilityNode(fromSessionId),
+        dispatcherVisibilityNode(toSessionId),
+      ),
     // Ticket 108: the coalescing window is opt-in — omitted entirely at the
     // default so the bus keeps pre-108 semantics byte-for-byte.
     ...(wakeCoalesceWindowMs > 0
@@ -1332,6 +1451,46 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     onInboxJobResolved: writeInboxResolution,
   });
   multitaskRef = multitask;
+  /**
+   * Lane C2a: the team leader's automatic final-answer push to its summoner.
+   * Created HERE, after the core and the host exist and before the lifecycle
+   * is bound (the closure reads it under the deferred-closure rule like every
+   * other seam above). It owns no queue and no store: the parent comes from
+   * the mark row the spawn already wrote (`dispatcherParentOf`) and the send
+   * rides the existing peer lane (`sendPeer`).
+   */
+  const teamLeaderPush = createTeamLeaderPusher({
+    host,
+    // The RAW bound method: it must bypass the manual-report observer installed
+    // just below, or the pusher's own envelope would dedupe itself.
+    sendPeer: multitask.sendPeer.bind(multitask),
+    classOfSession: (sessionId) =>
+      dispatcherClassBySession.get(sessionId) ?? null,
+    logWarning,
+  });
+
+  /**
+   * Lane C3: a successful peer send from a leader to its OWN summoner is the
+   * manual `message_agent` report. Mark its text as already reported so the
+   * idle that follows the same answer sends no duplicate envelope. Every other
+   * send (worker ID space, a third-party peer, the pusher above) is untouched;
+   * a failed send marks nothing.
+   */
+  const rawSendPeer = multitask.sendPeer.bind(multitask);
+  multitask.sendPeer = (sessionId, envelope) => {
+    const ack = rawSendPeer(sessionId, envelope);
+    if (ack.ok) {
+      const parentSessionId = host.dispatcherParentOf(envelope.fromAgentId);
+      if (
+        parentSessionId !== undefined &&
+        parentSessionId !== "" &&
+        envelope.to.agentId === parentSessionId
+      ) {
+        teamLeaderPush.noteManualReport(envelope.fromAgentId, envelope.text);
+      }
+    }
+    return ack;
+  };
 
   // Ticket 75: the ticket-29 firehose subscription already observes every
   // owned worker `tool/call`; route that observation into the core's existing
@@ -1352,6 +1511,9 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   // unconditionally; the core scopes the release to the watching session.
   host.onDispatcherUserMessage((sessionId) => {
     multitask.releaseWaits(sessionId, "user-message");
+    // Lane C3: a real user prompt handled by a leader clears any third-party
+    // peer hold; the answer to it pushes when its text changes.
+    teamLeaderPush.noteEpisodeReset(sessionId);
   });
 
   // Activation lifecycle (ticket 19, ADR-0009; per session per ADR-0019):
@@ -1474,18 +1636,21 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       // never see, steer, stop, or settle. They are not ours, so the fix is a
       // restriction on our own layer, which the host applies to the INHERITED
       // surface only (`dsh-tools/lib/index.js:3040-3072`): the preset's verbs
-      // go, our eight tools (registered on the same layer) stay.
+      // go, our three tools (registered on the same layer) stay — the shipped
+      // surface is those three plus the four stock worker verbs.
       //
       // A stub surface with no `restrict`, or carrying none of the
       // candidates, returns null and nothing is recorded (the host rejects an
       // empty filter).
       const withholdDisposer = withholdHostSpawnTools(scopedSurface, agent);
       if (withholdDisposer !== null) disposers.push(withholdDisposer);
-      // No half surface: `registerDispatcherTools` registers the eight tools
+      // No half surface: `registerDispatcherTools` registers our three tools
       // one by one, so a throw on the Nth leaves the first N-1 live. Register
       // through a capturing view that stores every disposer AS IT IS RETURNED,
       // which is what makes the rollback below complete.
-      const registrationSurface: ToolsLike = {
+      const registrationSurface: ToolsLike & {
+        register(definition: unknown): () => void;
+      } = {
         schemas: (scope?: unknown) => scopedSurface.schemas(scope),
         register: (definition: unknown): (() => void) => {
           const dispose = registerTool.call(scopedSurface, definition);
@@ -1497,6 +1662,40 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
         ctx: { tools: registrationSurface },
         ...toolDeps,
       });
+      // Same-name `list_agents` fence: the host's stock tool is a GLOBAL
+      // registration, and an own-layer tool on THIS agent's scope shadows it
+      // (the disposer restores it, so nothing global is replaced). The wrapper
+      // keeps stock name/description/parameters/schema/render and clamps the
+      // `descendants` scope to the caller's DIRECT children — the legacy
+      // parented-dispatcher shape is the only tree where stock would hand a
+      // dispatcher its summoner's grandchildren (ADR-0032 top-level team
+      // leaders have no catalog entry under their summoner).
+      //
+      // The gate inside refuses when this surface does not show stock
+      // `list_agents` or when the host has no listing seams; stub hosts and
+      // pre-seam deployments then keep the stock tool untouched. Registration
+      // goes through the SAME capturing view, so its disposer is part of the
+      // rollback set; the returned disposer is that same function, kept once.
+      const hostListChildren = ctx.subagents.listChildren;
+      const hostListDescendants = ctx.subagents.listDescendants;
+      const listAgentsDispose = registerListAgentsFence({
+        tools: registrationSurface,
+        scope: agent,
+        sessionId,
+        agents: ctx.agents,
+        ...(hostListChildren === undefined
+          ? {}
+          : { listChildren: hostListChildren.bind(ctx.subagents) }),
+        ...(hostListDescendants === undefined
+          ? {}
+          : { listDescendants: hostListDescendants.bind(ctx.subagents) }),
+      });
+      if (
+        listAgentsDispose !== null &&
+        !disposers.includes(listAgentsDispose)
+      ) {
+        disposers.push(listAgentsDispose);
+      }
       // Ticket 145 step 4: the dispatcher session's OWN recall tool. Registered
       // on the activated agent's scoped `ctx.tools`, so the model only sees
       // recall in a session that is an activated dispatcher — and the handler
@@ -1574,6 +1773,18 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     ) {
       return;
     }
+    // Lane C2b: the restart sweep. A worker that was live when the process
+    // died left a ticket-59 unknown-state hold holding its stream key; after a
+    // restart there is no live child to interrupt, so nothing else ever
+    // resolves it. The sweep (core method, the non-tool half of the retired
+    // worker-stop command) releases this session's own holds only. It runs
+    // HERE — after the rebuild's marker read and behind the generation guard —
+    // and a failure is logged, never allowed to fail the activation.
+    try {
+      await multitask.sweepUnknownStateHolds(sessionId);
+    } catch (error) {
+      logWarning(`unknown-state sweep for ${sessionId} failed`, error);
+    }
     // Ticket 138: warm the durable mark mirror for this activation. It runs
     // HERE — after the rebuild's marker read and behind the generation guard
     // — so it can never consume a build-time marker read that ticket 90
@@ -1590,14 +1801,13 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     // rows written in THIS process are already in the mirror.
     void host.refreshWorkerSessionMarks();
     if (notice !== null) {
-      // Ticket 57 (D-4): route recovery through the WAKING primitive.
-      // `injectNotice` only queues context; the reference re-wakes its parent
-      // on boot so the notice is acted on without the user speaking first.
-      // The trigger stays activation-driven (ADR-0009) — only the primitive
-      // changes. A future boot hook (if ADR-0016 is signed) calls this same
-      // method; item U-1 (is activation itself a deviation?) is not decided
-      // here.
-      lifecycle.wakeNotice(sessionId, notice);
+      // Ticket 31 / restart honesty: queue the visible notice on the surface
+      // WITHOUT opening a turn. The user's restart ruling (2026-11-13): a
+      // restart notice must never auto-wake a dispatcher; it rides the first
+      // REAL user message after activation. This supersedes ticket 57's wake
+      // for this notice (the waking primitive stays available as an explicit
+      // opt-in). It also keeps exactly one restart notice per activation.
+      lifecycle.queueNotice(sessionId, notice);
     }
     // Ticket 58 (register D-5): activation is also a delivery opportunity.
     // A restored result that settled before the restart and was never
@@ -1642,6 +1852,13 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
           return null;
         }
       },
+      // Lane C2a/C3: the automatic final-answer push. The lifecycle has already
+      // applied its gate (class `spawned`, no live worker, no busy turn, no
+      // queued wake, after the redrive) and hands us the text, stop reason,
+      // stop sequence and ledger sign; everything below is envelope
+      // construction and the text/stop dedupe.
+      onTeamLeaderIdle: (sessionId, signal) =>
+        teamLeaderPush.onTeamLeaderIdle(sessionId, signal),
       onActivated: (sessionId) => {
         try {
           // The boolean reports registration; a refusal has already logged
@@ -2186,4 +2403,230 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     },
     "multitask-dispatcher: plugin teardown",
   );
+}
+
+/**
+ * Lane C2a/C3 — the automatic final-answer push from a spawned team leader to
+ * the dispatcher that summoned it.
+ *
+ * The lifecycle observes the leader's episode (its last non-empty assistant
+ * text + its latest `turn/end` kind + that turn's sequence) and calls
+ * `BindDispatcherLifecycleOptions.onTeamLeaderIdle` only after its gate has
+ * passed: policy class `spawned`, no live worker, no busy turn, no queued wake.
+ * This factory is the caller half the adapter deliberately does not own —
+ * envelope construction, dedupe and the send.
+ *
+ * Route: the EXISTING peer lane (no new queue, no new store). The target is
+ * whatever `CordisDshHost.dispatcherParentOf` answers: a SESSION id, because
+ * that durable field is `parentSessionId`. `sendPeer` and the
+ * `message_agent` handler both address peers by session id (the `agentId`
+ * field of `PeerTarget` carries it), so the parent id is passed through
+ * verbatim — nothing maps a session id to an agent id, and no second lookup
+ * exists.
+ *
+ * Dedupe (lane C3, replacing the per-episode counter): per session we keep the
+ * last text successfully sent upward, the last non-completed `turn/end`
+ * sequence reported, and a one-idle `blocked` hold. A text change pushes the
+ * new answer (the interim progress note and the later final answer are two
+ * pushes); a non-completed turn whose seq was not reported appends exactly one
+ * `Leader ended: <reason>.` line, or sends that line alone when the text was
+ * already pushed; a repeat idle sends nothing. An open ledger obligation
+ * classifies the idle as an interim checkpoint for diagnostics; it NEVER
+ * suppresses the stop line. A successful manual `message_agent` report to the
+ * summoner marks its text as reported, so the idle that follows does not
+ * duplicate it. A failed send marks nothing, so the next idle retries.
+ */
+export interface TeamLeaderPushOptions {
+  /** Parent lookup (lane C4). Reads the mark the spawn already wrote. */
+  readonly host: Pick<CordisDshHost, "dispatcherParentOf">;
+  /**
+   * The existing peer lane, as a function. The plugin passes the RAW bound
+   * `multitask.sendPeer`: the pusher must bypass the manual-report observer
+   * wrapped around that method, or its own envelope would look like a manual
+   * report and dedupe itself out.
+   */
+  readonly sendPeer: (sessionId: string, envelope: PeerEnvelope) => PeerSendAck;
+  /**
+   * Defensive class read, wired to the plugin's own activation-class map. A
+   * session this process knows as `user` never pushes even if the C1 gate or
+   * the parent mark were somehow wrong. `null` means "this map does not
+   * know", and the lifecycle gate plus the parent mark stay the authority.
+   */
+  readonly classOfSession?: (sessionId: string) => DispatcherOrigin | null;
+  /** Best-effort failure sink; a failed push is logged, never thrown. */
+  readonly logWarning?: (message: string, error?: unknown) => void;
+}
+
+/** Lane C2a/C3: the calls the plugin wires into its observation points. */
+export interface TeamLeaderPusher {
+  /**
+   * The lifecycle's `onTeamLeaderIdle` callback. Trims the observed text,
+   * drops an empty answer, resolves the parent and sends at most one peer
+   * envelope for this idle.
+   */
+  onTeamLeaderIdle(sessionId: string, signal: TeamLeaderIdleSignal): void;
+  /**
+   * Re-arm the push after an episode boundary (a worker adopted/spawned for
+   * this leader, a real user message handled for it). Clears the one-idle
+   * third-party hold; the text/stop marks stay, because those describe what was
+   * already sent, not which episode is open.
+   */
+  noteEpisodeReset(sessionId: string): void;
+  /**
+   * Lane C3: classify the wake a peer message requests. A wake opened by the
+   * leader's own summoner clears any hold (the summoner asked for the next
+   * answer); any other `agent-message` wake sets the one-idle hold so the ack
+   * it provokes is not pushed; a non-peer wake clears a stale hold.
+   */
+  noteWakeOrigin(
+    sessionId: string,
+    origin: AgentMessageWakeOrigin | undefined,
+  ): void;
+  /**
+   * Lane C3: a manual `message_agent` report that reached the summoner. Its
+   * trimmed text counts as already reported, so an idle carrying the same text
+   * sends nothing.
+   */
+  noteManualReport(sessionId: string, text: string): void;
+}
+
+/** The non-completed suffix: one final line, no invented error detail. */
+function leaderStopLine(stopReason: string): string {
+  return `Leader ended: ${stopReason}.`;
+}
+
+/** Lane C3: the per-session marks described on {@link TeamLeaderPushOptions}. */
+interface TeamLeaderPushState {
+  lastText: string;
+  lastStopSeq: number;
+  blocked: boolean;
+}
+
+/**
+ * Build the leader→parent pusher. Module-level (not inside `apply`) so the
+ * wiring can be exercised against the fake host/lifecycle harness without a
+ * full plugin context.
+ */
+export function createTeamLeaderPusher(
+  options: TeamLeaderPushOptions,
+): TeamLeaderPusher {
+  const stateBySession = new Map<string, TeamLeaderPushState>();
+  const log = options.logWarning;
+  const stateOf = (sessionId: string): TeamLeaderPushState => {
+    let state = stateBySession.get(sessionId);
+    if (state === undefined) {
+      state = { lastText: "", lastStopSeq: 0, blocked: false };
+      stateBySession.set(sessionId, state);
+    }
+    return state;
+  };
+
+  return {
+    noteEpisodeReset(sessionId: string): void {
+      stateOf(sessionId).blocked = false;
+    },
+
+    noteWakeOrigin(
+      sessionId: string,
+      origin: AgentMessageWakeOrigin | undefined,
+    ): void {
+      const state = stateOf(sessionId);
+      if (origin?.kind !== "agent-message") {
+        state.blocked = false;
+        return;
+      }
+      const parentSessionId = options.host.dispatcherParentOf(sessionId);
+      if (
+        parentSessionId !== undefined &&
+        parentSessionId !== "" &&
+        origin.senderSessionId === parentSessionId
+      ) {
+        // The summoner asked for the next answer: re-arm the push.
+        state.blocked = false;
+        return;
+      }
+      // A third-party peer status/stop owns exactly one idle: the ack it
+      // provokes stays internal.
+      state.blocked = true;
+    },
+
+    noteManualReport(sessionId: string, text: string): void {
+      const trimmed = text.trim();
+      if (trimmed.length === 0) return;
+      stateOf(sessionId).lastText = trimmed;
+    },
+
+    onTeamLeaderIdle(sessionId: string, signal: TeamLeaderIdleSignal): void {
+      const state = stateOf(sessionId);
+      // Lane C3: the idle a third-party peer wake opened is never pushed.
+      if (state.blocked) {
+        state.blocked = false;
+        return;
+      }
+      // Trim first: whitespace-only is no answer at all.
+      const text = signal.text.trim();
+      if (text.length === 0) return;
+      // Defensive: never push upward from a dispatcher this process knows as
+      // the human's own. C1's spawned-origin gate blocks the same case; this
+      // one also covers a caller that drives the pusher directly.
+      if (options.classOfSession?.(sessionId) === "user") return;
+      // No summoner recorded (a user dispatcher, an unknown session, a
+      // pre-138 row) means there is nobody to push to.
+      const parentSessionId = options.host.dispatcherParentOf(sessionId);
+      if (parentSessionId === undefined || parentSessionId === "") return;
+      const stopReason = signal.stopReason;
+      const stopSeq = signal.stopSeq ?? 0;
+      // Lane C3 / audit #4: open obligations mark this idle an interim
+      // checkpoint, but they must NEVER drop a line: every non-completed turn
+      // whose seq was not yet reported gets exactly one `Leader ended` line,
+      // whether the answer changed or not. The ledger read only labels a
+      // failed push; it never gates the line.
+      const stopLine =
+        stopReason !== null &&
+        stopReason !== "completed" &&
+        stopSeq > state.lastStopSeq
+          ? leaderStopLine(stopReason)
+          : null;
+      const textChanged = text !== state.lastText;
+      // A changed answer carries the line inline; a turn whose text was already
+      // pushed reports the line alone. Neither path is held back.
+      const stopLineSent = stopLine !== null;
+      let body: string;
+      if (textChanged) {
+        body =
+          stopLineSent && stopLine !== null ? `${text}\n${stopLine}` : text;
+      } else if (stopLineSent && stopLine !== null) {
+        body = stopLine;
+      } else {
+        return;
+      }
+      // Same envelope the `message_agent` peer path builds: fresh id, the
+      // leader as sender, the parent as target, normal priority, the fenced
+      // direct conversation slot. `createdAtMs` is the send stamp.
+      const envelope: PeerEnvelope = {
+        messageId: `agent-${randomUUID()}`,
+        fromAgentId: sessionId,
+        fromName: sessionId,
+        to: { kind: "agent", agentId: parentSessionId },
+        conversationId: PEER_DIRECT_CONVERSATION_ID,
+        text: body,
+        priority: false,
+        createdAtMs: Date.now(),
+      };
+      const ack = options.sendPeer(parentSessionId, envelope);
+      if (!ack.ok) {
+        // Never mark a failed send: the same idle may push on a later attempt
+        // once the target is live again.
+        log?.(
+          `team leader ${sessionId} could not push its ${
+            signal.obligationsOpen === true ? "interim update" : "final answer"
+          } to ${parentSessionId}: ${ack.reason}`,
+          ack.detail,
+        );
+        return;
+      }
+      if (textChanged) state.lastText = text;
+      if (stopLineSent) state.lastStopSeq = stopSeq;
+    },
+  };
 }

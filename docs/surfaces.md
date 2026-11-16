@@ -84,7 +84,9 @@ conversational: the user says so in plain language, and the dispatcher
 policy maps that onto a steer or a stop of the matching worker (PRD §15.3,
 design-17 §4.6/conflict 1).
 
-`stop_worker` remains an **agent-facing tool only**. Aborted workers settle
+Stopping remains an **agent-facing tool only** — the stock `interrupt_agent`
+call since the 2026-11-16 stock-subagent swap (`stop_worker` is the retired
+custom verb; the toolview key below is kept for historical rows). Aborted workers settle
 to the terminal `aborted` state with "(Stopped before completion. No
 report.)" — no result revival (PRD S3, design-17 §4.6).
 
@@ -126,10 +128,19 @@ A row has exactly **three levels** and no field-pair anatomy:
    short ref (`worker …6132`, `session …93a7`, `todo 7`); old transcripts
    without the adapter's `display` projection degrade to short refs.
 
-A `check_workers` row renders a summary sentence, then one readable line per
+A `check_workers` row (the retired custom status verb; its toolview key is kept
+for historical rows) renders a summary sentence, then one readable line per
 worker: title first, one localized status word (the raw FSM status stays in
 `data-status`), elapsed/tool-call facts, an optional activity line, and the
-short ref last. The status is never duplicated.
+short ref last. The status is never duplicated. Current status calls are still the
+stock `list_agents` verb under its stock name and output shape: a two-state
+answer (`running` / `inactive`) with no per-worker detail and no row for a
+non-continuable child (`docs/research/stock-subagent-duplication-audit.md` §2).
+Since 2026-11-16 each activated dispatcher's scope shadows it with a same-name,
+same-output wrapper (`src/adapter/list-agents-fence.ts`): its `descendants`
+scope is clamped to the caller's direct children and `children` is unchanged.
+The verb is not removed and no host package is edited; see the same audit note,
+"Dispatcher visibility".
 
 ## No timeline cards
 
@@ -282,8 +293,8 @@ slots carry our content.
 | Session-kind glyph in the sidebar row | `src/client/session-kind.tsx` + the registration in `src/client/index.ts` | **Live** — one additive `sidebar.session.row.leading` entry (order 20, above the stock schedule mark at 10), a dispatcher glyph keyed on the adapter's `sessionKind` projection. Single slot: the rider licenses exactly one registration, and since ticket 177 that ONE entry marks both dispatcher classes, drawing a different portrait per class (`dispatcher` = chief of staff, `dispatcher-team-leader` = summoned team leader). Limits: worker/subagent sessions are hidden by stock dsh and never become rows, so only dispatcher vs normal shows here; the leading cell renders only on idle, non-archived, non-blank rows. 16px cell: glyph only, no text (ADR-0024 rider, 2026-10-18) |
 | Session-kind header chip (a spawned dispatcher's own conversation) | removed — `src/client/session-kind.tsx` + the registration in `src/client/index.ts` | **Withdrawn (2026-10-28)** — the `conversation.session.header.actions` entry (order 30) was removed from the client; the seat it occupied is no longer composed. It existed under the ticket-140 ruling of the same day, which assumed a spawned dispatcher is a subagent child with no sidebar row. ADR-0032 makes a summoned dispatcher a top-level session, so it now has a real sidebar row and the glyph on that row is the one mark, replacing the chip. The WORKER marker in this slot stays **declined** (ticket 123, 2026-10-22) — no seat composes it |
 | Settings card (the Plugins page row) | `src/client/settings-card.tsx` + `src/client/settings-card-store.ts` | **Live** — keyed `plugins.row.config`, the one configuration surface we register |
-| Nine tool call views | `src/client/toolviews.ts` + `src/client/toolview-panel.tsx` + `src/client/toolview-styles.ts` | **Live** — nine keyed `tool.call.toolview` entries: all eight dispatcher tools plus the retained historical `send_peer` key. Each row is one primary sentence, at most two ` · `-separated facts, and a nested Details area with full ids; `check_workers` adds one readable line per worker (title, one human status word, facts, activity, short ref). Raw statuses stay in `data-status`; client copy ships EN + ZH through `src/client/status-format.ts` |
-| Locale dictionary (en + zh, identical key sets) | `src/client/overlay.ts` | **Live** — namespace registration, not layout. Since ticket 153 the same `locale.preference` also selects the model-facing copy: dispatcher policy, standing rules, wake/peer blocks, the eight tool descriptions, the worker contract, and the wake cues all ship an EN and a ZH face (`src/core/policy/prompts.ts`, `src/worker/prompt.ts`, `src/adapter/wake-copy.ts`); an absent or unknown preference composes EN |
+| Nine tool call views | `src/client/toolviews.ts` + `src/client/toolview-panel.tsx` + `src/client/toolview-styles.ts` | **Live** — nine keyed `tool.call.toolview` entries: the eight dispatcher-tool keys — five of them retired custom verbs kept so historical rows still render — plus the retained historical `send_peer` key. Current worker calls are stock `subagent` / `list_agents` / `send_message` / `interrupt_agent` records; the dispatch card is a projection over the stock `subagent` record (`src/client/dispatch-card.ts`), not a toolview. Each row is one primary sentence, at most two ` · `-separated facts, and a nested Details area with full ids; `check_workers` adds one readable line per worker (title, one human status word, facts, activity, short ref). Raw statuses stay in `data-status`; client copy ships EN + ZH through `src/client/status-format.ts` |
+| Locale dictionary (en + zh, identical key sets) | `src/client/overlay.ts` | **Live** — namespace registration, not layout. Since ticket 153 the same `locale.preference` also selects the model-facing copy: dispatcher policy, standing rules, wake/peer blocks, the tool descriptions (the plugin's own three plus the stock four since the 2026-11-16 swap), the worker contract, and the wake cues all ship an EN and a ZH face (`src/core/policy/prompts.ts`, `src/worker/prompt.ts`, `src/adapter/wake-copy.ts`); an absent or unknown preference composes EN |
 | Roster wire contract (snapshot v4) | `src/core/roster-snapshot.ts` | **Retained** — the parse/projection contract stays; no live channel feeds it on 0.2.1 (the settings-document mirror is gone) |
 | Activation command + presence hint | `src/adapter/activation-command.ts` | **Live** — `/dsh-bot` in the stock chat |
 | Stop command | removed (`src/adapter/stop-command.ts` deleted) | **Withdrawn** — ADR-0030 (2026-10-21, ticket 129) removed the command and the file; deactivation is implicit via host disposal or plugin unload |

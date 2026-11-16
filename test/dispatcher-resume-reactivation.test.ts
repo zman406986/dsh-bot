@@ -5,10 +5,11 @@
  * ## The reported bug
  *
  * The owner's chat was activated with `/dsh-bot`, dsh restarted, and the first
- * request in the reopened chat produced the host's own notice
- * "Tools updated / 10 removed: await_agent, check_workers, deliver_result,
- * message_agent, recall, request_access, spawn_dispatcher, spawn_worker,
- * steer_worker, stop_worker" — the exact activated-dispatcher surface.
+ * request in the reopened chat produced the host's own "Tools updated" notice
+ * listing the activated-dispatcher surface as removed — the visible symptom
+ * that the whole scoped set had vanished. The old notice named the retired
+ * dispatcher verbs; that list is history, and this file no longer pins its
+ * text (only that no notice is produced on a clean resume).
  *
  * The activation set lives in memory only (`parent-agent.ts` `sessions` map),
  * the durable `dispatcher_sessions` mark is written only for SPAWNED children
@@ -19,9 +20,8 @@
  * ## What this file pins
  *
  * - A parentless session whose durable `sessionKind` projection says
- *   `"dispatcher"` re-activates on `agent/created`: the 9 scoped tools
- *   (`DISPATCHER_TOOL_SET`) plus the global refcounted `request_access` — the
- *   10 tools whose absence the owner saw — and exactly one policy inject.
+ *   `"dispatcher"` re-activates on `agent/created`: the custom scoped tools
+ *   (`DISPATCHER_TOOL_NAMES`) and exactly one policy inject.
  * - The projection is read through the REAL registered unit
  *   (`registerSessionKindProjection`), folding the REAL host command events
  *   (`command/run` + `command/done` for `dsh-bot`) out of the session log, so
@@ -48,6 +48,7 @@ import { createCordisDshHost } from "../src/adapter/cordis-dsh-host.js";
 import { volatileConfig } from "./support/plugin-config.js";
 import {DISPATCHER_START_COMMAND, SESSION_KIND_PROJECTION_KEY, RESTART_DEGRADED_NOTICE, type AgentLike, type CommandDefinitionLike, type CommandResultLike, type SessionProjectionChildLike, type SessionProjectionDefinitionLike, type SessionKindProjectionState, type ToolsLike} from "../src/adapter/index.js";
 import type { DurableWorkerMarker } from "../src/core/durability.js";
+import { DISPATCHER_TOOL_NAMES } from "../src/core/policy/prompts.js";
 
 function tick(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
@@ -382,38 +383,21 @@ function createCtx(options?: {
   return ctx;
 }
 
-/** The 8 tools registered on the dispatcher's OWN scope (racoons off by default). */
-const DISPATCHER_SCOPED_TOOLS = [
-  "await_agent",
-  "check_workers",
-  "deliver_result",
-  "message_agent",
-  "spawn_dispatcher",
-  "spawn_worker",
-  "steer_worker",
-  "stop_worker",
-];
-
 /**
- * The reported surface: the 8 scoped tools. Ticket 174 / ADR-0033 removed the
- * global `request_access`, so the full surface IS the scoped set.
+ * The CUSTOM tools registered on the dispatcher's OWN scope (racoons off by
+ * default), derived from the one const. The stock agent verbs (`subagent`,
+ * `list_agents`, `send_message`, `interrupt_agent`) are mounted by the
+ * preset, and this harness mounts no preset — so the scoped set is exactly the
+ * custom three, and that is also the full surface (ticket 174 / ADR-0033
+ * removed the global `request_access`).
  */
-const DISPATCHER_FULL_SURFACE = [
-  "await_agent",
-  "check_workers",
-  "deliver_result",
-  "message_agent",
-  "spawn_dispatcher",
-  "spawn_worker",
-  "steer_worker",
-  "stop_worker",
-];
+const DISPATCHER_SCOPED_TOOLS: string[] = [...DISPATCHER_TOOL_NAMES].sort();
 
 /** A top-level resumed chat: no parent, depth 0 — `isTopLevel`'s shape. */
 const TOP_LEVEL_HEADER = { parentSession: null, delegationDepth: 0 } as const;
 
 describe("ticket 147 — a user-started dispatcher re-activates after restart", () => {
-  it("a resumed generation-1 dispatcher gets its 8 tools back, one policy, no degraded notice", async () => {
+  it("a resumed generation-1 dispatcher gets its custom tools back, one policy, no degraded notice", async () => {
     // ── first process: the owner runs /dsh-bot in a normal chat ─────────
     const storage = new Map<string, Map<string, unknown>>();
     const first = createCtx({ storage });
@@ -453,12 +437,12 @@ describe("ticket 147 — a user-started dispatcher re-activates after restart", 
     });
     await drain();
 
-    // The exact surface the owner saw removed: the 9 scoped tools.
+    // The exact surface the owner saw removed is back: the custom scoped set.
     assert.deepEqual(resumed.scopedTools.names().sort(), DISPATCHER_SCOPED_TOOLS);
     assert.deepEqual(second.globalToolNames(), []);
     assert.equal(
       resumed.scopedTools.names().length + second.globalToolNames().length,
-      DISPATCHER_FULL_SURFACE.length,
+      DISPATCHER_SCOPED_TOOLS.length,
     );
 
     // Policy came back exactly once, and activation did not report degraded

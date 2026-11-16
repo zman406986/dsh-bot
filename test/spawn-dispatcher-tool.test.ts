@@ -161,10 +161,16 @@ function adapterToolsCapture(): {
 }
 
 describe("ticket 118: spawn_dispatcher — registration and visibility", () => {
-  it("is the eighth dispatcher tool, registered last", () => {
+  it("is the last of the three custom dispatcher tools", () => {
     assert.equal(SPAWN_DISPATCHER_TOOL, "spawn_dispatcher");
-    assert.equal(DISPATCHER_TOOL_NAMES.length, 8);
-    assert.equal(DISPATCHER_TOOL_NAMES[7], SPAWN_DISPATCHER_TOOL);
+    // Three custom verbs: deliver_result, message_agent, spawn_dispatcher.
+    // (Workers/status/steering/stopping are the preset's stock tools and are
+    // deliberately NOT in this list.)
+    assert.equal(DISPATCHER_TOOL_NAMES.length, 3);
+    assert.equal(
+      DISPATCHER_TOOL_NAMES[DISPATCHER_TOOL_NAMES.length - 1],
+      SPAWN_DISPATCHER_TOOL,
+    );
   });
 
   it("declares title and prompt required, model and worker_model optional, nothing else", () => {
@@ -218,7 +224,7 @@ describe("ticket 118: spawn_dispatcher — registration and visibility", () => {
 });
 
 describe("ticket 118: spawn_dispatcher — success shape", () => {
-  it("the note names it a peer, points at message_agent, and says do not wait", async () => {
+  it("the note names it a peer, points at message_agent, and says do not wait or poll", async () => {
     const r = rig();
     const result = (await r.tool.execute({
       title: "Own the login bug",
@@ -233,9 +239,11 @@ describe("ticket 118: spawn_dispatcher — success shape", () => {
     // The address is the id the caller just received.
     assert.ok(note.includes(result.dispatcher_id), note);
     assert.ok(note.includes("message_agent"), note);
-    // Do-not-wait, and it must be TRUE: await_agent is workers-only.
-    assert.ok(note.includes("Do not wait on it"), note);
-    assert.ok(note.includes("not awaitable"), note);
+    // Do-not-wait, re-derived for push-only completion: there is no wait verb
+    // left at all (await_agent is retired), so the note must say the answer
+    // arrives as its own message on a fresh turn and that polling is wrong.
+    assert.ok(note.includes("Do not wait or poll"), note);
+    assert.ok(note.includes("starts a new turn"), note);
     // A summoned dispatcher is a dispatcher: it answers its own user in its own
     // chat, and reports back to the summoner because it was asked (owner ruling
     // 2026-10-29, ADR-0032 open question 1). Not a mute relay.

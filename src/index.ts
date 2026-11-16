@@ -1,6 +1,7 @@
 export { Config, apply, inject, name } from "./plugin.js";
 export type { PluginConfig } from "./plugin.js";
 export {
+  ACTIVATION_COMMAND_CARD_TEXT,
   activationResultCopy,
   bindDispatcherLifecycle,
   blocksToText,
@@ -10,6 +11,7 @@ export {
   DISPATCHER_START_ALREADY_HERE,
   DISPATCHER_START_COMMAND,
   DISPATCHER_START_DESCRIPTION,
+  DISPATCHER_START_INPUT_HINT,
   DISPATCHER_START_NOT_TOP_LEVEL,
   DISPATCHER_START_SUCCESS,
   DISPATCHER_START_UNRESOLVED,
@@ -195,29 +197,13 @@ export type {
   WorkerStageInput,
 } from "./core/worker-stage.js";
 export {
-  formatAwaitNote,
-  formatCheckRowLine,
-  formatCheckSummary,
   formatElapsedMs,
-  formatDormantSteerNote,
   formatMessageAgentDormantSteerNote,
-  formatSpawnAck,
   formatSpawnDispatcherNote,
-  formatSteerNote,
-  formatStopNote,
-  formatStopUnknownStateNote,
-  toAwaitAgentToolResult,
-  toCheckRow,
 } from "./core/tool-results.js";
 export type {
-  AwaitAgentToolResult,
-  CheckWorkersToolResult,
   DeliverResultToolResult,
   SpawnDispatcherToolResult,
-  SpawnWorkerToolResult,
-  SteerWorkerToolResult,
-  StopWorkerToolResult,
-  WorkerCheckRow,
 } from "./core/tool-results.js";
 export {
   assemblePeerWakeTurn,
@@ -226,7 +212,10 @@ export {
   assembleWakeTurn,
   noticeFromSettled,
 } from "./core/policy/assembler.js";
-export type { WakeNotice } from "./core/policy/assembler.js";
+export type {
+  RePresentedNotice,
+  WakeNotice,
+} from "./core/policy/assembler.js";
 export {
   AWAIT_AGENT_TOOL,
   buildDispatcherPolicySection,
@@ -248,7 +237,6 @@ export type { PolicyLanguage } from "./core/policy/prompts.js";
 export {
   buildTurnReminderForSession,
   createDispatcherTools,
-  createWorkerLocalToolDefs,
   readExecSignal,
   toToolParametersSchema,
 } from "./core/tools.js";
@@ -257,6 +245,5 @@ export type {
   DispatcherToolDef,
   DispatcherToolDeps,
   RecentActivityFn,
-  WorkerReplyToolDeps,
 } from "./core/tools.js";
 

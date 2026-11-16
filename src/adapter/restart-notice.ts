@@ -26,6 +26,14 @@ import type { RebuildReport } from "../core/durability.js";
 export const RESTART_NOTICE_HEADING = "## Restart";
 
 /**
+ * One-line account for the collapsed `form: "notice"` row. It must let the
+ * dispatcher (and the user) tell this notice apart from the activation
+ * confirmation without expanding it; the full body is the rebuild report.
+ */
+export const RESTART_NOTICE_SUMMARY =
+  "Restart: worker state from before the last restart";
+
+/**
  * Degraded notice when the marker store itself could not be read
  * (rebuild failure). Activation still succeeds; the honest answer is
  * "nothing restored, nothing replayed" — never a fabricated roster.
@@ -54,9 +62,10 @@ export function restartUnknownStateLine(
     `${ids.join(", ")}. Their state is unknown — nothing was replayed. ` +
     `Transcripts: ${refs.join(", ")}. ` +
     `Stream(s) ${streamKeys.join(", ")} are held by them, so re-dispatching ` +
-    `onto those streams is refused; call stop_worker on the worker id to ` +
-    `release one once you know that worker is gone, or dispatch under a new ` +
-    `stream key.`
+    `onto those streams is refused. If one is still a live child, stop it ` +
+    `with interrupt_agent; when there is no live child, the plugin's restart ` +
+    `sweep releases the stale hold. Otherwise dispatch under a new stream ` +
+    `key.`
   );
 }
 

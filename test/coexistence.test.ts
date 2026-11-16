@@ -30,7 +30,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { apply as applyDispatcherHost } from "../src/plugin.js";
 import { volatileConfig } from "./support/plugin-config.js";
-import {DISPATCHER_START_COMMAND, DISPATCHER_START_SUCCESS, type AdapterContext, type AgentLike, type CommandDefinitionLike, type CommandResultLike, type SessionProjectionChildLike, type ToolsLike} from "../src/adapter/index.js";
+import {ACTIVATION_COMMAND_CARD_TEXT, DISPATCHER_START_COMMAND, type AdapterContext, type AgentLike, type CommandDefinitionLike, type CommandResultLike, type SessionProjectionChildLike, type ToolsLike} from "../src/adapter/index.js";
 import {
   apply as applyDispatcherClient,
   inject as clientInject,
@@ -861,7 +861,7 @@ describe("coexistence — host face: fail-loud claims (Findings 1 and 2)", () =>
     const agent = createAgent("s-1");
     assert.deepEqual(
       ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent }),
-      { kind: "success", text: DISPATCHER_START_SUCCESS },
+      { kind: "success", text: ACTIVATION_COMMAND_CARD_TEXT },
     );
 
     // …and the foreign command still routes to the foreign handler.
@@ -890,22 +890,24 @@ describe("coexistence — host face: fail-loud claims (Findings 1 and 2)", () =>
         }),
       new RegExp(`tool "${FOREIGN.tool}" is already registered`),
     );
-    // …nor a dispatcher tool name on the activated agent's own scope.
+    // …nor a dispatcher tool name on the activated agent's own scope. The
+    // worker spawn/list/steer/stop verbs are stock host tools now, so the
+    // kept custom name `deliver_result` stands in for the dispatcher surface.
     assert.throws(
       () =>
         agent.scopedTools.register({
-          name: "spawn_worker",
+          name: "deliver_result",
           execute: async () => ({ ok: false }),
         }),
-      /tool "spawn_worker" is already registered/,
+      /tool "deliver_result" is already registered/,
     );
 
     // The first claimant's definition is untouched: the dispatcher tool still
     // executes (it was not replaced by the interloper).
-    const spawn = agent.scopedTools.get("spawn_worker");
-    assert.ok(spawn);
-    const value = (await spawn.execute(
-      { stream_key: "s", title: "T", prompt: "P" },
+    const deliver = agent.scopedTools.get("deliver_result");
+    assert.ok(deliver);
+    const value = (await deliver.execute(
+      { text: "done" },
       { agent: { session: { id: "s-1" } } },
     )) as { ok: boolean };
     assert.equal(value.ok, true);
@@ -921,7 +923,7 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
     const agent = createAgent("s-1");
     assert.deepEqual(
       ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent }),
-      { kind: "success", text: DISPATCHER_START_SUCCESS },
+      { kind: "success", text: ACTIVATION_COMMAND_CARD_TEXT },
     );
 
     // Ticket 31: the on-activation publish lands after the async durability
@@ -930,19 +932,17 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
       await new Promise((resolve) => setImmediate(resolve));
     }
 
-    // The dispatcher surface (eight tools since ticket 118) lives in the
-    // agent's own scope; the foreign tool stays global — no clobbering.
-    // Ticket 174 / ADR-0033 removed `request_access`; owner ruling
-    // 2026-11-05 keeps racoons off by default, so no per-session `recall`.
+    // The dispatcher surface is the three CUSTOM tools; workers are spawned,
+    // listed, messaged and interrupted by the host's stock `subagent` /
+    // `list_agents` / `send_message` / `interrupt_agent` verbs, which this
+    // plugin never registers. The surface lives in the agent's own scope; the
+    // foreign tool stays global — no clobbering. Ticket 174 / ADR-0033 removed
+    // `request_access`; owner ruling 2026-11-05 keeps racoons off by default,
+    // so no per-session `recall`.
     assert.deepEqual(agent.scopedTools.registeredNames().sort(), [
-      "await_agent",
-      "check_workers",
       "deliver_result",
       "message_agent",
       "spawn_dispatcher",
-      "spawn_worker",
-      "steer_worker",
-      "stop_worker",
     ]);
     assert.deepEqual(ctx.toolNames().sort(), [FOREIGN.tool]);
 
@@ -954,17 +954,21 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
 
     // ADR-0019: the dispatcher tools are scoped to this agent. Execution
     // routes to the session that registered them; an out-of-scope caller
-    // cannot see the tools at all on a live host.
-    const crossCaller = (await agent.scopedTools.get("spawn_worker")?.execute(
-      { stream_key: "k", title: "T", prompt: "P" },
+    // cannot see the tools at all on a live host. `message_agent` addressed
+    // to the REGISTERING session proves the closure identity: the handler
+    // reads "s-1" from its closure and refuses self-target, while a handler
+    // that trusted the exec session would accept the send instead.
+    const crossCaller = (await agent.scopedTools.get("message_agent")?.execute(
+      { target: "s-1", text: "hello" },
       { agent: { session: { id: "some-other-chat" } } },
-    )) as { ok: boolean } | undefined;
-    assert.equal(crossCaller?.ok, true);
+    )) as { ok: boolean; reason?: string } | undefined;
+    assert.equal(crossCaller?.ok, false);
+    assert.equal(crossCaller?.reason, "self-target");
 
     // The roster mirror has no channel on 0.2.1 (undeclared settings keys are
     // rejected), so our namespace is never created and the foreign plugin's
     // settings document stays untouched.
-    assert.equal(ctx.hasSettingsNamespace("multitask-dispatcher"), false);
+    assert.equal(ctx.hasSettingsNamespace("dsh-bot"), false);
     assert.deepEqual(ctx.settingDoc(FOREIGN.settingsNs), { enabled: true });
   });
 

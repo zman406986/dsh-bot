@@ -26,9 +26,10 @@
  *    landed) registers nothing visible beyond the two commands: no tools, no
  *    roster publish, no access prompt, no restart notice, and no new
  *    listeners.
- * 3. **Deactivation honesty** — the panel path ages to "unavailable" after
- *    session end, and re-activation republishes a fresh roster (design-17
- *    §3.2 "what does the user come back to").
+ * 3. **Deactivation honesty** — the surface unbinds after session end, and
+ *    re-activation raises a fresh custom tool surface over the same core
+ *    state (design-17 §3.2 "what does the user come back to"; the panel path
+ *    itself is pinned by the client tests).
  * 4. **Locale + literal sweep** — the enlarged dictionary validates, every
  *    client key resolves, and no component carries a hard-coded user-facing
  *    sentence that bypasses the dictionary (tickets 27–31 additions).
@@ -39,9 +40,9 @@ import { readFileSync } from "node:fs";
 import { apply as pluginApply } from "../src/plugin.js";
 import { volatileConfig } from "./support/plugin-config.js";
 import {
+  ACTIVATION_COMMAND_CARD_TEXT,
   ACTIVATION_PRESENCE_HINT,
   DISPATCHER_START_COMMAND,
-  DISPATCHER_START_SUCCESS,
   DISPATCHER_STEER_COMMAND,
   MARKER_TABLE_NAME,
   type AdapterContext,
@@ -51,6 +52,7 @@ import {
   type ToolsLike,
 } from "../src/adapter/index.js";
 import type { DurableWorkerMarker } from "../src/core/durability.js";
+import { DISPATCHER_TOOL_NAMES } from "../src/core/policy/prompts.js";
 import {
 } from "../src/core/roster-snapshot.js";
 import {
@@ -362,22 +364,6 @@ async function seedMarkers(
 }
 
 describe("composition polish — activation copy (design-17 §7)", () => {
-  it("the command result carries the enlarged success copy on a real activation", async () => {
-    const ctx = createCompositionCtx();
-    pluginApply(ctx, volatileConfig({ enabled: true }));
-    const agent = createAgent("s-1");
-    const result = ctx.runCommand({
-      commandId: DISPATCHER_START_COMMAND,
-      agent,
-    });
-    assert.deepEqual(result, {
-      kind: "success",
-      text: DISPATCHER_START_SUCCESS,
-    });
-    assert.ok(result.text?.includes(ACTIVATION_PRESENCE_HINT));
-    await flushActivation();
-  });
-
   it("the host copy and the client locale faces stay one localized unit", () => {
     // en parity: the dictionary carries the exact host string (not a retyped
     // near-miss), so a copy edit in one place fails here.
@@ -452,54 +438,43 @@ describe("composition polish — dormant registration matrix (design-17 §3.2/§
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await flushActivation();
 
-    // Eight dispatcher tools in the activated agent's OWN scope (ADR-0019;
-    // the global fallback is refused). Ticket 174 / ADR-0033 removed
+    // The CUSTOM dispatcher tools in the activated agent's OWN scope
+    // (ADR-0019; the global fallback is refused). The stock agent verbs
+    // (`subagent`, `list_agents`, `send_message`, `interrupt_agent`) are
+    // mounted by the preset, and this fake mounts no preset, so the set is
+    // exactly the custom three. Ticket 174 / ADR-0033 removed
     // `request_access`; owner ruling 2026-11-05 keeps racoons off by default,
     // so no `recall`.
-    assert.deepEqual(agent.scopedTools.registeredNames().sort(), [
-      "await_agent",
-      "check_workers",
-      "deliver_result",
-      "message_agent",
-      "spawn_dispatcher",
-      "spawn_worker",
-      "steer_worker",
-      "stop_worker",
-    ]);
+    assert.deepEqual(
+      agent.scopedTools.registeredNames().sort(),
+      [...DISPATCHER_TOOL_NAMES].sort(),
+    );
     assert.deepEqual(ctx.toolNames(), [], "no process-global dispatcher tool");
-    // The roster view now comes from the core through check_workers; no
-    // settings document is written.
+    // No settings document is written: the roster lives in the core, and the
+    // stock `list_agents` is its reader now (this fake mounts none).
     assert.deepEqual(ctx.updates, [], "no settings mirror exists to write to");
-    const check = agent.scopedTools.get("check_workers");
-    assert.ok(check);
-    const roster = (await check.execute({})) as {
-      ok: boolean;
-      rows: Array<{ worker_id: string }>;
-    };
-    assert.deepEqual(roster.rows, [], "the empty roster reads back");
   });
 });
 
 describe("composition polish — deactivation honesty (design-17 §3.2)", () => {
-  it("session end unbinds the surface; re-activation rebuilds a fresh roster", async () => {
+  it("session end unbinds the surface; re-activation raises a fresh one over the same core state", async () => {
     const ctx = createCompositionCtx();
+    // A restored terminal marker sits in the durable store, so the rebuild
+    // (which runs before the first wake) has real work to do on every
+    // activation here. The roster READ used to be `check_workers`; that tool
+    // is retired and the stock `list_agents` is mounted by the preset (absent
+    // in this fake), so the roster observation now lives in the core suites
+    // and this case keeps the surface half.
     await seedMarkers(ctx, [RESTORED_MARKER]);
     pluginApply(ctx, volatileConfig({ enabled: true }));
     const agent = createAgent("s-1");
 
-    // First activation: the durable rebuild lands before the roster is read,
-    // so the restored terminal row is already there.
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await flushActivation();
-    const check = agent.scopedTools.get("check_workers");
-    assert.ok(check, "activation raised the tool surface");
-    const first = (await check.execute({})) as {
-      ok: boolean;
-      rows: Array<{ worker_id: string }>;
-    };
-    assert.ok(
-      first.rows.some((row) => row.worker_id === "w-restored"),
-      "restored row is on the roster after the rebuild",
+    assert.deepEqual(
+      agent.scopedTools.registeredNames().sort(),
+      [...DISPATCHER_TOOL_NAMES].sort(),
+      "activation raised the custom tool surface",
     );
 
     // Session end: the dispatcher unbinds and its tool surface disappears.
@@ -517,18 +492,13 @@ describe("composition polish — deactivation honesty (design-17 §3.2)", () => 
     });
     assert.deepEqual(again, {
       kind: "success",
-      text: DISPATCHER_START_SUCCESS,
+      text: ACTIVATION_COMMAND_CARD_TEXT,
     });
     await flushActivation();
-    const checkAgain = agent.scopedTools.get("check_workers");
-    assert.ok(checkAgain, "re-activation raises the surface again");
-    const second = (await checkAgain.execute({})) as {
-      ok: boolean;
-      rows: Array<{ worker_id: string }>;
-    };
-    assert.ok(
-      second.rows.some((row) => row.worker_id === "w-restored"),
-      "the rebuilt roster is readable again",
+    assert.deepEqual(
+      agent.scopedTools.registeredNames().sort(),
+      [...DISPATCHER_TOOL_NAMES].sort(),
+      "re-activation raises the surface again",
     );
   });
 });

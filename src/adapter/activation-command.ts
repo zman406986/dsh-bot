@@ -14,6 +14,7 @@ import type {
   CommandResultLike,
 } from "./cordis-dsh-host.js";
 import type { ActivationOutcome } from "./parent-agent.js";
+import { userTurnMessage } from "./wake-copy.js";
 
 /**
  * Globally unique host command name. The constant NAME is retained public
@@ -30,6 +31,20 @@ export const LEGACY_DISPATCHER_START_COMMAND = "dispatcher-start";
 /** Command menu description. */
 export const DISPATCHER_START_DESCRIPTION =
   "Turn this chat into the multitask dispatcher for this session.";
+
+/**
+ * Composer hint for the optional message argument.
+ *
+ * The host shows this hint after the claimed `/dsh-bot` token
+ * (`dsh-client-ui-commands/lib/client.js:1650-1653`, installed package). A
+ * claimed host command remains args-tolerant: bare Enter submits with an
+ * empty argument, so advertising the input does NOT force the user to type a
+ * message (`:1601-1615` returns the claim, `dsh-client-ui-conversation`
+ * `:5368-5379` submits it with `argsAfter(...) === ""`). The no-argument
+ * activation path therefore stays one step.
+ */
+export const DISPATCHER_START_INPUT_HINT =
+  "Optional first message; leave blank to only activate.";
 
 /**
  * Presence hint appended to the activation success copy (ticket 32,
@@ -55,11 +70,31 @@ export const DISPATCHER_START_SUCCESS =
 
 /**
  * Ticket 295: the one-line account of the visible activation notice — the
- * collapsed chat row's summary, above the full {@link DISPATCHER_START_SUCCESS}
- * body. Server-side and therefore outside the client locale dictionary, so it
- * is English only; the card's own text keeps its existing locale faces.
+ * deferred notice's collapsed chat row summary, above its full
+ * {@link DISPATCHER_START_SUCCESS} body. This is NOT the immediate command
+ * card's text (see {@link ACTIVATION_COMMAND_CARD_TEXT}). Server-side and
+ * therefore outside the client locale dictionary, so it is English only.
  */
 export const ACTIVATION_NOTICE_SUMMARY = "Dispatcher active in this chat.";
+
+/**
+ * The `/dsh-bot` command card's result line — the only confirmation the user
+ * sees at the instant the command returns, because the full notice is deferred
+ * to the first turn (ticket 298). The chat renders a command result as one
+ * collapsed row (`white-space: nowrap` + ellipsis) and builds a body only
+ * when the text contains a newline (`dsh-client-ui-chat/lib/client.js:8489`,
+ * `:8499-8501`), so this line must be self-contained and short enough to read
+ * in full: dispatcher active, results arrive in this chat, and
+ * `/dispatcher-steer` nudges a running worker.
+ *
+ * Measured against the shipped row at 13px: 67 characters render 372px wide,
+ * with no clipping down to a 480px chat column; the content column itself is
+ * `clamp(680px, 64% of the conversation column, 920px)`. Deliberately separate
+ * from {@link DISPATCHER_START_SUCCESS}, whose 208-character paragraph stays
+ * the deferred notice body.
+ */
+export const ACTIVATION_COMMAND_CARD_TEXT =
+  "Dispatcher active. Results arrive here; /dispatcher-steer to nudge.";
 
 /** Same chat is already the dispatcher. */
 export const DISPATCHER_START_ALREADY_HERE =
@@ -95,12 +130,24 @@ export interface RegisterDispatcherStartCommandOptions {
   readonly activate: (agent: AgentLike) => ActivationOutcome;
 }
 
+/**
+ * The message argument, normalized: the host's `rawInput` includes the
+ * separator whitespace after the command name (`dsh-commands/lib/types`),
+ * and a whitespace-only line must count as no message so plain `/dsh-bot`
+ * keeps its turn-free behavior.
+ */
+function dispatcherStartMessage(rawInput: string | undefined): string {
+  return rawInput === undefined ? "" : rawInput.trim();
+}
+
 /** Map an activation outcome to user-visible command copy. */
 export function activationResultCopy(
   outcome: ActivationOutcome,
 ): CommandResultLike {
   if (outcome.ok) {
-    return { kind: "success", text: DISPATCHER_START_SUCCESS };
+    // The immediate card is one readable line; DISPATCHER_START_SUCCESS stays
+    // the deferred notice body (tickets 295/298).
+    return { kind: "success", text: ACTIVATION_COMMAND_CARD_TEXT };
   }
   switch (outcome.reason) {
     case "not-top-level":
@@ -119,6 +166,10 @@ export function createDispatcherStartCommand(options: RegisterDispatcherStartCom
   return {
     name: DISPATCHER_START_COMMAND,
     description: DISPATCHER_START_DESCRIPTION,
+    // The claim is args-tolerant (see DISPATCHER_START_INPUT_HINT): bare
+    // Enter still activates immediately with no turn; a non-empty argument
+    // opens the first turn below.
+    input: { hint: DISPATCHER_START_INPUT_HINT },
     handler(invocation) {
       const agent: AgentLike | undefined = invocation?.agent;
       if (agent == null || agent.session == null) {
@@ -130,7 +181,30 @@ export function createDispatcherStartCommand(options: RegisterDispatcherStartCom
       if (current !== null && current === sessionId) {
         return { kind: "success", text: DISPATCHER_START_ALREADY_HERE };
       }
-      return activationResultCopy(options.activate(agent));
+      const outcome = options.activate(agent);
+      // Never on failure, never when the activation was already live. The
+      // message opens the first turn only after activation stands, so a
+      // refused command leaves the chat exactly as turn-free as before.
+      const message = dispatcherStartMessage(invocation.rawInput);
+      if (outcome.ok && message.length > 0) {
+        try {
+          // `followup` is the host's "next-turn" send with a wake
+          // (`dsh-agent-loop/lib/index.js:570-572`): the message enters the
+          // session as one user turn and starts it. `userTurnMessage` stamps
+          // `source.kind: "user"`, which is what the chat renders as the
+          // user's own message and what opens the deferred restart-notice
+          // gate. Best-effort: activation already stands if this fails.
+          void Promise.resolve(agent.followup(userTurnMessage(message))).catch(
+            () => {
+              // Opening the first turn never rewrites the command result.
+            },
+          );
+        } catch {
+          // Same: a broken followup must not turn a successful activation
+          // into a command failure.
+        }
+      }
+      return activationResultCopy(outcome);
     },
   };
 }

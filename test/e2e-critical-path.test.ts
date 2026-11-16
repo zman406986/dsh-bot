@@ -2,9 +2,19 @@
  * Ticket 172 — the ONE end-to-end file.
  *
  * The single critical path, over the real plugin `apply()` and the real
- * command/tool surface: activate a dispatcher → spawn a worker → the worker
- * settles → the settle wake reaches the dispatcher → the dispatcher calls
- * `deliver_result`.
+ * command/tool surface: activate a dispatcher → start a worker through the
+ * stock `subagent` tool (the preset's four agent verbs are mounted by the
+ * test) → the worker settles (the stock completion notice is the one
+ * parent-visible result; the plugin opens no settle wake) → the dispatcher
+ * calls `deliver_result`.
+ *
+ * Stock-subagent refactor: the five custom worker verbs (`spawn_worker`,
+ * `check_workers`, `steer_worker`, `stop_worker`, `await_agent`) are
+ * retired. This file therefore asserts the CURRENT surface — the three custom
+ * verbs plus the stock `subagent` / `list_agents` / `send_message` /
+ * `interrupt_agent` — and reads the spawned worker's linked todo off the
+ * durable marker (the same row a restart rebuilds from) instead of a roster
+ * tool. No removed name is ever registered or called here.
  *
  * The live plugin wires no separate user-facing send channel, so delivery is
  * conversational (ADR-0009): the dispatcher's own reply is the channel. The
@@ -31,6 +41,8 @@ import {
 // `CreateAgentOptionsLike` is exported by the host module but not re-exported
 // through the adapter barrel, so the test reaches the declaring module directly.
 import type { CreateAgentOptionsLike } from "../src/adapter/cordis-dsh-host.js";
+import { DISPATCHER_TOOL_NAMES } from "../src/core/policy/prompts.js";
+import type { DurableWorkerMarker } from "../src/core/durability.js";
 
 // ── fake host ─────────────────────────────────────────────────────────────
 
@@ -56,10 +68,15 @@ interface RecordingAgent extends AgentLike {
 function recordingAgent(
   id: string,
   scopedTools?: ScopedToolRegistry,
+  header: {
+    parentSession: unknown;
+    delegationDepth: number;
+    origin?: unknown;
+  } = { parentSession: null, delegationDepth: 0 },
 ): RecordingAgent {
   const followups: unknown[] = [];
   return {
-    session: { id, header: { parentSession: null, delegationDepth: 0 } },
+    session: { id, header },
     followup(message: unknown) {
       followups.push(message);
     },
@@ -83,9 +100,18 @@ interface Ctx extends AdapterContext {
   readonly disposers: Array<() => void>;
   /** The scoped surface every test agent must carry (ADR-0019). */
   readonly scopedTools: ScopedToolRegistry;
+  /**
+   * Mount the preset's four stock agent verbs on the dispatcher's own scope.
+   * A live preset does this, not this plugin; the fake `subagent` starts a
+   * child the same way the host's stock tool does — an `agent/created`
+   * announcement with the child's header, never a call into the plugin.
+   */
+  mountStockAgentTools(parentSessionId: string): void;
+  /** The durable worker marker (the row a restart rebuild reads). */
+  marker(workerId: string): DurableWorkerMarker | undefined;
 }
 
-function createCtx(agentsById: ReadonlyMap<string, AgentLike>): Ctx {
+function createCtx(agentsById: Map<string, AgentLike>): Ctx {
   const listeners = new Map<string, Array<(payload: never) => void>>();
   const commands: CommandDefinitionLike[] = [];
   const tools: Array<{
@@ -126,6 +152,45 @@ function createCtx(agentsById: ReadonlyMap<string, AgentLike>): Ctx {
     register: registerTool,
   };
 
+  const tableFor = (name: string): Map<string, unknown> => {
+    let table = tables.get(name);
+    if (table === undefined) {
+      table = new Map<string, unknown>();
+      tables.set(name, table);
+    }
+    return table;
+  };
+
+  /** A child scope shaped like a per-agent host context (worker barrier seam). */
+  const stockChildScope = {
+    schemas: () => [{ name: "deliver_result" }],
+    register: () => () => {},
+    restrict: () => () => {},
+  };
+
+  let nextStockChild = 0;
+  /**
+   * Announce a child the way the host's stock `subagent` tool does: the
+   * child is created by the preset, then `agent/created` carries its header.
+   * The plugin never sees a spawn call; adoption is the host's `header`
+   * evidence (`origin: "subagent"` + parent + depth), exactly the stock path.
+   */
+  const announceStockChild = (
+    parentSessionId: string,
+    label: string,
+  ): string => {
+    nextStockChild += 1;
+    const id = `stock-worker-${nextStockChild}`;
+    const child = recordingAgent(id, stockChildScope, {
+      parentSession: parentSessionId,
+      delegationDepth: 1,
+      origin: "subagent",
+    });
+    agentsById.set(id, child);
+    fire("agent/created", { agent: child, source: "startup", label });
+    return id;
+  };
+
   const ctx = {
     disposers,
     activationCalls,
@@ -138,6 +203,31 @@ function createCtx(agentsById: ReadonlyMap<string, AgentLike>): Ctx {
       return tools.map((t) => t.name);
     },
     fire,
+    mountStockAgentTools(parentSessionId: string) {
+      if (tools.some((t) => t.name === "subagent")) return;
+      scopedTools.register({
+        name: "subagent",
+        async execute(args: unknown) {
+          const input = (args ?? {}) as { description?: unknown; prompt?: unknown };
+          const label =
+            typeof input.description === "string" ? input.description : "";
+          return { ok: true, childId: announceStockChild(parentSessionId, label) };
+        },
+      });
+      for (const name of ["list_agents", "send_message", "interrupt_agent"]) {
+        scopedTools.register({
+          name,
+          async execute() {
+            return { ok: true };
+          },
+        });
+      }
+    },
+    marker(workerId: string) {
+      return tableFor(MARKER_TABLE_NAME).get(workerId) as
+        | DurableWorkerMarker
+        | undefined;
+    },
     tool: (name: string) => tools.find((t) => t.name === name),
     runCommand(invocation: { commandId: string; agent: AgentLike }) {
       const command = commands.find((c) => c.name === invocation.commandId);
@@ -199,24 +289,24 @@ function createCtx(agentsById: ReadonlyMap<string, AgentLike>): Ctx {
     jobs: { list: () => [] },
     storageDomain: {
       async open() {
-        let table = tables.get(MARKER_TABLE_NAME);
-        if (table === undefined) {
-          table = new Map<string, unknown>();
-          tables.set(MARKER_TABLE_NAME, table);
-        }
-        const rows = table;
         return {
           name: "multitask_dispatcher",
-          table: () => ({
-            get: (key: string) => rows.get(key) as never,
-            entries: () => rows.entries() as never,
-            async put(key: string, value: unknown) {
-              rows.set(key, value);
-            },
-            async delete(key: string) {
-              return rows.delete(key);
-            },
-          }),
+          // One map per table NAME: a worker marker and its worker-session
+          // row are different records (a shared map would overwrite one with
+          // the other and hide the linked todo this file reads).
+          async table(name: string) {
+            const rows = tableFor(name);
+            return {
+              get: (key: string) => rows.get(key) as never,
+              entries: () => rows.entries() as never,
+              async put(key: string, value: unknown) {
+                rows.set(key, value);
+              },
+              async delete(key: string) {
+                return rows.delete(key);
+              },
+            };
+          },
           async close() {},
         };
       },
@@ -225,54 +315,84 @@ function createCtx(agentsById: ReadonlyMap<string, AgentLike>): Ctx {
   return ctx as unknown as Ctx;
 }
 
-/** Text of the first text block of a wake message. */
-function textOf(message: unknown): string {
-  const content = (message as { content?: Array<{ text?: string }> }).content;
-  if (!Array.isArray(content)) return "";
-  return content.map((block) => block.text ?? "").join("");
-}
-
 // ── the one critical path ─────────────────────────────────────────────────
 
-describe("critical path — activate, spawn, settle, wake, deliver", () => {
+/** The preset's stock agent verbs — mounted by the preset, never by us. */
+const STOCK_AGENT_TOOL_NAMES = [
+  "subagent",
+  "list_agents",
+  "send_message",
+  "interrupt_agent",
+] as const;
+
+/** The five model-facing worker verbs retired by the stock-subagent refactor. */
+const REMOVED_WORKER_TOOL_NAMES = [
+  "spawn_worker",
+  "check_workers",
+  "steer_worker",
+  "stop_worker",
+  "await_agent",
+] as const;
+
+/**
+ * The current dispatcher plane: the three custom verbs plus the preset's four
+ * stock agent verbs, with no removed name registered at any point.
+ */
+function assertDispatcherToolSurface(ctx: Ctx): void {
+  for (const name of [...DISPATCHER_TOOL_NAMES, ...STOCK_AGENT_TOOL_NAMES]) {
+    assert.ok(
+      ctx.toolNames.includes(name),
+      `${name} must be on the dispatcher plane`,
+    );
+  }
+  for (const name of REMOVED_WORKER_TOOL_NAMES) {
+    assert.equal(
+      ctx.toolNames.includes(name),
+      false,
+      `${name} is retired and must never be registered`,
+    );
+  }
+}
+
+describe("critical path — activate, stock spawn, settle, deliver", () => {
   it("records the result for the dispatcher's reply and closes the obligation", async () => {
     const agents = new Map<string, AgentLike>();
     const ctx = createCtx(agents);
     const dispatcher = recordingAgent("session-1", ctx.scopedTools);
     agents.set("session-1", dispatcher);
+    // The preset mounts its four agent verbs on this dispatcher's scope; the
+    // plugin adds only its three custom verbs beside them.
+    ctx.mountStockAgentTools("session-1");
 
     // 1. Activate the dispatcher: the command binds the session and raises
     //    the tool surface.
     apply(ctx, volatileConfig({ enabled: true }));
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent: dispatcher });
     await flushActivation();
-    assert.ok(ctx.toolNames.includes("spawn_worker"), "activation raises the surface");
-    assert.ok(ctx.toolNames.includes("deliver_result"));
+    assertDispatcherToolSurface(ctx);
 
-    // 2. Spawn a worker. No todo_id given, so the core creates exactly one
-    //    linked ledger entry — the obligation this path must discharge.
-    const spawn = ctx.tool("spawn_worker");
-    assert.ok(spawn);
-    const spawned = (await spawn.execute({
-      stream_key: "critical",
-      title: "Critical path worker",
+    // 2. Start a worker through the stock `subagent` tool. The fake announces
+    //    the child exactly as the host's stock tool does; the plugin's host
+    //    adopts it from the child header (never from a spawn_worker call).
+    const subagent = ctx.tool("subagent");
+    assert.ok(subagent);
+    const spawned = (await subagent.execute({
+      description: "Critical path worker",
       prompt: "Do the one thing.",
-    })) as { ok: boolean; worker_id?: string };
+    })) as { ok: boolean; childId?: string };
     assert.equal(spawned.ok, true);
-    const workerId = spawned.worker_id;
+    const workerId = spawned.childId;
     assert.ok(workerId);
 
-    // The ledger link the spawn created is what delivery will later close.
-    const check = ctx.tool("check_workers");
-    assert.ok(check);
-    const row = ((await check.execute({})) as {
-      rows: Array<{ worker_id: string; todo_id: string | null; stage: string }>;
-    }).rows[0];
-    assert.ok(row);
-    assert.equal(row.worker_id, workerId);
-    assert.ok(row.todo_id, "a spawn without todo_id still creates the link");
-    assert.equal(row.stage, "working");
-    const todoId = row.todo_id;
+    // The adoption created exactly one linked ledger entry. It is read off
+    // the durable marker — the same row a restart rebuilds from.
+    await flushActivation();
+    const spawnMarker = ctx.marker(workerId);
+    assert.ok(spawnMarker, "stock adoption writes the durable worker marker");
+    assert.equal(spawnMarker.workerId, workerId);
+    assert.equal(spawnMarker.status, "spawned");
+    const todoId = spawnMarker.todoId;
+    assert.ok(todoId, "a stock adoption still creates the ledger link");
 
     // 3. The worker settles on the host. Nothing has been delivered yet, so
     //    the todo must still be open.
@@ -281,11 +401,19 @@ describe("critical path — activate, spawn, settle, wake, deliver", () => {
       stopReason: "completed",
       lastAssistantMessage: [{ type: "text", text: "The one thing is done." }],
     });
+    await flushActivation();
 
-    // 4. The settle reaches the dispatcher as a wake turn carrying the result.
-    assert.equal(dispatcher.followups.length, 1, "one wake, not one per event");
-    const wakeText = textOf(dispatcher.followups[0]);
-    assert.match(wakeText, /The one thing is done\./);
+    // 4. The plugin opens no wake turn for the settle: the stock completion
+    //    notice (source kind subagent-settled) is the one parent-visible
+    //    result. The obligation marker survives, still pointing at the todo.
+    assert.equal(dispatcher.followups.length, 0, "no plugin settle wake");
+    const settledMarker = ctx.marker(workerId);
+    assert.equal(settledMarker?.status, "completed");
+    assert.equal(
+      settledMarker?.todoId,
+      todoId,
+      "the completed worker is still owed a delivery",
+    );
 
     // 5. The dispatcher calls deliver_result. This plugin wires no separate
     //    user-facing send, so the dispatcher's own reply is the channel: the
@@ -315,14 +443,13 @@ describe("critical path — activate, spawn, settle, wake, deliver", () => {
     );
     assert.match(delivered.detail ?? "", /say it in your reply/i);
 
-    // 6. The obligation is closed: the result is recorded for the reply, so
-    //    the worker is no longer waiting-for-delivery.
-    const checked = (await check.execute({})) as {
-      rows: Array<{ worker_id: string; status: string; stage: string }>;
-    };
-    assert.deepEqual(
-      checked.rows.map((row) => ({ status: row.status, stage: row.stage })),
-      [{ status: "completed", stage: "ended" }],
+    // 6. The obligation is closed: delivery drops the durable marker, so no
+    //    restart can re-open an already-delivered result.
+    await flushActivation();
+    assert.equal(
+      ctx.marker(workerId),
+      undefined,
+      "delivery drops the delivery-obligation marker",
     );
 
     for (const dispose of ctx.disposers) dispose();
@@ -333,69 +460,99 @@ describe("critical path — activate, spawn, settle, wake, deliver", () => {
     const ctx = createCtx(agents);
     const dispatcher = recordingAgent("session-1", ctx.scopedTools);
     agents.set("session-1", dispatcher);
+    ctx.mountStockAgentTools("session-1");
 
     apply(ctx, volatileConfig({ enabled: true }));
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent: dispatcher });
     await flushActivation();
 
-    const spawn = ctx.tool("spawn_worker");
-    assert.ok(spawn);
-    const spawned = (await spawn.execute({
-      stream_key: "erroring",
-      title: "Erroring worker",
+    const subagent = ctx.tool("subagent");
+    assert.ok(subagent);
+    const spawned = (await subagent.execute({
+      description: "Erroring worker",
       prompt: "Fail on purpose.",
-    })) as { ok: boolean; worker_id?: string };
-    assert.ok(spawned.worker_id);
+    })) as { ok: boolean; childId?: string };
+    assert.equal(spawned.ok, true);
+    const workerId = spawned.childId;
+    assert.ok(workerId);
+    await flushActivation();
+    const spawnMarker = ctx.marker(workerId);
+    assert.ok(spawnMarker?.todoId);
+    const todoId = spawnMarker.todoId;
 
     ctx.fire("subagent/end", {
-      id: spawned.worker_id,
+      id: workerId,
       stopReason: "error",
       lastAssistantMessage: [{ type: "text", text: "it broke" }],
     });
+    await flushActivation();
 
-    // A settle, even a failed one, is a delivery obligation — it wakes.
-    assert.equal(dispatcher.followups.length, 1);
-
-    const check = ctx.tool("check_workers");
-    assert.ok(check);
-    const before = (await check.execute({})) as {
-      rows: Array<{ status: string; stage: string }>;
-    };
-    assert.deepEqual(
-      before.rows.map((row) => row.stage),
-      ["waiting-for-delivery"],
-      "an undelivered result keeps the worker in waiting-for-delivery",
+    // A settle, even a failed one, is a delivery obligation — but the plugin
+    // opens no wake for it. The marker keeps the obligation open, so the
+    // dispatcher still has to deliver the failure.
+    assert.equal(dispatcher.followups.length, 0, "no plugin settle wake");
+    const settled = ctx.marker(workerId);
+    assert.ok(settled, "an error still owes a delivery");
+    assert.equal(settled.status, "error");
+    assert.equal(
+      settled.todoId,
+      todoId,
+      "an undelivered result keeps its ledger link",
     );
 
     for (const dispose of ctx.disposers) dispose();
   });
 
-  it("refuses a duplicate stream key without spawning a second worker", async () => {
+  it("adopts each stock child once: the retired stream-key refusal has no stock counterpart", async () => {
     const agents = new Map<string, AgentLike>();
     const ctx = createCtx(agents);
     const dispatcher = recordingAgent("session-1", ctx.scopedTools);
     agents.set("session-1", dispatcher);
+    ctx.mountStockAgentTools("session-1");
 
     apply(ctx, volatileConfig({ enabled: true }));
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent: dispatcher });
     await flushActivation();
 
-    const spawn = ctx.tool("spawn_worker");
-    assert.ok(spawn);
-    const first = (await spawn.execute({
-      stream_key: "same",
-      title: "One",
+    const subagent = ctx.tool("subagent");
+    assert.ok(subagent);
+    const first = (await subagent.execute({
+      description: "One",
       prompt: "First.",
-    })) as { ok: boolean };
+    })) as { ok: boolean; childId?: string };
     assert.equal(first.ok, true);
+    const firstId = first.childId;
+    assert.ok(firstId);
+    await flushActivation();
+    const firstTodo = ctx.marker(firstId)?.todoId;
+    assert.ok(firstTodo);
 
-    const second = (await spawn.execute({
-      stream_key: "same",
-      title: "Two",
+    // The stock runtime has no stream-key slot, so its duplicate-key refusal
+    // retired with spawn_worker. The invariant that survives is identity:
+    // the same child announced again is the same worker, never a second one.
+    const child = agents.get(firstId);
+    assert.ok(child);
+    ctx.fire("agent/created", { agent: child, source: "startup" });
+    await flushActivation();
+    assert.equal(
+      ctx.marker(firstId)?.todoId,
+      firstTodo,
+      "a repeat announcement adds no second worker or todo",
+    );
+
+    // A second stock spawn is a distinct child and a distinct obligation.
+    const second = (await subagent.execute({
+      description: "Two",
       prompt: "Second.",
-    })) as { ok: boolean; reason?: string };
-    assert.equal(second.ok, false);
-    assert.equal(second.reason, "duplicate-stream-key");
+    })) as { ok: boolean; childId?: string };
+    assert.equal(second.ok, true);
+    const secondId = second.childId;
+    assert.ok(secondId);
+    assert.notEqual(secondId, firstId);
+    await flushActivation();
+    const secondTodo = ctx.marker(secondId)?.todoId;
+    assert.ok(secondTodo);
+    assert.notEqual(secondTodo, firstTodo);
 
     for (const dispose of ctx.disposers) dispose();
   });

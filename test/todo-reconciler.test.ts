@@ -240,7 +240,7 @@ describe("todo reconciler — completed only after delivered", () => {
   });
 });
 
-describe("todo reconciler — wake reports outstanding work", () => {
+describe("todo reconciler — reconcile reports outstanding work", () => {
   it("reports running, landed-undelivered, and next-to-dispatch in one reconcile", async () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
@@ -288,19 +288,37 @@ describe("todo reconciler — wake reports outstanding work", () => {
 
     host.fireSettled({ workerId: doneId, status: "completed", report: "done" });
 
-    const drained = multitask.drainWake("session-1");
-    assert.ok(drained);
+    // Lane V2: a settle no longer opens a plugin wake. The host's stock
+    // completion notice is the one parent-visible result, so the wake bus is
+    // empty here and the report is driven straight off the ledger + roster.
+    assert.equal(
+      multitask.drainWake("session-1"),
+      undefined,
+      "the settle opens no plugin wake",
+    );
+    assert.deepEqual(host.wakeCalls, []);
 
-    assert.equal(drained.reconcile.running.length, 1);
-    assert.equal(drained.reconcile.running[0]?.id, "todo-run");
-    assert.equal(drained.reconcile.landedUndelivered.length, 1);
-    assert.equal(drained.reconcile.landedUndelivered[0]?.id, "todo-done");
-    assert.equal(drained.reconcile.nextToDispatch.length, 1);
-    assert.equal(drained.reconcile.nextToDispatch[0]?.id, "todo-next");
+    // The terminal result is remembered where await_agent reads it.
+    const settle = multitask.settleRecords.lookup("session-1", doneId);
+    assert.equal(settle?.workerId, doneId);
+    assert.equal(settle?.status, "completed");
+    assert.equal(settle?.resultText, "done");
 
-    // Wake still carries the settled notice.
-    assert.equal(drained.wake.settledWorkers.length, 1);
-    assert.equal(drained.wake.settledWorkers[0]?.workerId, doneId);
+    const report = multitask.reconcileTodos("session-1");
+
+    assert.equal(report.running.length, 1);
+    assert.equal(report.running[0]?.id, "todo-run");
+    assert.equal(report.landedUndelivered.length, 1);
+    assert.equal(report.landedUndelivered[0]?.id, "todo-done");
+    assert.equal(report.nextToDispatch.length, 1);
+    assert.equal(report.nextToDispatch[0]?.id, "todo-next");
+    // Undelivered work stays owed: with no settle in this wake the item is
+    // past its chance, so reconcile charges exactly one retry. Opening the
+    // turn is the action layer's job (redriveUndelivered), not reconcile's.
+    assert.equal(report.toRedrive.length, 1);
+    assert.equal(report.toRedrive[0]?.id, "todo-done");
+    assert.equal(multitask.todos.get("todo-done")?.redriveAttempts, 1);
+    assert.equal(multitask.todos.get("todo-done")?.delivered, false);
   });
 
   it("reconcileTodos without a wake still buckets current state", () => {
@@ -638,7 +656,13 @@ describe("todo reconciler — worker list stays empty (ADR-0007)", () => {
     assert.ok(!keys.includes("title") || record.title === "Public title");
   });
 
-  it("wake notices carry result text and title only — no ledger payload", async () => {
+  // Lane V2 retired the plugin's settle wake: the host's stock completion
+  // notice (source `subagent-settled`) is the one parent-visible result, so
+  // there is no plugin-composed notice left to inspect. ADR-0007 still bounds
+  // the two things the core does carry out of a settle — the worker roster
+  // record's title (previous test) and the settle record's result text — to
+  // worker-visible data only, never the dispatcher ledger.
+  it("the settle record carries result text only — no ledger payload", async () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
 
@@ -659,13 +683,159 @@ describe("todo reconciler — worker list stays empty (ADR-0007)", () => {
     multitask.noteTurnStarted(workerId);
     host.fireSettled({ workerId, status: "completed", report: "result" });
 
-    const drained = multitask.drainWake("session-1");
-    assert.ok(drained);
-    const notice = drained.wake.settledWorkers[0];
-    assert.ok(notice);
-    assert.equal(notice.title, "Public title");
-    assert.equal(notice.resultText, "result");
-    const serialized = JSON.stringify(drained.wake);
+    // No plugin wake is enqueued by a settle any more.
+    assert.equal(multitask.drainWake("session-1"), undefined);
+
+    const record = multitask.settleRecords.lookup("session-1", workerId);
+    assert.ok(record);
+    assert.equal(record.workerId, workerId);
+    assert.equal(record.status, "completed");
+    assert.equal(record.resultText, "result");
+    // The title the parent sees is the worker's public title (asserted on the
+    // roster in the previous test), and neither carrier mentions the ledger.
+    assert.equal(multitask.getWorker(workerId)?.title, "Public title");
+    const serialized = JSON.stringify(record);
     assert.ok(!serialized.includes("SECRET-LEDGER-TITLE"));
+    assert.ok(!serialized.includes("todo-1"));
+
+    // The settle is bookkeeping only: the item still owes delivery.
+    const todo = multitask.listTodos("session-1")[0];
+    assert.equal(todo?.status, "in_progress");
+    assert.equal(todo?.delivered, false);
+  });
+});
+
+describe("todo reconciler — settle with no running edge (lane V4)", () => {
+  it("a worker that settles before any running edge promotes the linked todo and can be redriven and delivered", async () => {
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host);
+
+    multitask.createTodo({
+      sessionId: "session-1",
+      id: "todo-1",
+      title: "Fast finish",
+    });
+    const workerId = unwrapSpawn(
+      await multitask.spawnWorker({
+        parentSessionId: "session-1",
+        streamKey: "todo-1",
+        title: "Fast finish",
+        prompt: "Work.",
+        todoId: "todo-1",
+      }),
+    );
+    // The fixture never emits a running edge: no noteTurnStarted here.
+    assert.equal(multitask.todos.get("todo-1")?.status, "pending");
+
+    host.fireSettled({
+      workerId,
+      status: "completed",
+      report: "done before running",
+    });
+
+    // The settle record is still the completed one await_agent reads.
+    const settle = multitask.settleRecords.lookup("session-1", workerId);
+    assert.equal(settle?.status, "completed");
+    assert.equal(settle?.resultText, "done before running");
+    assert.equal(multitask.getWorker(workerId)?.status, "completed");
+
+    // The promotion is ledger state written by the settle path, not a wake.
+    assert.equal(
+      multitask.drainWake("session-1"),
+      undefined,
+      "the settle opens no plugin wake",
+    );
+    assert.deepEqual(host.wakeCalls, []);
+    // And it is NOT completion: completed means delivered (ADR-0007).
+    const promoted = multitask.todos.get("todo-1");
+    assert.equal(promoted?.status, "in_progress");
+    assert.equal(promoted?.delivered, false);
+    assert.equal(promoted?.redriveAttempts, 0);
+
+    // Turn-end redrive now sees a landed-undelivered item: it charges the
+    // attempt and opens the delivery turn instead of stranding it as pending.
+    const redrive = multitask.redriveUndelivered("session-1");
+    assert.equal(redrive.redriven.length, 1);
+    assert.equal(redrive.redriven[0]?.id, "todo-1");
+    assert.equal(redrive.lost.length, 0);
+    assert.equal(multitask.todos.get("todo-1")?.redriveAttempts, 1);
+    assert.equal(
+      host.wakeCalls.length,
+      1,
+      "the redrive opens one delivery turn",
+    );
+
+    // Delivery closes the obligation as completed — now it means delivered.
+    assert.equal(multitask.markDelivered("todo-1"), true);
+    const delivered = multitask.todos.get("todo-1");
+    assert.equal(delivered?.status, "completed");
+    assert.equal(delivered?.delivered, true);
+    assert.equal(multitask.drainWake("session-1"), undefined);
+  });
+
+  it("an aborted settle with no running edge keeps the cancel-and-prune rule", async () => {
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host);
+
+    multitask.createTodo({
+      sessionId: "session-1",
+      id: "todo-1",
+      title: "Stop fast",
+    });
+    const workerId = unwrapSpawn(
+      await multitask.spawnWorker({
+        parentSessionId: "session-1",
+        streamKey: "todo-1",
+        title: "Stop fast",
+        prompt: "Work.",
+        todoId: "todo-1",
+      }),
+    );
+    assert.equal(multitask.todos.get("todo-1")?.status, "pending");
+
+    host.fireSettled({ workerId, status: "aborted", report: "" });
+
+    assert.equal(multitask.getWorker(workerId)?.status, "aborted");
+    // An aborted stream owes nothing: cancelled, then pruned as before.
+    assert.equal(multitask.todos.get("todo-1"), undefined);
+    assert.deepEqual(multitask.listTodos("session-1"), []);
+    const redrive = multitask.redriveUndelivered("session-1");
+    assert.equal(redrive.redriven.length, 0);
+    assert.equal(redrive.lost.length, 0);
+  });
+
+  it("a settle never re-promotes an item a running edge already moved or delivery closed", async () => {
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host);
+
+    multitask.createTodo({
+      sessionId: "session-1",
+      id: "todo-1",
+      title: "Delivered early",
+    });
+    const workerId = unwrapSpawn(
+      await multitask.spawnWorker({
+        parentSessionId: "session-1",
+        streamKey: "todo-1",
+        title: "Delivered early",
+        prompt: "Work.",
+        todoId: "todo-1",
+      }),
+    );
+    multitask.noteTurnStarted(workerId);
+    assert.equal(multitask.todos.get("todo-1")?.status, "in_progress");
+    // deliver_result can land while the worker still runs.
+    assert.equal(multitask.markDelivered("todo-1"), true);
+
+    host.fireSettled({ workerId, status: "completed", report: "late result" });
+
+    const todo = multitask.todos.get("todo-1");
+    assert.equal(
+      todo?.status,
+      "completed",
+      "the settle promotes a pending item only — never reopens a closed one",
+    );
+    assert.equal(todo?.delivered, true);
+    assert.equal(multitask.redriveUndelivered("session-1").redriven.length, 0);
   });
 });

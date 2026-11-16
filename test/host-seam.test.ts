@@ -24,9 +24,17 @@ describe("multitask core ↔ DshHost seam", () => {
       }),
     );
     host.fireSettled({ workerId, status: "completed", report: "one" });
+    const first = multitask.settleRecords.lookup("session-1", workerId);
+    assert.ok(first);
     host.fireSettled({ workerId, status: "completed", report: "two" });
     assert.equal(multitask.getWorker(workerId)?.status, "completed");
-    assert.equal(host.wakeCalls.length, 1, "a second settle must not wake again");
+    assert.deepEqual(host.wakeCalls, [], "neither settle opens a plugin wake");
+    assert.deepEqual(
+      multitask.settleRecords.lookup("session-1", workerId),
+      first,
+      "the second settle must not overwrite the record",
+    );
+    assert.equal(first.resultText, "one");
 
     await assert.rejects(() => multitask.abortWorker("never-spawned"));
     assert.deepEqual(host.interruptCalls, [], "an unknown abort must not interrupt");
@@ -60,9 +68,14 @@ describe("multitask core ↔ DshHost seam", () => {
     assert.equal(worker.parentSessionId, "session-1");
   });
 
-  it("a settled event updates the roster and wakes the dispatcher exactly once", async () => {
+  it("a settled event updates the roster, opens no plugin wake, and leaves the todo open", async () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
+    multitask.createTodo({
+      sessionId: "session-1",
+      id: "todo-1",
+      title: "Build scaffold",
+    });
 
     const workerId = unwrapSpawn(
       await multitask.spawnWorker({
@@ -70,9 +83,11 @@ describe("multitask core ↔ DshHost seam", () => {
         streamKey: "todo-1",
         title: "Build scaffold",
         prompt: "Build it.",
+        todoId: "todo-1",
       }),
     );
 
+    multitask.noteTurnStarted(workerId);
     host.fireSettled({
       workerId,
       status: "completed",
@@ -82,7 +97,23 @@ describe("multitask core ↔ DshHost seam", () => {
     const worker = multitask.getWorker(workerId);
     assert.ok(worker);
     assert.equal(worker.status, "completed");
-    assert.deepEqual(host.wakeCalls, ["session-1"]);
+    // The stock completion notice is the parent-visible result; the plugin
+    // opens no wake turn of its own.
+    assert.deepEqual(host.wakeCalls, []);
+    assert.equal(multitask.wakeBus.peek("session-1"), undefined);
+    assert.equal(multitask.drainWake("session-1"), undefined);
+
+    const settle = multitask.settleRecords.lookup("session-1", workerId);
+    assert.ok(settle);
+    assert.equal(settle.status, "completed");
+    assert.equal(settle.resultText, "Scaffold is in place.");
+
+    // A settle does not deliver: the obligation stays open and uncharged.
+    const todo = multitask.todos.get("todo-1");
+    assert.ok(todo);
+    assert.equal(todo.status, "in_progress");
+    assert.equal(todo.delivered, false);
+    assert.equal(todo.redriveAttempts, 0);
   });
 
   it("abortWorker interrupts through the host and drops a late settle", async () => {

@@ -1,6 +1,6 @@
 {
   "name": "dsh-multitask-dispatcher",
-  "description": "Always-on multitask dispatcher plugin for DeepSeek Harness (dsh)",
+  "description": "Always-on dispatcher for DeepSeek Harness: routes work to workers and teams and reports results in this chat.",
   "version": "0.1.0",
   "keywords": ["cordis", "dsh", "deepseek", "dispatcher", "multitask", "agent"],
   "author": "TZ",
@@ -34,11 +34,14 @@
       "types": "./lib/worker/preset.d.ts",
       "import": "./lib/worker/preset.js"
     },
-    "./client": "./client/index.js"
+    "./client": "./client/index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./package.json": "./package.json"
   },
   "files": [
     "lib",
     "client",
+    "locale/*.json",
     "cordis.patch.yml",
     "README.md",
     "vendor/racoons"

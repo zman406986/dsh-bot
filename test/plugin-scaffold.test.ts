@@ -23,7 +23,10 @@ import {
   name,
   resolveInboxJobDir,
 } from "../src/plugin.js";
-import { POLICY_SECTION_HEADINGS_ZH } from "../src/core/policy/prompts.js";
+import {
+  DISPATCHER_TOOL_NAMES,
+  POLICY_SECTION_HEADINGS_ZH,
+} from "../src/core/policy/prompts.js";
 import type { Multitask } from "../src/core/multitask.js";
 import { volatileConfig } from "./support/plugin-config.js";
 import {
@@ -499,17 +502,13 @@ function createStubCtx(options?: {
   return ctx as typeof ctx & AdapterContext;
 }
 
-/** The 8 tools registered on the dispatcher's OWN scope (racoons off by default). */
-const DISPATCHER_TOOL_NAMES = [
-  "spawn_worker",
-  "check_workers",
-  "steer_worker",
-  "stop_worker",
-  "deliver_result",
-  "message_agent",
-  "await_agent",
-  "spawn_dispatcher",
-] as const;
+/**
+ * The tools THIS PLUGIN registers on the dispatcher's OWN scope (racoons off
+ * by default). Workers, status, steering and stopping are the preset's stock
+ * `subagent` / `list_agents` / `send_message` / `interrupt_agent`, which no
+ * fixture in this file mounts — so every count below is the custom set only.
+ */
+const DISPATCHER_TOOL_COUNT = DISPATCHER_TOOL_NAMES.length;
 
 describe("plugin scaffold", () => {
   it("exports the Cordis plugin contract", () => {
@@ -595,23 +594,21 @@ describe("plugin scaffold", () => {
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await new Promise((resolve) => setImmediate(resolve));
 
-    // Eight dispatcher tools (ticket 116 retired send_peer for message_agent;
-    // ticket 117 added await_agent; ticket 118 added spawn_dispatcher).
-    // Ticket 174 / ADR-0033 removed the worker access tool; owner ruling
-    // 2026-11-05 keeps racoons off by default, so no per-session `recall`.
-    // The surface is the agent's own scope — never the process-global one.
-    const names = agent.tools.registeredNames();
-    for (const tool of [
-      "spawn_worker",
-      "check_workers",
-      "steer_worker",
-      "stop_worker",
-      "deliver_result",
-      "message_agent",
-      "await_agent",
-      "spawn_dispatcher",
-    ]) {
-      assert.ok(names.includes(tool), `missing tool: ${tool}`);
+    // The custom three (deliver_result, message_agent, spawn_dispatcher). The
+    // stock agent verbs are mounted by the preset — this fixture mounts none,
+    // so the whole surface here is exactly the custom set. Ticket 174 /
+    // ADR-0033 removed the worker access tool; owner ruling 2026-11-05 keeps
+    // racoons off by default, so no per-session `recall`. The surface is the
+    // agent's own scope — never the process-global one.
+    assert.deepEqual(
+      agent.tools.registeredNames().sort(),
+      [...DISPATCHER_TOOL_NAMES].sort(),
+    );
+    for (const tool of DISPATCHER_TOOL_NAMES) {
+      assert.ok(
+        agent.tools.registeredNames().includes(tool),
+        `missing tool: ${tool}`,
+      );
     }
     assert.equal(ctx.registeredTools.length, 0, "no process-global tool");
 
@@ -622,15 +619,16 @@ describe("plugin scaffold", () => {
     // Re-activation registers a fresh surface.
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(agent.tools.registeredNames().length, 8);
+    assert.equal(agent.tools.registeredNames().length, DISPATCHER_TOOL_COUNT);
   });
 
-  it("the /dsh-bot surface withholds the host preset's spawn verbs and lifts the restriction on deactivation", async () => {
+  it("the /dsh-bot surface withholds the host preset's fork verb and lifts the restriction on deactivation", async () => {
     const ctx = createStubCtx();
     apply(ctx, volatileConfig({ enabled: true }));
 
-    // The preset's inherited agent-plane verbs: exactly the ones ticket 179
-    // withholds, plus an unrelated tool that must survive.
+    // The preset's inherited agent-plane verbs: the stock spawn verb and its
+    // route-discovery companion (both now ALLOWED for a dispatcher), the fork
+    // verb ticket 179 withholds, and an unrelated tool that must survive.
     const hostTools = [
       "subagent",
       "subagent_fork",
@@ -642,28 +640,29 @@ describe("plugin scaffold", () => {
     await new Promise((resolve) => setImmediate(resolve));
 
     // ONE restriction, scoped to the candidates actually on the surface —
-    // never a hard-coded deny list the host would reject.
-    assert.deepEqual(agent.tools.restrictCalls, [
-      { deny: ["subagent", "subagent_fork", "list_subagent_models"] },
-    ]);
+    // never a hard-coded deny list the host would reject. The stock-subagent
+    // refactor narrowed the withhold list to the fork verb alone: plain
+    // `subagent` is now how a dispatcher starts a worker, and
+    // `list_subagent_models` is its route-discovery companion.
+    assert.deepEqual(agent.tools.restrictCalls, [{ deny: ["subagent_fork"] }]);
     assert.ok(
       agent.tools.schemasScopeCalls.includes(agent),
       "the inherited layer is read through THIS agent's scope",
     );
 
     const visible = agent.tools.visibleNames();
-    for (const name of [
-      "subagent",
-      "subagent_fork",
-      "list_subagent_models",
-    ]) {
-      assert.ok(!visible.includes(name), `${name} is withheld`);
+    assert.ok(!visible.includes("subagent_fork"), "the fork verb is withheld");
+    for (const name of ["subagent", "list_subagent_models"]) {
+      assert.ok(visible.includes(name), `${name} stays visible for a dispatcher`);
     }
     assert.ok(visible.includes("read"), "an unrelated inherited tool stays");
     for (const name of DISPATCHER_TOOL_NAMES) {
       assert.ok(visible.includes(name), `the dispatcher tool ${name} stays`);
     }
-    assert.equal(agent.tools.registeredNames().length, hostTools.length + 8);
+    assert.equal(
+      agent.tools.registeredNames().length,
+      hostTools.length + DISPATCHER_TOOL_COUNT,
+    );
 
     // Deactivation runs the restriction disposer: the inherited verbs come
     // back with the session's own surface gone.
@@ -683,24 +682,30 @@ describe("plugin scaffold", () => {
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await new Promise((resolve) => setImmediate(resolve));
 
-    const spawn = agent.tools.get("spawn_worker");
-    assert.ok(spawn);
+    const deliver = agent.tools.get("deliver_result");
+    assert.ok(deliver);
 
     // ADR-0019: there is no execute-time gate. The surface is scoped to this
     // agent, and every execution routes to the registering session's state —
     // an exec argument naming another session changes nothing.
-    const routed = (await spawn.execute(
-      { stream_key: "s", title: "T", prompt: "P" },
+    const routed = (await deliver.execute(
+      { text: "Shipped." },
       { agent: { session: { id: "session-2" } } },
-    )) as { ok: boolean };
+    )) as { ok: boolean; delivered?: boolean };
     assert.equal(routed.ok, true);
+    assert.equal(routed.delivered, true);
 
-    // The activated chat's exec shape reaches the core identically.
-    const ok = (await spawn.execute(
-      { stream_key: "s2", title: "T", prompt: "P" },
-      { agent: { session: { id: "session-1" } } },
-    )) as { ok: boolean };
-    assert.equal(ok.ok, true);
+    // ...which the self-target fence proves positively: the tool's identity is
+    // session-1, so a peer send ADDRESSED to session-1 is the self-target
+    // refusal, never a peer send from session-2.
+    const message = agent.tools.get("message_agent");
+    assert.ok(message);
+    const selfSend = (await message.execute(
+      { target: "session-1", text: "hi" },
+      { agent: { session: { id: "session-2" } } },
+    )) as { ok: boolean; reason?: string };
+    assert.equal(selfSend.ok, false);
+    assert.equal(selfSend.reason, "self-target");
   });
 
   it("spawn_dispatcher reaches the host spawn seam (ticket 118 wiring)", async () => {
@@ -752,8 +757,11 @@ describe("plugin scaffold", () => {
     // the summoned child carried the summon verb too. The owner ruled on
     // 2026-11-03 that a spawned dispatcher may not summon further dispatchers,
     // so the child's surface is composed WITHOUT `spawn_dispatcher`. Every
-    // other dispatcher tool is still there, which the first line pins.
-    assert.ok(ctx.createdToolNames.includes("spawn_worker"));
+    // other CUSTOM dispatcher tool is still there (the stock agent verbs are
+    // the preset's, absent from this fake's child scope), which the first two
+    // lines pin.
+    assert.ok(ctx.createdToolNames.includes("deliver_result"));
+    assert.ok(ctx.createdToolNames.includes("message_agent"));
     assert.ok(!ctx.createdToolNames.includes("spawn_dispatcher"));
 
     // The first turn is part of the summon — a created-but-unprompted session
@@ -780,9 +788,9 @@ describe("plugin scaffold", () => {
     const agent = createAgent("session-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await new Promise((resolve) => setImmediate(resolve));
-    // Eight dispatcher tools on the agent's own scope (racoons off by default,
-    // so no `recall`).
-    assert.equal(agent.tools.registeredNames().length, 8);
+    // The custom dispatcher tools on the agent's own scope (racoons off by
+    // default, so no `recall`).
+    assert.equal(agent.tools.registeredNames().length, DISPATCHER_TOOL_COUNT);
 
     for (const dispose of ctx.disposers) dispose();
 
@@ -802,7 +810,7 @@ describe("plugin scaffold", () => {
     const agent = createAgent("session-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(agent.tools.registeredNames().length, 8);
+    assert.equal(agent.tools.registeredNames().length, DISPATCHER_TOOL_COUNT);
 
     for (const dispose of [...ctx.disposers]) dispose();
     assert.equal(ctx.registeredCommands.length, 0);
@@ -823,53 +831,15 @@ describe("plugin scaffold", () => {
       agent: reloaded,
     });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(reloaded.tools.registeredNames().length, 8);
+    assert.equal(reloaded.tools.registeredNames().length, DISPATCHER_TOOL_COUNT);
   });
 
-  it("a firehose tool/call advances the count check_workers shows (ticket 75)", async () => {
-    const ctx = createStubCtx();
-    apply(ctx, volatileConfig({ enabled: true }));
-
-    const agent = createAgent("session-1");
-    ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
-    await new Promise((resolve) => setImmediate(resolve));
-
-    const spawn = agent.tools.get("spawn_worker");
-    assert.ok(spawn);
-    const spawned = (await spawn.execute(
-      { stream_key: "s", title: "T", prompt: "P" },
-      { agent: { session: { id: "session-1" } } },
-    )) as { ok: boolean };
-    assert.equal(spawned.ok, true);
-
-    // Synthetic `session/event` firehose delivery, two-arg like the live bus.
-    const toolCall = (name: string) => ({
-      type: "tool/call",
-      data: { name, arguments: JSON.stringify({ command: "npm test" }) },
-    });
-    ctx.fire("session/event", { id: "child-stub" }, toolCall("bash"));
-    ctx.fire("session/event", { id: "child-stub" }, toolCall("grep"));
-    // Unowned and non-tool deliveries must not move the count.
-    ctx.fire("session/event", { id: "stranger" }, toolCall("bash"));
-    ctx.fire("session/event", { id: "child-stub" }, { type: "turn/start" });
-
-    const check = agent.tools.get("check_workers");
-    assert.ok(check);
-    const value = (await check.execute(
-      {},
-      { agent: { session: { id: "session-1" } } },
-    )) as {
-      ok: boolean;
-      rows: Array<{ worker_id: string; tool_call_count: number; liveness: string | null }>;
-    };
-    assert.equal(value.ok, true);
-    assert.equal(value.rows.length, 1);
-    assert.equal(value.rows[0]?.worker_id, "child-stub");
-    assert.equal(value.rows[0]?.tool_call_count, 2);
-    // Fresh observed activity reads active — the quiet→active flip the
-    // count wiring enables (previously the count could never advance).
-    assert.equal(value.rows[0]?.liveness, "active");
-  });
+  // DELETED with the `check_workers` handler: "a firehose tool/call advances
+  // the count check_workers shows (ticket 75)" read the per-worker
+  // tool-call count back through a tool this plugin no longer registers. The
+  // stock `list_agents` exposes no count or liveness field, so there is no
+  // honest surface left to assert; the activity ring itself stays core state,
+  // covered where it is written.
 
   // Ticket 117: the shipped `apply()` wires the user-message early release as
   // `host.onDispatcherUserMessage` → `multitask.releaseWaits`. The semantic
@@ -937,76 +907,16 @@ describe("plugin scaffold", () => {
 
     // Nothing was unregistered and no state changed by observation alone.
     assert.deepEqual(agent.tools.registeredNames(), before);
-    assert.equal(before.length, 8);
+    assert.equal(before.length, DISPATCHER_TOOL_COUNT);
   });
 
-  // Ticket 112: plugin teardown must disarm the wake bus. Under the ticket-108
-  // coalescing window a settle arms a timer that would later open a turn
-  // through the host. Teardown now calls `multitask.dispose()` before
-  // `host.dispose()`, so the armed timer is cancelled and a stale one that
-  // still fires is a generation-checked no-op. The control case (no teardown)
-  // proves the timer really does wake the agent — otherwise the assertion
-  // below would pass for the wrong reason.
-  //
-  // Real timers (not `t.mock.timers`): Node's mock timer API does not expose
-  // `clearTimeout` as a mockable api, so a mocked timer cannot be cancelled
-  // by the wake bus and the control case would leave the assertion passing
-  // for the wrong reason. Two short waits keep the pin honest.
-  it("plugin teardown cancels a pending coalesced wake timer (ticket 112)", async () => {
-    const WINDOW_MS = 20;
-    const wait = (ms: number): Promise<void> =>
-      new Promise((resolve) => setTimeout(resolve, ms));
-    const agent = createRecordingAgent("session-1");
-    const agentsById = new Map<string, AgentLike>([["session-1", agent]]);
-
-    /** Spawn one worker and settle it with the window armed. */
-    const armWake = async (
-      ctx: ReturnType<typeof createStubCtx>,
-    ): Promise<void> => {
-      apply(
-        ctx,
-        volatileConfig({ enabled: true, wakeCoalesceWindowMs: WINDOW_MS }),
-      );
-      ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
-      await new Promise((resolve) => setImmediate(resolve));
-
-      const spawn = agent.tools.get("spawn_worker");
-      assert.ok(spawn);
-      const spawned = (await spawn.execute(
-        { stream_key: "s", title: "T", prompt: "P" },
-        { agent: { session: { id: "session-1" } } },
-      )) as { ok: boolean; worker_id?: string };
-      assert.equal(spawned.ok, true);
-
-      ctx.fire("subagent/end", {
-        id: spawned.worker_id,
-        stopReason: "completed",
-        lastAssistantMessage: [{ type: "text", text: "done" }],
-      });
-    };
-
-    // Control: the same setup without teardown does wake the agent once the
-    // window elapses — there really is a timer to cancel.
-    const controlCtx = createStubCtx({ agentsById });
-    await armWake(controlCtx);
-    assert.equal(agent.followups.length, 0, "nothing before the window");
-    await wait(WINDOW_MS * 3);
-    assert.equal(agent.followups.length, 1, "the window opened the turn");
-    for (const dispose of controlCtx.disposers) dispose();
-    agent.followups.length = 0;
-
-    // Teardown runs the collected effect cleanups, then the window elapses.
-    const ctx = createStubCtx({ agentsById });
-    await armWake(ctx);
-    assert.equal(agent.followups.length, 0);
-    for (const dispose of ctx.disposers) dispose();
-    await wait(WINDOW_MS * 3);
-    assert.equal(
-      agent.followups.length,
-      0,
-      "no wake may open a turn after plugin teardown",
-    );
-  });
+  // DELETED (ticket 112): "plugin teardown cancels a pending coalesced wake
+  // timer". It armed the coalescing window through a settle, which no longer
+  // wakes through this bus (the host pushes the stock completion notice
+  // instead); the remaining coalesced trigger is a PEER message, which needs a
+  // second live dispatcher session this stub cannot activate cleanly.
+  // The behaviour itself — `dispose` cancels an armed window and stays
+  // idempotent — is pinned directly in test/wake-bus-disposal.test.ts.
 
   // Ticket 91 negative controls: the shipped registries are fail-loud on a
   // duplicate name, so a pre-registered name makes the REAL apply() throw
@@ -1033,9 +943,10 @@ describe("plugin scaffold", () => {
     apply(ctx, volatileConfig({ enabled: true }));
 
     const agent = createAgent("session-1");
-    // A foreign plugin already owns `spawn_worker` in this agent's scope.
+    // A foreign plugin already owns `deliver_result` in this agent's scope —
+    // the FIRST custom tool the dispatcher registers.
     agent.tools.register({
-      name: "spawn_worker",
+      name: "deliver_result",
       execute: async () => ({ ok: false }),
     });
 
@@ -1044,12 +955,12 @@ describe("plugin scaffold", () => {
     // whole activation, not one degraded surface).
     assert.throws(
       () => ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent }),
-      /tool "spawn_worker" is already registered/,
+      /tool "deliver_result" is already registered/,
     );
 
     // Rollback (fix 5): the failed registration left the foreign definition
     // alone and registered none of the dispatcher tools behind it.
-    assert.deepEqual(agent.tools.registeredNames(), ["spawn_worker"]);
+    assert.deepEqual(agent.tools.registeredNames(), ["deliver_result"]);
   });
 
   it("refuses the process-global tool fallback and logs the refusal once", () => {
@@ -1088,7 +999,9 @@ describe("plugin scaffold", () => {
     // `commitInjects` makes the fake session log carry every inject, which is
     // what the ticket-163 policy idempotence check reads on the retry.
     const agent = createAgent("session-1", { hostTools, commitInjects: true });
-    // `spawn_worker` (registered first) lands, then `deliver_result` throws.
+    // The foreign claimant owns `deliver_result`, which the dispatcher
+    // registers FIRST, so the very first registration throws (nothing behind
+    // it ever lands).
     const foreignDispose = agent.tools.register({
       name: "deliver_result",
       execute: async () => ({ ok: false }),
@@ -1122,20 +1035,26 @@ describe("plugin scaffold", () => {
     assert.doesNotThrow(() =>
       ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent }),
     );
-    assert.equal(agent.tools.registeredNames().length, hostTools.length + 8);
+    assert.equal(
+      agent.tools.registeredNames().length,
+      hostTools.length + DISPATCHER_TOOL_COUNT,
+    );
     assert.equal(
       agent.injected.length,
       1,
       "the retry sees the policy in the transcript and does not inject it again",
     );
-    // The retry re-applies the restriction for its own activation.
+    // The retry re-applies the restriction for its own activation: the fork
+    // verb is gone again, while the stock `subagent` stays (workers now start
+    // through it).
     assert.equal(agent.tools.restrictCalls.length, 2);
-    assert.ok(!agent.tools.visibleNames().includes("subagent"));
+    assert.ok(!agent.tools.visibleNames().includes("subagent_fork"));
+    assert.ok(agent.tools.visibleNames().includes("subagent"));
   });
 
-  it("removes all eight tools when recall registration throws after the dispatcher surface landed", () => {
+  it("removes every custom tool when recall registration throws after the dispatcher surface landed", () => {
     const ctx = createStubCtx();
-    // racoons on: `recallTools` runs AFTER the eight dispatcher tools and is
+    // racoons on: `recallTools` runs AFTER the custom dispatcher tools and is
     // the last step inside the activation's try block.
     apply(ctx, volatileConfig({ enabled: true, racoonsEnabled: true }));
     const hostTools = [
@@ -1156,7 +1075,7 @@ describe("plugin scaffold", () => {
       /tool "recall" is already registered/,
     );
 
-    // Every one of the eight tools is gone, and the restriction that ran
+    // Every one of the custom tools is gone, and the restriction that ran
     // before them is lifted; only the preset's tools and the foreign claimant
     // remain.
     assert.deepEqual(
@@ -1193,8 +1112,11 @@ describe("plugin scaffold", () => {
     // A spawned team leader never regains the summon verb just because the
     // human activation path ran in it.
     assert.ok(!names.includes("spawn_dispatcher"));
-    assert.ok(names.includes("spawn_worker"));
-    assert.equal(names.length, 7);
+    assert.ok(names.includes("deliver_result"));
+    assert.ok(names.includes("message_agent"));
+    // Two custom tools for a team leader: no spawn_dispatcher, no stock verbs
+    // registered by us.
+    assert.equal(names.length, 2);
   });
 
   it("settles the language on first activation rather than freezing apply-time EN", () => {

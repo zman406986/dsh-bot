@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "dsh-bot",
+    "description": "面向 DeepSeek Harness 的常驻调度器：把工作分派给 worker 与团队，并在本对话中汇报结果。"
+  }
+}

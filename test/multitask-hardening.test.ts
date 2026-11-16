@@ -332,10 +332,13 @@ describe("core hardening — durability failures are owned, never unhandled", ()
   });
 });
 
-describe("core hardening — rejected host wakes stay counted, not thrown", () => {
-  it("a rejecting dispatcher wakeup leaves the ready wake intact", async () => {
+describe("core hardening — a settle asks for no plugin wake", () => {
+  it("opens no plugin worker-settled wake; the settle record carries the result", async () => {
     const watcher = watchUnhandledRejections();
     try {
+      // The rejecting seam proves the deleted wake is genuinely not requested:
+      // a stray settle wake would both show up in `wakeCalls` and surface here
+      // as an unhandled rejection.
       const host = new RejectingWakeHost();
       const multitask = createMultitask(host);
       const workerId = await spawnRunning(multitask);
@@ -344,12 +347,17 @@ describe("core hardening — rejected host wakes stay counted, not thrown", () =
       await settleMicrotasks();
 
       assert.deepEqual(watcher.rejections, []);
-      assert.deepEqual(host.wakeCalls, [SESSION]);
-      // The bus marked the wake ready BEFORE notifying, so a failed host
-      // wake never drops it.
-      const wake = multitask.wakeBus.peek(SESSION);
-      assert.ok(wake);
-      assert.equal(wake.settledWorkers[0]?.workerId, workerId);
+      // The plugin worker-settled wake was deleted: the host's stock
+      // completion notice (source `subagent-settled`) is the only notice the
+      // parent gets, so this core requests no wake and opens no ready wake.
+      assert.deepEqual(host.wakeCalls, []);
+      assert.equal(multitask.wakeBus.peek(SESSION), undefined);
+      // The hardening invariant that survives: the result is still recorded
+      // synchronously on the settle path, which is what the core await reads.
+      const settle = multitask.settleRecords.lookup(SESSION, workerId);
+      assert.ok(settle, "the settle record is written");
+      assert.equal(settle.status, "completed");
+      assert.equal(settle.resultText, "done");
     } finally {
       watcher.stop();
     }
@@ -933,12 +941,11 @@ describe("core hardening — a settle inside the adopt-before-rebuild window", (
     assert.equal(settle.status, "completed");
     assert.equal(settle.resultText, "the answer", "first settle wins");
 
-    // The wake is enqueued exactly once, carrying the settle.
-    assert.deepEqual(host.wakeCalls, [SESSION]);
-    const wake = multitask.wakeBus.peek(SESSION);
-    assert.ok(wake);
-    assert.equal(wake.settledWorkers.length, 1);
-    assert.equal(wake.settledWorkers[0]?.workerId, "w-adopt-settle");
+    // No plugin settle wake: the host's stock completion notice is the
+    // parent-visible result, and the replayed terminal path opens no ready
+    // wake on the bus either. The settle record above is what survives.
+    assert.deepEqual(host.wakeCalls, []);
+    assert.equal(multitask.wakeBus.peek(SESSION), undefined);
 
     // The stream key is free because the worker is provably terminal.
     const reSpawn = await multitask.spawnWorker({
@@ -1063,12 +1070,11 @@ describe("core hardening — a sibling parent's rebuild keeps a buffered settle"
     assert.equal(settle.status, "completed");
     assert.equal(settle.resultText, "B's answer", "the buffered event is replayed");
 
-    // Exactly one settle wake, and it belongs to B.
-    assert.deepEqual(host.wakeCalls, [PARENT_B]);
-    const wake = multitask.wakeBus.peek(PARENT_B);
-    assert.ok(wake);
-    assert.equal(wake.settledWorkers.length, 1);
-    assert.equal(wake.settledWorkers[0]?.workerId, "w-sibling-b");
+    // No plugin settle wake is opened for either parent: the stock completion
+    // notice is the parent-visible result, and the settle record above is what
+    // survives for await_agent.
+    assert.deepEqual(host.wakeCalls, []);
+    assert.equal(multitask.wakeBus.peek(PARENT_B), undefined);
 
     // The terminal replay released B's stream key.
     const reSpawn = await multitask.spawnWorker({

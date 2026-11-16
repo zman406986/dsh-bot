@@ -1,78 +1,41 @@
 /**
- * Dispatcher tool surface: dsh-native tools mapped 1:1 onto existing
- * Multitask methods (and an injectable user-send for deliver). Eight tools —
- * `message_agent` is the one agent-messaging verb (`send_peer` is retired,
- * ticket 116 / ADR-0025), `await_agent` is the one bounded wait over
- * ticket 115's settle records, and `spawn_dispatcher` is mitosis (ticket 118
- * / ADR-0025) — the one tool that does NOT go through `Multitask`, because a
- * dispatcher is a peer, not a work stream. The peer inbox, envelope, dedupe,
- * cap, and `Multitask.sendPeer` machinery stay, because `message_agent` and
- * the worker reply channel both ride them. Handlers stay core-side; the
- * adapter registers them on ctx.tools. FakeDshHost stays green — handlers
- * only call existing core methods and the injected host seam.
+ * Dispatcher tool surface: the three verbs stock DSH does not cover — user
+ * delivery (`deliver_result`), peer-dispatcher messaging (`message_agent`)
+ * and mitosis (`spawn_dispatcher`, the one tool that does NOT go through
+ * `Multitask`, because a dispatcher is a peer, not a work stream). Workers,
+ * status, steering and stopping are the host's stock `subagent` /
+ * `list_agents` / `send_message` / `interrupt_agent` tools, and a stock
+ * completion notice — not a wait tool — starts the dispatcher's next turn.
+ * The peer inbox, envelope, dedupe, cap, and `Multitask.sendPeer` machinery
+ * stay, because `message_agent` rides them.
+ * Handlers stay core-side; the adapter registers them on ctx.tools.
+ * FakeDshHost stays green — handlers only call existing core methods and the
+ * injected host seam.
  */
 
 import type { Multitask } from "./multitask.js";
+import { assembleTurnReminder } from "./policy/assembler.js";
 import {
-  deriveWorkerLiveness,
-  type WorkerLiveness,
-} from "./liveness.js";
-import { deriveWorkerStage, type WorkerStage } from "./worker-stage.js";
-import {
-  assembleTurnReminder,
-} from "./policy/assembler.js";
-import {
-  CHECK_WORKERS_TOOL,
   DELIVER_RESULT_TOOL,
   MESSAGE_AGENT_TOOL,
-  SPAWN_WORKER_TOOL,
-  STEER_WORKER_TOOL,
-  STOP_WORKER_TOOL,
-  AWAIT_AGENT_TOOL,
   SPAWN_DISPATCHER_TOOL,
-  TOOL_DESCRIPTIONS,
   toolDescriptionsFor,
   type DispatcherOrigin,
   type PolicyLanguage,
 } from "./policy/prompts.js";
-import { AWAIT_INVALID_TIMEOUT_DETAIL } from "./settle-records.js";
 import { sanitizeModelOptionValue } from "./model-option-value.js";
 import {
-  isWorkerReplyStatus,
-  workerReplySenderLabel,
-  type PeerEnvelope,
-  type PeerSendAck,
-  type WorkerReplyOrigin,
-  type WorkerReplyStatus,
-} from "./peer-types.js";
-import {
-  formatCheckSummary,
   formatDeliverResultRecorded,
   formatDeliverResultUnknownTarget,
   formatMessageAgentRateLimited,
   formatMessageAgentRefusal,
   formatMessageAgentSteerNote,
   formatMessageAgentDormantSteerNote,
-  formatDormantSteerNote,
   formatPeerSendAck,
-  formatSpawnAck,
   formatSpawnDispatcherNote,
-  formatStopHoldReleaseFailedNote,
-  formatUnknownWorkerDetail,
-  formatSteerNote,
-  formatStopNote,
-  formatStopUnknownStateNote,
-  toAwaitAgentToolResult,
-  toCheckRow,
-  type AwaitAgentToolResult,
-  type CheckWorkersToolResult,
   type DeliverResultToolResult,
   type MessageAgentToolResult,
   type SpawnDispatcherToolResult,
-  type SpawnWorkerToolResult,
-  type SteerWorkerToolResult,
-  type StopWorkerToolResult,
-  type WorkerCheckRow,
 } from "./tool-results.js";
 import type {
   DispatcherSpawnOptions,
@@ -81,8 +44,6 @@ import type {
   ModelOptionPurpose,
   ModelOptionResolution,
   ModelRoute,
-  SpawnResult,
-  WorkerSummary,
 } from "./types.js";
 
 /** Structural JSON-Schema-ish parameter node (host-agnostic). */
@@ -102,9 +63,9 @@ export interface DispatcherToolDef {
   readonly description: string;
   readonly parameters: ToolParameterNode;
   /**
-   * `exec` is the host tool-exec context (structural). Only `await_agent`
-   * reads it — for `exec.signal`, so a stopped turn releases its wait
-   * (ticket 117). Every other handler ignores the second argument.
+   * `exec` is the host tool-exec context (structural). Only `spawn_dispatcher`
+   * reads it — for `exec.signal`, forwarded into the host spawn so a stopped
+   * turn cancels the summon. Every other handler ignores the second argument.
    *
    * The adapter (`toRegisterableTool`) forwards the host's second argument
    * (`tool.execute(exec.arguments, exec)`, `dsh-tools/lib/index.js:3406`),
@@ -176,15 +137,13 @@ export interface DispatcherToolDeps {
    * the result in that reply. It never claims the user already saw it.
    */
   readonly deliverToUser?: DeliverToUserFn;
-  /** Optional recent-activity resolver for check rows. */
-  readonly recentActivity?: RecentActivityFn;
   /**
-   * Ticket 61 (register A-8, ADR-0018 exception D22): host-clock ms of the
-   * last firehose-observed activity per worker — the observation moment of
-   * `recentActivity`'s phrase, from the same `session/event` projection (no
-   * new seam, no polling). Optional: absent → check rows carry
-   * `liveness: null` rather than a guessed verdict.
+   * No dispatcher tool reads this since the roster moved to the stock
+   * `list_agents`; kept because `src/plugin.ts` still forwards it through
+   * `registerDispatcherTools`.
    */
+  readonly recentActivity?: RecentActivityFn;
+  /** Same wiring-compatibility status as {@link recentActivity}. */
   readonly lastActivityAtMs?: (workerId: string) => number | null;
   /**
    * Ticket 118 / ADR-0025 mitosis: the host's dispatcher-spawn seam. Only
@@ -227,8 +186,7 @@ export interface DispatcherToolDeps {
   readonly language?: PolicyLanguage;
   /**
    * Which dispatcher CLASS this surface serves (owner ruling 2026-11-03,
-   * ticket 176). Omitted means `user`, so every pre-176 caller keeps the
-   * eight-tool surface byte-identically.
+   * ticket 176). Omitted means `user`.
    *
    * `spawned` — a dispatcher another dispatcher summoned — must NOT be able
    * to summon further dispatchers, so `spawn_dispatcher` is not registered at
@@ -240,10 +198,10 @@ export interface DispatcherToolDeps {
 }
 
 /**
- * Ticket 117: read the turn's abort signal out of the host's tool-exec
- * context, structurally (no host types, same idiom as
- * `resolveExecSessionId` in the adapter). Returns `undefined` when the exec
- * carries no usable signal — the wait then has only its timeout.
+ * Read the turn's abort signal out of the host's tool-exec context,
+ * structurally (no host types, same idiom as `resolveExecSessionId` in the
+ * adapter). Returns `undefined` when the exec carries no usable signal — the
+ * host spawn then simply has no cancellation signal.
  */
 export function readExecSignal(exec: unknown): AbortSignal | undefined {
   if (exec === null || typeof exec !== "object") return undefined;
@@ -296,43 +254,13 @@ function optionalStringArray(
   });
 }
 
-const STREAM_KEY_PARAM: ToolParameterNode = {
-  type: "string",
-  required: true,
-  description:
-    "Stable id for the logical stream. One live worker per key. Reuse the todo id when a todo exists.",
-};
-
-const TITLE_PARAM: ToolParameterNode = {
-  type: "string",
-  required: true,
-  description: "Short human title (3–8 words). Shown on wake and in check.",
-};
-
-const PROMPT_PARAM: ToolParameterNode = {
-  type: "string",
-  required: true,
-  description:
-    "Self-contained work instruction: goal, constraints, relevant context, success criteria, report format. The worker does not see this chat.",
-};
-
 /**
- * Ticket 285: optional model choices on the two spawn tools. The value is
- * validated by the wired resolver against the live catalog; a rejected
- * value falls back with a note and never refuses the spawn. Omission means
- * today's inheritance behavior, and the per-field `required` stays false so
- * the serialized parent-level `required` array is unchanged.
+ * Ticket 285: optional model choices on `spawn_dispatcher`. The value is
+ * validated by the wired resolver against the live catalog; a rejected value
+ * falls back with a note and never refuses the spawn. Omission means
+ * inheritance, and the per-field `required` stays false so the serialized
+ * parent-level `required` array is unchanged.
  */
-const SPAWN_WORKER_MODEL_PARAM: ToolParameterNode = {
-  type: "string",
-  required: false,
-  description:
-    "Optional model for this worker. Use provider/model-id (for example " +
-    '"deepseek/deepseek-reasoner"). A bare model id is accepted when it is ' +
-    "unique, or when it is shared but owned by your provider; otherwise it " +
-    "is ambiguous and falls back. Omit to inherit your default worker route.",
-};
-
 const SPAWN_DISPATCHER_MODEL_PARAM: ToolParameterNode = {
   type: "string",
   required: false,
@@ -349,13 +277,7 @@ const SPAWN_DISPATCHER_WORKER_MODEL_PARAM: ToolParameterNode = {
   description:
     "Optional default model for every worker this team leader later spawns. " +
     "Use provider/model-id. Omit to let workers inherit the team leader's " +
-    "own route. An explicit model on spawn_worker still wins for that worker.",
-};
-
-const WORKER_ID_PARAM: ToolParameterNode = {
-  type: "string",
-  required: true,
-  description: "Target worker id.",
+    "own route. An explicit model on a worker spawn still wins for that worker.",
 };
 
 /**
@@ -374,61 +296,22 @@ export const SEND_PEER_TEXT_MAX_CHARS = 8000;
 export const PEER_DIRECT_CONVERSATION_ID = "direct";
 
 /**
- * Ticket 122 / ADR-0028: the worker's mid-task reply verb.
- *
- * It is deliberately NOT part of `createDispatcherTools()` — the dispatcher
- * never sees it. Workers inherit it from the global layer, and the handler
- * refuses every caller that is not a worker in core truth. The address is never an
- * argument: the parent dispatcher id comes from the worker's own roster
- * record, so the channel is structurally single-parent and no
- * worker→worker or worker→other-dispatcher path exists.
- */
-export const REPLY_TO_DISPATCHER_TOOL = "reply_to_dispatcher";
-
-/**
- * Inline ceiling on one mid-task reply. 8,000 characters, the same bound
- * the peer lane already enforces (`SEND_PEER_TEXT_MAX_CHARS`) and the
- * reference's peer-text clamp. Reusing it keeps one documented number for
- * every peer-borne text: a reply cannot arrive through the peer envelope
- * larger than an ordinary peer message, and the bound is an order of
- * magnitude below ZCode's 65,536-character context-message cap, which is
- * not a per-message peer bound. An over-max reply refuses before accept.
- */
-export const WORKER_REPLY_TEXT_MAX_CHARS = SEND_PEER_TEXT_MAX_CHARS;
-
-/** Declared status words (closed set; see `WorkerReplyStatus`). */
-export const WORKER_REPLY_STATUSES: readonly WorkerReplyStatus[] = [
-  "progress",
-  "blocked",
-  "note",
-];
-
-/**
  * Ticket 116: the shared agent-message budget — 8 accepted messages per
  * SENDER session per rolling 60 s, counted on accept; refusals do not count.
- * Both agent-message verbs draw on it via {@link createAgentMessageBudget}:
- * `message_agent` keys the budget by the dispatcher's own session id, and
- * `reply_to_dispatcher` (ticket 122) keys it by the sending worker's id.
- * The inbox cap (64 undelivered) is the second, independent bound.
+ * `message_agent` draws on it via {@link createAgentMessageBudget}, keyed by
+ * the sending dispatcher's own session id. The inbox cap (64 undelivered) is
+ * the second, independent bound.
  */
 export const MESSAGE_AGENT_RATE_LIMIT = 8;
 export const MESSAGE_AGENT_RATE_WINDOW_MS = 60_000;
 
 /**
- * Worker-side aliases for the same budget (ticket 122 wording). The limit
- * and window are one number pair everywhere; keeping these exports stable
- * preserves the existing pins.
- */
-export const WORKER_REPLY_RATE_LIMIT = MESSAGE_AGENT_RATE_LIMIT;
-export const WORKER_REPLY_RATE_WINDOW_MS = MESSAGE_AGENT_RATE_WINDOW_MS;
-
-/**
- * The one rate-budget mechanism both agent-message verbs share (ticket 116).
+ * The one agent-message rate-budget mechanism (ticket 116).
  * Counting happens ONLY on accept: a caller checks {@link hasCapacity}
  * before sending and calls {@link record} only after the send was accepted —
  * a refusal therefore never consumes budget. Keys are sender identities
- * (dispatcher session id, or worker id on the worker side); each key holds
- * its own rolling window of accepted-at timestamps.
+ * (the dispatcher session id); each key holds its own rolling window of
+ * accepted-at timestamps.
  */
 export interface AgentMessageBudget {
   /** Whether one more accept fits `senderId`'s rolling window at `atMs`. */
@@ -456,295 +339,25 @@ export function createAgentMessageBudget(): AgentMessageBudget {
   };
 }
 
-/** Model-facing description (new copy). */
-export const REPLY_TO_DISPATCHER_TOOL_DESCRIPTION = [
-  "Report something to the dispatcher that spawned you without ending your turn.",
-  "Use it when the parent should know about a finding, a changed assumption, or a blocker before you finish.",
-  "It reaches only your parent dispatcher — never the user and never another worker.",
-  "It does not finish the task: keep working, and still end with your final answer.",
-  "text is capped at 8000 characters; status is one of progress, blocked, note.",
-].join(" ");
-
-/** One worker-side tool: name, description, parameters, handler. */
-export interface WorkerToolDef {
-  readonly name: string;
-  readonly description: string;
-  readonly parameters: ToolParameterNode;
-  readonly execute: (
-    args: Record<string, unknown>,
-    exec?: unknown,
-  ) => Promise<unknown>;
-}
-
-/** Result shape returned to the worker model. */
-export interface WorkerReplyToolResult {
-  readonly ok: boolean;
-  readonly summary: string;
-  readonly message_id?: string;
-  readonly status?: WorkerReplyStatus;
-}
-
-export interface WorkerReplyToolDeps {
-  /**
-   * Core truth for the worker record: the handler derives the parent
-   * dispatcher session id from here, never from a tool argument. `getWorker`
-   * is also the worker-only gate — a caller with no roster record is refused.
-   */
-  readonly multitask: Pick<Multitask, "getWorker" | "sendPeer">;
-  /**
-   * Resolve the calling worker id from the tool exec context. The adapter
-   * wires this from the exec's session id + `host.owns`; returning null means
-   * "not a worker this plugin owns".
-   */
-  readonly resolveWorkerId: (exec: unknown) => string | null;
-  /** Injectable id factory + clock for tests. */
-  readonly newMessageId?: () => string;
-  readonly now?: () => number;
-}
-
 /**
- * Build the worker-facing `reply_to_dispatcher` tool.
+ * Ticket 179, narrowed by the stock-subagent refactor: the ONLY host verb a
+ * dispatcher surface withholds is `subagent_fork`.
  *
- * Side-effect contract: it only accepts a peer envelope. It never calls the
- * worker FSM, the todo ledger, or a completion path — so a reply cannot
- * settle the worker, complete a todo, or produce a completion-kind wake.
+ * Fork is the one stock spawn a dispatcher must not use: a forked child
+ * inherits its parent's context, and workers are required to start blank
+ * (ADR-0003). Plain `subagent` is now the supported way to start a worker, and
+ * `list_agents` / `send_message` / `interrupt_agent` / `list_subagent_models`
+ * stay visible.
  */
-export function createWorkerReplyTool(
-  deps: WorkerReplyToolDeps,
-): WorkerToolDef {
-  const now = deps.now ?? (() => Date.now());
-  const newMessageId =
-    deps.newMessageId ?? (() => `worker-reply-${crypto.randomUUID()}`);
-  /**
-   * The worker-side draw on the shared agent-message budget (ticket 116),
-   * keyed by the sending worker's id — the worker's session identity. Same
-   * limit/window and the same count-on-accept semantics as before the
-   * shared mechanism existed; observable behavior is unchanged.
-   */
-  const budget = createAgentMessageBudget();
-
-  function refuse(summary: string): WorkerReplyToolResult {
-    return { ok: false, summary };
-  }
-
-  return {
-    name: REPLY_TO_DISPATCHER_TOOL,
-    description: REPLY_TO_DISPATCHER_TOOL_DESCRIPTION,
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        text: {
-          type: "string",
-          required: true,
-          description:
-            "The update itself. Short and concrete: what changed, what you found, or what blocks you.",
-        },
-        status: {
-          type: "string",
-          required: false,
-          enum: [...WORKER_REPLY_STATUSES],
-          description:
-            "Optional status word: progress, blocked, or note. It is metadata, not a completion signal.",
-        },
-      },
-    },
-
-    async execute(
-      args: Record<string, unknown>,
-      exec?: unknown,
-    ): Promise<WorkerReplyToolResult> {
-      const workerId = deps.resolveWorkerId(exec);
-      if (workerId === null) {
-        return refuse(
-          "reply_to_dispatcher is only available to workers; no reply was sent.",
-        );
-      }
-      const record = deps.multitask.getWorker(workerId);
-      if (record === undefined) {
-        return refuse(
-          "reply_to_dispatcher is only available to workers; no reply was sent.",
-        );
-      }
-
-      const textRaw = args.text;
-      if (typeof textRaw !== "string") {
-        return refuse("text is required and must be a non-empty string.");
-      }
-      const text = textRaw.trim();
-      if (text.length === 0) {
-        return refuse("text is required and must be a non-empty string.");
-      }
-      if (text.length > WORKER_REPLY_TEXT_MAX_CHARS) {
-        return refuse(
-          `text is ${text.length} characters; a mid-task reply is capped at ` +
-            `${WORKER_REPLY_TEXT_MAX_CHARS} — shorten it and try again.`,
-        );
-      }
-
-      const statusRaw = args.status;
-      let status: WorkerReplyStatus | undefined;
-      if (statusRaw !== undefined && statusRaw !== null) {
-        if (!isWorkerReplyStatus(statusRaw)) {
-          return refuse(
-            `status must be one of ${WORKER_REPLY_STATUSES.join(", ")} when provided.`,
-          );
-        }
-        status = statusRaw;
-      }
-
-      const at = now();
-      if (!budget.hasCapacity(workerId, at)) {
-        return refuse(
-          `rate limit reached: at most ${WORKER_REPLY_RATE_LIMIT} replies per ` +
-            `${WORKER_REPLY_RATE_WINDOW_MS / 1000} seconds. Nothing was sent; ` +
-            `batch your next update.`,
-        );
-      }
-
-      const origin: WorkerReplyOrigin = {
-        kind: "worker-reply",
-        workerId,
-        ...(status !== undefined ? { status } : {}),
-      };
-      const envelope: PeerEnvelope = {
-        messageId: newMessageId(),
-        fromAgentId: workerId,
-        fromName: workerReplySenderLabel(record.title, status),
-        to: { kind: "agent", agentId: record.parentSessionId },
-        conversationId: PEER_DIRECT_CONVERSATION_ID,
-        text,
-        // A mid-task report must never preempt the dispatcher's user turn.
-        // `enqueuePeer` queues non-priority notices during a user turn.
-        priority: false,
-        createdAtMs: at,
-        origin,
-      };
-
-      const ack: PeerSendAck = deps.multitask.sendPeer(
-        record.parentSessionId,
-        envelope,
-      );
-      if (!ack.ok) {
-        return refuse(
-          `the reply was not delivered (${ack.reason}): ${ack.detail}`,
-        );
-      }
-
-      budget.record(workerId, at);
-      return {
-        ok: true,
-        message_id: ack.messageId,
-        ...(status !== undefined ? { status } : {}),
-        summary:
-          "Reply sent to your dispatcher. Keep working — this did not end your turn; " +
-          "your final answer is still required.",
-      };
-    },
-  };
-}
+export const DISPATCHER_WITHHELD_HOST_TOOLS: readonly string[] = [
+  "subagent_fork",
+];
 
 /**
- * Structural registration shape for a worker-local tool (mirrors the host's
- * `ToolDefinition`, same idiom as `toRegisterableTool` in the adapter). Kept
- * here so the worker composition can register the tool on the CHILD's scoped
- * surface without importing the adapter's dispatcher registration path.
- */
-export interface RegisterableWorkerTool {
-  readonly name: string;
-  readonly description: string;
-  readonly parameters: unknown;
-  readonly output: {
-    readonly schema: unknown;
-    readonly render: (
-      args: unknown,
-      value: unknown,
-    ) => Array<{ readonly type: string; readonly text?: string }>;
-  };
-  readonly execute: (args: unknown, exec?: unknown) => Promise<unknown>;
-}
-
-/** Wrap a worker tool definition into the registry-ready shape. */
-export function toRegisterableWorkerTool(
-  def: WorkerToolDef,
-): RegisterableWorkerTool {
-  return {
-    name: def.name,
-    description: def.description,
-    // Ticket 45 rule applies to every registered tool: serialize the
-    // authored tree so per-field `required` becomes the parent's array.
-    parameters: toToolParametersSchema(def.parameters),
-    output: {
-      schema: { type: "object" },
-      render: (_args, value) => {
-        const record = value as { summary?: unknown } | null | undefined;
-        return [
-          {
-            type: "text",
-            text:
-              record != null && typeof record.summary === "string"
-                ? record.summary
-                : "",
-          },
-        ];
-      },
-    },
-    execute(args: unknown, exec?: unknown): Promise<unknown> {
-      const record =
-        args !== null && typeof args === "object"
-          ? (args as Record<string, unknown>)
-          : {};
-      return def.execute(record, exec);
-    },
-  };
-}
-
-/** Scoped surface a worker-local tool registers on (the host's `agent.ctx.tools`). */
-export interface WorkerToolSurface {
-  register(definition: unknown): () => void;
-}
-
-/**
- * Build the worker-local tool definitions for ONE child, ready to register on
- * its scoped surface (ticket 122 / ADR-0028). The caller supplies the
- * registries; this module stays free of host types.
- */
-export function createWorkerLocalToolDefs(
-  deps: WorkerReplyToolDeps,
-): readonly RegisterableWorkerTool[] {
-  return [toRegisterableWorkerTool(createWorkerReplyTool(deps))];
-}
-
-/**
- * Register the worker-only tool set on ONE child's scoped surface
- * (ticket 122 / ADR-0028). This is the inverse of the dispatcher
- * registration: dispatcher tools land on the activated dispatcher agent's
- * scope, worker tools land on the child's scope, and neither surface lists
- * the other's tools. Returns the exact disposers.
- */
-export function registerWorkerLocalTools(
-  surface: WorkerToolSurface,
-  deps: WorkerReplyToolDeps,
-): Array<() => void> {
-  return [surface.register(toRegisterableWorkerTool(createWorkerReplyTool(deps)))];
-}
-
-/**
- * Ticket 179: the host's own spawn verbs, withheld from every dispatcher's
- * surface so `spawn_worker` is the only way a dispatcher can create a child.
- *
- * They are not ours — the shipped `standard`, `cordis` and `ptc` agent presets
- * mount them on the agent plane (`tool-subagent` with `provider: spawn` /
- * `toolName: subagent`, and `provider: fork` / `toolName: subagent_fork`), and
- * our dispatcher surface is composed ON TOP of that inherited layer. A child
- * created through them is invisible to this plugin: no roster entry, no stream
- * key, no todo link, no settle record, no wake, no tool barrier. Ticket 178
- * keeps `spawn_worker` for exactly the bookkeeping the raw verbs skip.
- *
- * `list_subagent_models` rides along because it is the route-discovery
- * companion of those two verbs: its description tells the model to use the
- * returned ids with "a delegation tool's `provider`, `model` and
- * `reasoning_effort` fields", which this surface no longer has.
+ * The worker barrier's candidate list: every host spawn verb a WORKER may
+ * never reach. Separate from {@link DISPATCHER_WITHHELD_HOST_TOOLS} — the
+ * worker barrier keeps denying `subagent` and `list_subagent_models` while
+ * the dispatcher surface now allows them.
  */
 export const HOST_SPAWN_TOOL_CANDIDATES: readonly string[] = [
   "subagent",
@@ -754,7 +367,7 @@ export const HOST_SPAWN_TOOL_CANDIDATES: readonly string[] = [
 
 /**
  * The one method this module needs from a dispatcher's scoped tool surface
- * (the host's `agent.ctx.tools`). Structural, like {@link WorkerToolSurface}.
+ * (the host's `agent.ctx.tools`). Structural.
  */
 export interface DispatcherScopedToolSurface {
   /** Live tool names as this scope sees them (host: `tools.schemas(scope)`). */
@@ -770,7 +383,7 @@ export interface DispatcherScopedToolSurface {
 }
 
 /**
- * The tickets-179 deny list: candidates that are ACTUALLY on this surface.
+ * The dispatcher withhold list: candidates that are ACTUALLY on this surface.
  *
  * Same rule as the worker barrier (`src/worker/tool-barrier.ts:1-7`): the host
  * throws on a restriction naming a tool it does not know, so never hand it a
@@ -780,20 +393,21 @@ export interface DispatcherScopedToolSurface {
 export function withheldHostSpawnTools(
   knownToolNames: ReadonlySet<string>,
 ): string[] {
-  return HOST_SPAWN_TOOL_CANDIDATES.filter((name) =>
+  return DISPATCHER_WITHHELD_HOST_TOOLS.filter((name) =>
     knownToolNames.has(name),
   );
 }
 
 /**
- * Ticket 179: take the host's raw spawn verbs off ONE dispatcher's surface.
+ * Ticket 179: take the host's raw FORK verb off ONE dispatcher's surface.
  *
  * Why a restriction and not "build fewer definitions" (ticket 176's mechanism
  * for `spawn_dispatcher`): these verbs are registered by a preset ANCESTOR
  * layer, not by us, so not registering them is not an option. `restrict`
  * filters what a scope inherits and never what it registers itself
  * (`dsh-tools/lib/index.js:3040-3072`), which is exactly the split needed —
- * the preset's verbs disappear, our eight stay.
+ * the preset's fork verb disappears, our three tools and stock `subagent`
+ * stay.
  *
  * Two host behaviours follow for free, which is why no copy moves:
  * `tools.get(name, scope)` resolves through the restriction, so
@@ -824,16 +438,60 @@ export function withholdHostSpawnTools(
 }
 
 /**
+ * Ticket 59 / register B-1: release the stream a crash-time worker still
+ * holds, dropping its durable marker with it.
+ *
+ * This is the non-tool half of the retired worker-stop command, and it must
+ * stay callable: after a restart a worker that was live is not on the roster,
+ * yet its stream key is still held, and `interrupt_agent` has no live child to
+ * target. The plugin's restart sweep is the intended caller (next lane); it
+ * passes its own dispatcher session id so one session can never release
+ * another's stream. A structured outcome instead of model-facing copy keeps
+ * this usable outside a tool call.
+ *
+ * `releaseUnknownStateHoldOutcome` drops the durable marker, so a released
+ * hold cannot come back on the next activation. When the store refuses that
+ * drop, the hold (and its key) stays in place and `kind:
+ * "hold-release-failed"` says so. `kind: "not-held"` covers both "this id
+ * never held a stream" and a concurrent release.
+ */
+export type StaleWorkerHoldReleaseOutcome =
+  | { readonly kind: "not-held" }
+  | { readonly kind: "released"; readonly streamKey: string }
+  | { readonly kind: "hold-release-failed"; readonly detail: string };
+
+export async function releaseStaleWorkerHold(
+  multitask: Pick<
+    Multitask,
+    "listUnknownStateHolds" | "releaseUnknownStateHoldOutcome"
+  >,
+  sessionId: string,
+  workerId: string,
+): Promise<StaleWorkerHoldReleaseOutcome> {
+  const hold = multitask
+    .listUnknownStateHolds(sessionId)
+    .find((held) => held.workerId === workerId);
+  if (hold === undefined) return { kind: "not-held" };
+  const release = await multitask.releaseUnknownStateHoldOutcome(workerId);
+  if (release.ok) return { kind: "released", streamKey: hold.streamKey };
+  if (release.reason === "hold-release-failed") {
+    return { kind: "hold-release-failed", detail: release.detail };
+  }
+  // `not-held`: the hold disappeared between the listing and the release.
+  // Nothing was released by this call.
+  return { kind: "not-held" };
+}
+
+/**
  * Create the dispatcher tool definitions bound to a Multitask core — the
- * eight-tool shape (ticket 116 retired `send_peer` for `message_agent`;
- * ticket 117 added `await_agent`; ticket 118 added `spawn_dispatcher`).
- * Pure enough for unit tests: no ctx, no host types.
+ * three-tool shape stock DSH does not cover: `deliver_result`,
+ * `message_agent` and `spawn_dispatcher`. Pure enough for unit tests: no
+ * ctx, no host types.
  *
  * Ticket 176: `deps.origin` selects the CLASS. The user-started chief of staff
- * gets all eight tools; a spawned team leader gets seven and NO
- * `spawn_dispatcher` (owner ruling 2026-11-03 — a summoned dispatcher may not
- * summon further dispatchers). Omitted means `user`, so the shape is
- * unchanged for every pre-176 caller.
+ * gets all three; a spawned team leader gets two and NO `spawn_dispatcher`
+ * (owner ruling 2026-11-03 — a summoned dispatcher may not summon further
+ * dispatchers). Omitted means `user`.
  */
 export function createDispatcherTools(
   deps: DispatcherToolDeps,
@@ -867,27 +525,12 @@ export function createDispatcherTools(
   }
 
   /**
-   * Ticket 151 review fix: drop the entry this spawn created, but only when
-   * it is still UNLINKED. `multitask.spawnWorker` links the entry before the
-   * durability marker write, so a throw from that write comes from a spawn
-   * that already started a live worker — pruning then would leave the worker
-   * pointing at a missing entry. Never touches a caller-given id.
-   */
-  function pruneIfUnlinked(createdTodoId: string | null): void {
-    if (createdTodoId === null) return;
-    const entry = multitask.todos.get(createdTodoId);
-    if (entry === undefined) return;
-    if (entry.workerId !== null) return;
-    multitask.todos.prune(createdTodoId);
-  }
-
-  /**
    * Ticket 285: normalize one optional model argument. Absent, empty, and
    * whitespace-only values all mean "not provided" (no resolver call, no
    * note). A non-empty value with no wired resolver is a WIRING bug and
    * throws: reporting a fallback would claim a validation that never ran.
-   * The worker handler calls this before any ledger work, so a wiring error
-   * cannot leave an orphan todo behind.
+   * `spawn_dispatcher` calls this before the host call, so a wiring error
+   * refuses the summon before anything starts.
    *
    * The seam is total in the other direction: a resolver that rejects, or
    * one that breaks its contract by answering `absent` for a non-empty
@@ -942,384 +585,9 @@ export function createDispatcherTools(
     };
   }
 
-  const spawnWorker: DispatcherToolDef = {
-    name: SPAWN_WORKER_TOOL,
-    description: descriptions[SPAWN_WORKER_TOOL],
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        stream_key: STREAM_KEY_PARAM,
-        title: TITLE_PARAM,
-        prompt: PROMPT_PARAM,
-        model: SPAWN_WORKER_MODEL_PARAM,
-        todo_id: {
-          type: "string",
-          required: false,
-          description:
-            "Links an existing todo entry; an unknown id is refused. " +
-            "When omitted, the spawn creates the entry from the title.",
-        },
-      },
-    },
-    async execute(args): Promise<SpawnWorkerToolResult> {
-      const parentSessionId = requireSessionId();
-      const streamKey = requireString(args, "stream_key");
-      const title = requireString(args, "title");
-      const prompt = requireString(args, "prompt");
-      const todoId = optionalString(args, "todo_id");
-      // Ticket 285: resolve BEFORE the todo existence checks and before
-      // any todo creation. A wiring error must not leave an orphan ledger
-      // entry behind (a rejected resolver is a fallback, not a throw).
-      const resolvedModel = await resolveModelArg(
-        optionalString(args, "model"),
-        "model",
-        "worker",
-      );
-
-      // Ticket 151 (ruling 2026-10-28): a GIVEN todo_id must be usable.
-      // Existence alone is not enough (review): a foreign session's id must
-      // not leak in, and an id already linked to a worker must not be
-      // re-pointed (linkWorker would overwrite workerId and keep the old
-      // streamKey). A typo is a refusal, never a silent new entry.
-      if (todoId !== undefined) {
-        const existing = multitask.todos.get(todoId);
-        if (existing === undefined || existing.sessionId !== parentSessionId) {
-          return {
-            ok: false,
-            reason: "unknown-todo-id",
-            detail:
-              `todo entry "${todoId}" does not exist in this session; omit ` +
-              `todo_id to let the spawn create the entry, or pass an existing id`,
-          };
-        }
-        if (existing.workerId !== null) {
-          return {
-            ok: false,
-            reason: "todo-already-linked",
-            detail:
-              `todo entry "${todoId}" is already linked to worker ` +
-              `${existing.workerId}; steer that worker or omit todo_id for a ` +
-              `new entry`,
-          };
-        }
-      }
-
-      // Ticket 151 (ruling 2026-10-28, PM under owner grant): no todo_id →
-      // the spawn itself creates the linked ledger entry. The entry is
-      // system-authored and lifecycle-bound (ADR-0007 / DD-164: no
-      // model-invoked create tool), built from the title the model already
-      // passes. Created BEFORE the spawn so §6.1's "todo entry before spawn"
-      // holds; `noteTurnStarted` later promotes it to in_progress.
-      let createdTodoId: string | null = null;
-      if (todoId === undefined) {
-        createdTodoId = multitask.createTodo({
-          sessionId: parentSessionId,
-          title,
-          streamKey,
-        }).id;
-      }
-      const linkedTodoId = todoId ?? createdTodoId ?? undefined;
-      const request = {
-        parentSessionId,
-        streamKey,
-        title,
-        prompt,
-        ...(linkedTodoId !== undefined ? { todoId: linkedTodoId } : {}),
-        ...(resolvedModel.route !== undefined
-          ? { model: resolvedModel.route }
-          : {}),
-      };
-      let result: SpawnResult;
-      try {
-        result = await multitask.spawnWorker(request);
-      } catch (error) {
-        // A failed spawn must leave the ledger untouched — but only a spawn
-        // that failed BEFORE the worker was registered/linked (review): the
-        // durability marker write at the end of a successful spawn can still
-        // throw, and a live worker must not have its entry pruned out from
-        // under it. `linkWorker` is the observable moment the live worker
-        // starts referencing the entry, so an unlinked entry is the only one
-        // safe to drop.
-        pruneIfUnlinked(createdTodoId);
-        throw error;
-      }
-      if (!result.ok) {
-        pruneIfUnlinked(createdTodoId);
-        return {
-          ok: false,
-          reason: "duplicate-stream-key",
-          detail: result.detail,
-        };
-      }
-      return {
-        ok: true,
-        worker_id: result.workerId,
-        stream_key: streamKey,
-        title,
-        ack: formatSpawnAck({
-          title,
-          workerId: result.workerId,
-          streamKey,
-          prompt,
-          ...(resolvedModel.fallback !== undefined
-            ? { modelFallbacks: [resolvedModel.fallback] }
-            : {}),
-        }),
-        ...(resolvedModel.fallback !== undefined
-          ? { model_fallbacks: [resolvedModel.fallback] }
-          : {}),
-      };
-    },
-  };
-
-  const checkWorkers: DispatcherToolDef = {
-    name: CHECK_WORKERS_TOOL,
-    description: descriptions[CHECK_WORKERS_TOOL],
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        worker_id: {
-          type: "string",
-          required: false,
-          description:
-            "When set, return one worker; when omitted, return the roster.",
-        },
-      },
-    },
-    async execute(args): Promise<CheckWorkersToolResult> {
-      const parentSessionId = requireSessionId();
-      const workerId = optionalString(args, "worker_id");
-      const activity = deps.recentActivity;
-      const lastActivityAtMs = deps.lastActivityAtMs;
-      /**
-       * Ticket 61: liveness verdict over the row's own fields. Only when
-       * the activity-time seam exists; otherwise `null` (honest absence).
-       * The one `Date.now()` here is the check boundary — the derivation
-       * itself is pure and takes the clock as an argument.
-       */
-      const livenessOf = (summary: WorkerSummary): WorkerLiveness | null => {
-        if (lastActivityAtMs === undefined) return null;
-        return deriveWorkerLiveness(
-          {
-            status: summary.status,
-            startedAtMs: summary.startedAtMs,
-            toolCallCount: summary.toolCallCount,
-            lastActivityAtMs: lastActivityAtMs(summary.workerId) ?? null,
-          },
-          Date.now(),
-        );
-      };
-      /**
-       * Ticket 171: the ledger index, built once for both branches. The
-       * stage joins the row's own status to the structural todo link
-       * (ADR-0007) — every input is truth the core already holds, so nothing
-       * new is stored or fetched.
-       */
-      const todosById = new Map(
-        multitask.listTodos(parentSessionId).map((t) => [t.id, t]),
-      );
-      const stageOf = (summary: WorkerSummary): WorkerStage =>
-        deriveWorkerStage({
-          status: summary.status,
-          linkedTodo:
-            summary.todoId !== null ? todosById.get(summary.todoId) : undefined,
-        });
-
-      if (workerId !== undefined) {
-        const record = multitask.getWorker(workerId);
-        if (
-          record === undefined ||
-          record.parentSessionId !== parentSessionId
-        ) {
-          return {
-            ok: false,
-            reason: "unknown-worker",
-            detail: formatUnknownWorkerDetail(workerId),
-          };
-        }
-        const summaries = multitask.listWorkers(parentSessionId);
-        const summary = summaries.find((row) => row.workerId === workerId);
-        if (summary === undefined) {
-          return {
-            ok: false,
-            reason: "unknown-worker",
-            detail: formatUnknownWorkerDetail(workerId),
-          };
-        }
-        const row = toCheckRow(
-          summary,
-          activity?.(workerId) ?? null,
-          livenessOf(summary),
-          stageOf(summary),
-        );
-        return {
-          ok: true,
-          rows: [row],
-          summary: formatCheckSummary([row]),
-        };
-      }
-
-      const summaries = multitask.listWorkers(parentSessionId);
-      const rows: WorkerCheckRow[] = summaries.map((summary) =>
-        toCheckRow(
-          summary,
-          activity?.(summary.workerId) ?? null,
-          livenessOf(summary),
-          stageOf(summary),
-        ),
-      );
-      return {
-        ok: true,
-        rows,
-        summary: formatCheckSummary(rows),
-      };
-    },
-  };
-
-  const steerWorker: DispatcherToolDef = {
-    name: STEER_WORKER_TOOL,
-    description: descriptions[STEER_WORKER_TOOL],
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        worker_id: WORKER_ID_PARAM,
-        message: {
-          type: "string",
-          required: true,
-          description: "The correction itself, not a meta-sentence.",
-        },
-      },
-    },
-    async execute(args): Promise<SteerWorkerToolResult> {
-      const sessionId = requireSessionId();
-      const workerId = requireString(args, "worker_id");
-      const message = requireString(args, "message");
-      // Foreign-worker fence (same silent shape as `message_agent`): a worker
-      // this session does not own — live OR dormant — must read exactly like a
-      // nonexistent id, or the refusal would leak that it exists. The core's
-      // `steerWorker` has no caller-session argument, so the fence lives here.
-      const owner =
-        multitask.getWorker(workerId)?.parentSessionId ??
-        multitask.durableWorkerParent(workerId);
-      if (owner !== undefined && owner !== sessionId) {
-        return {
-          ok: false,
-          reason: "unknown-worker",
-          detail: formatUnknownWorkerDetail(workerId),
-        };
-      }
-      const result = await multitask.steerWorker(workerId, message);
-      if (!result.ok) {
-        return {
-          ok: false,
-          reason: result.reason,
-          detail: result.detail,
-        };
-      }
-      const record = multitask.getWorker(workerId);
-      const title = record?.title ?? workerId;
-      return {
-        ok: true,
-        worker_id: workerId,
-        ...(record !== undefined ? { title: record.title } : {}),
-        ...(result.dormant === true ? { dormant: true as const } : {}),
-        // Ticket 142: a dormant worker's session is being resumed, so the
-        // "next step boundary" copy would be false for it.
-        note:
-          result.dormant === true
-            ? formatDormantSteerNote(title)
-            : formatSteerNote(title),
-      };
-    },
-  };
-
-  const stopWorker: DispatcherToolDef = {
-    name: STOP_WORKER_TOOL,
-    description: descriptions[STOP_WORKER_TOOL],
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        worker_id: WORKER_ID_PARAM,
-      },
-    },
-    async execute(args): Promise<StopWorkerToolResult> {
-      const sessionId = requireSessionId();
-      const workerId = requireString(args, "worker_id");
-      const record = multitask.getWorker(workerId);
-      // Foreign-worker fence: a live worker owned by another dispatcher must
-      // read exactly like a nonexistent id, or the refusal would leak that it
-      // exists. Checked BEFORE `abortWorker`, which is session-agnostic.
-      if (record !== undefined && record.parentSessionId !== sessionId) {
-        return {
-          ok: false,
-          reason: "already-settled",
-          detail: formatUnknownWorkerDetail(workerId),
-        };
-      }
-      if (record === undefined) {
-        // Ticket 59: a worker that was live at crash time is deliberately not
-        // on the roster, but it still holds its stream key. Stopping it is the
-        // dispatcher's way of abandoning that stream — the hold's documented
-        // escape hatch, and the only action the restart notice points at.
-        // Session-scoped, so one session can never release another's stream.
-        const hold = multitask
-          .listUnknownStateHolds(sessionId)
-          .find((held) => held.workerId === workerId);
-        if (hold !== undefined) {
-          // The outcome shape distinguishes "nothing was held" (a concurrent
-          // release) from "the store refused the drop". The boolean shape
-          // collapsed both into false, which made a known hold read as an
-          // unknown worker while its stream key stayed occupied.
-          const release =
-            await multitask.releaseUnknownStateHoldOutcome(workerId);
-          if (release.ok) {
-            return {
-              ok: true,
-              worker_id: workerId,
-              mode: "released-hold",
-              note: formatStopUnknownStateNote(workerId, hold.streamKey),
-            };
-          }
-          if (release.reason === "hold-release-failed") {
-            return {
-              ok: false,
-              reason: "hold-release-failed",
-              detail: formatStopHoldReleaseFailedNote(workerId),
-            };
-          }
-          // `not-held`: the hold disappeared between the listing and the
-          // release. Fall through to the ordinary refusal — nothing was
-          // released by this call.
-        }
-        // abortWorker throws on unknown; map to already-settled-shaped refusal
-        // so the model gets a clean tool result rather than an exception.
-        return {
-          ok: false,
-          reason: "already-settled",
-          detail: formatUnknownWorkerDetail(workerId),
-        };
-      }
-      const result = await multitask.abortWorker(workerId);
-      if (!result.ok) {
-        return {
-          ok: false,
-          reason: "already-settled",
-          detail: result.detail,
-        };
-      }
-      return {
-        ok: true,
-        worker_id: workerId,
-        title: record.title,
-        mode: "stopped",
-        note: formatStopNote(),
-      };
-    },
-  };
+  // Workers, status, steering and stopping are the host's stock `subagent`,
+  // `list_agents`, `send_message` and `interrupt_agent` tools. Nothing on this
+  // surface creates a child, steers it, stops it, or waits for it.
 
   const deliverResult: DispatcherToolDef = {
     name: DELIVER_RESULT_TOOL,
@@ -1461,15 +729,17 @@ export function createDispatcherTools(
   };
 
   /**
-   * Ticket 116 / ADR-0025: the ONE agent-messaging verb. Routing lives
-   * inside the tool, keyed off core truth — never an argument:
-   * - a worker id owned by THIS session → the EXISTING steer path
-   *   (`multitask.steerWorker`: single-slot last-wins park, interrupt,
-   *   wrapped send at the next step boundary). No second queue.
-   * - anything else → the existing peer lane (`multitask.sendPeer`), whose
-   *   own fences produce `self-target` / `unknown-target` / `inbox-full`;
-   *   `priority` may reclaim a non-user turn and never interrupts a user
-   *   turn.
+   * The peer-dispatcher messaging verb. Its model-facing job is the peer lane
+   * (`multitask.sendPeer`), whose own fences produce `self-target` /
+   * `unknown-target` / `inbox-full`; `priority` may reclaim a non-user turn
+   * and never interrupts a user turn.
+   *
+   * The worker-id branch is retained for compatibility: a worker id owned by
+   * THIS session still rides the EXISTING steer path
+   * (`multitask.steerWorker`: single-slot last-wins park, interrupt, wrapped
+   * send at the next step boundary) — no second queue. Policy points the model
+   * at the stock `send_message` for workers.
+   *
    * A worker id owned by ANOTHER session refuses `unknown-target` — this
    * session cannot see that worker, and the refusal must not leak that it
    * exists. Sender identity is the registration closure's session id; there
@@ -1488,7 +758,7 @@ export function createDispatcherTools(
           type: "string",
           required: true,
           description:
-            "Who the message is for: one of YOUR worker ids (from a spawn ack) or another dispatcher's session id (from a message you received).",
+            "Another dispatcher's session id (from a message you received). For one of your own workers use send_message, addressed to its id.",
         },
         text: {
           type: "string",
@@ -1500,7 +770,7 @@ export function createDispatcherTools(
           type: "boolean",
           required: false,
           description:
-            "Dispatcher targets only: ask for attention now. May interrupt only the peer's background work — never a turn their user is driving. Ignored for worker targets (a worker message always folds in at the next step boundary). Default false.",
+            "Ask for attention now. May interrupt only the peer's background work — never a turn their user is driving. Default false.",
         },
       },
     },
@@ -1659,85 +929,12 @@ export function createDispatcherTools(
   };
 
   /**
-   * Ticket 117 / ADR-0025: the ONE bounded wait (`await_agent`).
-   *
-   * It routes into the existing ticket-115 core (`Multitask.awaitWorker` →
-   * `settleRecords.wait`) — no second wait mechanism, no host poll, no
-   * transcript read. The core is camelCase; this handler maps the outcome
-   * onto the ticket's snake_case wire shape at exactly one place
-   * (`toAwaitAgentToolResult`).
-   *
-   * Bounds live in the core (`validateAwaitTimeout`): default 30,000 ms,
-   * 0–120,000 ms, `0` = non-blocking status read, at most 4 concurrent
-   * waiters per session. This handler only rejects a NON-NUMBER argument,
-   * because the core's signature is typed and never receives one.
-   *
-   * `exec.signal` reaches the wait when the caller supplies exec, so a
-   * stopped turn resolves `released`. Session deactivation is already wired
-   * at plugin level (`multitask.cancelWaits(sessionId)` on deactivate,
-   * ticket 115) — reused, not duplicated here.
-   *
-   * Adapter wiring (ticket 117, landed): `toRegisterableTool` forwards the
-   * host's `exec`, so live `exec.signal` reaches this handler; and the
-   * plugin watches the dispatcher's own `session/event` for a STRUCTURED user
-   * prompt and calls `multitask.releaseWaits(sessionId, "user-message")`.
-   */
-  const awaitAgent: DispatcherToolDef = {
-    name: AWAIT_AGENT_TOOL,
-    description: descriptions[AWAIT_AGENT_TOOL],
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        target: {
-          type: "string",
-          required: true,
-          description:
-            "Worker id to wait for. One of YOUR workers only — a dispatcher session is not awaitable.",
-        },
-        timeout_ms: {
-          type: "number",
-          required: false,
-          description:
-            "Max wait, 0–120000 ms. 0 returns the current state immediately. Default 30000.",
-        },
-      },
-    },
-    async execute(args, exec): Promise<AwaitAgentToolResult> {
-      const target = requireString(args, "target");
-      // The core's timeout parameter is typed `number | undefined`; a JSON
-      // value of any other type (string, object, boolean) is refused here
-      // instead of being coerced — `"5000"` must never silently become a
-      // default-timeout wait.
-      const timeoutRaw = args.timeout_ms;
-      if (
-        timeoutRaw !== undefined &&
-        typeof timeoutRaw !== "number"
-      ) {
-        return {
-          ok: false,
-          reason: "invalid-timeout",
-          detail: AWAIT_INVALID_TIMEOUT_DETAIL,
-        };
-      }
-      const sessionId = requireSessionId();
-      const outcome = await multitask.awaitWorker(
-        sessionId,
-        target,
-        typeof timeoutRaw === "number" ? timeoutRaw : undefined,
-        readExecSignal(exec),
-      );
-      return toAwaitAgentToolResult(target, outcome);
-    },
-  };
-
-  /**
    * Ticket 118 / ADR-0025 mitosis: `spawn_dispatcher`.
    *
    * Visibility is the fence (ADR-0019): it is registered on the dispatcher
    * surface only, so workers never see it and no extra execute-time gate is
    * needed. The parent is the REGISTRATION CLOSURE's session id — there is no
-   * parent argument, exactly like `spawn_worker` and `message_agent`.
+   * parent argument on the wire.
    *
    * It is NOT routed through `Multitask.spawnWorker`: a dispatcher is not a
    * work stream. Nothing here touches the worker roster, the stream-key
@@ -1881,17 +1078,9 @@ export function createDispatcherTools(
     },
   };
 
-  // Ticket 176: the spawned class stops here. Every other tool is identical
-  // for both classes — only the summon verb is withheld.
-  const tools: DispatcherToolDef[] = [
-    spawnWorker,
-    checkWorkers,
-    steerWorker,
-    stopWorker,
-    deliverResult,
-    messageAgent,
-    awaitAgent,
-  ];
+  // Ticket 176: the spawned class stops here. Both classes get the same kept
+  // tools — only the summon verb is withheld.
+  const tools: DispatcherToolDef[] = [deliverResult, messageAgent];
   if (maySummonDispatchers) tools.push(spawnDispatcher);
   return tools;
 }

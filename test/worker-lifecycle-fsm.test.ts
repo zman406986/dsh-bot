@@ -129,7 +129,7 @@ describe("worker lifecycle FSM (observable via multitask + fake host)", () => {
     assert.equal(multitask.getWorker(abortedId)?.status, "aborted");
   });
 
-  it("a second settle for an already-terminal worker is ignored — no second wake, no overwritten status, no throw", async () => {
+  it("a second settle for an already-terminal worker is ignored — no plugin wake, no overwritten status, no throw", async () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
 
@@ -137,7 +137,9 @@ describe("worker lifecycle FSM (observable via multitask + fake host)", () => {
     multitask.noteTurnStarted(workerId);
 
     host.fireSettled({ workerId, status: "completed", report: "first" });
-    assert.equal(host.wakeCalls.length, 1);
+    assert.deepEqual(host.wakeCalls, [], "the settle opens no plugin wake");
+    const first = multitask.settleRecords.lookup("session-1", workerId);
+    assert.ok(first);
 
     assert.doesNotThrow(() => {
       host.fireSettled({ workerId, status: "error", report: "second" });
@@ -145,10 +147,13 @@ describe("worker lifecycle FSM (observable via multitask + fake host)", () => {
     });
 
     assert.equal(multitask.getWorker(workerId)?.status, "completed");
-    assert.deepEqual(host.wakeCalls, ["session-1"]);
+    assert.equal(multitask.listWorkers("session-1").length, 1);
+    assert.deepEqual(multitask.settleRecords.lookup("session-1", workerId), first);
+    assert.equal(first.resultText, "first");
+    assert.deepEqual(host.wakeCalls, []);
   });
 
-  it("a settle while the worker is steering still completes and wakes once", async () => {
+  it("a settle while the worker is steering still completes and opens no plugin wake", async () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
 
@@ -159,7 +164,12 @@ describe("worker lifecycle FSM (observable via multitask + fake host)", () => {
     host.fireSettled({ workerId, status: "completed", report: "finished mid-steer" });
 
     assert.equal(multitask.getWorker(workerId)?.status, "completed");
-    assert.deepEqual(host.wakeCalls, ["session-1"]);
+    assert.equal(multitask.listWorkers("session-1").length, 1);
+    assert.deepEqual(host.wakeCalls, []);
+    assert.equal(
+      multitask.settleRecords.lookup("session-1", workerId)?.resultText,
+      "finished mid-steer",
+    );
   });
 
   /**

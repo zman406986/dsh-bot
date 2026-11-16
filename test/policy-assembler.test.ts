@@ -10,8 +10,6 @@ import {
   type WakeNotice,
 } from "../src/core/policy/assembler.js";
 import {
-  AWAIT_AGENT_TOOL,
-  CHECK_WORKERS_TOOL,
   DELIVER_RESULT_TOOL,
   DISPATCHER_TOOL_NAMES,
   MESSAGE_AGENT_TOOL,
@@ -20,9 +18,6 @@ import {
   POLICY_SECTION_HEADINGS,
   POLICY_SECTION_HEADINGS_ZH,
   SPAWN_DISPATCHER_TOOL,
-  SPAWN_WORKER_TOOL,
-  STEER_WORKER_TOOL,
-  STOP_WORKER_TOOL,
   TOOL_DESCRIPTIONS,
   TOOL_DESCRIPTIONS_ZH,
   buildDispatcherPolicySection,
@@ -41,11 +36,9 @@ import { createMultitask } from "../src/core/multitask.js";
 import { emptyReportPlaceholder, REPORT_CLAMP_CHARS } from "../src/core/report-clamp.js";
 import {
   formatMessageAgentDormantSteerNote,
-  formatDormantSteerNote,
-  formatSpawnAck,
+  formatMessageAgentRefusal,
+  formatMessageAgentSteerNote,
   formatSpawnDispatcherNote,
-  formatSteerNote,
-  formatStopNote,
 } from "../src/core/tool-results.js";
 import { WAKE_CUE } from "../src/adapter/wake-copy.js";
 import type { TodoItem } from "../src/core/todo-reconciler.js";
@@ -113,12 +106,12 @@ function modelFacingCopy(): string[] {
   ];
 }
 
-/** The owner's team-leader copy, verbatim (ticket 175). */
+/** The pinned team-leader copy (ticket 175; step 3 revised by lane C3). */
 const TEAM_LEADER_STANDING_RULES_EN = [
   "## Standing rules",
   "- Chunk down tasks as much as you can, run as many lanes in parallel as you can. If any task can be run in parallel chunks, do that instead of giving to a single agent.",
-  "- Keep turns short: dispatch or re-chunk, then end or wait bounded (`await_agent`); never loop.",
-  "- A correction is a steer (`message_agent`), not a cloned worker. When a part is running and the direction changes, steer it.",
+  "- Keep turns short: dispatch or re-chunk, then end the turn. Do not wait or poll — a worker's completion notice starts a new turn and carries its closing message.",
+  "- A correction is `send_message` to the worker, not a cloned worker. When a part is running and the direction changes, send it the new direction.",
   "- Plain and concise language, no jargon. Lead with what is now unblocked, not \"it worked\".",
   "- Update the ledger and keep it lean. It is how you see what is running, what is parked, and what still needs splitting.",
 ].join("\n");
@@ -128,7 +121,7 @@ const TEAM_LEADER_WAKE_EN = [
   "",
   "1. Match each settled worker to its ledger entry (`todo_id` on the worker record). A settle closes one part, not the job.",
   "2. Re-chunk what is left. A finished part usually changes the split: decide what can run in parallel now, and dispatch it before you answer anyone.",
-  "3. Report back to whoever gave you the task order. `message_agent` to the dispatcher that summoned you, addressed to the session id on the \"Summoning dispatcher session id\" line of your handoff prompt; if the user directly ordered something from you, state the result in your reply to the user — that reply is the channel they read.",
+  "3. Report back to whoever gave the task order: your final answer is pushed to the dispatcher that summoned you automatically when you go idle, so do not resend it with `message_agent`. Use `message_agent` (to the session id on the \"Summoning dispatcher session id\" line of your handoff prompt) only for interim upward notes that the summoner needs before you are done; if the user directly ordered something from you, state the result in your reply to the user — that reply is the channel they read — and close its ledger entry with `deliver_result(todo_id=...)`.",
   "4. Report failures early instead of exhausting save attempts. If the approach looks like a dead end, report at the first sign.",
   "5. Silence is a valid outcome only when nothing changed for anyone above you.",
 ].join("\n");
@@ -181,17 +174,27 @@ describe("policy assembler", () => {
     assert.equal(assembleSessionPolicy(true).length > 0, true);
   });
 
-  it("the dispatcher tool list is exactly the shipped eight, in order", () => {
+  it("the dispatcher tool list is exactly the three custom verbs stock DSH lacks, in order", () => {
+    // Workers, status, steering and stopping are the preset's stock
+    // `subagent` / `list_agents` / `send_message` / `interrupt_agent`, so the
+    // plugin registers only what the stock surface does not cover.
     assert.deepEqual([...DISPATCHER_TOOL_NAMES], [
-      SPAWN_WORKER_TOOL,
-      CHECK_WORKERS_TOOL,
-      STEER_WORKER_TOOL,
-      STOP_WORKER_TOOL,
       DELIVER_RESULT_TOOL,
       MESSAGE_AGENT_TOOL,
-      AWAIT_AGENT_TOOL,
       SPAWN_DISPATCHER_TOOL,
     ]);
+    const STOCK_WORKER_VERBS = [
+      "subagent",
+      "list_agents",
+      "send_message",
+      "interrupt_agent",
+    ] as const;
+    for (const stock of STOCK_WORKER_VERBS) {
+      assert.ok(
+        !(DISPATCHER_TOOL_NAMES as readonly string[]).includes(stock),
+        `${stock} is the preset's, never ours to register`,
+      );
+    }
     for (const name of DISPATCHER_TOOL_NAMES) {
       assert.ok(TOOL_DESCRIPTIONS[name].length > 20, `thin description: ${name}`);
     }
@@ -216,11 +219,10 @@ describe("policy assembler", () => {
       buildStandingRulesBlock("en", "spawned"),
       buildWakeInstructionsBlock("en", "spawned"),
       buildPeerWakeInstructionsBlock("en", "spawned"),
-      formatSpawnAck({ title: "t", workerId: "w-1", streamKey: "s", prompt: "p" }),
-      formatSteerNote("t"),
-      formatDormantSteerNote("t"),
+      formatSpawnDispatcherNote({ title: "t", dispatcherId: "disp-1" }),
+      formatMessageAgentSteerNote("t"),
       formatMessageAgentDormantSteerNote("t"),
-      formatStopNote(),
+      formatMessageAgentRefusal({ reason: "unknown-target", target: "x" }),
     ];
     for (const text of [...narration, ...modelFacingCopy()]) {
       const lower = text.toLowerCase();
@@ -229,7 +231,11 @@ describe("policy assembler", () => {
       }
     }
     for (const text of narration) {
-      const lower = text.toLowerCase();
+      // The stock tool names ARE the tool contract now (a backticked
+      // `subagent` is how a dispatcher starts a worker), so identifiers are
+      // removed before the machinery sweep. What must stay invisible is the
+      // bare vocabulary, never the model-facing tool name.
+      const lower = text.replace(/`[^`]+`/g, " ").toLowerCase();
       for (const token of MACHINERY_TOKENS) {
         assert.ok(!lower.includes(token), `machinery token "${token}" in: ${text.slice(0, 60)}`);
       }
@@ -239,7 +245,10 @@ describe("policy assembler", () => {
   it("keeps ADR-0007: a settle completes nothing until the dispatcher delivers", () => {
     const wake = buildWakeInstructionsBlock();
     assert.ok(wake.includes("A settle does not complete anything"));
-    assert.ok(wake.includes("mark the matching todo `completed`"));
+    // Closing the ledger entry is named, not left as an unspecified "mark
+    // completed": zero deliver_result calls across ~330 dispatcher tool calls
+    // was the observable defect this wording fixes.
+    assert.ok(wake.includes("deliver_result(todo_id=...)"));
     for (const text of [assembleSessionPolicy(true), wake]) {
       assert.ok(!text.includes("user has the result"));
       assert.ok(!text.includes("user actually has the result"));
@@ -251,16 +260,17 @@ describe("policy assembler", () => {
   });
 
   it("the chief-of-staff blocks are byte-identical to the shipped bytes (ticket 175 sha pins)", () => {
-    // Ticket 175 split three blocks into two classes each. These shas are the
-    // PRE-split chief-of-staff bytes, captured before the split landed, so
-    // any drift in the class the user still reads fails here.
+    // Ticket 175 split three blocks into two classes each. These shas pin the
+    // chief-of-staff bytes the user still reads, so any drift in that class
+    // fails here.
     const SHIPPED = {
-      // Re-pinned after the reference-prose re-authoring (standing rule,
-      // wake step 3), the sender-address wording (peer step 4), and the
-      // conversational-delivery step 4 (ADR-0009); no other drift is allowed.
-      standing: "7ef18b9e8878cac79d5004e304988ef5e859df1e690d06b00fa49b0aa03dc0a4",
-      wake: "5b6a7caa9ad2845fc5939620561e6004a65386c93cccfeec6d42c89083962b1c",
-      peer: "3b7608ff8e70f513a3ed053cde934f40e101cbbb1b25136da953197dce18a8c1",
+      // Re-pinned for the stock-subagent re-authoring: the standing rules now
+      // name the stock `subagent` / `send_message` verbs and end the turn
+      // instead of waiting, and wake step 5 retries with a stock `subagent`.
+      // Peer step 4 gained the worker-vs-peer split. No other drift allowed.
+      standing: "eaed5fc7001a1d202772fa4d240206c223f62dc5491efbb9acd01fb6eaa30f58",
+      wake: "cb236393fcaa7c650fbdb227b68f7b59a299eb626218980c2cb45d6a080f0ff8",
+      peer: "5a32dbbd241feeae78c7c930791d4ea421b5c0ada31bb7e81b27e532d28cfa2e",
     } as const;
     const sha = (text: string) =>
       createHash("sha256").update(text, "utf8").digest("hex");
@@ -273,7 +283,7 @@ describe("policy assembler", () => {
     assert.equal(sha(buildPeerWakeInstructionsBlock("en", "user")), SHIPPED.peer);
   });
 
-  it("the team-leader faces carry the owner's text verbatim (ticket 175)", () => {
+  it("the team-leader faces carry the pinned text (ticket 175, C3 step 3)", () => {
     assert.equal(buildStandingRulesBlock("en", "spawned"), TEAM_LEADER_STANDING_RULES_EN);
     assert.equal(buildWakeInstructionsBlock("en", "spawned"), TEAM_LEADER_WAKE_EN);
     assert.equal(buildPeerWakeInstructionsBlock("en", "spawned"), TEAM_LEADER_PEER_WAKE_EN);
@@ -364,10 +374,12 @@ describe("policy assembler", () => {
   });
 
   it("the user-started policy is byte-identical to the shipped bytes (ticket 141 sha pin)", () => {
-    // Re-pinned per ticket: 151, 166, 170, then 2026-11-02's chief-of-staff
-    // rewrite. Any OTHER drift still fails here.
+    // Re-pinned per ticket: 151, 166, 170, 2026-11-02's chief-of-staff
+    // rewrite, then the stock-subagent re-authoring (the stock `subagent` /
+    // `list_agents` / `send_message` / `interrupt_agent` rules). Any OTHER
+    // drift still fails here.
     const SHIPPED_SHA256 =
-      "29aaea291cc1431cbf0338ea0d8ff7159cfd70e37d0e132b620e7a1829c7a464";
+      "338cd1e8e82078d666ba6d1ca2aa00f6c21ef7134131af89b1b0e6d54f762812";
     const text = buildDispatcherPolicySection("user");
     assert.equal(createHash("sha256").update(text, "utf8").digest("hex"), SHIPPED_SHA256);
     // The generation argument can never reach either class.
@@ -384,10 +396,12 @@ describe("policy assembler", () => {
     assert.ok(user.startsWith("# ") && spawned.startsWith("# "));
     // The shared doctrine stays in the standing rules, not in either class.
     const rules = buildStandingRulesBlock();
-    assert.ok(rules.includes("never loop"));
-    assert.ok(rules.includes("wait bounded"));
-    assert.ok(rules.includes(`(\`${AWAIT_AGENT_TOOL}\`)`));
-    assert.ok(rules.includes(`(\`${MESSAGE_AGENT_TOOL}\`)`));
+    assert.ok(rules.includes("end the turn"));
+    assert.ok(rules.includes("Do not wait or poll"));
+    // The stock worker verbs are named; the retired custom wait verb is not.
+    assert.ok(rules.includes("send_message"));
+    assert.ok(rules.includes("subagent"));
+    assert.ok(!rules.includes("await_agent"));
   });
 
   it("the no-summon rule is stated to the team leader only (ticket 176)", () => {
@@ -449,6 +463,31 @@ describe("policy assembler", () => {
     assert.ok(abortedEmpty.includes("No report"));
   });
 
+  it("wake turn: a re-presented result gets its own block, not a first-time settle", () => {
+    const represented = {
+      todoId: "t-1",
+      workerId: "w-1",
+      title: "Rewrite auth docs",
+      status: "completed" as const,
+      report: "Auth docs rewritten.",
+      transcriptRef: "child-1",
+    };
+    const text = assembleWakeTurn([], "en", "user", [represented]);
+    const heading = "## Re-presented — already shown, not yet delivered";
+    assert.ok(text.includes(heading), "the distinct block is present");
+    assert.ok(text.includes("Auth docs rewritten."), "the real report rides the block");
+    assert.ok(!text.includes(emptyReportPlaceholder()));
+
+    const zh = assembleWakeTurn([], "zh", "user", [represented]);
+    assert.ok(zh.includes("## 再次呈现——已经展示过，尚未送达"));
+    assert.ok(!zh.includes(heading), "the EN heading never leaks into ZH");
+
+    const errored = assembleWakeTurn([], "en", "user", [
+      { ...represented, status: "error" as const, report: "npm test failed" },
+    ]);
+    assert.ok(errored.includes("Worker failed:"), "errors keep their status label");
+  });
+
   it("maps a settled worker notice onto the wake row", () => {
     assert.deepEqual(
       noticeFromSettled(
@@ -459,19 +498,22 @@ describe("policy assembler", () => {
     );
   });
 
-  it("the spawn/steer/stop notes stay narration-shaped and name the channel", () => {
-    const ack = formatSpawnAck({
-      title: "Rewrite auth docs",
-      workerId: "w-1",
-      streamKey: "t-1",
-      prompt: "Do the work.",
+  it("the surviving tool notes stay narration-shaped and name the channel", () => {
+    const note = formatSpawnDispatcherNote({
+      title: "Own the login bug",
+      dispatcherId: "disp-2",
     });
-    assert.ok(ack.includes("background") && ack.includes("do not need to wait"));
-    assert.ok(formatSteerNote("x").includes("no restart"));
-    assert.ok(formatDormantSteerNote("x").length > 0);
-    assert.ok(formatMessageAgentDormantSteerNote("x").length > 0);
-    assert.ok(formatStopNote().includes("Tell the user only if"));
-    assert.ok(TOOL_DESCRIPTIONS[CHECK_WORKERS_TOOL].includes("never a wait loop"));
+    assert.ok(note.includes("peer dispatcher"), note);
+    assert.ok(note.includes("Message it with message_agent"), note);
+    assert.ok(note.includes("Do not wait or poll"), note);
+    assert.ok(formatMessageAgentSteerNote("x").includes("no restart"));
+    assert.ok(formatMessageAgentDormantSteerNote("x").includes("dormant"));
+    assert.ok(
+      formatMessageAgentRefusal({ reason: "not-running", target: "w-1" }).includes(
+        "NOT delivered",
+      ),
+    );
+    assert.ok(TOOL_DESCRIPTIONS[MESSAGE_AGENT_TOOL].includes("send_message"));
   });
 });
 
@@ -496,12 +538,13 @@ describe("dispatcher copy — surface truth and class-aware wakes", () => {
     assert.ok(!note.includes("same dispatcher tools and policy"), note);
   });
 
-  it("the spawn tools teach the optional model arguments (ticket 285)", () => {
+  it("the spawn_dispatcher description teaches the optional model arguments (ticket 285)", () => {
     // The schema is the contract; the description is where the model learns
     // the option exists (PLAN §3.1). No policy bullet is added for it.
+    // `spawn_worker` is retired, so the summon is the only spawn result left.
     assert.ok(
-      TOOL_DESCRIPTIONS[SPAWN_WORKER_TOOL].includes("model"),
-      "spawn_worker description never mentions model",
+      TOOL_DESCRIPTIONS[SPAWN_DISPATCHER_TOOL].includes("model"),
+      "spawn_dispatcher description never mentions model",
     );
     assert.ok(
       TOOL_DESCRIPTIONS[SPAWN_DISPATCHER_TOOL].includes("worker_model"),
@@ -509,13 +552,39 @@ describe("dispatcher copy — surface truth and class-aware wakes", () => {
     );
     // The ZH face names the same two keys; argument names stay ASCII.
     assert.ok(
-      TOOL_DESCRIPTIONS_ZH[SPAWN_WORKER_TOOL].includes("model"),
-      "ZH spawn_worker description never mentions model",
+      TOOL_DESCRIPTIONS_ZH[SPAWN_DISPATCHER_TOOL].includes("model"),
+      "ZH spawn_dispatcher description never mentions model",
     );
     assert.ok(
       TOOL_DESCRIPTIONS_ZH[SPAWN_DISPATCHER_TOOL].includes("worker_model"),
       "ZH spawn_dispatcher description never mentions worker_model",
     );
+  });
+
+  it("the team-leader wake names the automatic push, keeping message_agent interim-only", () => {
+    // Defect fix (lane C3): the final answer reaches the summoner without the
+    // leader calling `message_agent`; that verb is for interim upward notes.
+    const en = buildWakeInstructionsBlock("en", "spawned");
+    assert.ok(
+      en.includes(
+        "your final answer is pushed to the dispatcher that summoned you automatically when you go idle",
+      ),
+      en,
+    );
+    assert.ok(en.includes("do not resend it with `message_agent`"), en);
+    assert.ok(en.includes("only for interim upward notes"), en);
+
+    const zh = buildWakeInstructionsBlock("zh", "spawned");
+    assert.ok(
+      zh.includes("最终答复会自动推送给召唤你的那个调度器"),
+      zh,
+    );
+    assert.ok(zh.includes("不要再用 `message_agent` 重发一遍"), zh);
+    assert.ok(zh.includes("只用于在你做完之前"), zh);
+
+    // The chief-of-staff faces are untouched by this leader-only rule.
+    assert.ok(!buildWakeInstructionsBlock("en", "user").includes("automatically when you go idle"));
+    assert.ok(!buildWakeInstructionsBlock("zh", "user").includes("自动推送"));
   });
 
   it("the team leader is told where the summoner id comes from", () => {
@@ -532,15 +601,11 @@ describe("dispatcher copy — surface truth and class-aware wakes", () => {
     assert.ok(policy.includes("handoff prompt"), policy);
   });
 
-  it("steer_worker tells the truth about dormant workers", () => {
-    const description = TOOL_DESCRIPTIONS[STEER_WORKER_TOOL];
-    assert.ok(description.includes("dormant"), description);
-    assert.ok(description.includes("resumed"), description);
-    assert.ok(!description.includes("Refused when the worker is not running"), description);
-    // The ZH face mirrors the same rule.
-    assert.ok(TOOL_DESCRIPTIONS_ZH[STEER_WORKER_TOOL].includes("休眠"), "ZH dormant");
-    assert.ok(TOOL_DESCRIPTIONS_ZH[STEER_WORKER_TOOL].includes("恢复"), "ZH resume");
-  });
+  // DELETED with the `steer_worker` handler: its description and ZH face were
+  // the only surface that said a dormant worker is resumed. Steering is the
+  // preset's stock `send_message` now, whose description is not ours to pin;
+  // the dormant-resume behaviour itself stays covered where the adapter
+  // handles it.
 
   it("the re-authored delivery copy no longer echoes the reference phrasing", () => {
     for (const text of [
@@ -554,10 +619,13 @@ describe("dispatcher copy — surface truth and class-aware wakes", () => {
     assert.ok(!buildWakeInstructionsBlock("en", "user").includes("it worked"));
   });
 
-  it("the team-leader policy names workers, not a retired subagent verb", () => {
+  it("the team-leader policy calls workers workers, not subagents (the tool name is fine)", () => {
     for (const language of POLICY_LANGUAGES) {
       const policy = buildDispatcherPolicySection("spawned", 2, language);
-      assert.ok(!policy.toLowerCase().includes("subagent"), language);
+      // `subagent` is the stock spawn TOOL now, so it may appear backticked;
+      // what must never come back is the retired machinery NOUN for a worker.
+      const withoutIdentifiers = policy.replace(/`[^`]+`/g, " ");
+      assert.ok(!withoutIdentifiers.toLowerCase().includes("subagent"), language);
     }
     assert.ok(buildDispatcherPolicySection("spawned").includes("worker"));
   });
@@ -759,10 +827,10 @@ describe("policy ZH face — structure, not prose", () => {
   });
 
   it("ZH mirrors the EN line shape: same lines, same bullets, headings aligned", () => {
-    // The two classes have different bullet counts (chief of staff 4, team
-    // leader 7 after ticket 176 added the no-summon rule to the owner's
-    // 2026-11-03 rewrite), so the pin is per class.
-    const bullets: Record<"user" | "spawned", number> = { user: 4, spawned: 7 };
+    // The two classes have different bullet counts (chief of staff 5, team
+    // leader 9 after the stock-subagent rules joined the owner's 2026-11-03
+    // rewrite), so the pin is per class.
+    const bullets: Record<"user" | "spawned", number> = { user: 5, spawned: 9 };
     for (const origin of ["user", "spawned"] as const) {
       const en = buildDispatcherPolicySection(origin, 2, "en").split("\n");
       const zh = buildDispatcherPolicySection(origin, 2, "zh").split("\n");
@@ -777,21 +845,36 @@ describe("policy ZH face — structure, not prose", () => {
     }
   });
 
-  it("ZH keeps the literal ASCII tool identifiers and the bounded wait", () => {
+  it("ZH keeps the literal ASCII tool identifiers and names the stock verbs", () => {
     const zh = buildDispatcherPolicySection("user", 2, "zh");
-    assert.ok(zh.includes(`\`${SPAWN_DISPATCHER_TOOL}\``));
-    // The team-leader text (owner rewrite 2026-11-03) names no tool at all;
-    // the scheduling health-check block that carried `check_workers` is gone.
+    assert.ok(zh.includes(`${SPAWN_DISPATCHER_TOOL}`));
+    // The team-leader faces name the stock worker verbs and never the summon
+    // verb; the retired scheduling block that carried `check_workers` stays
+    // gone.
     for (const language of ["en", "zh"] as const) {
-      assert.equal(
-        [...buildDispatcherPolicySection("spawned", 2, language).matchAll(/`[^`]+`/g)].length,
-        0,
-        `team-leader ${language} face names no backticked tool`,
+      const leader =
+        buildDispatcherPolicySection("spawned", 2, language) +
+        "\n" +
+        buildStandingRulesBlock(language, "spawned");
+      for (const stock of [
+        "subagent",
+        "list_agents",
+        "send_message",
+        "interrupt_agent",
+      ]) {
+        assert.ok(
+          leader.includes(`${stock}`),
+          `${language}: team-leader face never names ${stock}`,
+        );
+      }
+      assert.ok(
+        !leader.includes(`${SPAWN_DISPATCHER_TOOL}`),
+        `${language}: team-leader face names the summon verb`,
       );
     }
     const zhRules = buildStandingRulesBlock("zh");
-    assert.ok(zhRules.includes("有上限"));
-    assert.ok(zhRules.includes("绝不循环"));
+    assert.ok(zhRules.includes("不要等待"));
+    assert.ok(zhRules.includes("轮询"));
   });
 
   it("ZH carries no untranslated EN words and no forbidden identifier", () => {

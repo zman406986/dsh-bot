@@ -126,8 +126,8 @@ describe("settle record ring (ticket 115)", () => {
     host.fireSettled({ workerId, status: "completed", report: "done" });
     const record = multitask.settleRecords.lookup("session-1", workerId);
     assert.ok(record !== undefined);
-    // The wake was drained; the record must not depend on the wake.
-    assert.ok(multitask.drainWake("session-1") !== undefined);
+    // No plugin wake is opened for a settle; the record must not depend on one.
+    assert.equal(multitask.drainWake("session-1"), undefined);
     const outcome = await multitask.settleRecords.wait("session-1", workerId, 0);
     assert.deepEqual(outcome, {
       ok: true,
@@ -196,13 +196,10 @@ describe("await wait engine (ticket 115)", () => {
     // The losing timer did not survive the win.
     assert.equal(seams.scheduled[0]?.cancelled, true);
     assert.equal(multitask.settleRecords.waiterCount("session-1"), 0);
-    // Wake composition is untouched: the settle wake still arrives.
-    const drained = multitask.drainWake("session-1");
-    assert.ok(drained !== undefined);
-    assert.deepEqual(
-      drained.wake.settledWorkers.map((worker) => worker.workerId),
-      [workerId],
-    );
+    // The settle no longer opens a plugin wake: the stock completion notice is
+    // the parent-visible result. The record above is what await_agent reads.
+    assert.equal(multitask.drainWake("session-1"), undefined);
+    assert.ok(multitask.settleRecords.lookup("session-1", workerId));
   });
 
   it("timeout returns still-running and a later settle is not lost", async () => {

@@ -6,9 +6,14 @@ import { describe, it } from "node:test";
 import {createCordisDshHost, listGlobalToolNames, mapStopReason, SPAWN_PROVIDER, type ActivationLike, type ActivationSpecLike, type AdapterContext, type AgentLike} from "../src/adapter/cordis-dsh-host.js";
 import { RESUME_WAKE_CUE } from "../src/adapter/wake-copy.js";
 import {
+  ACTIVATION_COMMAND_CARD_TEXT,
   createDispatcherStartCommand,
   DISPATCHER_START_SUCCESS,
 } from "../src/adapter/activation-command.js";
+import {
+  RESTART_DEGRADED_NOTICE,
+  RESTART_NOTICE_SUMMARY,
+} from "../src/adapter/restart-notice.js";
 import { bindDispatcherLifecycle, isTopLevel } from "../src/adapter/parent-agent.js";
 import { createMultitask } from "../src/core/multitask.js";
 import { assembleSessionPolicy } from "../src/core/policy/assembler.js";
@@ -179,17 +184,24 @@ function createStubCtx() {
   // barrier's deny intersection must use the scoped read, so the fake keeps
   // the two views distinct the same way.
   const contextGlobalTools = [{ name: "request_access" }, { name: "working_directory" }];
+  // The stock agent plane (the preset's model-facing tools): the four stock
+  // agent verbs, the fork variant the dispatcher surface still withholds,
+  // route discovery, and the KEPT custom dispatcher tools. The five removed
+  // dispatcher verbs (spawn_worker / check_workers / steer_worker /
+  // stop_worker / await_agent) are deliberately absent — the host no longer
+  // mounts them, and a stale fixture would let the deny plan pass without
+  // pinning the surface a worker actually inherits.
   const agentPlaneTools = [
     { name: "present" },
+    { name: "subagent" },
+    { name: "subagent_fork" },
+    { name: "list_agents" },
     { name: "send_message" },
+    { name: "interrupt_agent" },
+    { name: "list_subagent_models" },
     { name: "todo_write" },
-    { name: "spawn_worker" },
-    { name: "check_workers" },
-    { name: "steer_worker" },
-    { name: "stop_worker" },
     { name: "deliver_result" },
     { name: "message_agent" },
-    { name: "await_agent" },
     { name: "spawn_dispatcher" },
     { name: "read" },
   ];
@@ -640,26 +652,46 @@ describe("CordisDshHost spawn / interrupt / send", () => {
       (composed.schemasScopes[0] as { session: { id: string } }).session.id,
       workerId,
     );
+    // Stock-subagent refactor: the deny plan over the surface a worker
+    // inherits. Every spawn verb is denied — plain `subagent`, `subagent_fork`
+    // and route discovery alike — because any of them would slip the worker an
+    // unaccounted child; `subagent_fork` is never weakened here. The control
+    // verbs are denied too, EXCEPT the upward `send_message` a worker answers
+    // its parent with (asserted below). The kept custom dispatcher tools stay
+    // off every worker surface. Candidate order follows
+    // `WORKER_DENIED_TOOL_CANDIDATES`; this intersection sees the child's
+    // scoped surface, so `request_access` (context-global) is present.
     assert.deepEqual(composed.restrictions, [
       {
         deny: [
           "present",
-          "send_message",
-          "todo_write",
-          "spawn_worker",
-          "check_workers",
-          "steer_worker",
-          "stop_worker",
-          "deliver_result",
+          "interrupt_agent",
+          "list_agents",
           "message_agent",
-          "await_agent",
+          "deliver_result",
           "spawn_dispatcher",
+          "subagent",
+          "subagent_fork",
+          "list_subagent_models",
+          "todo_write",
           "request_access",
         ],
       },
     ]);
     // ... while the ordinary work tool surface survives.
     assert.equal(composed.restrictions[0]?.deny?.includes("read"), false);
+    // The two memberships the refactor turns on: a worker keeps the stock
+    // upward channel and never the fork verb.
+    assert.equal(
+      composed.restrictions[0]?.deny?.includes("send_message"),
+      false,
+      "a worker's only upward channel stays allowed",
+    );
+    assert.equal(
+      composed.restrictions[0]?.deny?.includes("subagent_fork"),
+      true,
+      "fork is never offered to a worker",
+    );
     // The mid-task reply channel is registered on the child's scope only.
     assert.deepEqual(composed.localTools, [
       { name: "reply_to_dispatcher", workerSessionId: workerId },
@@ -1364,7 +1396,7 @@ describe("bindDispatcherLifecycle", () => {
     );
   });
 
-  it("settle through subagent/end reaches the wake bus exactly once", async () => {
+  it("settle through subagent/end opens no plugin wake — the stock notice is the result channel", async () => {
     const ctx = createStubCtx();
     const host = createCordisDshHost(ctx);
     const multitask = createMultitask(host);
@@ -1402,14 +1434,16 @@ describe("bindDispatcherLifecycle", () => {
     });
 
     assert.equal(multitask.getWorker(workerId)?.status, "completed");
-    // Mid-turn: wake is queued, not flushed.
-    assert.equal(multitask.wakeBus.peek("disp-1"), undefined);
+    // The stock completion notice (source kind subagent-settled, delivery
+    // "parent") is the parent-visible result; the plugin enqueues nothing.
     ctx.fire("agent/status", { agent: parent, status: "idle" });
-    const wake = multitask.wakeBus.drain("disp-1");
-    assert.ok(wake);
-    assert.equal(wake.settledWorkers.length, 1);
-    assert.equal(wake.settledWorkers[0]?.workerId, workerId);
-    assert.equal(wake.settledWorkers[0]?.resultText, "ok");
+    assert.equal(multitask.wakeBus.peek("disp-1"), undefined);
+    assert.equal(multitask.wakeBus.drain("disp-1"), undefined);
+    // The settle record is still written, before any delivery attempt.
+    assert.equal(
+      multitask.settleRecords.lookup("disp-1", workerId)?.resultText,
+      "ok",
+    );
   });
 
   it("unbind removes listeners and refuses later activation", async () => {
@@ -3584,7 +3618,7 @@ describe("ticket 295: activation confirmation is visible and turn-free", () => {
     assert.equal(ctx.followupCalls.length, 0, "no inbox entry, no wake");
   });
 
-  it("the command path returns the unchanged result AND the notice", () => {
+  it("the command path returns the short card result AND the notice", () => {
     const ctx = createStubCtx();
     const host = createCordisDshHost(ctx);
     const multitask = createMultitask(host);
@@ -3598,7 +3632,7 @@ describe("ticket 295: activation confirmation is visible and turn-free", () => {
     const parent = withRecordedAppend(createAgent("disp-1"), ctx.appendCalls);
     assert.deepEqual(command.handler({ commandId: "c1", agent: parent }), {
       kind: "success",
-      text: DISPATCHER_START_SUCCESS,
+      text: ACTIVATION_COMMAND_CARD_TEXT,
     });
     assert.equal(ctx.appendCalls.length, 1);
     assert.equal(ctx.followupCalls.length, 0);
@@ -3688,11 +3722,31 @@ describe("ticket 295: activation confirmation is visible and turn-free", () => {
  * does. The fixture is not a mock of the log; it is the log.
  */
 describe("ticket 298: the activation notice can never be the surface head", () => {
+  /**
+   * Live-publication regression: the real store-owned write path. `Session.create` below is an
+   * independent session, so it never publishes to a context; `SessionStore`
+   * is what the web server observes, and its `session/event` is the client
+   * stream's source (`dsh-session/lib/index.js:1601`).
+   */
+  interface LiveContext {
+    on(
+      name: "session/event",
+      listener: (session: RealSessionLike, event: unknown) => void,
+      options?: { global?: boolean },
+    ): () => void;
+  }
+
+  interface LiveStore {
+    create(id: string, options?: { meta?: { cwd?: string } }): RealSessionLike;
+  }
+
   /** The installed host's own writer + validator, loaded from the dsh install. */
   interface HostFormat {
     Session: {
       create(id: string, seed?: undefined, header?: unknown): RealSessionLike;
     };
+    Context: new () => LiveContext;
+    SessionStore: new (ctx: LiveContext) => LiveStore;
     knownEventTypes: Set<string>;
     restore(
       artifact: {
@@ -3711,6 +3765,7 @@ describe("ticket 298: the activation notice can never be the surface head", () =
   }
 
   interface RealSessionLike {
+    readonly id: string;
     readonly header: Record<string, unknown>;
     readonly inheritedEventCount: number;
     readonly surface: { readonly nodes: readonly number[] };
@@ -3753,6 +3808,7 @@ describe("ticket 298: the activation notice can never be the surface head", () =
     const packages = join(root, "@deepseek-ai", "dsh", "node_modules", "@deepseek-ai");
     const load = async (path: string): Promise<Record<string, unknown>> =>
       (await import(pathToFileURL(path).href)) as Record<string, unknown>;
+    const cordisModule = await load(join(packages, "cordis", "lib", "index.js"));
     const sessionModule = await load(join(packages, "dsh-session", "lib", "index.js"));
     const formatModule = await load(
       join(packages, "dsh-session-format-v3-to-v4", "lib", "index.js"),
@@ -3763,6 +3819,8 @@ describe("ticket 298: the activation notice can never be the surface head", () =
     ) as { version: string };
     return {
       Session: sessionModule["Session"] as HostFormat["Session"],
+      Context: cordisModule["Context"] as HostFormat["Context"],
+      SessionStore: sessionModule["SessionStore"] as HostFormat["SessionStore"],
       knownEventTypes: sessionModule["KNOWN_SESSION_EVENT_TYPES"] as Set<string>,
       restore: formatModule["restoreReleasedV4Artifact"] as HostFormat["restore"],
       createSystemMessage: llmModule["createSystemMessage"] as HostFormat["createSystemMessage"],
@@ -3882,6 +3940,48 @@ describe("ticket 298: the activation notice can never be the surface head", () =
     commit(session, ctx, "turn/end", { turn: 1, reason: { kind: "completed" } });
   }
 
+  /**
+   * Live-publication regression: a store-owned session, plus the SAME publication the web
+   * server observes. `SessionStore` attaches the session to a real Cordis
+   * context; its `session/event` dispatch is the client stream's source
+   * (`dsh-session/lib/index.js:1601`). The bridge forwards that publication
+   * into the stub context the lifecycle listens on, so this exercises the REAL
+   * emitter — no manual `ctx.fire` of the notice.
+   */
+  function newStoreSession(
+    host: HostFormat,
+    ctx: ReturnType<typeof createStubCtx>,
+    id: string,
+  ): {
+    session: RealSessionLike;
+    live: Array<{ type: string; seq: number; surfaceOp: unknown }>;
+    dispose: () => void;
+  } {
+    const liveCtx = new host.Context();
+    const store = new host.SessionStore(liveCtx);
+    const session = store.create(id, { meta: { cwd: process.cwd() } });
+    const live: Array<{ type: string; seq: number; surfaceOp: unknown }> = [];
+    const off = liveCtx.on("session/event", (source, event) => {
+      if (source.id !== session.id) return;
+      const record = event as { type?: unknown; seq?: unknown; surfaceOp?: unknown };
+      live.push({
+        type: String(record.type),
+        seq: Number(record.seq),
+        surfaceOp: record.surfaceOp,
+      });
+      ctx.fire("session/event", source, event);
+    });
+    return {
+      session,
+      live,
+      dispose() {
+        off();
+        const disposable = liveCtx as { dispose?: () => void };
+        disposable.dispose?.();
+      },
+    };
+  }
+
   it("the host validator rejects the ticket-295 log shape (the bug is real)", async (t) => {
     const host = await hostFormat();
     if (host === null) return t.skip("no installed dsh to validate against");
@@ -3955,6 +4055,137 @@ describe("ticket 298: the activation notice can never be the surface head", () =
     // 0 turn/start, 1 step/start, 2 system/message, 3 user/message (prompt),
     // 4 user/message (notice), 5 step/end, 6 turn/end
     assert.equal(artifact.events.length, 7);
+  });
+
+  it("a /dsh-bot message argument starts one user turn and flushes both deferred notices once", async (t) => {
+    const host = await hostFormat();
+    if (host === null) return t.skip("no installed dsh to validate against");
+
+    const ctx = createStubCtx();
+    const cordisHost = createCordisDshHost(ctx);
+    const multitask = createMultitask(cordisHost);
+    const lifecycle = bindDispatcherLifecycle(ctx, cordisHost, multitask);
+    const command = createDispatcherStartCommand({
+      ctx,
+      activeSessionId: () => lifecycle.dispatcherSessionId(),
+      activate: (agent) => lifecycle.activate(agent),
+    });
+
+    const session = newSession(host, "sess-message-arg");
+    const followed: unknown[] = [];
+    const parent: AgentLike = {
+      session: session as unknown as AgentLike["session"],
+      followup(message: unknown) {
+        followed.push(message);
+      },
+    };
+
+    // The host logs `command/run` before invoking the handler; the card is
+    // the pairing of this event with the `command/done` appended after it.
+    commit(session, ctx, "command/run", {
+      commandId: "c1",
+      name: "dsh-bot",
+      args: "  Investigate the flaky suite.  ",
+      source: { kind: "user" },
+    });
+    assert.deepEqual(
+      command.handler({
+        commandId: "c1",
+        agent: parent,
+        rawInput: "  Investigate the flaky suite.  ",
+      }),
+      { kind: "success", text: ACTIVATION_COMMAND_CARD_TEXT },
+    );
+    assert.equal(followed.length, 1, "exactly one user message");
+    const message = followed[0] as {
+      role?: unknown;
+      content?: Array<{ text?: string }>;
+      source?: { kind?: unknown; form?: unknown };
+    };
+    assert.equal(message.role, "user");
+    assert.equal(
+      (message.content ?? []).map((block) => block.text ?? "").join(""),
+      "Investigate the flaky suite.",
+    );
+    assert.deepEqual(
+      message.source,
+      { kind: "user" },
+      "a human message, not a plugin notice row",
+    );
+    assert.equal(
+      session.surface.nodes.length,
+      0,
+      "activation itself still writes nothing on a fresh surface",
+    );
+
+    // The restart rebuild's queued notice lands between activation and the
+    // first step in production; queue it here to exercise the same FIFO.
+    lifecycle.queueNotice(session.id, RESTART_DEGRADED_NOTICE);
+
+    // The loop opens the first turn around exactly the message the command
+    // queued: system head, then the committed user message. `turn/start`
+    // lands inside the handler (followup wakes the driver synchronously), so
+    // the command's settlement follows it; the log must still load.
+    commit(session, ctx, "turn/start", { turn: 1 });
+    commit(session, ctx, "command/done", {
+      commandId: "c1",
+      kind: "success",
+      text: ACTIVATION_COMMAND_CARD_TEXT,
+    });
+    commit(session, ctx, "step/start", { turn: 1, step: 1 });
+    commit(
+      session,
+      ctx,
+      "system/message",
+      { turn: 1, step: 1, message: host.createSystemMessage("rendered system prompt") },
+      { surfaceOp: "append" },
+    );
+    const committed = session.append("user/message", message, {
+      surfaceOp: "append",
+    });
+    ctx.fire("session/event", session, committed);
+    await flushMicrotasks();
+
+    // 0 command/run, 1 turn/start, 2 command/done, 3 step/start,
+    // 4 system head, 5 user prompt, 6 activation notice, 7 restart notice.
+    assert.deepEqual(
+      noticeNodes(session),
+      [6, 7],
+      "both deferred notices ride the user's turn, in FIFO order",
+    );
+    const plainUserSeqs = session.surface.nodes.filter((seq) => {
+      const event = session.eventAt(seq);
+      if (event?.type !== "user/message") return false;
+      const data = event.data as { source?: { kind?: unknown; form?: unknown } };
+      return data.source?.kind === "user" && data.source.form === undefined;
+    });
+    assert.deepEqual(
+      plainUserSeqs,
+      [5],
+      "the message is the one plain user node and is never duplicated",
+    );
+    assert.equal(followed.length, 1, "no second user message is queued");
+
+    // A later system commit must not append either notice again.
+    commit(session, ctx, "step/end", { turn: 1, step: 1 });
+    commit(session, ctx, "step/start", { turn: 1, step: 2 });
+    commit(
+      session,
+      ctx,
+      "system/message",
+      { turn: 1, step: 2, message: host.createSystemMessage("appended history") },
+      { surfaceOp: "append" },
+    );
+    await flushMicrotasks();
+    assert.equal(noticeNodes(session).length, 2, "notices are one-shot");
+    assert.equal(followed.length, 1);
+
+    commit(session, ctx, "step/end", { turn: 1, step: 2 });
+    commit(session, ctx, "turn/end", { turn: 1, reason: { kind: "completed" } });
+    assert.doesNotThrow(
+      () => host.restore(artifactOf(session), host.knownEventTypes),
+      "the real log with a message-argument turn must load",
+    );
   });
 
   it("the deferred notice still carries the full confirmation", async (t) => {
@@ -4071,6 +4302,184 @@ describe("ticket 298: the activation notice can never be the surface head", () =
     assert.equal(notices.length, 1, "flushed once, after the head");
     assert.equal(nodes[0], 0, "the system head stayed node 0");
     assert.equal(ctx.followupCalls.length, 0);
+  });
+
+  it("the live store publishes the notice to session/event (the client stream's source)", async (t) => {
+    const host = await hostFormat();
+    if (host === null) return t.skip("no installed dsh to publish against");
+
+    const ctx = createStubCtx();
+    const cordisHost = createCordisDshHost(ctx);
+    const multitask = createMultitask(cordisHost);
+    const lifecycle = bindDispatcherLifecycle(ctx, cordisHost, multitask, {
+      policyEnabled: false,
+    });
+    const { session, live, dispose } = newStoreSession(
+      host,
+      ctx,
+      "sess-live-headed",
+    );
+
+    // A chat that already ran a step has the loop's protected system head.
+    session.append("turn/start", { turn: 1 });
+    session.append("step/start", { turn: 1, step: 1 });
+    session.append(
+      "system/message",
+      { turn: 1, step: 1, message: host.createSystemMessage("rendered") },
+      { surfaceOp: "append" },
+    );
+
+    const parent: AgentLike = {
+      session: session as unknown as AgentLike["session"],
+      followup() {},
+    };
+    assert.deepEqual(lifecycle.activate(parent), { ok: true });
+
+    // The notice is committed AND published synchronously: no manual fire, no
+    // request, no followup. This is the event the web session controller
+    // forwards to an already-open chat.
+    const notices = live.filter(
+      (event) => event.type === "user/message" && event.surfaceOp === "append",
+    );
+    assert.equal(notices.length, 1, "exactly one notice publication");
+    assert.equal(notices[0]?.seq, 3, "the store assigned the notice seq 3");
+    assert.equal(headType(session), "system/message");
+    assert.deepEqual(noticeNodes(session), [3]);
+    assert.equal(ctx.followupCalls.length, 0, "no model turn was opened");
+
+    session.append("step/end", { turn: 1, step: 1 });
+    session.append("turn/end", { turn: 1, reason: { kind: "completed" } });
+    assert.doesNotThrow(
+      () => host.restore(artifactOf(session), host.knownEventTypes),
+      "the published notice is still a loadable log",
+    );
+    dispose();
+  });
+
+  it("a fresh store-owned chat publishes the notice after the head, never before it", async (t) => {
+    const host = await hostFormat();
+    if (host === null) return t.skip("no installed dsh to publish against");
+
+    const ctx = createStubCtx();
+    const cordisHost = createCordisDshHost(ctx);
+    const multitask = createMultitask(cordisHost);
+    const lifecycle = bindDispatcherLifecycle(ctx, cordisHost, multitask, {
+      policyEnabled: false,
+    });
+    const { session, live, dispose } = newStoreSession(
+      host,
+      ctx,
+      "sess-live-fresh",
+    );
+
+    const parent: AgentLike = {
+      session: session as unknown as AgentLike["session"],
+      followup() {},
+    };
+    assert.deepEqual(lifecycle.activate(parent), { ok: true });
+    assert.equal(session.surface.nodes.length, 0, "nothing on the fresh surface");
+    assert.equal(live.length, 0, "the store published nothing at activation");
+    assert.equal(ctx.followupCalls.length, 0);
+
+    // The loop's first step: head, then the user's prompt. The deferral's
+    // microtask runs after this synchronous preamble.
+    session.append("turn/start", { turn: 1 });
+    session.append("step/start", { turn: 1, step: 1 });
+    session.append(
+      "system/message",
+      { turn: 1, step: 1, message: host.createSystemMessage("rendered") },
+      { surfaceOp: "append" },
+    );
+    session.append(
+      "user/message",
+      host.createUserMessage({
+        content: [{ type: "text", text: "first prompt" }],
+        source: { kind: "user" },
+      }),
+      { surfaceOp: "append" },
+    );
+    await flushMicrotasks();
+
+    // THE point: the store itself published the notice; the client stream is
+    // not missing a notification, it simply had no row to send until now.
+    const notices = live.filter(
+      (event) => event.type === "user/message" && event.surfaceOp === "append",
+    );
+    assert.equal(notices.length, 2, "the prompt and the notice both published");
+    assert.equal(notices[1]?.seq, 4, "the notice is published after the head");
+    assert.equal(headType(session), "system/message");
+    assert.deepEqual(noticeNodes(session), [4]);
+    assert.equal(ctx.followupCalls.length, 0);
+
+    session.append("step/end", { turn: 1, step: 1 });
+    session.append("turn/end", { turn: 1, reason: { kind: "completed" } });
+    assert.doesNotThrow(
+      () => host.restore(artifactOf(session), host.knownEventTypes),
+      "the live-published log still loads",
+    );
+    dispose();
+  });
+
+  it("a queued restart notice joins the activation notice after the first user turn, and the log loads", async (t) => {
+    const host = await hostFormat();
+    if (host === null) return t.skip("no installed dsh to validate against");
+
+    const ctx = createStubCtx();
+    const cordisHost = createCordisDshHost(ctx);
+    const multitask = createMultitask(cordisHost);
+    const lifecycle = bindDispatcherLifecycle(ctx, cordisHost, multitask);
+
+    const session = newSession(host, "sess-31-restart-queue");
+    const parent: AgentLike = {
+      session: session as unknown as AgentLike["session"],
+      followup() {
+        throw new Error("the restart notice must never open a turn");
+      },
+    };
+    assert.deepEqual(lifecycle.activate(parent), { ok: true });
+    lifecycle.queueNotice(session.id, RESTART_DEGRADED_NOTICE);
+
+    // Both notices are queued: the fresh surface stays empty, and neither one
+    // has woken the agent or written anything.
+    assert.equal(session.surface.nodes.length, 0, "nothing is surface head");
+    assert.equal(ctx.appendCalls.length, 0, "nothing before the first user turn");
+    assert.equal(ctx.followupCalls.length, 0, "queueing never opens a turn");
+
+    // The loop commits the protected system head and the user's own prompt.
+    firstStep(host, session, ctx, "first prompt");
+    await flushMicrotasks();
+    endStep(session, ctx);
+
+    assert.equal(headType(session), "system/message", "system stays node 0");
+    const seqs = noticeNodes(session);
+    assert.equal(seqs.length, 2, "activation and restart notices both land once");
+    const textOfNotice = (seq: number): string => {
+      const data = session.eventAt(seq)?.data as {
+        content?: Array<{ text?: string }>;
+      };
+      return (data.content ?? []).map((block) => block.text ?? "").join("");
+    };
+    assert.ok(
+      textOfNotice(seqs[0] ?? -1).includes(DISPATCHER_START_SUCCESS),
+      "the activation notice comes first",
+    );
+    assert.ok(
+      textOfNotice(seqs[1] ?? -1).includes(RESTART_DEGRADED_NOTICE),
+      "the restart notice follows the user's turn",
+    );
+    const restartData = session.eventAt(seqs[1] ?? -1)?.data as {
+      source?: { form?: unknown; summary?: unknown };
+    };
+    assert.equal(restartData.source?.form, "notice");
+    assert.equal(restartData.source?.summary, RESTART_NOTICE_SUMMARY);
+    assert.equal(ctx.followupCalls.length, 0, "neither notice woke a turn");
+
+    // The load path: the host's own validator over the real log, with both
+    // notices after the protected head.
+    assert.doesNotThrow(
+      () => host.restore(artifactOf(session), host.knownEventTypes),
+      "a log carrying both queued notices must load",
+    );
   });
 });
 

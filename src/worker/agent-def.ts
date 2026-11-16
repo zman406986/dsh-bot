@@ -1,4 +1,3 @@
-import { REPLY_TO_DISPATCHER_TOOL } from "../core/tools.js";
 import { buildWorkerSystemPrompt, type WorkerPromptLanguage } from "./prompt.js";
 import {
   buildWorkerToolFilter,
@@ -6,24 +5,17 @@ import {
 } from "./tool-barrier.js";
 
 /**
- * Tools that exist ONLY on a worker's own scoped surface (ticket 122 /
- * ADR-0028), declared here so the composition seam and the barrier agree on
- * one list without hard-coded names.
- *
- * These are worker-only, not dispatcher-only: they are registered on the
- * child's scope (the inverse of how dispatcher tools register on the
- * activated agent's scope), and the barrier must never deny them. A worker
- * using one can reach exactly one address — its owning dispatcher — because
- * the handler derives that address from the roster record.
- */
-export const WORKER_LOCAL_TOOL_NAMES = [REPLY_TO_DISPATCHER_TOOL] as const;
-
-/**
  * Worker agent type: composition of (contract persona + tool barrier + leaf
- * delegation budget). The persona and barrier are declared by the
- * `multitask-worker` Agent Preset (`src/worker/preset.ts`); this definition
- * is the offline seam that names the preset and carries its inputs.
- * Not a host registry object.
+ * delegation budget). The persona and barrier are applied per child by the
+ * composition seam (`src/worker/preset.ts`); this definition is the offline
+ * seam that names the preset and carries its inputs. Not a host registry
+ * object.
+ *
+ * The worker carries NO plugin-local tool of its own (stock-subagent
+ * refactor): its interim steer to the dispatcher is the stock `send_message`,
+ * and its report is the closing answer the stock completion notice carries.
+ * The only worker-scoped registrations left are the dynamic recall tools
+ * (ticket 145), built per child by `plugin.ts`.
  */
 export interface WorkerAgentDef {
   /**

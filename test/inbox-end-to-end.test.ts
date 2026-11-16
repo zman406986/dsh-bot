@@ -89,6 +89,36 @@ async function pollUntil(
   }
 }
 
+/**
+ * A resumed worker's composition probe. `check_workers` is retired, but the
+ * reclaim path still composes the child (persona section + tool barrier), so
+ * the test can wait for the SAME observable without a roster tool: the host
+ * applies composition before it reclaims the unknown-state hold.
+ */
+function workerCompositionProbe(): {
+  ctx: NonNullable<AgentLike["ctx"]>;
+  applied(): boolean;
+} {
+  let sections = 0;
+  return {
+    ctx: {
+      systemPrompt: {
+        section() {
+          sections += 1;
+          return () => {};
+        },
+        getSectionOrder: () => 0,
+      },
+      tools: {
+        schemas: () => [{ name: "deliver_result" }],
+        restrict: () => () => {},
+        register: () => () => {},
+      },
+    } as NonNullable<AgentLike["ctx"]>,
+    applied: () => sections > 0,
+  };
+}
+
 interface TestAgent extends AgentLike {
   /** Narrow the base view's opaque `id` to the string this fixture mints. */
   readonly session: AgentLike["session"] & { readonly id: string };
@@ -594,47 +624,98 @@ describe("inbox end to end — the full pipeline (ticket 113, ADR-0023)", () => 
   it("a worker error still writes the honest failed status and closes the checkpoint", async () => {
     const parent = await mkdtemp(join(tmpdir(), "dsh-inbox-failed-"));
     const root = join(parent, "inbox");
+    const jobDir = join(root, "job-err");
     const shared = createSharedTables();
     const ctx = createInboxCtx(shared);
     try {
-      pluginApply(ctx as never, volatileConfig({
-        enabled: true,
-        inboxEnabled: true,
-        inboxDir: root,
-        inboxRescanIntervalMs: 1000,
-      }));
+      // The worker whose error must close the job. `spawn_worker` is retired,
+      // so the setup uses the restart-side core seam instead: a live-at-crash
+      // marker linked to the presented inbox job is rebuilt as a hold, then
+      // reclaimed when the host announces the resumed child. That is the same
+      // worker record a stock spawn would establish, with the inbox link.
+      await mkdir(jobDir, { recursive: true });
+      await writeFile(
+        join(jobDir, "status.json"),
+        JSON.stringify({ jobId: "job-err", status: "claimed", claimedAt: 1_000 }) +
+          "\n",
+        "utf8",
+      );
+      shared.tables.set(
+        MARKER_TABLE_NAME,
+        new Map<string, unknown>([
+          [
+            "w-err",
+            {
+              workerId: "w-err",
+              parentSessionId: "s-1",
+              streamKey: "err",
+              title: "Widget worker",
+              status: "running",
+              transcriptRef: null,
+              todoId: "todo-err",
+              external: { kind: "inbox", jobId: "job-err", jobDir },
+              startedAtMs: 1_000,
+              updatedAtMs: 2_000,
+            },
+          ],
+        ]),
+      );
+      shared.tables.set(
+        WORKER_SESSION_TABLE_NAME,
+        new Map<string, unknown>([
+          ["w-err", { sessionId: "w-err", parentSessionId: "s-1" }],
+        ]),
+      );
+      // Intake is off: only the durable link drives the terminal write.
+      pluginApply(ctx as never, volatileConfig({ enabled: true }));
       const agent = createAgent("s-1");
       ctx.bindAgent(agent as never);
       ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
       await flushActivation();
-      await pollUntil(() => dirExists(root));
 
-      await writeQueue(root, [
-        JSON.stringify({ jobId: "job-err", text: "Build the widget" }),
-      ]);
-      await pollUntil(async () => {
-        const checkpoint = readCheckpoints(shared).get("job-err");
-        return checkpoint?.state === "presented";
+      // Seed the presented checkpoint AFTER activation: the boot rescan must
+      // not try to re-present it (there is no queue line to resolve). The
+      // resolution writer updates this row when the worker errors.
+      let inboxTable = shared.tables.get(INBOX_TABLE_NAME);
+      if (inboxTable === undefined) {
+        inboxTable = new Map<string, unknown>();
+        shared.tables.set(INBOX_TABLE_NAME, inboxTable);
+      }
+      inboxTable.set("job-err", {
+        jobId: "job-err",
+        state: "presented",
+        jobDir,
+        sessionId: "s-1",
+        todoId: "todo-err",
+        claimedAtMs: 1_000,
+        presentedAtMs: 2_000,
+        endedAtMs: null,
+        presentAttempts: 1,
       });
-      const presented = readCheckpoints(shared).get("job-err");
-      assert.ok(presented?.todoId, "the checkpoint carries the todo id");
+
+      // Announce the resumed child; composition is applied before reclaim.
+      const probe = workerCompositionProbe();
+      const worker: AgentLike = {
+        session: {
+          id: "w-err",
+          header: {
+            parentSession: "s-1",
+            delegationDepth: 1,
+            origin: "subagent",
+          },
+        },
+        followup() {},
+        inject() {},
+        ctx: probe.ctx,
+      };
+      ctx.bindAgent(worker as AgentLike & { session: { id: string } });
+      ctx.fire("agent/created", { agent: worker, source: "resume" });
+      await pollUntil(() => probe.applied());
 
       // No delivery channel exists, but a worker ERROR is a terminal path the
       // reply writer owns: status.json {status:"failed"} + closed checkpoint.
-      const spawn = agent.scopedTool("spawn_worker");
-      assert.ok(spawn);
-      const spawned = (await spawn.execute(
-        {
-          stream_key: "err",
-          title: "Widget worker",
-          prompt: "Do it",
-          todo_id: presented.todoId,
-        },
-        { agent: { session: { id: "s-1" } } },
-      )) as { ok: boolean; worker_id: string };
-      assert.equal(spawned.ok, true);
       ctx.fire("subagent/end", {
-        id: spawned.worker_id,
+        id: "w-err",
         stopReason: "error",
         lastAssistantMessage: [{ type: "text", text: "boom" }],
       });
@@ -643,11 +724,11 @@ describe("inbox end to end — the full pipeline (ticket 113, ADR-0023)", () => 
         const checkpoint = readCheckpoints(shared).get("job-err");
         return checkpoint?.state === "failed";
       });
-      const status = await readStatus(join(root, "job-err"));
+      const status = await readStatus(jobDir);
       assert.equal(status.status, "failed");
       assert.equal(status.error, "boom");
       await assert.rejects(
-        readFile(join(root, "job-err", "reply.md"), "utf8"),
+        readFile(join(jobDir, "reply.md"), "utf8"),
         "the failed path writes no reply.md",
       );
       const terminal = readCheckpoints(shared).get("job-err");
@@ -729,30 +810,27 @@ describe("inbox end to end — the full pipeline (ticket 113, ADR-0023)", () => 
       ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
       await flushActivation();
 
+      const probe = workerCompositionProbe();
       const worker: AgentLike = {
         session: {
           id: "w-nowhere",
-          header: { parentSession: "s-1", delegationDepth: 1 },
+          header: {
+            parentSession: "s-1",
+            delegationDepth: 1,
+            origin: "subagent",
+          },
         },
         followup() {},
         inject() {},
+        ctx: probe.ctx,
       };
       ctx.bindAgent(worker as AgentLike & { session: { id: string } });
       ctx.fire("agent/created", { agent: worker, source: "resume" });
       await flushActivation();
       // Adoption + reclaim are async (the worker-session row round-trip).
-      // Wait for the live roster entry before firing its terminal settle;
-      // `check_workers` is the plugin's own observable view.
-      await pollUntil(async () => {
-        const check = agent.scopedTool("check_workers");
-        if (check === undefined) return false;
-        const roster = (await check.execute({})) as {
-          rows?: Array<{ worker_id?: string }>;
-        };
-        return (roster.rows ?? []).some(
-          (row) => row.worker_id === "w-nowhere",
-        );
-      });
+      // Composition lands immediately before the reclaim, so it is the kept
+      // replacement for the retired `check_workers` roster poll.
+      await pollUntil(() => probe.applied());
 
       const warnings: string[] = [];
       const originalWarn = console.warn;

@@ -33,7 +33,7 @@ An optional named group a dispatcher can address instead of one agent; 1:1 messa
 _Avoid_: group chat, broadcast channel
 
 **Mid-task reply**:
-A worker's message to its own dispatcher sent before the worker finishes, separate from its final answer; shipped as the worker-only `reply_to_dispatcher` tool (ADR-0028).
+A worker's message to its own dispatcher sent before the worker finishes, separate from its final answer; it rides the stock `send_message` child → parent relay, the worker-only `reply_to_dispatcher` tool having retired with the stock-subagent swap (2026-11-16). ADR-0028 is the rationale, not the surface.
 _Avoid_: partial result, progress ping
 
 **Compaction boundary**:

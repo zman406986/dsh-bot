@@ -1,16 +1,22 @@
 import type { Multitask } from "../core/multitask.js";
+import { isTerminalStatus } from "../core/types.js";
 import {
   assembleSessionPolicy,
   assembleTurnReminder,
   buildPeerRosterSnapshot,
 } from "../core/policy/assembler.js";
-import { textBlocks } from "./content-blocks.js";
+import {
+  blocksToText,
+  textBlocks,
+  type ContentBlock,
+} from "./content-blocks.js";
 import type { AdapterContext, AgentLike, CordisDshHost } from "./cordis-dsh-host.js";
 import {
-  activationNoticeMessage,
+  noticeMessage,
   WAKE_SOURCE_KIND,
   wakeUserMessage,
 } from "./wake-copy.js";
+import { RESTART_NOTICE_SUMMARY } from "./restart-notice.js";
 import {
   ACTIVATION_NOTICE_SUMMARY,
   DISPATCHER_START_SUCCESS,
@@ -137,6 +143,90 @@ function isCommittedProducerMessage(event: TranscriptEventLike): boolean {
     return false;
   }
   return record.source.kind === WAKE_SOURCE_KIND;
+}
+
+/**
+ * Why a team leader's episode ended — the `kind` of its latest `turn/end`
+ * (`TurnEndReason.kind` in the host session log). `completed` is the only
+ * successful kind; `error`, `aborted`, `max-tokens` and `interrupted` are
+ * non-completed. The host's `blocked` and `forked` variants are carried
+ * through rather than folded into a guess.
+ */
+export type TeamLeaderStopReason =
+  | "completed"
+  | "error"
+  | "aborted"
+  | "max-tokens"
+  | "interrupted"
+  | "blocked"
+  | "forked";
+
+/** The kinds a `turn/end` may name; anything else is not stored. */
+const TEAM_LEADER_STOP_REASONS: ReadonlySet<string> = new Set([
+  "completed",
+  "error",
+  "aborted",
+  "max-tokens",
+  "interrupted",
+  "blocked",
+  "forked",
+]);
+
+/**
+ * One idle episode of a SPAWNED team leader, as the observer sealed it: the
+ * last non-empty assistant text it wrote, the kind of its latest `turn/end`
+ * (`null` when this process observed none for the session), that turn's
+ * sequence, and whether the leader still owes an undelivered ledger item.
+ */
+export interface TeamLeaderIdleSignal {
+  readonly text: string;
+  readonly stopReason: TeamLeaderStopReason | null;
+  /**
+   * Lane C3: monotonically increasing per-session `turn/end` sequence — the
+   * host's durable `event.seq` when it is numeric, else the previous observed
+   * value + 1. It makes a stop line sendable exactly once per turn even when
+   * the assistant text did not change. Optional so a caller that drives the
+   * seam directly (tests, a host without seqs) stays valid; the pusher treats
+   * absence as 0.
+   */
+  readonly stopSeq?: number;
+  /**
+   * Lane C3: the leader's own ledger still holds an undelivered
+   * `pending`/`in_progress` item, so this idle is an INTERIM checkpoint, not
+   * the final answer. Optional; absence means "no open obligation" (final).
+   */
+  readonly obligationsOpen?: boolean;
+}
+
+/**
+ * Text of one committed `assistant/message`: `data.message.content` is the
+ * `ContentBlock[]`, joined by {@link blocksToText}. Empty for an unreadable
+ * payload or a tool-call-only / usage-only step — the caller keeps the older
+ * answer in that case (the host's own last-non-empty rule).
+ */
+function assistantMessageText(event: TranscriptEventLike): string {
+  const data = event.data;
+  if (typeof data !== "object" || data === null) return "";
+  const message = (data as { readonly message?: unknown }).message;
+  if (typeof message !== "object" || message === null) return "";
+  const content = (message as { readonly content?: unknown }).content;
+  if (!Array.isArray(content)) return "";
+  return blocksToText(content as readonly ContentBlock[]);
+}
+
+/** `turn/end`'s `data.reason.kind`, or null for any other shape. */
+function turnEndStopReason(
+  event: TranscriptEventLike,
+): TeamLeaderStopReason | null {
+  const data = event.data;
+  if (typeof data !== "object" || data === null) return null;
+  const reason = (data as { readonly reason?: unknown }).reason;
+  if (typeof reason !== "object" || reason === null) return null;
+  const kind = (reason as { readonly kind?: unknown }).kind;
+  if (typeof kind !== "string" || !TEAM_LEADER_STOP_REASONS.has(kind)) {
+    return null;
+  }
+  return kind as TeamLeaderStopReason;
 }
 
 /**
@@ -468,12 +558,111 @@ function tryWake(agent: AgentLike, text: string): void {
 }
 
 /**
- * Ticket 298: activated agents whose confirmation notice is WAITING for the
- * loop to commit a system head (a WeakSet, so a disposed agent cannot be kept
- * alive or flushed late). Cleared on flush, on deactivation, and structurally
- * when the agent is collected.
+ * One visible notice waiting for a legal surface append.
+ *
+ * Ticket 295/298 decided the shape and the head constraint for the activation
+ * confirmation. The restart-honesty notice (ticket 31) uses the same visible
+ * write but must NEVER open a turn; it waits for the first REAL user message
+ * after its activation, then appends inside that user's turn. Both kinds share
+ * one FIFO per agent, so a younger notice can never overtake an older one.
  */
-const pendingActivationNotices = new WeakSet<AgentLike>();
+interface PendingNotice {
+  readonly text: string;
+  readonly summary: string;
+  readonly idPrefix: string;
+  /**
+   * Real-user-message epoch that must be observed before this notice may
+   * append; `null` means no user gate (the activation confirmation).
+   */
+  readonly requiredUserEpoch: number | null;
+}
+
+/** Per-agent notice FIFO; a WeakMap keeps a disposed agent collectible. */
+const pendingNotices = new WeakMap<AgentLike, PendingNotice[]>();
+
+/** Committed real user messages seen per agent. */
+const realUserMessageEpoch = new WeakMap<AgentLike, number>();
+
+function enqueueNotice(agent: AgentLike, notice: PendingNotice): void {
+  const queue = pendingNotices.get(agent);
+  if (queue === undefined) {
+    pendingNotices.set(agent, [notice]);
+  } else {
+    queue.push(notice);
+  }
+  // Outside a publication boundary: an already-open gate may write now, which
+  // keeps the headed-surface activation notice immediate (ticket 295).
+  tryFlushNotices(agent, false);
+}
+
+/**
+ * Append every notice whose gate is open, in FIFO order.
+ *
+ * Head-of-line blocking is deliberate: when the oldest notice still needs a
+ * real user message, a younger ungated notice must not jump over it. The head
+ * check and the pop happen before the microtask, so a second publication in the
+ * same turn cannot append the same notice twice.
+ */
+function tryFlushNotices(agent: AgentLike, defer: boolean): void {
+  const queue = pendingNotices.get(agent);
+  if (queue === undefined || queue.length === 0) return;
+  // TICKET 298 (P1): a notice appended to an EMPTY surface becomes node 0, and
+  // the loop's `system/message` — committed at the start of the first step —
+  // then fails the format validator on the NEXT load ("system/message requires
+  // a protected first surface head"), i.e. the session log is unloadable. So
+  // the head decides: an empty readable surface WAITS for that commit; a
+  // surface already headed by a system message takes the notice now; an
+  // unreadable surface (structural stub) keeps the pre-298 best-effort append.
+  if (surfaceHeadState(agent) === "empty") return;
+  const seen = realUserMessageEpoch.get(agent) ?? 0;
+  while (queue.length > 0) {
+    const next = queue[0];
+    if (next === undefined) break;
+    if (next.requiredUserEpoch !== null && seen < next.requiredUserEpoch) {
+      break;
+    }
+    queue.shift();
+    // The host refuses an append reentered from inside its own publication
+    // boundary ("session append cannot reenter while another append is being
+    // published", `dsh-session/lib/index.js:1580`). The event listener therefore
+    // defers one microtask; the activation path, which is outside a
+    // publication, may write immediately. The pop above keeps the write
+    // one-shot even if another publication arrives first.
+    if (defer) {
+      queueMicrotask(() => {
+        appendNotice(agent, next);
+      });
+    } else {
+      appendNotice(agent, next);
+    }
+  }
+  if (queue.length === 0) pendingNotices.delete(agent);
+}
+
+/**
+ * The one surface write. Best-effort by construction: a session without the
+ * seam, a throwing append, or a rejected promise leaves the command card as
+ * the only confirmation — never a faked wake.
+ */
+function appendNotice(agent: AgentLike, notice: PendingNotice): void {
+  const append = agent.session.append;
+  if (typeof append !== "function") return;
+  try {
+    const event = append.call(
+      agent.session,
+      "user/message",
+      noticeMessage(notice.idPrefix, notice.text, notice.summary),
+      { surfaceOp: "append" },
+    );
+    // A structural stub may answer with a promise; own it so a rejection can
+    // never surface as fatal (the append is best-effort).
+    void Promise.resolve(event).catch(() => {
+      // Visible notice is best-effort; never break activation on it.
+    });
+  } catch {
+    // Visible notice is best-effort; never break activation on it.
+  }
+}
 
 /**
  * Ticket 295: put the activation confirmation on the session's VISIBLE
@@ -489,71 +678,20 @@ const pendingActivationNotices = new WeakSet<AgentLike>();
  * (`dsh-client-ui-chat/lib/client.js:8489` collapses any text without a
  * newline).
  *
- * Best-effort by construction: a session without the seam keeps the pre-295
- * behavior (the command card only) rather than faking a wake.
- *
  * Ticket 298 adds the one legality constraint this write has: it must never be
  * the surface HEAD (see {@link surfaceHeadState}), so on a fresh chat it waits
  * for the loop's system-message commit. The user-visible cost is a DELAY: the
  * confirmation row appears when the first turn starts, after the user's own
- * message, not at the instant `/dsh-bot` returns (the command card is still
- * immediate). A chat that never runs a turn after activation therefore keeps
- * the card as its only confirmation.
+ * message, not at the instant `/dsh-bot` returns. (The command card is still
+ * written immediately; on a brand-new chat the host's blank-screen state hides
+ * the conversation until the first turn — a host issue, not this queue.)
  */
 function tryActivationNotice(agent: AgentLike): void {
-  // TICKET 298 (P1): a notice appended to an EMPTY surface becomes node 0, and
-  // the loop's `system/message` — committed at the start of the first step —
-  // then fails the format validator on the NEXT load ("system/message requires
-  // a protected first surface head"), i.e. the session log is unloadable. So
-  // the head decides: an empty readable surface DEFERS the notice until that
-  // commit; a surface already headed by a system message takes it now; an
-  // unreadable surface (structural stub) keeps the pre-298 best-effort append.
-  if (surfaceHeadState(agent) === "empty") {
-    pendingActivationNotices.add(agent);
-    return;
-  }
-  appendActivationNotice(agent);
-}
-
-/**
- * The one append. Best-effort by construction: a session without the seam, a
- * throwing append, or a rejected promise leaves the command card as the only
- * confirmation — never a faked wake.
- */
-function appendActivationNotice(agent: AgentLike): void {
-  const append = agent.session.append;
-  if (typeof append !== "function") return;
-  try {
-    const event = append.call(
-      agent.session,
-      "user/message",
-      activationNoticeMessage(DISPATCHER_START_SUCCESS, ACTIVATION_NOTICE_SUMMARY),
-      { surfaceOp: "append" },
-    );
-    // A structural stub may answer with a promise; own it so a rejection can
-    // never surface as fatal (the append is best-effort).
-    void Promise.resolve(event).catch(() => {
-      // Visible confirmation is best-effort; never break activation on it.
-    });
-  } catch {
-    // Visible confirmation is best-effort; never break activation on it.
-  }
-}
-
-/**
- * Flush one deferred notice, EXACTLY once (ticket 298).
- *
- * The append is deferred by a microtask on purpose: the host refuses an append
- * reentered from inside its own publication boundary ("session append cannot
- * reenter while another append is being published",
- * `dsh-session/lib/index.js:1580`), and the flush is triggered by the
- * `session/event` publication of the system message. Dropping the pending
- * entry first makes a second system commit in the same turn a no-op.
- */
-function flushActivationNotice(agent: AgentLike): void {
-  if (!pendingActivationNotices.delete(agent)) return;
-  queueMicrotask(() => {
-    appendActivationNotice(agent);
+  enqueueNotice(agent, {
+    text: DISPATCHER_START_SUCCESS,
+    summary: ACTIVATION_NOTICE_SUMMARY,
+    idPrefix: "multitask-activation-notice",
+    requiredUserEpoch: null,
   });
 }
 
@@ -633,10 +771,21 @@ export interface BindDispatcherLifecycleResult {
     options?: DispatcherActivationOptions,
   ): ActivationOutcome;
   /**
+   * Queue a visible `form: "notice"` message on ONE activated dispatcher chat
+   * WITHOUT opening a turn. It is appended only after the first REAL user
+   * message following this activation (and never on an empty surface, ticket
+   * 298), so it rides that user's turn instead of waking the dispatcher. The
+   * default `summary` is the restart-honesty one; pass another for a
+   * different notice kind. No-op when the session is not an activated
+   * dispatcher.
+   */
+  queueNotice(sessionId: string, text: string, summary?: string): void;
+  /**
    * Best-effort one-shot **waking** delivery into ONE activated dispatcher
    * chat (ticket 57, register D-4): opens a recovery turn rather than
-   * waiting for one. Used at activation for that session's restart-honesty
-   * notice. No-op when the session is not an activated dispatcher.
+   * waiting for one. Kept as an explicit opt-in primitive; the activation
+   * restart-honesty path uses {@link queueNotice} instead so it never opens a
+   * turn. No-op when the session is not an activated dispatcher.
    *
    * Named for activation, not boot: activation is our only trigger today
    * (ADR-0009). If ADR-0016 is signed into a boot hook, that hook calls this
@@ -749,6 +898,23 @@ export interface BindDispatcherLifecycleOptions {
    * answers null and renders its id, exactly as before.
    */
   readonly peerLabelOf?: (session: unknown) => string | null;
+  /**
+   * Team-leader last-answer seam (observe only). Fired when a session whose
+   * policy class is `spawned` goes idle with no live worker, no busy turn and
+   * no wake queued — its turn is over and nothing else will open one. Carries
+   * the leader's last non-empty assistant text, its latest `turn/end` kind and
+   * sequence, and whether the leader's ledger still holds an undelivered
+   * obligation (interim vs final); never called with empty text, and never for
+   * a `user`-class dispatcher.
+   *
+   * The adapter deliberately stops here: peer sending, per-episode dedupe and
+   * the message body are the caller's (the peer lane reuses its own envelope).
+   * Optional; the default is a no-op, so an unbound caller observes nothing.
+   */
+  readonly onTeamLeaderIdle?: (
+    sessionId: string,
+    signal: TeamLeaderIdleSignal,
+  ) => void;
 }
 
 /**
@@ -784,12 +950,20 @@ export function bindDispatcherLifecycle(
   const onActivated = options?.onActivated;
   const onDeactivated = options?.onDeactivated;
   const peerLabelOf = options?.peerLabelOf;
+  const onTeamLeaderIdle = options?.onTeamLeaderIdle;
   /**
    * Activated dispatcher sessions: insertion-ordered sessionId → live agent.
    * The LAST entry is the most recently activated session (the map-of-one
    * compatibility slot).
    */
   const sessions = new Map<string, AgentLike>();
+  /**
+   * Real-user-message epoch captured when THIS activation bound. A queued
+   * restart notice requires a later message, so a restart on a chat that
+   * already had user turns still waits for the next real prompt instead of
+   * appending during activation. Deleted with the activation.
+   */
+  const activationUserMessageEpoch = new Map<string, number>();
   /**
    * Activation generation per session (ticket 90, F2): monotonic, never
    * reused, stamped at activation. The entry survives deactivation so the
@@ -834,6 +1008,28 @@ export function bindDispatcherLifecycle(
    * a stale class (ADR-0034 Consequences).
    */
   const origins = new Map<string, DispatcherOrigin>();
+  /**
+   * Team-leader episode state, per session (the last-answer seam's source).
+   *
+   * `leaderLastText` holds the last NON-EMPTY assistant text the leader wrote:
+   * a tool-call-only or usage-only step commits an `assistant/message` too, and
+   * it must not erase the earlier answer. `leaderStopReasons` holds the kind of
+   * the leader's latest `turn/end` — `completed` is the only successful one.
+   *
+   * Both are activation-scoped like `origins`: a later activation starts a new
+   * episode, and a stale answer must never be pushed as the new one's. They are
+   * process-local by design — after a cold resume nothing here is known, so no
+   * push is invented until the leader writes again.
+   */
+  const leaderLastText = new Map<string, string>();
+  const leaderStopReasons = new Map<string, TeamLeaderStopReason>();
+  /**
+   * Lane C3: the last `turn/end` sequence observed per leader. The host's
+   * `event.seq` is the source when numeric; a host (or stub) that does not
+   * stamp one gets a process-local counter so the sequence stays monotonic.
+   * Activation-scoped like the two maps above.
+   */
+  const leaderStopSeqs = new Map<string, number>();
   let activationSeq = 0;
   let unbound = false;
   const disposers: Array<() => void> = [];
@@ -869,14 +1065,21 @@ export function bindDispatcherLifecycle(
     const boundAgent = sessions.get(sessionId);
     sessions.delete(sessionId);
     policyInjectInFlight.delete(sessionId);
-    // Ticket 298: a notice still waiting for the system head dies with the
-    // activation — a later session must not inherit it.
-    if (boundAgent !== undefined) pendingActivationNotices.delete(boundAgent);
+    activationUserMessageEpoch.delete(sessionId);
+    // Ticket 298 / restart queue: notices still waiting for their gate die
+    // with the activation — a later session must not inherit them.
+    if (boundAgent !== undefined) {
+      pendingNotices.delete(boundAgent);
+      realUserMessageEpoch.delete(boundAgent);
+    }
     // Ticket 155: `spawnTitles` is NOT dropped here — the title is a property
     // of the session ID, exactly like `generations`, so a peer that is
     // deactivated and later re-activated keeps the label its peers render.
     // (Only `origins` belongs to one activation: ADR-0034 decision 1.)
     origins.delete(sessionId);
+    leaderLastText.delete(sessionId);
+    leaderStopReasons.delete(sessionId);
+    leaderStopSeqs.delete(sessionId);
     // Defect fix (a disposed dispatcher stayed busy): an activation also ends
     // any turn it owned. `cancelTurn`, not `noteTurnEnded`: the latter flushes
     // pending work and can open a wake turn into the session being destroyed
@@ -904,10 +1107,17 @@ export function bindDispatcherLifecycle(
    *
    * Absence renders nothing on both counts, so an unchanged roster stays
    * byte-identical.
+   *
+   * Visibility is the CORE's shared `multitask.canSeePeer` — the same method
+   * `sendPeer` uses for `message_agent`. There is deliberately no local
+   * ancestry/workspace filter here: the roster and the messaging lane must
+   * never disagree about who exists.
    */
   function peerRosterFor(selfSessionId: string) {
     const candidates = [...sessions.entries()]
-      .filter(([sessionId]) => sessionId !== selfSessionId)
+      .filter(([sessionId]) =>
+        multitask.canSeePeer(selfSessionId, sessionId),
+      )
       .map(([sessionId, peerAgent]) => {
         const tool = host.peerToolActivity(sessionId);
         return {
@@ -931,6 +1141,45 @@ export function bindDispatcherLifecycle(
       // A label is prompt garnish; a broken read must never break the turn.
       return null;
     }
+  }
+
+  /**
+   * The team-leader last-answer gate, evaluated at the END of an idle branch
+   * (see the call site for why after `redriveUndelivered`/`noteTurnEnded`).
+   *
+   * Four conditions, all existing reads: the class is `spawned` (never push
+   * upward from a user-started dispatcher), the core roster has no worker in a
+   * non-terminal state, the bus is not busy, and no wake is queued. A queued
+   * wake means another turn is already coming, and that turn's answer is the
+   * one worth pushing; this turn stays silent and a later idle can push.
+   */
+  function notifyTeamLeaderIdle(sessionId: string): void {
+    if (onTeamLeaderIdle === undefined) return;
+    if (origins.get(sessionId) !== "spawned") return;
+    const liveWorker = multitask
+      .listWorkers(sessionId)
+      .some((worker) => !isTerminalStatus(worker.status));
+    if (liveWorker) return;
+    if (multitask.wakeBus.isBusy(sessionId)) return;
+    if (multitask.wakeBus.peek(sessionId) !== undefined) return;
+    const text = leaderLastText.get(sessionId);
+    if (text === undefined || text.length === 0) return;
+    // Lane C3: the ledger read that tells the pusher whether this idle is the
+    // final answer or an interim checkpoint (an undelivered pending or
+    // in_progress item is still owed).
+    const obligationsOpen = multitask
+      .listTodos(sessionId)
+      .some(
+        (todo) =>
+          !todo.delivered &&
+          (todo.status === "pending" || todo.status === "in_progress"),
+      );
+    onTeamLeaderIdle(sessionId, {
+      text,
+      stopReason: leaderStopReasons.get(sessionId) ?? null,
+      stopSeq: leaderStopSeqs.get(sessionId) ?? 0,
+      obligationsOpen,
+    });
   }
 
   disposers.push(
@@ -1018,6 +1267,15 @@ export function bindDispatcherLifecycle(
           // the next turn's probe decides from the committed surface.
           policyInjectInFlight.delete(agentSessionId);
           multitask.wakeBus.noteTurnEnded(agentSessionId);
+          // Last, and deliberately last: the redrive pass has already claimed
+          // its wake and `noteTurnEnded` has flushed whatever the turn left
+          // behind, so the bus has settled. `isBusy` is false because this
+          // turn is over, and anything the flush armed sits in `peek` and
+          // suppresses this push. A redrive the leader is about to run IS its
+          // next delivery attempt — pushing this turn's text now would race
+          // that turn, so the later idle (after the redrive turn) is the
+          // honest push point.
+          notifyTeamLeaderIdle(agentSessionId);
         }
         return;
       }
@@ -1057,11 +1315,74 @@ export function bindDispatcherLifecycle(
         if (headSessionId === null) return;
         const waiting = sessions.get(headSessionId);
         if (waiting === undefined) return;
-        if (!pendingActivationNotices.has(waiting)) return;
         // The head must BE that committed system message; anything else means
         // the surface is not (yet) in the shape the validator requires.
         if (surfaceHeadState(waiting) !== "system") return;
-        flushActivationNotice(waiting);
+        tryFlushNotices(waiting, true);
+        return;
+      }
+      if (type === "user/message") {
+        // Ticket 31 / restart queue: only the human's own prompt opens the
+        // notice gate. Plugin notices, injected policy, and agent context are
+        // also user-role messages, but their source kind is not "user".
+        const source = (
+          rawEvent as {
+            readonly data?: {
+              readonly source?: { readonly kind?: unknown };
+            };
+          }
+        ).data?.source;
+        if (source?.kind !== "user") return;
+        const promptSessionId = sessionIdOfRef(sessionRef);
+        if (promptSessionId === null) return;
+        const waiting = sessions.get(promptSessionId);
+        if (waiting === undefined) return;
+        realUserMessageEpoch.set(
+          waiting,
+          (realUserMessageEpoch.get(waiting) ?? 0) + 1,
+        );
+        tryFlushNotices(waiting, true);
+        return;
+      }
+      // Team-leader last answer. A summoned leader is a TOP-LEVEL session, so
+      // there is no `subagent/end` and no stock last-assistant-message capture:
+      // its own committed `assistant/message` is the only carrier of its text.
+      // Narrow branch, bound dispatcher only — every worker transcript keeps
+      // its existing path. Tool-call-only (or usage-only) steps join to "" and
+      // are dropped, so they never replace the previous real answer.
+      if (type === "assistant/message") {
+        const textSessionId = sessionIdOfRef(sessionRef);
+        if (textSessionId === null || !sessions.has(textSessionId)) return;
+        const text = assistantMessageText(
+          rawEvent as TranscriptEventLike,
+        ).trim();
+        if (text.length === 0) return;
+        leaderLastText.set(textSessionId, text);
+        return;
+      }
+      // Team-leader stop reason. `turn/end` is durable and closes the leader's
+      // own episode; its `data.reason.kind` is the whole observation here. The
+      // host's richer `agent/error` object rides the agent bus, which this
+      // listener never receives — no error detail is invented from it.
+      if (type === "turn/end") {
+        const stopSessionId = sessionIdOfRef(sessionRef);
+        if (stopSessionId === null || !sessions.has(stopSessionId)) return;
+        const stopEvent = rawEvent as TranscriptEventLike;
+        const stopReason = turnEndStopReason(stopEvent);
+        if (stopReason !== null) {
+          leaderStopReasons.set(stopSessionId, stopReason);
+        }
+        // Lane C3: the per-turn identity a stop line dedupes on. The host
+        // stamps `seq`; when it is absent or unreadable, a local counter keeps
+        // the value monotonic for this activation.
+        const observedSeq = stopEvent.seq;
+        const previousSeq = leaderStopSeqs.get(stopSessionId) ?? 0;
+        leaderStopSeqs.set(
+          stopSessionId,
+          typeof observedSeq === "number" && Number.isFinite(observedSeq)
+            ? observedSeq
+            : previousSeq + 1,
+        );
         return;
       }
       if (type !== "compaction/end") {
@@ -1117,6 +1438,12 @@ export function bindDispatcherLifecycle(
     // ADR-0019: another chat being a dispatcher is not a refusal — each
     // session activates independently.
     sessions.set(sessionId, agent);
+    // Ticket 31 / restart queue: the first REAL prompt after this activation
+    // opens the restart-notice gate; messages already in the chat do not.
+    activationUserMessageEpoch.set(
+      sessionId,
+      realUserMessageEpoch.get(agent) ?? 0,
+    );
     // Ticket 175: the class belongs to THIS activation and is dropped with it.
     origins.set(sessionId, origin);
     // Ticket 155: a summoned session has no `subagent.label`, so its spawn
@@ -1217,11 +1544,28 @@ export function bindDispatcherLifecycle(
       return activateSession(agent, options);
     },
 
+    queueNotice(sessionId: string, text: string, summary?: string): void {
+      const agent = sessions.get(sessionId);
+      if (agent === undefined) return;
+      // The gate is the first real prompt AFTER this activation. A chat that
+      // already had user turns still waits for the next one: the restart
+      // notice must never be the reason a turn opens (ticket 57 is superseded
+      // for this notice, deliberately).
+      const activationEpoch =
+        activationUserMessageEpoch.get(sessionId) ??
+        (realUserMessageEpoch.get(agent) ?? 0);
+      enqueueNotice(agent, {
+        text,
+        summary: summary ?? RESTART_NOTICE_SUMMARY,
+        idPrefix: "multitask-restart-notice",
+        requiredUserEpoch: activationEpoch + 1,
+      });
+    },
+
     wakeNotice(sessionId: string, text: string): void {
-      // Ticket 57 (D-4): the recovery notice must OPEN the turn it lands in.
-      // `inject` only queues, so before this fix the notice sat in context
-      // until the user happened to speak next — the chain stalled after a
-      // restart. Waking is what the reference does on boot.
+      // Ticket 57 (D-4): an explicitly requested notice OPENS the turn it
+      // lands in. Retained as an opt-in primitive; the restart-honesty path
+      // uses `queueNotice` above so it can never auto-wake a dispatcher.
       const agent = sessions.get(sessionId);
       if (agent === undefined) return;
       tryWake(agent, text);

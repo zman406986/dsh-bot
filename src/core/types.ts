@@ -95,6 +95,28 @@ export interface SpawnOptions {
 }
 
 /**
+ * Lane A2a: host → core adoption of a child the STOCK `subagent` tool spawned.
+ *
+ * The stock tool starts the child through `ctx.subagents.startActivation`
+ * without a reserved `childId`, so the host learns the identity only at
+ * `agent/created`. By then the child is already live; this request is the one
+ * narrow seam that puts it on the same roster / todo / obligation contract
+ * `spawnWorker` establishes.
+ */
+export interface AdoptSpawnedWorkerRequest {
+  /** The child's session id — the stock runtime's only worker identity. */
+  readonly workerId: string;
+  /** The bound dispatcher session whose child this is. */
+  readonly parentSessionId: string;
+  /**
+   * `subagent.label` read from the child's session projection at
+   * `agent/created`, or null when unreadable/absent. The core falls back to
+   * `Worker <short id>`; it never invents a label.
+   */
+  readonly label?: string | null;
+}
+
+/**
  * Ticket 285: which spawn argument a model value came from. Drives the
  * fallback warning's wording and the tool-result notice.
  */

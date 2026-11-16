@@ -168,9 +168,13 @@ describe("session-kind projection — sessions do not cross-contaminate", () => 
       commandRun("b-1", DISPATCHER_START_COMMAND),
     );
     registry.append("session-b", commandDone("b-1", "success"));
+    // A tool call — the stock spawn verb the model now uses — is not the
+    // activation command, so it never marks a session. Historical
+    // `spawn_worker` rows still render in the client, and the projection
+    // ignores every tool name alike.
     registry.append("session-c", {
       type: "tool/call",
-      data: { name: "spawn_worker" },
+      data: { name: "subagent" },
     });
 
     assert.equal(registry.snapshot("session-a"), DISPATCHER_SESSION_KIND);

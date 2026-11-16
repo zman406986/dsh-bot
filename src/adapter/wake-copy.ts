@@ -139,16 +139,63 @@ export interface WakeUserMessage {
  */
 let wakeMessageSeq = 0;
 
-export function activationNoticeMessage(
+/**
+ * Build one visible `form: "notice"` message. The id prefix distinguishes the
+ * activation confirmation from the restart-honesty notice while both keep the
+ * same producer-owned source (ticket 295 / ticket 298 queue).
+ */
+export function noticeMessage(
+  idPrefix: string,
   text: string,
   summary: string,
 ): WakeUserMessage {
   wakeMessageSeq += 1;
   return {
-    id: `multitask-activation-notice-${Date.now()}-${wakeMessageSeq}`,
+    id: `${idPrefix}-${Date.now()}-${wakeMessageSeq}`,
     role: "user",
     content: textBlocks(text),
     source: { kind: WAKE_SOURCE_KIND, form: "notice", summary },
+  };
+}
+
+/** The /dsh-bot activation confirmation notice (ticket 295). */
+export function activationNoticeMessage(
+  text: string,
+  summary: string,
+): WakeUserMessage {
+  return noticeMessage("multitask-activation-notice", text, summary);
+}
+
+/**
+ * The restart-honesty notice (ticket 31). It rides the same visible surface
+ * write as the activation notice but is queued until the first real user
+ * message after activation, so it never opens a turn of its own.
+ */
+export function restartNoticeMessage(
+  text: string,
+  summary: string,
+): WakeUserMessage {
+  return noticeMessage("multitask-restart-notice", text, summary);
+}
+
+/**
+ * Build the user turn a `/dsh-bot` message argument starts.
+ *
+ * `source.kind: "user"` is the host's own marker for a human prompt
+ * (`dsh-api-session-controller/lib/index.js:4054-4060`): the chat renders it
+ * as the user's message rather than a context/notice row, and the lifecycle's
+ * `user/message` listener counts it as the first real user message that opens
+ * the deferred restart-notice gate (ticket 31). No `form` is declared: a
+ * notice row is a structured context presentation, while this source must
+ * stay an ordinary human message.
+ */
+export function userTurnMessage(text: string): WakeUserMessage {
+  wakeMessageSeq += 1;
+  return {
+    id: `multitask-user-turn-${Date.now()}-${wakeMessageSeq}`,
+    role: "user",
+    content: textBlocks(text),
+    source: { kind: "user" },
   };
 }
 

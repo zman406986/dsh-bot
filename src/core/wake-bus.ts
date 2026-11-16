@@ -192,6 +192,31 @@ export interface WakeBus {
   drain(sessionId: string): WakeEvent | undefined;
   /** Read the ready wake without taking it. */
   peek(sessionId: string): WakeEvent | undefined;
+  /**
+   * Read the background wake this session would deliver next without taking
+   * it: the ready background/redrive batch plus any settle or external job
+   * queued mid-turn, merged into one non-destructive event. Undefined when a
+   * user/peer wake owns the ready slot and nothing background is queued —
+   * those turns do not surface delivery obligations, so they are not a
+   * delivery opportunity. Used by the redrive pass so a settle that is still
+   * queued is charged as its own first chance, never as a missed one.
+   */
+  peekPending(sessionId: string): WakeEvent | undefined;
+  /**
+   * Drop one worker's settled notice from the queued or ready background
+   * batch. Called when its todo is delivered: a settle already queued for a
+   * closed obligation must not open (or re-present in) a later wake.
+   * Returns true when a queued or ready notice was dropped.
+   */
+  dropSettledWorker(sessionId: string, workerId: string): boolean;
+  /**
+   * Drop an owed delivery redrive: clears the owed flag and a ready
+   * redrive-only timer wake (one with no settle/external payload). Called
+   * when the last undelivered obligation closes, so completion cannot be
+   * followed by a redrive turn that has nothing to present. Returns true when
+   * anything was dropped.
+   */
+  dropPendingRedrive(sessionId: string): boolean;
   /** Whether the dispatcher session is mid-turn. */
   isBusy(sessionId: string): boolean;
   /** Owner of the running turn, or null when idle. Fail-closed to user. */
@@ -1061,6 +1086,95 @@ export function createWakeBus(options: WakeBusOptions): WakeBus {
 
     peek(sessionId: string): WakeEvent | undefined {
       return sessions.get(sessionId)?.ready ?? undefined;
+    },
+
+    peekPending(sessionId: string): WakeEvent | undefined {
+      const state = sessions.get(sessionId);
+      if (state === undefined) return undefined;
+      const ready = state.ready;
+      // A ready user/peer wake does not surface worker obligations, so it must
+      // not hide a settle that is still queued behind it.
+      const readyBackground = ready !== null && canJoinBackground(ready.source);
+      const settledWorkers = [
+        ...(readyBackground ? ready.settledWorkers : []),
+        ...state.pending,
+      ];
+      const externalJobs = [
+        ...(readyBackground ? (ready.externalJobs ?? []) : []),
+        ...state.pendingExternalJobs,
+      ];
+      // A redrive-only ready wake has no payload of its own, but it still IS
+      // the paid delivery opportunity and must be reconciled as such.
+      if (
+        readyBackground &&
+        settledWorkers.length === 0 &&
+        externalJobs.length === 0
+      ) {
+        return ready;
+      }
+      if (settledWorkers.length === 0 && externalJobs.length === 0) {
+        return undefined;
+      }
+      return {
+        sessionId,
+        source: sourceFor(settledWorkers, externalJobs),
+        settledWorkers,
+        externalJobs,
+        ...((readyBackground && ready.deliveryRedrive === true) ||
+        state.pendingRedrive
+          ? { deliveryRedrive: true }
+          : {}),
+      };
+    },
+
+    dropSettledWorker(sessionId: string, workerId: string): boolean {
+      const state = sessions.get(sessionId);
+      if (state === undefined) return false;
+      const before = state.pending.length;
+      state.pending = state.pending.filter(
+        (notice) => notice.workerId !== workerId,
+      );
+      let dropped = state.pending.length !== before;
+
+      const ready = state.ready;
+      if (ready !== null && canJoinBackground(ready.source)) {
+        const kept = ready.settledWorkers.filter(
+          (notice) => notice.workerId !== workerId,
+        );
+        if (kept.length !== ready.settledWorkers.length) {
+          dropped = true;
+          const externalJobs = ready.externalJobs ?? [];
+          if (kept.length === 0 && externalJobs.length === 0) {
+            // Nothing left to present. The host may already hold a
+            // notification for this batch; clearing the ready identity at
+            // least stops drain from handing a delivered result back.
+            setReady(state, null);
+            state.pendingOwner = null;
+          } else {
+            state.ready = { ...ready, settledWorkers: kept };
+          }
+        }
+      }
+      return dropped;
+    },
+
+    dropPendingRedrive(sessionId: string): boolean {
+      const state = sessions.get(sessionId);
+      if (state === undefined) return false;
+      let dropped = state.pendingRedrive;
+      state.pendingRedrive = false;
+      const ready = state.ready;
+      if (
+        ready !== null &&
+        ready.source === "timer" &&
+        ready.settledWorkers.length === 0 &&
+        (ready.externalJobs ?? []).length === 0
+      ) {
+        setReady(state, null);
+        state.pendingOwner = null;
+        dropped = true;
+      }
+      return dropped;
     },
 
     isBusy(sessionId: string): boolean {

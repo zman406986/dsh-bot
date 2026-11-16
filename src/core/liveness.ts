@@ -1,11 +1,11 @@
 /**
  * Worker liveness verdict (ticket 61; register A-8, ADR-0018 exception D22).
  *
- * A wedged worker was previously invisible: `check_workers` projects elapsed
- * time, tool-call count, and the latest activity phrase, and a human reads
- * all four and decides. This module derives the verdict the human was making
- * implicitly — `active` / `quiet` / `stalled` — as a PURE function over the
- * fields the check surface already carries, plus the caller's clock.
+ * A wedged worker was previously invisible: the dispatcher roster projects
+ * elapsed time, tool-call count, and the latest activity phrase, and a human
+ * reads all four and decides. This module derives the verdict the human was
+ * making implicitly — `active` / `quiet` / `stalled` — as a PURE function
+ * over the fields the check surface already carries, plus the caller's clock.
  *
  * Deliberately NOT a watchdog (the fidelity audit's §2 stage-4 finding
  * stands): the signal only makes a stalled worker visible; nothing is

@@ -122,14 +122,20 @@ describe("stop semantics", () => {
 
     const workerId = await spawnRunning(host, multitask);
 
-    // Settle first: the completion is delivered through the normal path.
+    // Settle first: the completion reaches the parent through the host's stock
+    // completion notice, and the core records the terminal settle. The plugin's
+    // own settle wake was deleted on purpose (lane V2) — the settle must not
+    // enqueue a second, parent-visible turn.
     host.fireSettled({
       workerId,
       status: "completed",
       report: "all finished",
     });
     assert.equal(multitask.getWorker(workerId)?.status, "completed");
-    assert.deepEqual(host.wakeCalls, ["session-1"]);
+    assert.deepEqual(host.wakeCalls, [], "a settle opens no plugin wake");
+    const settle = multitask.settleRecords.lookup("session-1", workerId);
+    assert.equal(settle?.status, "completed");
+    assert.equal(settle?.resultText, "all finished");
 
     const stopped = await multitask.abortWorker(workerId);
     assert.equal(stopped.ok, false);
@@ -139,10 +145,16 @@ describe("stop semantics", () => {
       "refusal should say the worker may already be done",
     );
 
-    // Refusal does not interrupt and does not undo the delivered completion.
+    // Refusal does not interrupt and does not undo the delivered completion —
+    // and the refusal itself wakes nothing.
     assert.deepEqual(host.interruptCalls, []);
     assert.equal(multitask.getWorker(workerId)?.status, "completed");
-    assert.deepEqual(host.wakeCalls, ["session-1"]);
+    assert.deepEqual(host.wakeCalls, []);
+    assert.equal(
+      multitask.settleRecords.lookup("session-1", workerId)?.status,
+      "completed",
+      "the terminal settle record survives the refused stop",
+    );
   });
 
   it("stopping a worker that has not started yet still aborts it cleanly", async () => {

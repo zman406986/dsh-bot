@@ -1,10 +1,9 @@
 /**
  * Adapter registration of the dispatcher tools (design-16 §3.8; the
- * eight-tool shape after ticket 116 retired `send_peer` in favour of
- * `message_agent`, ticket 117 added `await_agent`, and ticket 118 added
- * `spawn_dispatcher` — every one of them flows through this same path and
- * needs no per-tool wiring, the shared `presentationMeta` projection already
- * covers them).
+ * three-tool shape stock DSH does not cover: `deliver_result`,
+ * `message_agent` and `spawn_dispatcher`. Every one of them flows through
+ * this same path and needs no per-tool wiring, the shared
+ * `presentationMeta` projection already covers them).
  * ADR-0019: registration addresses a tool surface — the plugin passes the
  * ACTIVATED agent's own scoped `ctx.tools` (per-agent visibility: the model
  * only ever sees its own dispatcher's tools) or, when the agent carries no
@@ -38,15 +37,10 @@ import type {
   PolicyLanguage,
 } from "../core/policy/prompts.js";
 import {
-  AWAIT_AGENT_TOOL,
-  CHECK_WORKERS_TOOL,
   DELIVER_RESULT_TOOL,
   MESSAGE_AGENT_TOOL,
   SEND_PEER_TOOL,
   SPAWN_DISPATCHER_TOOL,
-  SPAWN_WORKER_TOOL,
-  STEER_WORKER_TOOL,
-  STOP_WORKER_TOOL,
 } from "../core/policy/prompts.js";
 
 /** Structural tool registration shape (mirrors dsh ToolRuntime.register). */
@@ -83,9 +77,10 @@ export interface RegisterableTool {
 /**
  * The presentation projection attached to every registered dispatcher tool
  * (ticket 81 FINDING 2): the structured result minus the model-facing prose
- * fields. `ack` embeds the entire worker prompt and `summary` embeds the
- * rendered roster table — both already durable in the tool/call arguments or
- * derivable from `rows`, so the meta record stays compact; `note` likewise.
+ * fields. `ack` embedded the entire worker prompt and `summary` the rendered
+ * roster table (both gone with the worker tools); the surviving kept fields
+ * are already durable in the tool/call arguments, and `note` is dropped for
+ * the same reason, so the meta record stays compact.
  * A non-record value passes through unchanged (the host rejects an undefined
  * projection outright, so there is no "absent" answer here).
  */
@@ -126,9 +121,10 @@ function displayString(value: unknown): string | null {
 /**
  * Build one JSON-serializable `display.subject` for a tool result.
  *
- * Only identity the multittask core already holds is read: a worker's title
- * and kind, a todo entry's title, or (for a dispatcher target) the title the
- * call itself carried. Never a prompt, a report, or transcript text.
+ * Only identity the multitask core already holds is read: a worker's title on
+ * `message_agent`'s compatibility branch, a todo entry's title, or (for a
+ * dispatcher target) the title the call itself carried. Never a prompt, a
+ * report, or transcript text.
  *
  * The client parser treats a missing projection as "old transcript" and
  * degrades to a short ref, so an absent answer is safe.
@@ -141,29 +137,7 @@ export function projectDisplaySubject(
 ): ToolviewDisplaySubject | null {
   const argRecord = displayRecord(args);
   const resultRecord = displayRecord(value);
-  const workerSubject = (
-    id: string | null,
-    title?: string | null,
-  ): ToolviewDisplaySubject | null => {
-    if (id === null) return null;
-    const workerTitle = multitask.getWorker(id)?.title ?? title ?? null;
-    return withTitle("worker", id, workerTitle);
-  };
   switch (toolName) {
-    case SPAWN_WORKER_TOOL:
-      return workerSubject(
-        displayString(resultRecord?.worker_id),
-        displayString(resultRecord?.title),
-      );
-    case CHECK_WORKERS_TOOL:
-      return workerSubject(displayString(argRecord?.worker_id));
-    case STEER_WORKER_TOOL:
-    case STOP_WORKER_TOOL:
-      return workerSubject(
-        displayString(resultRecord?.worker_id) ??
-          displayString(argRecord?.worker_id),
-        displayString(resultRecord?.title),
-      );
     case DELIVER_RESULT_TOOL: {
       const todoId =
         displayString(resultRecord?.todo_completed) ??
@@ -187,11 +161,6 @@ export function projectDisplaySubject(
         displayString(resultRecord?.title),
       );
     }
-    case AWAIT_AGENT_TOOL:
-      return workerSubject(
-        displayString(resultRecord?.target) ??
-          displayString(argRecord?.target),
-      );
     case SPAWN_DISPATCHER_TOOL: {
       const dispatcherId = displayString(resultRecord?.dispatcher_id);
       if (dispatcherId === null) return null;
@@ -379,14 +348,13 @@ export function toRegisterableTool(
       if (executeOverride !== undefined) {
         return executeOverride(record, exec);
       }
-      // Ticket 117: the host invokes a registered tool as
+      // The host invokes a registered tool as
       // `tool.execute(exec.arguments, exec)` (`dsh-tools/lib/index.js:3406`,
       // `dispatchToolBody`), where `exec.signal` is the turn's fused
       // cancellation signal. The default path MUST forward that second
-      // argument: `await_agent` reads it via `readExecSignal` to release its
-      // wait on a stopped turn, and `spawn_dispatcher` forwards it into the
-      // host spawn. Every other handler ignores the parameter, so forwarding
-      // is inert for them.
+      // argument: `spawn_dispatcher` reads it via `readExecSignal` and passes
+      // it into the host spawn. Every other handler ignores the parameter, so
+      // forwarding is inert for them.
       return def.execute(record, exec);
     },
   };
@@ -409,8 +377,13 @@ export interface RegisterDispatcherToolsOptions {
    */
   readonly getSessionId: () => string | null;
   readonly deliverToUser?: DeliverToUserFn;
+  /**
+   * Wiring-compatibility only: no dispatcher tool reads activity since the
+   * roster moved to the stock `list_agents`, but `src/plugin.ts` still
+   * forwards these through this registration.
+   */
   readonly recentActivity?: RecentActivityFn;
-  /** Ticket 61: activity observation moments for the check-row liveness verdict. */
+  /** Wiring-compatibility only, same status as {@link recentActivity}. */
   readonly lastActivityAtMs?: (workerId: string) => number | null;
   /**
    * Ticket 118 (chunk 2, seam only): the host's dispatcher-spawn port,
@@ -449,8 +422,7 @@ export interface RegisterDispatcherToolsOptions {
   /**
    * Ticket 176: which dispatcher CLASS this surface serves. `spawned` — a
    * team leader another dispatcher summoned — gets NO `spawn_dispatcher`
-   * definition (owner ruling 2026-11-03). Omitted means `user`, so the
-   * eight-tool surface is unchanged for every pre-176 caller.
+   * definition (owner ruling 2026-11-03). Omitted means `user`.
    */
   readonly origin?: DispatcherOrigin;
 }

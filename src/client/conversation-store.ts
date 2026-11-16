@@ -83,7 +83,6 @@
  * `shell.tsx` is covered by build + typecheck.
  */
 import { describeToolview, type ToolviewModel } from "./toolviews.js";
-import { SPAWN_WORKER_TOOL } from "../core/policy/prompts.js";
 import {
   projectDispatchCard,
   type WorkerDispatchCard,
@@ -159,11 +158,12 @@ export type ConversationItem =
       readonly view: ToolviewModel;
       /**
        * Ticket 81: the presentation-time worker-dispatch card for a
-       * `spawn_worker` record (ticket 69 §3.2) — projected from THIS item's
-       * parsed args + structured result, so a replayed window yields the
-       * identical card. `null` for every other tool, for an unsettled call,
-       * and for records too malformed to name a spawn (the generic row
-       * covers those — never a fabricated card).
+       * `spawn_worker` (historical) or `subagent` (stock) record (ticket 69
+       * §3.2) — projected from THIS item's parsed args + structured result,
+       * so a replayed window yields the identical card. `null` for every
+       * other tool, for an unsettled call, and for records too malformed to
+       * name a spawn (the generic row covers those — never a fabricated
+       * card).
        */
       readonly dispatch: WorkerDispatchCard | null;
       /** True when the paired result reported an error. */
@@ -472,17 +472,17 @@ export function reduceConversationWindow(
             args: call.args,
             result: resultRecord,
           }),
-          // Ticket 81: spawn records additionally project the frozen
+          // Ticket 81: dispatch records additionally project the frozen
           // worker-dispatch card from their own args + result (pure in the
-          // record → replay-safe; ticket 69 §3.2, C15 holds).
-          dispatch:
-            call.item.toolName === SPAWN_WORKER_TOOL
-              ? projectDispatchCard({
-                  callId,
-                  args: call.args,
-                  result: resultRecord,
-                })
-              : null,
+          // record → replay-safe; ticket 69 §3.2, C15 holds). The projection
+          // accepts the historical `spawn_worker` and the stock `subagent`
+          // record that replaced it; every other tool name projects null.
+          dispatch: projectDispatchCard({
+            toolName: call.item.toolName,
+            callId,
+            args: call.args,
+            result: resultRecord,
+          }),
           failed: toolResultIsError(data.message, data),
           settled: true,
         };

@@ -1,6 +1,7 @@
 import type { DshHost } from "./dsh-host.js";
 import {
   isTerminalStatus,
+  type AdoptSpawnedWorkerRequest,
   type SettledEvent,
   type SpawnRequest,
   type SpawnResult,
@@ -134,6 +135,18 @@ export type UnknownStateReleaseOutcome =
     };
 
 /**
+ * One unknown-state hold a restart sweep visited, with the exact outcome the
+ * single-release call returned for it. The stream key rides along so an
+ * activation log can say which stream is still occupied after a failed drop
+ * without re-listing the holds.
+ */
+export interface UnknownStateHoldSweepEntry {
+  readonly workerId: string;
+  readonly streamKey: string;
+  readonly outcome: UnknownStateReleaseOutcome;
+}
+
+/**
  * What one delivery-redrive pass did (ticket 58, register D-5).
  * `redriven` items were re-offered to the dispatcher; `lost` items hit the
  * bound and are now terminal. Both are empty when nothing was owed — which is
@@ -254,6 +267,17 @@ export interface MultitaskOptions {
    */
   readonly isDurablyMarkedDispatcher?: (sessionId: string) => boolean;
   /**
+   * The ONE dispatcher visibility predicate (roster + `message_agent`).
+   * Wired by the plugin to `canSeeDispatcherPeer` over the host's dispatcher
+   * parent and live session header cwd. `sendPeer` refuses a target it hides
+   * with the existing `unknown-target` shape, and `peerRosterFor` filters
+   * through the same method — there is deliberately no second filter.
+   *
+   * Absent keeps the shipped behavior (every peer visible), so core unit
+   * tests and stub hosts stay host-agnostic.
+   */
+  readonly canSeePeer?: (fromSessionId: string, toSessionId: string) => boolean;
+  /**
    * Ticket 142 (owner ruling 2026-10-22 — the CHILDREN half): the durable
    * wake identity of a worker this plugin spawned, read synchronously from
    * the adapter's mirror of the `worker_sessions` table. Present means "this
@@ -350,6 +374,22 @@ export interface Multitask {
    * left untouched).
    */
   reclaimWorker(workerId: string, parentSessionId: string): boolean;
+  /**
+   * Lane A2a: adopt a child the STOCK `subagent` tool spawned under a bound
+   * dispatcher as a first-class worker.
+   *
+   * The host identifies it at `agent/created` (no reserved id exists, so the
+   * `pendingSpawns` counter cannot), composes it, and has already put it in its
+   * own `workers` registry. This method supplies the core half, synchronously
+   * and before the child's first status edge: a `WorkerRecord` in `spawned`,
+   * a pending ledger item titled from the child's `subagent.label` (fallback
+   * `Worker <short id>`), the structural todo↔worker link, and the same
+   * durable worker marker + wake row a spawn writes.
+   *
+   * Idempotent: an id already on the roster is left untouched and `false` is
+   * returned (the host's create path can see a repeated announcement).
+   */
+  adoptSpawnedWorker(request: AdoptSpawnedWorkerRequest): boolean;
   /**
    * First turn started: spawned → running. Marks any linked todo in_progress.
    * No-op if illegal. An edge observed while an adopted worker's marker is
@@ -471,6 +511,36 @@ export interface Multitask {
     workerId: string,
   ): Promise<UnknownStateReleaseOutcome>;
   /**
+   * Ticket 59 restart sweep: release every GENUINELY STALE unknown-state hold
+   * this dispatcher session owns through the existing marker-first release
+   * path. This is the non-tool half of the retired worker-stop command — after
+   * a restart there is no live child to interrupt, so without an automatic
+   * sweep a stale hold (and the stream key it keeps occupied) would outlive
+   * every command that could resolve it.
+   *
+   * Lane A2c2: only GENUINELY STALE holds are released. A hold that still has
+   * durable wake evidence — the adapter's `worker_sessions` mirror answers
+   * `findDurableWorker`, or the durable row itself is readable — is a
+   * dormant-resumable child, and a send to it cold-resumes it (ticket 142's
+   * owner ruling: children stay wake-able). Releasing it would delete the
+   * marker and wake row that resume needs, so such a hold is skipped: it is
+   * not reported, stays listed and keeps fencing its stream. A bare
+   * live-status marker with neither is stale and is released.
+   *
+   * Call it on dispatcher activation/restart. It visits only ids that are
+   * currently unknown-state holds for THIS session: live roster workers are
+   * not holds, healthy dormant rows are not holds, and a sibling session's
+   * holds are never touched (ADR-0019). Nothing held means an empty array and
+   * no store access, so the common activation pays nothing.
+   *
+   * Each entry carries the same outcome the single-release call returns.
+   * `hold-release-failed` leaves that hold in place (memory and disk still
+   * agree), so a later sweep retries it instead of pretending it was released.
+   */
+  sweepUnknownStateHolds(
+    parentSessionId: string,
+  ): Promise<readonly UnknownStateHoldSweepEntry[]>;
+  /**
    * Wake bus this core enqueues settles through. Settles are batched per
    * parent session; a mid-turn dispatcher queues rather than receiving an
    * injected wake. Callers use it to note dispatcher turn bounds, drain
@@ -496,6 +566,14 @@ export interface Multitask {
    * then it is accepted and the host's wake path cold-resumes it.
    */
   sendPeer(sessionId: string, envelope: PeerEnvelope): PeerSendAck;
+  /**
+   * The shared dispatcher visibility port: whether `fromSessionId` may see
+   * and message `toSessionId`. A session never sees itself; with no callback
+   * wired every OTHER peer is visible (the host-agnostic unit-test behavior).
+   * The plugin's {@link sendPeer} and the adapter's peer roster BOTH consult
+   * this method — never a local copy of the rule.
+   */
+  canSeePeer(fromSessionId: string, toSessionId: string): boolean;
   /** Undelivered peer envelopes for a session (status tools / tests). */
   listPendingPeers(sessionId: string): readonly PeerEnvelope[];
   /**
@@ -573,6 +651,23 @@ export function createMultitask(
   const isLiveDispatcherSession = options?.isLiveDispatcherSession;
   const isDurablyMarkedDispatcher = options?.isDurablyMarkedDispatcher;
   const findDurableWorker = options?.findDurableWorker;
+  const canSeePeerOption = options?.canSeePeer;
+  /**
+   * One guarded read of the visibility port. A throwing adapter predicate is
+   * treated as "hidden" — fail closed, like an unknown workspace, so a broken
+   * host read can never widen the peer surface.
+   */
+  function canSeePeer(fromSessionId: string, toSessionId: string): boolean {
+    // Same session is never a visible peer — the rule holds even when no
+    // callback is wired, so the roster cannot list itself in a stub host.
+    if (fromSessionId === toSessionId) return false;
+    if (canSeePeerOption === undefined) return true;
+    try {
+      return canSeePeerOption(fromSessionId, toSessionId);
+    } catch {
+      return false;
+    }
+  }
   const workers = new Map<string, WorkerRecord>();
   /**
    * Live (non-terminal) worker per stream, keyed `(parentSessionId, streamKey)`
@@ -888,12 +983,50 @@ export function createMultitask(
     }
   }
 
+  /**
+   * Lane V4: promote the linked item when a worker settles WITHOUT ever
+   * emitting a running edge.
+   *
+   * The removed settle wake was the ledger's last promotion point for a
+   * pending item (reconcileTodos step 1 ran on the drained wake). A worker
+   * that finishes before its first `running` edge therefore left the item
+   * `pending` forever: the obligation loop only charges `in_progress`
+   * (todo-reconciler.ts step 2b), the worker-gone sweep needs `in_progress`,
+   * and the stale-pending prune needs `workerId === null` — three ways to
+   * never close it, while the bucket still reported it as running.
+   *
+   * Promoting HERE, in the settle path itself, makes the turn-end redrive see
+   * a landed-undelivered item so it can charge an attempt and deliver it.
+   * This is ledger state only: no wake is opened, and `completed` still means
+   * DELIVERED, not "worker exited" (ADR-0007).
+   *
+   * Idempotent by construction: `markInProgress` moves `pending` only, so a
+   * running edge that already promoted the item (or a delivery that already
+   * closed it) is untouched. The structural link is checked first — an item
+   * re-dispatched to a different worker is that worker's obligation (the
+   * reconciler records the old result as superseded), so this settle must not
+   * advance it.
+   */
+  function promoteSettledTodo(record: WorkerRecord): void {
+    if (record.todoId === null) return;
+    const todo = todoLedger.get(record.todoId);
+    if (todo === undefined) return;
+    if (todo.workerId !== null && todo.workerId !== record.workerId) return;
+    todoLedger.markInProgress(record.todoId);
+  }
+
   /** Close the linked todo when a worker is aborted for good. */
   function cancelLinkedTodo(record: WorkerRecord): void {
     if (record.todoId === null) return;
     // Read BEFORE the close: cancelled items are pruned below, and the
     // ticket-113 hook needs the inbox origin while it still exists.
     const todo = todoLedger.get(record.todoId);
+    // Delivery is terminal. An abort can land AFTER deliver_result (the
+    // dispatcher may deliver while the worker still runs), and such a late
+    // abort must not rewrite a completed obligation as cancelled: that would
+    // prune the delivered row and fire an inbox `cancelled` after `replied`.
+    // Nothing is owed once the user has the result.
+    if (todo?.delivered === true) return;
     todoLedger.markCancelled(record.todoId);
     // dsh has no cancelled status — drop the item so the list stays usable.
     todoLedger.prune(record.todoId);
@@ -1077,6 +1210,13 @@ export function createMultitask(
     steerQueue.clear(event.workerId);
     clearSteerRetry(event.workerId);
     steerBoundaryDeferred.delete(event.workerId);
+    // Delivery may already have closed the ledger entry before this terminal
+    // event landed (deliver_result can be called while the worker is still
+    // running). Such a settle must neither write a fresh obligation marker nor
+    // open a post-completion wake.
+    const alreadyDelivered =
+      record.todoId !== null &&
+      todoLedger.get(record.todoId)?.delivered === true;
     // Aborted via settle: close the todo here; the wake still informs the dispatcher.
     // The marker obligation is closed too — nothing to reconstruct or deliver.
     if (event.status === "aborted") {
@@ -1088,11 +1228,20 @@ export function createMultitask(
         );
       }
     } else {
+      // Lane V4: a worker can settle before any running edge ever lands (the
+      // fixture that motivated this never emitted one). Promote the linked
+      // item out of `pending` right here — the settle path, not a wake — so
+      // the turn-end redrive can charge and deliver it instead of leaving it
+      // pending forever behind a workerId the stale-pending prune won't
+      // touch. The item stays OWED: this is not completion, and completed
+      // still means delivered (ADR-0007). Pending-only, so a running edge
+      // that already promoted it is a no-op.
+      promoteSettledTodo(record);
       // Ticket 113: an inbox-origin worker's ERROR maps to a `failed` job
       // status. The todo itself stays open (the dispatcher still reports and
       // may re-plan), but the job dir gets its honest terminal signal from
       // the terminal path, delivery or not.
-      if (event.status === "error") {
+      if (event.status === "error" && !alreadyDelivered) {
         const external = todoExternalOf(record.todoId);
         if (external?.kind === "inbox") {
           fireInboxHook({
@@ -1105,15 +1254,15 @@ export function createMultitask(
           });
         }
       }
-      if (durability !== undefined) {
+      if (durability !== undefined && !alreadyDelivered) {
         // Snapshot terminal status (+ transcript pointer) so a crash before
         // user delivery still lets a restart notice the undelivered result.
         // Ticket 113: the marker carries the inbox origin so a rebuild
         // re-creates the ledger link with it intact.
         //
         // Deliberately fire-and-forget, not awaited: `onWorkerSettled` is a
-        // SYNCHRONOUS host callback, and the settle wake (enqueued below)
-        // must keep its current ordering relative to other settles. The
+        // SYNCHRONOUS host callback, and the stock completion notice must keep
+        // its current ordering relative to other settles. The
         // catch keeps a store failure from becoming an unhandled rejection;
         // the remaining window is a crash between a failed write and the
         // wake, which delivery redrive covers like any other undelivered
@@ -1144,15 +1293,11 @@ export function createMultitask(
       }),
       settledAtMs: Date.now(),
     });
-    // One enqueue per accepted settle; the bus batches and routes the wake.
-    // The ledger is never included — workers and host never see todos (ADR-0007).
-    wakeBus.enqueueWorkerSettled({
-      parentSessionId: record.parentSessionId,
-      workerId: event.workerId,
-      status: event.status,
-      title: record.title,
-      resultText: event.report,
-    });
+    // No plugin wake here: the host already pushes the stock completion
+    // notice (source `subagent-settled`) to the parent, and that is the one
+    // parent-visible result per settle. The settle record above is still
+    // written so await_agent can read the result; delivery redrive stays the
+    // separate, bounded lane.
     return true;
   }
 
@@ -1370,6 +1515,82 @@ export function createMultitask(
       // Mirror failures never break the release.
     }
     return { ok: true };
+  }
+
+  /**
+   * Lane A2c2 (ticket 142 follow-up): is this unknown-state hold
+   * DORMANT-RESUMABLE, i.e. does the durable wake path still own it?
+   *
+   * The restart sweep exists to clear holds nobody can ever resolve. That is
+   * only true of a BARE live-status marker: with no wake identity,
+   * `steerWorker`/`message_agent` refuse the id and the child can never be
+   * brought back. A hold with wake evidence is the opposite — the owner
+   * ruling keeps children wake-able by send — and releasing it would delete
+   * exactly the rows that cold resume needs.
+   *
+   * The discriminator is durable resumability evidence. Two probes, each one
+   * something the dormant-wake path itself reads; either answering preserves
+   * the hold:
+   *
+   * 1. `findDurableWorker` — the adapter's warm mirror of the
+   *    `worker_sessions` table (`workerSessionMark`), which is the very
+   *    question the send fence asks. Present means a send is ACCEPTED and
+   *    `wakeDormantWorker` is issued.
+   * 2. the durable `worker_sessions` ROW itself (`readWorkerSession`). The
+   *    mirror is warmed by `refreshWorkerSessionMarks`, which the plugin
+   *    starts AFTER this sweep, so on activation the mirror can still be
+   *    cold while the row is durable. Store truth must be consulted directly
+   *    or every restart would drop the row the wake path needs before the
+   *    mirror ever sees it.
+   *
+   * A bare marker (neither answer) is stale and may be released. A store
+   * read failure proves nothing, so it PRESERVES the hold (fail-safe: a
+   * wrongly kept hold costs one stream key until the next sweep; a wrongly
+   * dropped one destroys the worker for good). A store with no
+   * `readWorkerSession` seam is the pre-142 shape: no wake identity exists,
+   * so the marker really is bare.
+   */
+  async function holdIsDormantResumable(workerId: string): Promise<boolean> {
+    // The synchronous fence evidence first: no store round-trip when the
+    // adapter already answers, and this is the same authority a send uses.
+    if (findDurableWorker?.(workerId) !== undefined) return true;
+    if (durability === undefined) return false;
+    if (durability.readWorkerSession === undefined) return false;
+    try {
+      const row = await Promise.resolve(
+        durability.readWorkerSession(workerId),
+      );
+      return row !== undefined;
+    } catch (error) {
+      warnBestEffort(
+        `worker session row for ${workerId} could not be read; the hold was kept`,
+        error,
+      );
+      return true;
+    }
+  }
+
+  /**
+   * Close every queued wake owned by a just-delivered obligation.
+   *
+   * Delivery is the terminal event for these notices: a settle or redrive
+   * queued before `deliver_result` must not open a turn after it. The redrive
+   * flag is dropped only when no other landed-undelivered item remains, so
+   * closing one obligation never strands another's retry.
+   */
+  function dropQueuedWakesForDelivered(todo: TodoItem): void {
+    if (todo.workerId !== null) {
+      wakeBus.dropSettledWorker(todo.sessionId, todo.workerId);
+    }
+    const otherOwed = todoLedger.list(todo.sessionId).some((item) => {
+      if (item.status !== "in_progress" || item.delivered) return false;
+      if (item.workerId === null) return false;
+      const worker = workers.get(item.workerId);
+      return worker !== undefined && isTerminalStatus(worker.status);
+    });
+    if (!otherOwed) {
+      wakeBus.dropPendingRedrive(todo.sessionId);
+    }
   }
 
   return {
@@ -1822,6 +2043,78 @@ export function createMultitask(
       return true;
     },
 
+    /**
+     * Lane A2a: put a STOCK-spawned child on the same contract a spawn
+     * establishes. See the interface doc; every piece here reuses the spawn
+     * path's internals (ledger create/link, roster map, marker projection,
+     * wake-row mirror) rather than cloning them.
+     */
+    adoptSpawnedWorker(request: AdoptSpawnedWorkerRequest): boolean {
+      const workerId = request.workerId;
+      const parentSessionId = request.parentSessionId;
+      if (workerId === "" || parentSessionId === "") return false;
+      // Idempotent by identity: a record that already exists IS the adoption.
+      if (workers.has(workerId)) return false;
+      const label = request.label?.trim();
+      const title =
+        label !== undefined && label.length > 0
+          ? label
+          : `Worker ${workerId.slice(0, 8)}`;
+      // The child session id IS this worker's identity, and a stock child has
+      // no model-authored stream key to collide with: using the id keeps the
+      // durable marker's / restart notice's identity truthful. Deliberately
+      // NOT entered in `liveByStreamKey` — a stock child never went through
+      // the spawn tool's stream reservation.
+      const streamKey = workerId;
+      // Ledger first: the record points at the item, and a ledger failure must
+      // leave no half-registered worker behind.
+      const todo = todoLedger.create({
+        sessionId: parentSessionId,
+        title,
+        status: "pending",
+      });
+      const record: WorkerRecord = {
+        workerId,
+        parentSessionId,
+        streamKey,
+        title,
+        status: "spawned",
+        startedAtMs: Date.now(),
+        toolCallCount: 0,
+        transcriptRef: null,
+        todoId: todo.id,
+        redriveAttempts: 0,
+      };
+      workers.set(workerId, record);
+      // The structural link a spawn establishes at registration (ADR-0007).
+      todoLedger.linkWorker(todo.id, workerId, streamKey);
+      // The same two durable rows `spawnWorker` writes, best-effort: a store
+      // failure must never turn the host's create path into an error (the
+      // child is already live). Host mirror first, synchronously, so a send
+      // arriving before the store write settles already sees the wake identity.
+      if (durability !== undefined) {
+        try {
+          host.rememberWorkerWake?.(workerId, parentSessionId);
+        } catch {
+          // A mirror failure must not break the adoption.
+        }
+        durabilityBestEffort(
+          `worker marker for ${workerId} could not be written`,
+          () => durability.writeWorkerMarker(toDurableMarker(record, null)),
+        );
+        durabilityBestEffort(
+          `worker session row for ${workerId} could not be written`,
+          () =>
+            durability.writeWorkerSession?.({
+              sessionId: workerId,
+              parentSessionId,
+            }),
+        );
+      }
+      notifyRosterChanged(parentSessionId);
+      return true;
+    },
+
     noteSteerReceived(workerId: string): void {
       transition(workerId, { type: "steer-received" });
     },
@@ -1925,6 +2218,7 @@ export function createMultitask(
         // between a recoverable bookkeeping failure and an obligation that
         // resurrects on the next activation. No roster event and no second
         // `replied` resolution — those answer the close, not the cleanup.
+        dropQueuedWakesForDelivered(before);
         dropObligationMarker(before.workerId);
         return true;
       }
@@ -1932,7 +2226,12 @@ export function createMultitask(
       if (!ok) return false;
       // Ticket 27: the delivered flag flipped — presence must re-project.
       const todo = todoLedger.get(todoId);
-      if (todo !== undefined) notifyRosterChanged(todo.sessionId);
+      if (todo !== undefined) {
+        // The obligation is delivered: any settle or redrive wake already
+        // queued for it is now stale and must not open another turn.
+        dropQueuedWakesForDelivered(todo);
+        notifyRosterChanged(todo.sessionId);
+      }
       // Delivery obligation closed — drop the durable marker for its worker.
       dropObligationMarker(todo?.workerId ?? null);
       // Ticket 113: an inbox-origin item's delivered completion is the
@@ -1977,18 +2276,18 @@ export function createMultitask(
     },
 
     redriveUndelivered(sessionId: string): RedriveReport {
-      // Reuse the pure reconciler with an empty wake. That is the whole
-      // point: with no settles in the wake, every landed-undelivered item is
-      // by definition past its first delivery opportunity, so the pass below
-      // is exactly the redrive set. The bound logic lives in one place (the
-      // reconciler); this method is the action layer — persist the counter,
-      // open the turn.
-      const emptyWake: WakeEvent = {
+      // Reconcile against the background wake this session would deliver
+      // next, not a fabricated empty one. A settle queued mid-turn is that
+      // item's FIRST delivery opportunity: an empty wake would charge it as a
+      // missed redrive before its own wake ever gets to open. When nothing
+      // background is pending, the empty timer wake remains the honest view.
+      const pendingWake = wakeBus.peekPending(sessionId);
+      const effectiveWake: WakeEvent = pendingWake ?? {
         sessionId,
         source: "timer",
         settledWorkers: [],
       };
-      const report = runReconcile(sessionId, emptyWake);
+      const report = runReconcile(sessionId, effectiveWake);
       todoLedger.apply(report.mutations);
       // Notify only when something actually moved. This pass runs on every
       // dispatcher turn end, and an unconditional notify would publish an
@@ -2260,6 +2559,51 @@ export function createMultitask(
       return releaseHold(workerId);
     },
 
+    async sweepUnknownStateHolds(
+      parentSessionId: string,
+    ): Promise<readonly UnknownStateHoldSweepEntry[]> {
+      // Snapshot first: `releaseHold` deletes from the map as it goes. The
+      // filter is the scope fence (ADR-0019) — this sweep can only ever see
+      // holds owned by the activating dispatcher session.
+      const held = [...unknownStateHolds.values()].filter(
+        (hold) => hold.parentSessionId === parentSessionId,
+      );
+      const visited: UnknownStateHoldSweepEntry[] = [];
+      for (const hold of held) {
+        // Two re-checks at release time, because listing and releasing are
+        // separated by awaits:
+        // - a live roster record beats a stale hold (stock adoption can put a
+        //   child back on the roster without going through reclaimWorker), and
+        //   a live worker must never lose its marker to a sweep;
+        // - a hold the host reclaimed on live evidence is no longer ours:
+        //   reclaimWorker removed it, so there is nothing left to release.
+        if (workers.has(hold.workerId)) continue;
+        if (!unknownStateHolds.has(hold.workerId)) continue;
+        // Lane A2c2: release only GENUINELY STALE holds. A hold whose durable
+        // wake evidence still exists is a dormant-resumable child, not a
+        // corpse: a send to it is accepted and cold-resumes it (ticket 142's
+        // owner ruling — children stay wake-able by send), and this release
+        // would delete the marker and `worker_sessions` row that resume path
+        // needs. It is skipped silently — it stays listed through
+        // `listUnknownStateHolds` and keeps fencing its stream — until the
+        // worker is woken, reclaims the stream, or the evidence is gone and a
+        // later sweep finds it stale.
+        if (await holdIsDormantResumable(hold.workerId)) continue;
+        // The evidence probe awaited a store read: a wake that landed in that
+        // window may already have adopted the worker, which is the same
+        // "live roster record beats a stale hold" rule one await later.
+        if (workers.has(hold.workerId)) continue;
+        if (!unknownStateHolds.has(hold.workerId)) continue;
+        const outcome = await releaseHold(hold.workerId);
+        visited.push({
+          workerId: hold.workerId,
+          streamKey: hold.streamKey,
+          outcome,
+        });
+      }
+      return visited;
+    },
+
     wakeBus,
     dispose(): void {
       // Ticket 112: teardown reaches the bus so a pending coalesced drain
@@ -2273,6 +2617,7 @@ export function createMultitask(
       steerBoundaryDeferred.clear();
     },
     todos: todoLedger,
+    canSeePeer,
     sendPeer(sessionId: string, envelope: PeerEnvelope): PeerSendAck {
       // Ticket 70 §2 fences, BEFORE the inbox (whose lazy per-session state
       // would otherwise materialize a phantom target). Self-target is
@@ -2288,6 +2633,19 @@ export function createMultitask(
           reason: "self-target",
           detail:
             "the target dispatcher session is the sender's own session; peer messages to yourself are refused",
+        };
+      }
+      // The shared visibility fence (roster + peer lane). A hidden target is
+      // refused with the SAME shape an unknown/unmarked target gets, so a
+      // caller cannot distinguish "exists but hidden" from "does not exist".
+      // Checked before liveness: a durably marked target that is also hidden
+      // must not leak through the wake acceptance path.
+      if (!canSeePeer(envelope.fromAgentId, sessionId)) {
+        return {
+          ok: false,
+          messageId: envelope.messageId,
+          reason: "unknown-target",
+          detail: `no live dispatcher session "${sessionId}" — the message was not delivered`,
         };
       }
       if (isLiveDispatcherSession !== undefined && !isLiveDispatcherSession(sessionId)) {

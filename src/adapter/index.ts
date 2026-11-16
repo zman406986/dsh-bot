@@ -21,12 +21,14 @@ export {
   type RegisterableTool,
 } from "./dispatcher-tools.js";
 export {
+  ACTIVATION_COMMAND_CARD_TEXT,
   ACTIVATION_PRESENCE_HINT,
   activationResultCopy,
   createDispatcherStartCommand,
   DISPATCHER_START_ALREADY_HERE,
   DISPATCHER_START_COMMAND,
   DISPATCHER_START_DESCRIPTION,
+  DISPATCHER_START_INPUT_HINT,
   DISPATCHER_START_NOT_TOP_LEVEL,
   DISPATCHER_START_SUCCESS,
   DISPATCHER_START_UNRESOLVED,
@@ -115,6 +117,7 @@ export {
   type ActivationOutcome,
   type BindDispatcherLifecycleOptions,
   type BindDispatcherLifecycleResult,
+  type TeamLeaderIdleSignal,
 } from "./parent-agent.js";
 export {
   applySessionKindProjection,
@@ -170,6 +173,7 @@ export {
   assembleRestartNotice,
   RESTART_DEGRADED_NOTICE,
   RESTART_NOTICE_HEADING,
+  RESTART_NOTICE_SUMMARY,
   restartRestoredLine,
   restartUnknownStateLine,
 } from "./restart-notice.js";

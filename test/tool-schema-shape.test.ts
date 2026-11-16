@@ -21,10 +21,6 @@ import {
   registerDispatcherTools,
   type RegisterableTool,
 } from "../src/adapter/dispatcher-tools.js";
-import {
-  createWorkerReplyTool,
-  toRegisterableWorkerTool,
-} from "../src/core/tools.js";
 import type { AdapterContext } from "../src/adapter/cordis-dsh-host.js";
 
 const JSON_SCHEMA_TYPES = new Set([
@@ -145,7 +141,7 @@ describe("tool schema shape — provider-valid JSON Schema (ticket 45)", () => {
   it("the capture registry throws the host duplicate-tool error (ticket 91 pin)", () => {
     const ctx = createCaptureCtx();
     const tool = {
-      name: "spawn_worker",
+      name: "deliver_result",
       description: "d",
       parameters: {},
       execute: async () => ({}),
@@ -154,18 +150,40 @@ describe("tool schema shape — provider-valid JSON Schema (ticket 45)", () => {
 
     assert.throws(
       () => ctx.tools.register(tool),
-      /tool "spawn_worker" is already registered/,
+      /tool "deliver_result" is already registered/,
     );
   });
 
-  it("all eight serialized dispatcher tool schemas are structurally valid", () => {
+  it("the three kept dispatcher tool schemas are structurally valid", () => {
     const tools = registerAllDispatcherTools();
     assert.deepEqual(
       tools.map((tool) => tool.name),
       [...DISPATCHER_TOOL_NAMES],
     );
+    assert.equal(tools.length, 3);
     for (const tool of tools) {
       assertValidToolSchema(tool.parameters, `${tool.name}.parameters`);
+    }
+  });
+
+  it("the removed dispatcher tool names are absent from the registered surface", () => {
+    const registered = new Set(
+      registerAllDispatcherTools().map((tool) => tool.name),
+    );
+    for (const removed of [
+      "spawn_worker",
+      "check_workers",
+      "steer_worker",
+      "stop_worker",
+      "await_agent",
+      "send_peer",
+      "reply_to_dispatcher",
+    ]) {
+      assert.equal(
+        registered.has(removed),
+        false,
+        `removed tool still registered: ${removed}`,
+      );
     }
   });
 
@@ -173,36 +191,23 @@ describe("tool schema shape — provider-valid JSON Schema (ticket 45)", () => {
     const tools = registerAllDispatcherTools();
     const byName = new Map(tools.map((tool) => [tool.name, tool]));
 
-    const spawn = byName.get("spawn_worker")?.parameters as Record<
-      string,
-      unknown
-    >;
-    assert.deepEqual(spawn.required, ["stream_key", "title", "prompt"]);
-
-    const check = byName.get("check_workers")?.parameters as Record<
-      string,
-      unknown
-    >;
-    // No mandatory fields → no object-level required key at all.
-    assert.equal(check.required, undefined);
-
-    const steer = byName.get("steer_worker")?.parameters as Record<
-      string,
-      unknown
-    >;
-    assert.deepEqual(steer.required, ["worker_id", "message"]);
-
-    const stop = byName.get("stop_worker")?.parameters as Record<
-      string,
-      unknown
-    >;
-    assert.deepEqual(stop.required, ["worker_id"]);
-
     const deliver = byName.get("deliver_result")?.parameters as Record<
       string,
       unknown
     >;
     assert.deepEqual(deliver.required, ["text"]);
+
+    const message = byName.get("message_agent")?.parameters as Record<
+      string,
+      unknown
+    >;
+    assert.deepEqual(message.required, ["target", "text"]);
+
+    const summon = byName.get("spawn_dispatcher")?.parameters as Record<
+      string,
+      unknown
+    >;
+    assert.deepEqual(summon.required, ["title", "prompt"]);
   });
 
   it("no property schema carries a required key; optionality preserved", () => {
@@ -226,19 +231,23 @@ describe("tool schema shape — provider-valid JSON Schema (ticket 45)", () => {
     });
   });
 
-  it("worker-side reply_to_dispatcher schema passes the same structural walk", () => {
-    // Ticket 174 / ADR-0033 removed the worker access tool; the surviving
-    // worker-side tool is the mid-task reply, and it takes this same walk.
-    const tool = toRegisterableWorkerTool(
-      createWorkerReplyTool({
-        multitask: {
-          getWorker: () => undefined,
-          sendPeer: () => ({ ok: false, messageId: "", reason: "self-target", detail: "" }),
-        } as never,
-        resolveWorkerId: () => null,
-      }),
+  it("spawn_dispatcher keeps its model and worker_model parameters optional", () => {
+    const tools = registerAllDispatcherTools();
+    const summon = tools.find(
+      (tool) => tool.name === "spawn_dispatcher",
+    )?.parameters as {
+      properties: Record<string, Record<string, unknown>>;
+    };
+    assert.deepEqual(
+      Object.keys(summon.properties).sort(),
+      ["model", "prompt", "title", "worker_model"],
     );
-    assert.equal(tool.name, "reply_to_dispatcher");
-    assertValidToolSchema(tool.parameters, `${tool.name}.parameters`);
+    for (const name of ["model", "worker_model"]) {
+      assert.equal(
+        "required" in (summon.properties[name] ?? {}),
+        false,
+        `spawn_dispatcher.properties.${name} still carries required`,
+      );
+    }
   });
 });

@@ -141,7 +141,17 @@ describe("inbox core — enqueueExternalJob (ticket 113)", () => {
     const workerId = await spawnRunning(multitask, "s-1", "k-1", "One");
 
     host.fireSettled({ workerId, status: "completed", report: "finished" });
-    assert.deepEqual(host.wakeCalls, ["s-1"], "the settle wakes at once");
+    // The plugin no longer enqueues a settle wake (the stock notice opens the
+    // parent turn). Feed the notice on the bus directly so the join rule below
+    // stays pinned at the bus level.
+    multitask.wakeBus.enqueueWorkerSettled({
+      parentSessionId: "s-1",
+      workerId,
+      status: "completed",
+      title: "One",
+      resultText: "finished",
+    });
+    assert.deepEqual(host.wakeCalls, ["s-1"], "the notice wakes at once");
 
     multitask.enqueueExternalJob({
       sessionId: "s-1",

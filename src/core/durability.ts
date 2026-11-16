@@ -326,8 +326,9 @@ export interface DurabilityPort {
 /**
  * A live marker that cannot be reconstructed after a restart.
  * Reported honestly: never replayed, never resumed, never invented.
- * Ticket 59 (register B-1): it keeps its stream key occupied until the
- * dispatcher resolves it (`releaseUnknownStateHold` / `stop_worker`).
+ * Ticket 59 (register B-1): it keeps its stream key occupied until it is
+ * released — `releaseUnknownStateHold`, which the plugin's restart sweep
+ * calls when no live child remains.
  * `transcriptRef` falls back to the worker id (child session id) so the
  * dispatcher can still point the user at the transcript.
  */

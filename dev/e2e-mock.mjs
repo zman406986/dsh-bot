@@ -9,15 +9,19 @@
 //             DSH_HOME. Proves: mock serves the real provider protocol, dsh boots
 //             with DEEPSEEK_BASE_URL, a task is sent, a scripted reply comes back.
 //   dispatch  Real `dsh --profile web --patch dev/cordis.web.patch.yml`, a session
-//             opened through the host's own RPC, /dsh-bot, one task, and
-//             a wait for the dispatcher tools (spawn_worker) to reach the mock.
+//             opened through the host's own RPC, /dsh-bot, one task, and a wait
+//             for the dispatcher surface to offer the stock `subagent` tool.
+//             Asserts the whole stock worker set is there
+//             (subagent / list_agents / send_message / interrupt_agent) and
+//             that the retired worker verbs are gone.
 //             Runs only when the plugin actually mounts on the installed dsh.
-//   s1..s4    The ticket-120 messaging / await / mitosis scenarios. One boot
-//             each, plugin loaded from SOURCE (`--import tsx` +
-//             dev/cordis.src.patch.yml) because lib/ is a build artifact and
-//             this harness never builds. Every assertion reads observable
-//             behaviour from the mock's request log: what a tool RETURNED,
-//             what the next turn saw, and which turn a message arrived on.
+//   s1..s4    The ticket-120 messaging / completion / mitosis / responsiveness
+//             scenarios on the stock subagent surface. One boot each, plugin
+//             loaded from SOURCE (`--import tsx` + dev/cordis.src.patch.yml)
+//             because lib/ is a build artifact and this harness never builds.
+//             Every assertion reads observable behaviour from the mock's request
+//             log: what a tool RETURNED, what the next turn saw, and which turn
+//             a message or the host's own `subagent-settled` notice arrived on.
 //
 // Every child gets a kill timer ARMED AT LAUNCH (taskkill /T /F on Windows).
 // Every wait is bounded. Cleanup runs in `finally` and is verified with tasklist
@@ -714,6 +718,18 @@ function diagnosticsFrom(log) {
   return interesting.slice(0, 24);
 }
 
+// The stock-subagent surface: workers start with the host's own `subagent`
+// tool and are handled with the host's own control trio. The plugin adds only
+// `deliver_result`, `message_agent` and `spawn_dispatcher`; the five retired
+// worker verbs (ticket 120's generation) must not come back.
+const STOCK_WORKER_TOOLS = ["subagent", "list_agents", "send_message", "interrupt_agent"];
+const RETIRED_WORKER_TOOLS = ["spawn_worker", "check_workers", "steer_worker", "stop_worker", "await_agent"];
+
+/** The retired worker verbs a request still offers (empty is the pass). */
+function retiredToolsOffered(toolNames) {
+  return RETIRED_WORKER_TOOLS.filter((name) => (toolNames ?? []).includes(name));
+}
+
 async function phaseDispatch(scriptFile) {
   record('phase', { message: 'dispatcher e2e (web profile + dev overlay)' });
   const home = join(OUT, 'web-home');
@@ -787,13 +803,30 @@ async function phaseDispatch(scriptFile) {
     record('prompt', { message: 'task sent to the dispatcher' });
 
     const toolRequest = await waitFor(
-      'a request that offers spawn_worker',
-      () => readRequests(mock.requestLog).find((entry) => entry.toolNames?.includes('spawn_worker')) ?? null,
+      'a request that offers subagent',
+      () => readRequests(mock.requestLog).find((entry) => entry.toolNames?.includes('subagent')) ?? null,
       60000,
       { watch: [dsh, mock.entry] },
     );
-    phase.spawnRequest = { toolCount: toolRequest.toolNames.length, userText: toolRequest.lastUserText?.slice(0, 120) };
-    assert('dispatch', 'host sent dispatcher tools (spawn_worker) to the mock', true, phase.spawnRequest);
+    const offered = toolRequest.toolNames ?? [];
+    phase.spawnRequest = {
+      toolCount: offered.length,
+      userText: toolRequest.lastUserText?.slice(0, 120),
+      stockWorkerTools: STOCK_WORKER_TOOLS.filter((name) => offered.includes(name)),
+      retiredStillOffered: retiredToolsOffered(offered),
+    };
+    assert(
+      'dispatch',
+      'host sent the stock worker surface (subagent, list_agents, send_message, interrupt_agent) to the mock',
+      STOCK_WORKER_TOOLS.every((name) => offered.includes(name)),
+      phase.spawnRequest,
+    );
+    assert(
+      'dispatch',
+      'the retired worker verbs are gone from the dispatcher surface',
+      phase.spawnRequest.retiredStillOffered.length === 0,
+      { stillOffered: phase.spawnRequest.retiredStillOffered },
+    );
     // Assert against full text: the truncated field can hold only the host's
     // injected policy, while the task still has to be in the conversation sent.
     const taskSeen =
@@ -970,19 +1003,6 @@ function toolResultTexts(entry, toolName) {
   return (entry.toolResults ?? []).filter((result) => result.tool === toolName).map((result) => result.text);
 }
 
-/**
- * User messages the model can actually READ: non-empty text blocks only.
- *
- * The host delivers every tool_result as a user-role message with no text
- * block, so counting raw user messages would count tool steps. Kept as a
- * recorded fact for future scenarios: it is NOT a valid "same turn" proxy
- * either, because the host's own `subagent-settled` notice is an extra
- * user-role message WITH text inside one turn (ticket 120 s2, observed 1 → 2).
- */
-function readableUserTexts(entry) {
-  return (entry.userTextsAll ?? []).filter((text) => text.trim().length > 0);
-}
-
 /** Wait for a request on a session that satisfies a predicate. */
 function waitForRequest(mock, sessionId, label, predicate, timeoutMs, watch) {
   return waitFor(
@@ -1009,43 +1029,70 @@ function waitForToolResult(mock, sessionId, toolName, label, timeoutMs, watch, e
   );
 }
 
+/**
+ * The stock `subagent` tool's model-facing result. Its output schema is
+ * `{kind:"activation", subagentId}` and its render is
+ * `started subagent <id>` (dsh-tool-subagent/lib/index.js:409-429), so the
+ * activation id is readable from the tool-result body the model saw. That id
+ * IS the child session id and the address `send_message` takes.
+ */
+const SUBAGENT_STARTED_PATTERN = /started subagent ([^\s]+)/;
+
+/** The activation id out of a stock `subagent` result, or null. */
+function subagentActivationId(text) {
+  return SUBAGENT_STARTED_PATTERN.exec(text ?? '')?.[1] ?? null;
+}
+
+/**
+ * The host's own completion notice for a settled subagent
+ * (dsh-subagent/lib/types/continuation-messages.js:91-116): one user-role
+ * message (source kind `subagent-settled`) opening with
+ * `Background subagent <id> finished and will do no further work unless you
+ * send it more.`, then `Its closing message:` and the child's closing text.
+ * It is the parent's result — there is no wait tool to call and no status poll.
+ */
+function settlementNoticeFor(userTexts, childId) {
+  return (userTexts ?? []).find((text) => text.includes(`Background subagent ${childId} `)) ?? null;
+}
+
 const SCENARIO_TIMEOUT_MS = 120000;
 
 /**
- * Ticket 120 scenario 1 — dispatcher messages a RUNNING worker; the worker's
- * next step reflects the correction (the steer path end to end, including the
- * step-boundary send).
+ * Ticket 120 scenario 1 — a dispatcher messages a RUNNING worker and the
+ * worker's next step reflects the correction (the steer path end to end,
+ * including the step-boundary send). Rebuilt on the stock subagent surface:
+ * the worker starts with `subagent`, the correction is `send_message`, and
+ * the parent's result is the host's own `subagent-settled` notice.
  *
  * Observable assertions:
- * - the `message_agent` tool returned the steer ack ("Message parked for …");
- * - a LATER worker turn at the mock carries `[Parent correction]` and the exact
- *   correction text — i.e. the worker's next step saw it;
- * - the worker's turn that saw the correction is a different turn from the one
- *   the correction was parked against (the step-boundary send, not a restart).
+ * - `subagent` returned the stock activation id ("started subagent <id>");
+ * - `send_message` returned "message delivered to agent <id>";
+ * - a LATER worker turn at the mock carries the exact correction text — the
+ *   worker's next step saw it (no `[Parent correction]` wrapper: stock
+ *   `send_message` injects the raw text as the steer);
+ * - the worker finished on the corrected instruction;
+ * - the parent's later turn carries the stock completion notice with the
+ *   worker's closing message.
  */
 async function scenario1() {
-  record('phase', { message: 's1 — message a running worker (steer end to end)' });
+  record('phase', { message: 's1 — message a running worker (stock send_message steer)' });
   const scriptFile = join(OUT, 's1-script.json');
   writeFileSync(
     scriptFile,
     JSON.stringify(
       [
         {
-          // The dispatcher's first move: start a worker that takes a while.
-          match: { anyUserIncludes: 's1-start', toolNames: ['spawn_worker'] },
+          // The dispatcher's first move: start a worker through the stock tool.
+          match: { anyUserIncludes: 's1-start', toolNames: ['subagent'] },
           say: 's1-spawn',
           tool: {
-            name: 'spawn_worker',
-            input: {
-              stream_key: 's1-stream',
-              title: 'S1 draftsman',
-              prompt: 's1-worker-brief: produce a draft.',
-            },
+            name: 'subagent',
+            input: { description: 'S1 draftsman', prompt: 's1-worker-brief: produce a draft.' },
           },
         },
         {
           // The worker's FIRST step is slow on purpose: it must still be
-          // running when the correction is parked.
+          // running when the correction is sent.
           match: { systemIncludes: 'delegated worker', anyUserIncludes: 's1-worker-brief' },
           say: 'worker-draft-v1',
           delayMs: 20000,
@@ -1054,22 +1101,23 @@ async function scenario1() {
           // The dispatcher's continuation after the spawn ack. The delay puts
           // the steer well inside the worker's first step, so "the worker is
           // running" is not a race in this scenario.
-          match: { toolResultIncludes: 'in the background (worker', toolNames: ['message_agent'] },
+          match: { toolResultIncludes: 'started subagent', toolNames: ['send_message'] },
           say: 's1-steer',
           delayMs: 6000,
-          capture: { workerId: ['in the background \\(worker ([^,\\s]+), stream '] },
+          capture: { workerId: ['started subagent ([^\\s]+)'] },
           tool: {
-            name: 'message_agent',
-            input: { target: '{{workerId}}', text: 's1-correction-marker: use the other format instead.' },
+            name: 'send_message',
+            input: { agent_id: '{{workerId}}', message: 's1-correction-marker: use the other format instead.' },
           },
         },
         {
-          // The worker's NEXT step is opened by the step-boundary send.
+          // The worker's NEXT step is opened by the step-boundary steer.
           match: { systemIncludes: 'delegated worker', anyUserIncludes: 's1-correction-marker' },
           say: 'worker-final-v2',
         },
         {
-          match: { anyUserIncludes: 'worker-final-v2', toolNames: ['check_workers'] },
+          // The host's completion notice starts the parent's next turn.
+          match: { anyUserIncludes: 'worker-final-v2', toolNames: ['subagent'] },
           say: 's1-dispatcher-done',
         },
       ],
@@ -1085,28 +1133,39 @@ async function scenario1() {
     phase.sessionId = sessionId;
     await sendUserMessage(api, sessionId, 's1-start');
 
-    // Read the ACK from the request that carries the tool result, not from the
-    // request that issued the call (they are different model turns).
-    const steerResultRequest = await waitForToolResult(
+    // Read the RESULT from the request that carries the tool_result, not from
+    // the request that issued the call (they are different model turns).
+    const spawnResultRequest = await waitForToolResult(
       mock,
       sessionId,
-      'message_agent',
-      'the message_agent result to reach the model',
+      'subagent',
+      'the subagent result to reach the model',
       SCENARIO_TIMEOUT_MS,
       [dsh, mock.entry],
     );
-    const steerResult = toolResultTexts(steerResultRequest, 'message_agent').at(-1) ?? '';
-    phase.steerAck = steerResult.slice(0, 240);
-    const steerAccepted = steerResult.includes('Message parked for "S1 draftsman"');
-    assert('s1', 'message_agent returned the steer ack (correction parked)', steerAccepted, { returned: phase.steerAck });
-    if (!steerAccepted) {
-      // FIXED in ticket 120 (2026-10-22): the worker is registered before the
-      // child can emit its first `agent/status: running`, so the FSM leaves
-      // `spawned` and this lane accepts the steer. The branch is kept as a
-      // diagnostic: if it ever fires again, the failure is the old race or a
-      // new one in the same seam, and the assertions below stay real.
-      phase.blocker = 'steer refused: worker status never left "spawned" (regressed?)';
-    }
+    const spawnResult = toolResultTexts(spawnResultRequest, 'subagent').at(-1) ?? '';
+    phase.spawnResult = spawnResult.slice(0, 240);
+    const workerId = subagentActivationId(spawnResult);
+    phase.workerId = workerId;
+    assert('s1', 'subagent returned the stock activation id (started subagent <id>)', workerId !== null, { returned: phase.spawnResult });
+    if (workerId === null) throw new Error(`subagent returned no activation id: ${spawnResult.slice(0, 200)}`);
+
+    const sendResultRequest = await waitForToolResult(
+      mock,
+      sessionId,
+      'send_message',
+      'the send_message result to reach the model',
+      SCENARIO_TIMEOUT_MS,
+      [dsh, mock.entry],
+    );
+    const sendResult = toolResultTexts(sendResultRequest, 'send_message').at(-1) ?? '';
+    phase.sendResult = sendResult.slice(0, 240);
+    assert(
+      's1',
+      'send_message delivered the correction to the running worker',
+      sendResult.includes(`message delivered to agent ${workerId}`),
+      { returned: phase.sendResult },
+    );
 
     // The correction lands on the WORKER's session, so the search must span
     // every session: filtering by the dispatcher's id here made the predicate
@@ -1118,14 +1177,14 @@ async function scenario1() {
       (entry) =>
         (entry.systemFull ?? '').includes('delegated worker') &&
         (entry.userTextsAll ?? []).some((text) => text.includes('s1-correction-marker')) &&
-        (entry.userTextsAll ?? []).some((text) => text.includes('[Parent correction]')),
-      // Bounded well below the scenario budget: when the steer is refused the
+        (entry.userTextsAll ?? []).some((text) => text.includes('use the other format instead.')),
+      // Bounded well below the scenario budget: when the send is refused the
       // correction can never arrive, and a long wait would only hide that.
       30000,
       [dsh, mock.entry],
     ).catch(() => null);
     phase.correctionSeenAtMock = corrected !== null;
-    assert('s1', 'the worker\'s NEXT step carries [Parent correction] and the exact text', corrected !== null);
+    assert('s1', 'the worker\'s NEXT step carries the exact correction text', corrected !== null);
 
     const workerTurns = allRequests(mock).filter((entry) => (entry.systemFull ?? '').includes('delegated worker'));
     phase.workerTurns = workerTurns.length;
@@ -1147,6 +1206,34 @@ async function scenario1() {
 
     const finalWorkerTurn = readRequests(mock.requestLog).find((entry) => (entry.reply?.say ?? '').includes('worker-final-v2')) ?? null;
     assert('s1', 'the worker finished on the corrected instruction', finalWorkerTurn !== null);
+
+    // The parent's result is the host's own settlement notice: it must arrive
+    // on a LATER dispatcher turn and carry the child's closing text.
+    const noticeTurn = await waitForRequest(
+      mock,
+      sessionId,
+      'the stock completion notice to reach the parent',
+      (entry) => settlementNoticeFor(entry.userTextsAll, workerId) !== null,
+      SCENARIO_TIMEOUT_MS,
+      [dsh, mock.entry],
+    ).catch(() => null);
+    const noticeText = noticeTurn === null ? null : settlementNoticeFor(noticeTurn.userTextsAll, workerId);
+    phase.notice = noticeText === null ? null : noticeText.slice(0, 400);
+    phase.noticeTurnSeq = noticeTurn?.seq ?? null;
+    assert('s1', 'the parent got the stock subagent-settled notice for that child', noticeText !== null, { notice: phase.notice });
+    assert(
+      's1',
+      'the notice carries "Its closing message:" and the worker\'s closing answer',
+      noticeText !== null && noticeText.includes('Its closing message:') && noticeText.includes('worker-final-v2'),
+      { notice: phase.notice },
+    );
+    assert(
+      's1',
+      'the notice opened a later parent turn and the dispatcher continued',
+      noticeTurn !== null && noticeTurn.seq > spawnResultRequest.seq && (noticeTurn.reply?.say ?? '').includes('s1-dispatcher-done'),
+      { spawnSeq: spawnResultRequest.seq, noticeSeq: noticeTurn?.seq ?? null, reply: (noticeTurn?.reply?.say ?? '').slice(0, 80) },
+    );
+
     phase.status = statusFrom(phase.scenario);
   } catch (error) {
     phase.error = String(error?.message ?? error);
@@ -1161,48 +1248,56 @@ async function scenario1() {
 }
 
 /**
- * Ticket 120 scenario 2 — a dispatcher `await_agent`s a slow worker and
- * receives its result IN THE SAME TURN.
+ * Ticket 120 scenario 2 — a dispatcher starts a slow worker, ENDS its turn,
+ * and receives the result as the host's own completion notice on a fresh turn.
+ *
+ * Ticket 117 retired the bounded wait, and the stock-subagent refactor removed
+ * its last name: there is no `await_agent`, and no stock tool blocks on a
+ * child. This phase therefore asserts the stock behaviour that replaces it —
+ * push, not poll — and proves the wait cannot be silently faked:
  *
  * Observable assertions:
- * - the `await_agent` tool returned `settled` with the worker's report text;
- * - the request that carried that result has the SAME number of user messages
- *   as the request that issued the call — no new turn opened in between;
- * - the worker's report marker is that result.
+ * - the dispatcher surface offers `subagent` and the stock control trio and
+ *   NO wait verb (`await_agent` / `check_workers`);
+ * - the parent's turn carrying the spawn result ended instead of polling;
+ * - nothing else on the dispatcher session ran before the notice;
+ * - the notice names the finished child and carries "Its closing message:"
+ *   plus the worker's report marker;
+ * - the notice opened a LATER parent turn and the scripted continuation
+ *   (`s2-notice-received`) is that turn's reply.
  */
 async function scenario2() {
-  record('phase', { message: 's2 — await_agent returns the result in the same turn' });
+  record('phase', { message: 's2 — the stock completion notice is the result, on a new turn' });
   const scriptFile = join(OUT, 's2-script.json');
   writeFileSync(
     scriptFile,
     JSON.stringify(
       [
         {
-          match: { anyUserIncludes: 's2-start', toolNames: ['spawn_worker'] },
+          match: { anyUserIncludes: 's2-start', toolNames: ['subagent'] },
           say: 's2-spawn',
           tool: {
-            name: 'spawn_worker',
-            input: {
-              stream_key: 's2-stream',
-              title: 'S2 slow worker',
-              prompt: 's2-worker-brief: take a moment, then report.',
-            },
+            name: 'subagent',
+            input: { description: 'S2 slow worker', prompt: 's2-worker-brief: take a moment, then report.' },
           },
         },
         {
+          // The worker's only turn is slow on purpose: the parent is idle
+          // again well before the notice, so the notice has to OPEN a turn.
           match: { systemIncludes: 'delegated worker', anyUserIncludes: 's2-worker-brief' },
           say: 's2-worker-result-marker',
           delayMs: 4000,
         },
         {
-          match: { toolResultIncludes: 'in the background (worker', toolNames: ['await_agent'] },
-          say: 's2-awaiting',
-          capture: { workerId: ['in the background \\(worker ([^,\\s]+), stream '] },
-          tool: { name: 'await_agent', input: { target: '{{workerId}}', timeout_ms: 60000 } },
+          // The parent's turn that carries the spawn result: the dispatcher
+          // ends it. No wait tool is called — there is none to call.
+          match: { toolResultIncludes: 'started subagent', toolNames: ['subagent'] },
+          say: 's2-no-wait',
         },
         {
-          match: { toolResultIncludes: 'settled: completed' },
-          say: 's2-await-done',
+          // The completion notice opens the parent's next turn.
+          match: { anyUserIncludes: 's2-worker-result-marker', toolNames: ['subagent'] },
+          say: 's2-notice-received',
         },
       ],
       null,
@@ -1217,54 +1312,87 @@ async function scenario2() {
     phase.sessionId = sessionId;
     await sendUserMessage(api, sessionId, 's2-start');
 
-    const awaitCall = await waitForRequest(
+    const spawnResultRequest = await waitForToolResult(
       mock,
       sessionId,
-      'the dispatcher to call await_agent',
-      (entry) => entry.reply?.tool?.name === 'await_agent',
+      'subagent',
+      'the subagent result to reach the model',
       SCENARIO_TIMEOUT_MS,
       [dsh, mock.entry],
     );
-    const awaitResultRequest = await waitForRequest(
-      mock,
-      sessionId,
-      'the await_agent result to reach the model',
-      (entry) => toolResultTexts(entry, 'await_agent').length > 0,
-      SCENARIO_TIMEOUT_MS,
-      [dsh, mock.entry],
-    );
-    const awaitResult = toolResultTexts(awaitResultRequest, 'await_agent').at(-1) ?? '';
-    phase.awaitResult = awaitResult.slice(0, 400);
-    assert('s2', 'await_agent returned the settled worker', awaitResult.includes('settled: completed'), { returned: phase.awaitResult });
-    assert('s2', 'the returned result IS the worker\'s report', awaitResult.includes('s2-worker-result-marker'));
+    const spawnResult = toolResultTexts(spawnResultRequest, 'subagent').at(-1) ?? '';
+    phase.spawnResult = spawnResult.slice(0, 240);
+    const workerId = subagentActivationId(spawnResult);
+    phase.workerId = workerId;
+    assert('s2', 'subagent returned the stock activation id (started subagent <id>)', workerId !== null, { returned: phase.spawnResult });
+    if (workerId === null) throw new Error(`subagent returned no activation id: ${spawnResult.slice(0, 200)}`);
 
-    const userMessagesAtCall = readableUserTexts(awaitCall).length;
-    const userMessagesAtResult = readableUserTexts(awaitResultRequest).length;
-    phase.userMessages = { atCall: userMessagesAtCall, atResult: userMessagesAtResult };
-    // "Same turn" is asserted by what the TOOL RETURNED (the settled result
-    // above) plus the absence of any intervening dispatcher request: if the
-    // wait had timed out, the tool would have answered `still-running` and the
-    // report would only arrive later on a wake turn. Counting user messages is
-    // NOT a valid proxy — the host delivers its own `subagent-settled` notice
-    // as an extra user-role message inside the SAME turn (observed: 1 → 2).
-    // Identify requests by `seq` (stable across log reads) and by SERVICE SESSION:
-    // an intervening dispatcher turn would show up as a dispatcher-session
-    // request between the call and the result.
-    const between = sessionRequests(mock, sessionId).filter(
-      (entry) => entry.seq > awaitCall.seq && entry.seq < awaitResultRequest.seq,
-    );
-    phase.interveningDispatcherRequests = between.length;
+    // No wait verb exists on the shipped surface: proven, not assumed.
+    const offered = spawnResultRequest.toolNames ?? [];
+    phase.offeredTools = offered;
     assert(
       's2',
-      'the tool call itself returned it — no intervening dispatcher request',
-      awaitResultRequest.seq === awaitCall.seq + 1 || between.length === 0,
-      { callSeq: awaitCall.seq, resultSeq: awaitResultRequest.seq, between: between.length },
+      'the dispatcher surface has no wait verb to call',
+      !offered.includes('await_agent') && !offered.includes('check_workers'),
+      { retiredStillOffered: retiredToolsOffered(offered) },
     );
     assert(
       's2',
-      'the dispatcher continued that turn after the result',
-      awaitResultRequest.seq > awaitCall.seq && (awaitResultRequest.reply?.say ?? '').includes('s2-await-done'),
-      { callSeq: awaitCall.seq, resultSeq: awaitResultRequest.seq },
+      'the dispatcher ended its turn on the spawn result instead of polling',
+      (spawnResultRequest.reply?.say ?? '').includes('s2-no-wait'),
+      { reply: (spawnResultRequest.reply?.say ?? '').slice(0, 120) },
+    );
+
+    const noticeTurn = await waitForRequest(
+      mock,
+      sessionId,
+      'the stock completion notice to open a new turn',
+      (entry) => settlementNoticeFor(entry.userTextsAll, workerId) !== null,
+      SCENARIO_TIMEOUT_MS,
+      [dsh, mock.entry],
+    );
+    const noticeText = settlementNoticeFor(noticeTurn.userTextsAll, workerId);
+    phase.notice = noticeText.slice(0, 400);
+    phase.noticeTurnSeq = noticeTurn.seq;
+    assert(
+      's2',
+      'the notice names the finished child and its stop reason',
+      noticeText.includes(`Background subagent ${workerId} finished`),
+      { notice: phase.notice },
+    );
+    assert(
+      's2',
+      'the notice carries "Its closing message:" and the worker\'s report',
+      noticeText.includes('Its closing message:') && noticeText.includes('s2-worker-result-marker'),
+      { notice: phase.notice },
+    );
+    assert(
+      's2',
+      'the notice arrived on a LATER parent turn than the spawn result',
+      noticeTurn.seq > spawnResultRequest.seq,
+      { spawnSeq: spawnResultRequest.seq, noticeSeq: noticeTurn.seq },
+    );
+    // Push, not poll: nothing on the dispatcher session ran between the
+    // spawn-result turn and the notice. The session-title request carries no
+    // dispatcher surface, so the stock-tool filter excludes it by construction.
+    const dispatcherTurnsBetween = sessionRequests(mock, sessionId).filter(
+      (entry) =>
+        entry.seq > spawnResultRequest.seq &&
+        entry.seq < noticeTurn.seq &&
+        (entry.toolNames ?? []).includes('subagent'),
+    );
+    phase.interveningDispatcherRequests = dispatcherTurnsBetween.length;
+    assert(
+      's2',
+      'no dispatcher turn polled in between — the notice did the waking',
+      dispatcherTurnsBetween.length === 0,
+      { between: dispatcherTurnsBetween.map((entry) => entry.seq) },
+    );
+    assert(
+      's2',
+      'the parent turn after the notice continued (the notice is the result)',
+      (noticeTurn.reply?.say ?? '').includes('s2-notice-received'),
+      { reply: (noticeTurn.reply?.say ?? '').slice(0, 120) },
     );
 
     phase.status = statusFrom(phase.scenario);
@@ -1309,10 +1437,11 @@ function spawnAckChildId(ack) {
  * (`## Other agents — not the user`), which is how a real model would learn it.
  * Observable assertions:
  * - `spawn_dispatcher` returned a dispatcher id and the "peer dispatcher" note;
- * - the child session is a real dispatcher (spawn_worker + await_agent on its
- *   tool surface, and NO spawn_dispatcher — ticket 176 withholds the summon
- *   verb from the spawned class) and its brief reached it;
- * - the child spawned a worker and that worker ran;
+ * - the child session is a real dispatcher on the STOCK surface (its own
+ *   `subagent` + `list_agents`, none of the retired worker verbs, and NO
+ *   `spawn_dispatcher` — ticket 176 withholds the summon verb from the spawned
+ *   class) and its brief reached it;
+ * - the child spawned a worker with `subagent` and that worker ran;
  * - a LATER creator turn carries the peer-message heading and the child's text;
  * - the child's send was accepted for the creator's session.
  */
@@ -1341,11 +1470,13 @@ async function scenario3() {
           // `spawn_dispatcher` is deliberately withheld from its surface, so the
           // gate must use the surface it DOES have. Gating on `spawn_dispatcher`
           // made this step unmatchable, so the child never spawned its worker.
-          match: { anyUserIncludes: 's3-child-brief', toolNames: ['spawn_worker', 'await_agent'] },
+          // Stock-subagent refactor: that surface is `subagent` + `list_agents`,
+          // and the worker starts with the stock `subagent` tool.
+          match: { anyUserIncludes: 's3-child-brief', toolNames: ['subagent', 'list_agents'] },
           say: 's3-child-spawn',
           tool: {
-            name: 'spawn_worker',
-            input: { stream_key: 's3-stream', title: 'S3 child worker', prompt: 's3-worker-brief: produce the slice.' },
+            name: 'subagent',
+            input: { description: 'S3 child worker', prompt: 's3-worker-brief: produce the slice.' },
           },
         },
         {
@@ -1425,15 +1556,17 @@ async function scenario3() {
     phase.childToolCount = childToolNames.length;
     // Ticket 176: the spawned class is a dispatcher (own workers, ledger, inbox,
     // team-leader policy) whose surface withholds `spawn_dispatcher`, so it
-    // cannot summon further dispatchers. Both halves are asserted: the
-    // dispatcher verbs it must carry, and the one verb it must not.
+    // cannot summon further dispatchers. Both halves are asserted: the stock
+    // dispatcher verbs it must carry, and the verb it must not.
+    phase.childRetiredTools = retiredToolsOffered(childToolNames);
     assert(
       's3',
-      'the child is a dispatcher (its own surface offers spawn_worker and await_agent)',
+      'the child is a dispatcher on the stock surface (subagent and list_agents, no retired worker verbs)',
       childRequest !== null &&
-        childToolNames.includes('spawn_worker') &&
-        childToolNames.includes('await_agent'),
-      { toolCount: phase.childToolCount },
+        childToolNames.includes('subagent') &&
+        childToolNames.includes('list_agents') &&
+        phase.childRetiredTools.length === 0,
+      { toolCount: phase.childToolCount, retiredStillOffered: phase.childRetiredTools },
     );
     assert(
       's3',
@@ -1514,38 +1647,39 @@ async function scenario3() {
 }
 
 /**
- * Ticket 120 scenario 4 — a real USER message during `await_agent` releases
- * the wait promptly (PRD S1).
+ * Ticket 120 scenario 4 — a real USER message while a worker is RUNNING: the
+ * dispatcher answers it on its own turn, and the worker's result still arrives
+ * later (PRD S1 responsiveness). Retargeted by the stock-subagent refactor.
  *
- * The user message is sent through the host's own `session/prompt` RPC, so it
- * carries `source.kind: "user"` exactly as the GUI's composer does. Nothing
- * calls `releaseWaits` directly: the assertion is that the shipped trigger —
- * host `session/event` → plugin release — actually fires.
+ * The old phase proved that a user message released an in-turn `await_agent`.
+ * That premise is gone — ticket 117 retired the wait, the stock surface has no
+ * wait verb, and nothing blocks a dispatcher turn on a child. What remains
+ * provable offline is the S1 property the wait was protecting: the dispatcher
+ * is responsive while a worker runs, and the worker's own result is neither
+ * stolen nor lost. So the phase now sends the same real user message (through
+ * the host's own `session/prompt` RPC, exactly as the GUI composer does) while
+ * the worker is mid-step, and asserts that:
  *
- * Observable assertions:
- * - the `await_agent` tool returned `released` with the USER-MESSAGE copy
- *   ("was released because the user said something"), not the stopped copy;
- * - it returned well before the worker settled and far below the 120 s cap;
- * - the dispatcher produced a reply in that same turn;
- * - the worker kept running and its result still arrived later.
+ * - the dispatcher surface has no in-turn wait tool, and its spawn turn ended;
+ * - the user message opened a new dispatcher turn and was answered;
+ * - the worker's completion notice arrived only after its scripted 25 s step,
+ *   i.e. the user turn neither stopped nor answered for the worker;
+ * - the notice carries the worker's own closing answer, and the dispatcher
+ *   continued on that later turn.
  */
 async function scenario4() {
-  record('phase', { message: 's4 — a user message releases the await (PRD S1)' });
+  record('phase', { message: 's4 — the dispatcher stays responsive while a worker runs (PRD S1)' });
   const scriptFile = join(OUT, 's4-script.json');
   writeFileSync(
     scriptFile,
     JSON.stringify(
       [
         {
-          match: { anyUserIncludes: 's4-start', toolNames: ['spawn_worker'] },
+          match: { anyUserIncludes: 's4-start', toolNames: ['subagent'] },
           say: 's4-spawn',
           tool: {
-            name: 'spawn_worker',
-            input: {
-              stream_key: 's4-stream',
-              title: 'S4 slow worker',
-              prompt: 's4-worker-brief: finish much later.',
-            },
+            name: 'subagent',
+            input: { description: 'S4 slow worker', prompt: 's4-worker-brief: finish much later.' },
           },
         },
         {
@@ -1554,21 +1688,19 @@ async function scenario4() {
           delayMs: 25000,
         },
         {
-          match: { toolResultIncludes: 'in the background (worker', toolNames: ['await_agent'] },
-          say: 's4-awaiting',
-          capture: { workerId: ['in the background \\(worker ([^,\\s]+), stream '] },
-          tool: { name: 'await_agent', input: { target: '{{workerId}}', timeout_ms: 120000 } },
+          // The parent's arrival turn ends; there is nothing to wait on.
+          match: { toolResultIncludes: 'started subagent', toolNames: ['subagent'] },
+          say: 's4-turn-ended',
         },
         {
-          match: { toolResultIncludes: 'was released because the user said something' },
-          say: 's4-reply-after-release',
-        },
-        {
-          match: { anyUserIncludes: 's4-user-interrupt' },
+          // The user's own message, delivered while the worker is still
+          // inside its 25 s step.
+          match: { anyUserIncludes: 's4-user-message' },
           say: 's4-answered-the-user',
         },
         {
-          match: { anyUserIncludes: 's4-worker-late-result', toolNames: ['check_workers'] },
+          // The worker's completion notice opens a turn of its own.
+          match: { anyUserIncludes: 's4-worker-late-result', toolNames: ['subagent'] },
           say: 's4-late-result-arrived',
         },
       ],
@@ -1584,73 +1716,88 @@ async function scenario4() {
     phase.sessionId = sessionId;
     await sendUserMessage(api, sessionId, 's4-start');
 
-    const awaitCall = await waitForRequest(
+    const spawnResultRequest = await waitForToolResult(
       mock,
       sessionId,
-      'the dispatcher to enter await_agent',
-      (entry) => entry.reply?.tool?.name === 'await_agent',
+      'subagent',
+      'the subagent result to reach the model',
       SCENARIO_TIMEOUT_MS,
       [dsh, mock.entry],
     );
-    phase.awaitStartedAt = awaitCall.t;
+    const spawnResult = toolResultTexts(spawnResultRequest, 'subagent').at(-1) ?? '';
+    phase.spawnResult = spawnResult.slice(0, 240);
+    const workerId = subagentActivationId(spawnResult);
+    phase.workerId = workerId;
+    assert('s4', 'subagent returned the stock activation id (started subagent <id>)', workerId !== null, { returned: phase.spawnResult });
+    if (workerId === null) throw new Error(`subagent returned no activation id: ${spawnResult.slice(0, 200)}`);
 
-    // The real user message, exactly as the GUI composer sends it.
-    record('prompt', { message: 's4: user message during the await' });
-    await sendUserMessage(api, sessionId, 's4-user-interrupt: stop waiting and answer me.');
+    const offered = spawnResultRequest.toolNames ?? [];
+    assert(
+      's4',
+      'the dispatcher surface has no in-turn wait tool to block on',
+      !offered.includes('await_agent') && !offered.includes('check_workers'),
+      { retiredStillOffered: retiredToolsOffered(offered) },
+    );
+    assert(
+      's4',
+      'the dispatcher ended its spawn turn without waiting',
+      (spawnResultRequest.reply?.say ?? '').includes('s4-turn-ended'),
+      { reply: (spawnResultRequest.reply?.say ?? '').slice(0, 120) },
+    );
 
-    const releasedRequest = await waitForRequest(
+    // The real user message, exactly as the GUI composer sends it — now while
+    // the worker is mid-step, with no in-turn wait to release.
+    record('prompt', { message: 's4: real user message while the worker runs' });
+    await sendUserMessage(api, sessionId, 's4-user-message: status while the worker runs?');
+
+    const userTurn = await waitForRequest(
       mock,
       sessionId,
-      'the released await result to reach the model',
-      (entry) => toolResultTexts(entry, 'await_agent').length > 0,
+      'the dispatcher to answer the user message while the worker runs',
+      (entry) => (entry.userTextsAll ?? []).some((text) => text.includes('s4-user-message')),
       30000,
       [dsh, mock.entry],
     );
-    const released = toolResultTexts(releasedRequest, 'await_agent').at(-1) ?? '';
-    phase.awaitResult = released.slice(0, 400);
+    phase.userTurnAt = userTurn.t;
     assert(
       's4',
-      'the wait was released with the USER-MESSAGE reason (not stopped)',
-      released.includes('was released because the user said something'),
-      { returned: phase.awaitResult },
-    );
-    assert('s4', 'the worker was reported as still running, not stopped', released.includes('worker was not stopped and keeps running'));
-
-    const waitedMs = Date.parse(releasedRequest.t) - Date.parse(awaitCall.t);
-    phase.waitedMs = waitedMs;
-    assert('s4', 'it returned promptly — far below the 120 s cap', waitedMs < 15000, { waitedMs });
-
-    const settledRequest = readRequests(mock.requestLog).find((entry) =>
-      (entry.userTextsAll ?? []).some((text) => text.includes('s4-worker-late-result')),
-    );
-    phase.workerSettledBeforeRelease = settledRequest !== undefined && Date.parse(settledRequest.t) < Date.parse(releasedRequest.t);
-    assert(
-      's4',
-      'the release came BEFORE the worker settled (it was the user, not the settle, that ended the wait)',
-      !phase.workerSettledBeforeRelease,
-      { waitedMs, workerSettleSeen: settledRequest !== undefined },
+      'the dispatcher answered the user on its own turn while the worker ran',
+      (userTurn.reply?.say ?? '').includes('s4-answered-the-user'),
+      { reply: (userTurn.reply?.say ?? '').slice(0, 120) },
     );
 
-    // The turn continued and answered: the reply the mock scripted AFTER the
-    // released result is the assistant's answer in that same turn.
-    assert(
-      's4',
-      'the dispatcher still replied in that turn',
-      (releasedRequest.reply?.say ?? '').includes('s4-reply-after-release'),
-      { reply: (releasedRequest.reply?.say ?? '').slice(0, 120) },
-    );
-
-    // The worker was not stopped: its late result still arrives on a later turn.
-    const lateResultTurn = await waitForRequest(
+    // The worker was neither stopped nor answered for by the user turn: the
+    // host's completion notice still arrives, later, with its closing answer.
+    const noticeTurn = await waitForRequest(
       mock,
       sessionId,
-      'the released worker\'s late result to arrive anyway',
-      (entry) => (entry.userTextsAll ?? []).some((text) => text.includes('s4-worker-late-result')) && entry.seq > releasedRequest.seq,
+      'the worker\'s completion notice after the user turn',
+      (entry) => settlementNoticeFor(entry.userTextsAll, workerId) !== null,
       60000,
       [dsh, mock.entry],
     ).catch(() => null);
-    phase.lateResultArrived = lateResultTurn !== null;
-    assert('s4', 'the released worker kept running and its result arrived later', lateResultTurn !== null);
+    const noticeText = noticeTurn === null ? null : settlementNoticeFor(noticeTurn.userTextsAll, workerId);
+    phase.notice = noticeText === null ? null : noticeText.slice(0, 400);
+    const noticeAfterUserMs = noticeTurn === null ? null : Date.parse(noticeTurn.t) - Date.parse(userTurn.t);
+    phase.noticeAfterUserMs = noticeAfterUserMs;
+    assert(
+      's4',
+      'the notice arrived only after the worker\'s scripted 25 s step — the user turn did not end it',
+      noticeAfterUserMs !== null && noticeAfterUserMs >= 15000,
+      { noticeAfterUserMs, workerDelayMs: 25000 },
+    );
+    assert(
+      's4',
+      'the notice carries the worker\'s own closing answer ("Its closing message:")',
+      noticeText !== null && noticeText.includes('Its closing message:') && noticeText.includes('s4-worker-late-result'),
+      { notice: phase.notice },
+    );
+    assert(
+      's4',
+      'the dispatcher continued on the notice turn',
+      noticeTurn !== null && (noticeTurn.reply?.say ?? '').includes('s4-late-result-arrived'),
+      { reply: (noticeTurn?.reply?.say ?? '').slice(0, 120) },
+    );
 
     phase.status = statusFrom(phase.scenario);
   } catch (error) {
@@ -1680,11 +1827,11 @@ function writeDispatcherScript(path) {
     JSON.stringify(
       [
         {
-          match: { toolNames: ['spawn_worker'], userIncludes: 'mock-e2e-smoke' },
+          match: { toolNames: ['subagent'], userIncludes: 'mock-e2e-smoke' },
           say: 'Starting one worker.',
           tool: {
-            name: 'spawn_worker',
-            input: { stream_key: 'mock-stream', title: 'Mock smoke worker', prompt: 'Reply with exactly: worker-ok' },
+            name: 'subagent',
+            input: { description: 'Mock smoke worker', prompt: 'Reply with exactly: worker-ok' },
           },
         },
         { match: { systemIncludes: 'delegated worker' }, say: 'worker-ok' },

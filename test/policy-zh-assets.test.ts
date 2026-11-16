@@ -163,7 +163,10 @@ describe("remaining model-facing copy — ZH face (ticket 153 step 2)", () => {
     // Ticket 174 / ADR-0033: `request_access` is gone, so it is not asserted.
     // `class`/`target` were the ask tool's parameter names and went with it.
     for (const identifier of [
-      "reply_to_dispatcher",
+      // Stock-subagent refactor: the worker-local reply tool is gone; the
+      // interim steer to the dispatcher is the stock `send_message`, and the
+      // status words it prefixes are unchanged.
+      "send_message",
       "progress",
       "blocked",
       "note",

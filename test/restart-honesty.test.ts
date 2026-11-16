@@ -32,6 +32,7 @@ import {
   markerDomainSpec,
   RESTART_DEGRADED_NOTICE,
   RESTART_NOTICE_HEADING,
+  RESTART_NOTICE_SUMMARY,
   restartRestoredLine,
   type AgentLike,
   type CommandDefinitionLike,
@@ -40,11 +41,7 @@ import {
 } from "../src/adapter/index.js";
 import type { DurableWorkerMarker } from "../src/core/durability.js";
 
-import {
-  buildDispatcherPolicySection,
-  CHECK_WORKERS_TOOL,
-  SPAWN_WORKER_TOOL,
-} from "../src/core/policy/prompts.js";
+import { buildDispatcherPolicySection } from "../src/core/policy/prompts.js";
 import {assembleSessionPolicy} from "../src/core/policy/assembler.js";
 import {
   abortedReportBody,
@@ -59,10 +56,21 @@ async function flushActivation(): Promise<void> {
   }
 }
 
+interface AppendedRecord {
+  readonly type: string;
+  readonly data: unknown;
+  readonly options?: unknown;
+}
+
 interface TestAgent extends AgentLike {
   readonly injected: unknown[];
   /** Ticket 57: waking deliveries (`followup`) — must not be confused with injects. */
   readonly woken: unknown[];
+  /**
+   * Ticket 31 (restart notice): surface writes. The notice queue appends the
+   * deferred notice here; no wake/inject is involved.
+   */
+  readonly appended: AppendedRecord[];
   readonly scopedTools: ScopedToolSurface;
 }
 
@@ -104,11 +112,18 @@ function createScopedTools(): ScopedToolSurface {
 function createAgent(id: string): TestAgent {
   const injected: unknown[] = [];
   const woken: unknown[] = [];
+  const appended: AppendedRecord[] = [];
   const scopedTools = createScopedTools();
   return {
     session: {
       id,
       header: { parentSession: null, delegationDepth: 0 },
+      append(type: string, data: unknown, options?: unknown) {
+        appended.push(
+          options === undefined ? { type, data } : { type, data, options },
+        );
+        return Promise.resolve();
+      },
     },
     followup(message: unknown) {
       woken.push(message);
@@ -118,6 +133,7 @@ function createAgent(id: string): TestAgent {
     },
     injected,
     woken,
+    appended,
     ctx: { tools: scopedTools },
     scopedTools,
   };
@@ -137,6 +153,7 @@ function textOf(message: unknown): string {
  */
 function createRestartCtx() {
   const listeners = new Map<string, Array<(payload: never) => void>>();
+  const boundAgents = new Map<string, AgentLike>();
   const commands = new Map<string, CommandDefinitionLike>();
   const tools = new Map<
     string,
@@ -192,9 +209,9 @@ function createRestartCtx() {
     taken: boolean;
   }> = [];
 
-  const fire = (name: string, payload: unknown) => {
+  const fire = (name: string, ...payload: unknown[]) => {
     for (const cb of [...(listeners.get(name) ?? [])]) {
-      cb(payload as never);
+      (cb as unknown as (...args: unknown[]) => void)(...payload);
     }
   };
 
@@ -299,7 +316,7 @@ function createRestartCtx() {
         return "msg-stub";
       },
     },
-    agents: { get: () => undefined },
+    agents: { get: (id: string) => boundAgents.get(id) },
     jobs: { list: () => [] },
     storageDomain: {
       async open() {
@@ -327,6 +344,74 @@ function createRestartCtx() {
     tool: (name: string, agent?: AgentLike) =>
       (agent?.ctx?.tools as ScopedToolSurface | undefined)?.get(name) ??
       tools.get(name),
+    bindAgent(agent: AgentLike) {
+      boundAgents.set(String(agent.session.id), agent);
+    },
+    /**
+     * The preset's stock `subagent` tool, faked at the host boundary: it
+     * announces the child the stock runtime creates (`agent/created` with
+     * `origin: "subagent"`), never a plugin spawn handler. The plugin adopts
+     * the child from that header — the same core seam a restart rebuild uses.
+     */
+    mountStockTools(agent: TestAgent) {
+      if (agent.scopedTools.get("subagent") !== undefined) return;
+      agent.scopedTools.register({
+        name: "subagent",
+        async execute() {
+          const childId = `child-${nextChild++}`;
+          // The child's inherited scope: one denied verb is enough for the
+          // worker barrier, and `restrict`/registration are the seams the
+          // composition writes through (test stub, never the live host).
+          const childTools = {
+            schemas: () => [{ name: "deliver_result" }],
+            restrict: () => () => {},
+            register: () => () => {},
+          };
+          const child: AgentLike = {
+            session: {
+              id: childId,
+              header: {
+                parentSession: "s-1",
+                delegationDepth: 1,
+                origin: "subagent",
+              },
+            },
+            followup() {},
+            inject() {},
+            ctx: { tools: childTools as unknown as ToolsLike },
+          };
+          boundAgents.set(childId, child);
+          fire("agent/created", { agent: child, source: "startup" });
+          return { ok: true, childId };
+        },
+      });
+    },
+    /** Start one stock worker and return its id. */
+    async spawnStockWorker(agent: TestAgent, label: string): Promise<string> {
+      const subagent = agent.scopedTools.get("subagent");
+      assert.ok(subagent, "the preset must be mounted on the dispatcher");
+      const value = (await subagent.execute({
+        description: label,
+        prompt: "work",
+      })) as { ok: boolean; childId: string };
+      assert.equal(value.ok, true);
+      return value.childId;
+    },
+    /**
+     * The kept replacement for `check_workers`: `message_agent` routes an id
+     * with a roster record to the worker-steer branch (`not-running` for a
+     * terminal or pre-turn worker) and an id with none to the peer branch
+     * (`unknown-target`). Neither refusal mutates state or spends budget.
+     */
+    async workerOnRoster(agent: TestAgent, workerId: string): Promise<boolean> {
+      const message = agent.scopedTools.get("message_agent");
+      assert.ok(message, "the dispatcher surface is registered");
+      const result = (await message.execute({
+        target: workerId,
+        text: "roster probe",
+      })) as { ok: boolean; reason?: string };
+      return result.ok === false && result.reason === "not-running";
+    },
     /** Park the next marker-table resolution until released (ticket 90). */
     holdNextMarkerTable() {
       let release: () => void = () => {};
@@ -351,7 +436,7 @@ function createRestartCtx() {
     },
   };
   return ctx as unknown as Parameters<typeof pluginApply>[0] & {
-    fire(name: string, payload: unknown): void;
+    fire(name: string, ...payload: unknown[]): void;
     readonly updates: unknown[];
     readonly settingsProvider: {
       register(ns: string): { update(value: unknown): Promise<void> };
@@ -364,6 +449,10 @@ function createRestartCtx() {
     ):
       | { execute: (args: unknown, exec?: unknown) => Promise<unknown> }
       | undefined;
+    bindAgent(agent: AgentLike): void;
+    mountStockTools(agent: TestAgent): void;
+    spawnStockWorker(agent: TestAgent, label: string): Promise<string>;
+    workerOnRoster(agent: TestAgent, workerId: string): Promise<boolean>;
     holdNextMarkerTable(): void;
     releaseMarkerTableHold(): void;
     runCommand(invocation: {
@@ -436,21 +525,88 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
     // Exactly ONE restart notice, carrying the id, the transcript pointer,
     // the honest unknown wording, and the restored count (design-17 §7).
     //
-    // Ticket 57 (D-4): it must arrive on the WAKING primitive. Reading it out
-    // of `agent.injected` — what this test used to do — is precisely how the
-    // old behaviour stayed green: `inject` queues context into a turn that
-    // only opens if the user speaks next, so the recovery chain stalled.
-    const notices = agent.woken
-      .map(textOf)
-      .filter((text) => text.includes(RESTART_NOTICE_HEADING));
-    assert.equal(notices.length, 1, "recovery notice is delivered by a wake");
+    // Ticket 31 clarification (supersedes ticket 57 for THIS notice): it is
+    // queued, not woken. A restart must never auto-wake a dispatcher; the
+    // notice waits for the user's own first turn, then appends exactly once.
+    const restartAppended = () =>
+      agent.appended.filter((entry) =>
+        textOf(entry.data).includes(RESTART_NOTICE_HEADING),
+      );
+    assert.equal(
+      agent.woken.length,
+      0,
+      "activation queues the restart notice and opens no turn at all",
+    );
     assert.equal(
       agent.injected
         .map(textOf)
         .filter((text) => text.includes(RESTART_NOTICE_HEADING)).length,
       0,
-      "the recovery notice must NOT go through the queueing primitive",
+      "the restart notice must NOT go through the queueing primitive",
     );
+    assert.equal(
+      restartAppended().length,
+      0,
+      "nothing is visible before the first real user turn",
+    );
+
+    // The first step's protected system head is not a user message: the
+    // restart notice stays queued.
+    ctx.fire(
+      "session/event",
+      { id: "s-1" },
+      {
+        type: "system/message",
+        data: { turn: 1, step: 1, message: { role: "system", content: [] } },
+      },
+    );
+    await flushActivation();
+    assert.equal(
+      restartAppended().length,
+      0,
+      "a system head alone does not flush the restart notice",
+    );
+
+    // A plugin-authored notice is not a user turn either.
+    ctx.fire(
+      "session/event",
+      { id: "s-1" },
+      {
+        type: "user/message",
+        data: {
+          role: "user",
+          content: [{ type: "text", text: "Dispatcher active in this chat." }],
+          source: { kind: "plugin:multitask-dispatcher", form: "notice" },
+        },
+      },
+    );
+    await flushActivation();
+    assert.equal(
+      restartAppended().length,
+      0,
+      "plugin notices do not open the restart queue",
+    );
+
+    // The user's first real message flushes exactly once.
+    ctx.fire(
+      "session/event",
+      { id: "s-1" },
+      {
+        type: "user/message",
+        data: {
+          role: "user",
+          content: [{ type: "text", text: "hello" }],
+          source: { kind: "user" },
+        },
+      },
+    );
+    await flushActivation();
+    assert.equal(
+      restartAppended().length,
+      1,
+      "exactly one restart notice arrives with the first user turn",
+    );
+
     // R2: the activation-time session policy rides the already-open turn, so
     // it stays on `inject` (waking it would cost an extra model call).
     const policyInjects = agent.injected
@@ -464,7 +620,23 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
       0,
       "session policy does not wake",
     );
-    const notice = notices[0] ?? "";
+    const restartRecord = restartAppended()[0];
+    const notice = textOf(restartRecord?.data ?? {});
+    assert.equal(
+      (restartRecord?.data as { source?: { form?: unknown } }).source?.form,
+      "notice",
+      "the restart notice uses the notice form",
+    );
+    assert.equal(
+      (restartRecord?.data as { source?: { summary?: unknown } }).source?.summary,
+      RESTART_NOTICE_SUMMARY,
+      "the restart notice carries its collapsed summary",
+    );
+    assert.deepEqual(
+      restartRecord?.options,
+      { surfaceOp: "append" },
+      "the restart notice is a surface append, never a turn",
+    );
     assert.ok(notice.includes("w-live"), "notice names the unknown worker");
     assert.ok(
       notice.includes("state is unknown"),
@@ -487,21 +659,40 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
       "notice carries the restored-count line",
     );
 
+    // A second user turn must not duplicate it: the queue drained once.
+    ctx.fire(
+      "session/event",
+      { id: "s-1" },
+      {
+        type: "user/message",
+        data: {
+          role: "user",
+          content: [{ type: "text", text: "and again" }],
+          source: { kind: "user" },
+        },
+      },
+    );
+    await flushActivation();
+    assert.equal(
+      restartAppended().length,
+      1,
+      "the restart notice is appended exactly once",
+    );
+
     // The rebuild must have landed before the first roster read: the live
-    // roster already carries the restored terminal row.
-    const check = ctx.tool(CHECK_WORKERS_TOOL, agent);
-    assert.ok(check, "the dispatcher tool surface is registered");
-    const roster = (await check.execute({})) as {
-      ok: boolean;
-      rows: Array<{ worker_id: string; status: string }>;
-    };
-    assert.equal(roster.ok, true);
-    const ids = roster.rows.map((row) => row.worker_id);
-    assert.ok(ids.includes("w-done"), "restored row is on the roster");
+    // roster already carries the restored terminal row. `check_workers` is
+    // retired; `message_agent` still answers roster membership (a roster id
+    // hits the worker branch and refuses not-running; an absent id falls to
+    // the peer branch and refuses unknown-target).
+    assert.equal(
+      await ctx.workerOnRoster(agent, "w-done"),
+      true,
+      "restored row is on the roster",
+    );
     // Unknown-state rows NEVER land on the roster (core rule) — the notice
     // is their only surface.
     assert.equal(
-      ids.includes("w-live"),
+      await ctx.workerOnRoster(agent, "w-live"),
       false,
       "unknown-state worker never appears on the roster",
     );
@@ -510,8 +701,12 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
   it("rebuild failure: activation still succeeds with the degraded honest notice", async () => {
     const commands = new Map<string, CommandDefinitionLike>();
     const tools = new Map<string, { name?: string }>();
+    const listeners = new Map<string, Array<(...args: unknown[]) => void>>();
     const injected: unknown[] = [];
     const agent = createAgent("s-1");
+    const fire = (name: string, ...payload: unknown[]) => {
+      for (const cb of [...(listeners.get(name) ?? [])]) cb(...payload);
+    };
     const ctx = {
       // Cordis effect contract (ticket 44): `execute` runs at apply; whatever
       // it returns (or a generator yields) is the unload disposer — dropped
@@ -528,9 +723,18 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
         }
       },
       inject() {},
-      on() {
-        return () => {};
+      on(name: string, cb: (...args: unknown[]) => void) {
+        const list = listeners.get(name) ?? [];
+        list.push(cb);
+        listeners.set(name, list);
+        return () => {
+          listeners.set(
+            name,
+            (listeners.get(name) ?? []).filter((entry) => entry !== cb),
+          );
+        };
       },
+      fire,
       commands: {
         register(definition: CommandDefinitionLike) {
           // Shipped rule (ticket 91): duplicate command name throws
@@ -599,15 +803,52 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
     assert.equal(result.kind, "success", "activation survives a broken store");
     await flushActivation();
 
-    // Ticket 57: the degraded path is still a story the dispatcher must act
-    // on, so it wakes like the normal one — same primitive, same guarantee.
-    const notices = agent.woken
-      .map(textOf)
-      .filter((text) => text.includes(RESTART_DEGRADED_NOTICE));
+    // Ticket 31: the degraded notice is queued like the normal one — it must
+    // never auto-wake, and it stays invisible until the user speaks.
+    const degraded = (records: readonly { data: unknown }[]) =>
+      records.filter((entry) => textOf(entry.data).includes(RESTART_DEGRADED_NOTICE));
+    assert.equal(
+      agent.woken.filter((entry) => textOf(entry).includes(RESTART_DEGRADED_NOTICE))
+        .length,
+      0,
+      "the degraded notice does not wake the agent",
+    );
+    assert.equal(
+      degraded(agent.appended).length,
+      0,
+      "the degraded notice waits for the first real user turn",
+    );
+
+    ctx.fire(
+      "session/event",
+      { id: "s-1" },
+      {
+        type: "user/message",
+        data: {
+          role: "user",
+          content: [{ type: "text", text: "hello" }],
+          source: { kind: "user" },
+        },
+      },
+    );
+    await flushActivation();
+
+    const notices = degraded(agent.appended);
     assert.equal(
       notices.length,
       1,
       "exactly one degraded notice: nothing restored, nothing replayed",
+    );
+    assert.equal(
+      (notices[0]?.data as { source?: { summary?: unknown } }).source?.summary,
+      RESTART_NOTICE_SUMMARY,
+      "the degraded notice carries the restart summary",
+    );
+    assert.equal(
+      agent.woken.filter((entry) => textOf(entry).includes(RESTART_DEGRADED_NOTICE))
+        .length,
+      0,
+      "delivery is an append, not a followup",
     );
   });
 
@@ -654,6 +895,7 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
     await seedMarkers(ctx, [{ ...DONE_MARKER }]);
     pluginApply(ctx, volatileConfig({ enabled: true }));
     const agent = createAgent("s-1");
+    ctx.mountStockTools(agent);
 
     ctx.holdNextMarkerTable();
     const result = ctx.runCommand({
@@ -663,32 +905,27 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
     assert.equal(result.kind, "success");
     await flushActivation();
 
-    // A roster-affecting transition lands inside the window. A worker spawn is
-    // the cheapest real one: its marker write is a LATER table resolution, so
-    // it completes while the activation read is still parked.
-    const spawn = ctx.tool(SPAWN_WORKER_TOOL, agent);
-    assert.ok(spawn, "the dispatcher tool surface is registered");
-    const spawned = (await spawn.execute({
-      stream_key: "k-race",
-      title: "Raced task",
-      prompt: "work",
-    })) as { ok: boolean };
-    assert.equal(spawned.ok, true, "the spawn completed mid-rebuild");
+    // A roster-affecting transition lands inside the window. A stock worker
+    // adoption is the cheapest real one: its marker write is a LATER table
+    // resolution, so it completes while the activation read is still parked.
+    const racedId = await ctx.spawnStockWorker(agent, "Raced task");
+    assert.equal(racedId, "child-1", "the stock child was adopted mid-rebuild");
 
     ctx.releaseMarkerTableHold();
     await flushActivation();
 
     // The post-rebuild roster carries BOTH the restored rows and the raced
-    // transition — the mid-read spawn was never dropped.
-    const check = ctx.tool(CHECK_WORKERS_TOOL, agent);
-    assert.ok(check);
-    const roster = (await check.execute({})) as {
-      ok: boolean;
-      rows: Array<{ worker_id: string }>;
-    };
-    const ids = roster.rows.map((row) => row.worker_id);
-    assert.ok(ids.includes("w-done"), "the restored rows are present");
-    assert.ok(ids.includes("child-1"), "the raced transition is present");
+    // transition — the mid-read adoption was never dropped.
+    assert.equal(
+      await ctx.workerOnRoster(agent, "w-done"),
+      true,
+      "the restored rows are present",
+    );
+    assert.equal(
+      await ctx.workerOnRoster(agent, racedId),
+      true,
+      "the raced transition is present",
+    );
   });
 
   it("a stale chain from an earlier activation of the same session id is refused (ticket 90 F2)", async () => {
@@ -696,6 +933,7 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
     await seedMarkers(ctx, [{ ...DONE_MARKER }]);
     pluginApply(ctx, volatileConfig({ enabled: true }));
     const agent = createAgent("s-1");
+    ctx.mountStockTools(agent);
 
     // Activation #1 starts a chain and parks on the marker read.
     ctx.holdNextMarkerTable();
@@ -729,14 +967,8 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
     );
 
     // A roster transition lands while the LIVE chain is still reading.
-    const spawn = ctx.tool(SPAWN_WORKER_TOOL, agent);
-    assert.ok(spawn);
-    const spawned = (await spawn.execute({
-      stream_key: "k-race",
-      title: "Raced task",
-      prompt: "work",
-    })) as { ok: boolean };
-    assert.equal(spawned.ok, true);
+    const racedId = await ctx.spawnStockWorker(agent, "Raced task");
+    assert.equal(racedId, "child-1", "the stock child was adopted mid-rebuild");
 
     // The live chain resumes: one redrive pass, and the raced transition is
     // not lost.
@@ -749,15 +981,16 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
       1,
       "the persisted D-5 budget was spent once, not twice",
     );
-    const check = ctx.tool(CHECK_WORKERS_TOOL, agent);
-    assert.ok(check);
-    const roster = (await check.execute({})) as {
-      ok: boolean;
-      rows: Array<{ worker_id: string }>;
-    };
-    const ids = roster.rows.map((row) => row.worker_id);
-    assert.ok(ids.includes("w-done"), "the restored rows are present");
-    assert.ok(ids.includes("child-1"), "the raced transition is present");
+    assert.equal(
+      await ctx.workerOnRoster(agent, "w-done"),
+      true,
+      "the restored rows are present",
+    );
+    assert.equal(
+      await ctx.workerOnRoster(agent, racedId),
+      true,
+      "the raced transition is present",
+    );
   });
 });
 
