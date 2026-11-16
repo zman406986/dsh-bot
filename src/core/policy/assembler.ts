@@ -25,6 +25,8 @@ import {
   PEER_ROSTER_INTRO_ZH,
   PEER_ROSTER_SECTION_HEADING,
   PEER_ROSTER_SECTION_HEADING_ZH,
+  PEER_ROSTER_SUPERSEDE_LINE,
+  PEER_ROSTER_SUPERSEDE_LINE_ZH,
   PEER_WAKE_SECTION_HEADINGS,
   PEER_WAKE_SECTION_HEADINGS_ZH,
   REMINDER_SECTION_HEADINGS,
@@ -115,13 +117,18 @@ export function formatLedgerLine(todo: TodoItem): string {
  * or not peers exist. Adding the roster therefore cannot shift a single
  * byte of the cached prefix; removing it restores the exact old text.
  *
- * FRESHNESS: every output ends with the "Other agents" section, even when no
- * peer is visible — the empty case emits the heading plus
- * {@link PEER_ROSTER_EMPTY_LINE}, a zero-row section that still carries the
- * supersede instruction. This is forward-only: the host replays committed
- * user messages after a restart, so an old roster block can remain above this
- * turn, and nothing here can delete, compact, or rewrite it. The newest
- * reminder stating that it is current is the only correction available.
+ * FRESHNESS, three distinct shapes (never conflated):
+ * - a SUPPLIED snapshot renders its section (non-empty rows, or the heading
+ *   plus {@link PEER_ROSTER_EMPTY_LINE} with zero rows);
+ * - `null` means the caller did not compute a roster (the wake composer
+ *   passes `null`), so the reminder ends with the neutral
+ *   {@link PEER_ROSTER_SUPERSEDE_LINE} — freshness only, no heading, no claim
+ *   that a roster follows and no claim that nobody is visible;
+ * - `undefined` (the no-argument helper call) emits no roster text at all.
+ * This is forward-only: the host replays committed user messages after a
+ * restart, so an old roster block can remain above this turn, and nothing
+ * here can delete, compact, or rewrite it. The newest reminder stating which
+ * one is current is the only correction available.
  */
 export function assembleTurnReminder(
   todos: readonly TodoItem[],
@@ -142,14 +149,24 @@ export function assembleTurnReminder(
     buildStandingRulesBlock(language, origin),
   ];
   const roster = renderPeerRoster(peers, language);
-  sections.push("");
   if (roster !== null) {
+    sections.push("");
     sections.push(roster);
-  } else {
-    // Empty or absent roster: still a FRESH section, with no rows, carrying
-    // the same "this one is current" instruction. A turn that rendered
-    // nothing used to supersede nothing, which is exactly the replayed
-    // old-block case.
+  } else if (peers === null) {
+    // Wake composer: no roster was computed on this turn (it passes `null`),
+    // yet the replayed log may still carry an old "Other agents" block above.
+    // Freshness only — no heading, no rows, and no claim about who is visible,
+    // because nobody looked. The most recent real roster stays the authority.
+    sections.push("");
+    sections.push(
+      language === "zh" ? PEER_ROSTER_SUPERSEDE_LINE_ZH : PEER_ROSTER_SUPERSEDE_LINE,
+    );
+  } else if (peers !== undefined) {
+    // The caller DID compute a roster and it lists nobody. Say so in a FRESH
+    // zero-row section that carries the same "this one is current"
+    // instruction: a replayed old roster block may sit above this turn, and a
+    // reminder that rendered nothing would supersede nothing.
+    sections.push("");
     sections.push(
       language === "zh" ? PEER_ROSTER_SECTION_HEADING_ZH : PEER_ROSTER_SECTION_HEADING,
     );
@@ -158,6 +175,8 @@ export function assembleTurnReminder(
       language === "zh" ? PEER_ROSTER_EMPTY_LINE_ZH : PEER_ROSTER_EMPTY_LINE,
     );
   }
+  // `undefined` (the no-argument helper call) emits nothing: the caller of
+  // that shape did not ask about peers at all.
   return sections.join("\n");
 }
 

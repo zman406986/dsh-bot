@@ -19,6 +19,8 @@ import {
   PEER_ROSTER_INTRO,
   PEER_ROSTER_SECTION_HEADING,
   PEER_ROSTER_SECTION_HEADING_ZH,
+  PEER_ROSTER_SUPERSEDE_LINE,
+  PEER_ROSTER_SUPERSEDE_LINE_ZH,
   PEER_WAKE_SECTION_HEADINGS,
 } from "../src/core/policy/prompts.js";
 
@@ -219,10 +221,17 @@ describe("roster freshness marker — the newest turn is authoritative", () => {
     assert.ok(!zh.includes(PEER_ROSTER_FRESHNESS_LINE), "no EN marker in ZH");
   });
 
-  it("an empty roster still emits a fresh zero-row section with the same instruction", () => {
+  it("a computed-but-empty roster emits a fresh zero-row section with the same instruction", () => {
     // A replayed old roster block sits ABOVE this turn; a reminder that renders
-    // no section at all supersedes nothing, so the empty case must speak.
-    for (const peers of [undefined, null, { peers: [] }] as const) {
+    // no section at all supersedes nothing, so a roster the caller actually
+    // computed and found empty must speak.
+    const snapshots = [
+      { peers: [] },
+      { peers: [], selfSessionId: "self" },
+      // The live path's shape: peerRosterFor always answers a snapshot.
+      buildPeerRosterSnapshot("self", []),
+    ] as const;
+    for (const peers of snapshots) {
       const text = assembleTurnReminder([], peers);
       assert.ok(text.includes(PEER_ROSTER_SECTION_HEADING), text);
       assert.ok(text.includes(PEER_ROSTER_EMPTY_LINE), text);
@@ -237,6 +246,10 @@ describe("roster freshness marker — the newest turn is authoritative", () => {
         "zero rows: the empty section lists no peer",
       );
     }
+    assert.deepEqual(buildPeerRosterSnapshot("self", []), {
+      peers: [],
+      selfSessionId: "self",
+    });
     // Both cases state the SAME supersede instruction.
     assert.ok(
       PEER_ROSTER_EMPTY_LINE.includes('ignore every earlier "Other agents" section'),
@@ -249,6 +262,48 @@ describe("roster freshness marker — the newest turn is authoritative", () => {
     assert.ok(zh.includes(PEER_ROSTER_SECTION_HEADING_ZH), zh);
     assert.ok(zh.includes(PEER_ROSTER_EMPTY_LINE_ZH), zh);
     assert.ok(!zh.includes(PEER_ROSTER_SECTION_HEADING), "no EN heading in ZH");
+  });
+
+  it("a null roster (wake composer) emits ONLY the neutral supersede line", () => {
+    // plugin.ts:694 passes `null` because a wake turn never builds a roster.
+    // After a restart that first wake turn still has an old block above it, so
+    // it must say which roster wins — but it must not claim a roster follows,
+    // and it must not claim nobody is visible: nobody looked.
+    const text = assembleTurnReminder([], null);
+    assert.ok(text.includes(PEER_ROSTER_SUPERSEDE_LINE), text);
+    assert.ok(
+      text.trimEnd().endsWith(PEER_ROSTER_SUPERSEDE_LINE),
+      "the neutral line is the reminder's tail",
+    );
+    assert.ok(!text.includes(PEER_ROSTER_SECTION_HEADING), "no heading");
+    assert.ok(!text.includes(PEER_ROSTER_EMPTY_LINE), "no empty-roster claim");
+    assert.ok(!text.includes(PEER_ROSTER_FRESHNESS_LINE), "no roster-exists claim");
+    assert.ok(!text.includes("No other agents"), text);
+    assert.ok(!text.includes(PEER_ROSTER_INTRO), text);
+    // Byte-stable: the same call renders identical bytes.
+    assert.equal(assembleTurnReminder([], null), text);
+    // ZH face of the neutral line only.
+    const zh = assembleTurnReminder([], null, "zh");
+    assert.ok(zh.includes(PEER_ROSTER_SUPERSEDE_LINE_ZH), zh);
+    assert.ok(!zh.includes(PEER_ROSTER_SECTION_HEADING_ZH), zh);
+    assert.ok(!zh.includes(PEER_ROSTER_EMPTY_LINE_ZH), zh);
+    assert.ok(!zh.includes(PEER_ROSTER_SUPERSEDE_LINE), "no EN line in ZH");
+  });
+
+  it("an undefined roster (no-argument helper call) emits no roster text at all", () => {
+    const text = assembleTurnReminder([]);
+    assert.ok(!text.includes(PEER_ROSTER_SECTION_HEADING), text);
+    assert.ok(!text.includes(PEER_ROSTER_EMPTY_LINE), text);
+    assert.ok(!text.includes(PEER_ROSTER_FRESHNESS_LINE), text);
+    assert.ok(!text.includes(PEER_ROSTER_SUPERSEDE_LINE), text);
+    assert.ok(!text.includes("Other agents"), text);
+    // The reminder still ends with its stable rules, no dangling separator.
+    assert.ok(text.trimEnd().endsWith("- Update the ledger and keep it lean."), text);
+    assert.equal(text, assembleTurnReminder([], undefined));
+    const zh = assembleTurnReminder([], undefined, "zh");
+    assert.ok(!zh.includes(PEER_ROSTER_SECTION_HEADING_ZH), zh);
+    assert.ok(!zh.includes(PEER_ROSTER_EMPTY_LINE_ZH), zh);
+    assert.ok(!zh.includes(PEER_ROSTER_SUPERSEDE_LINE_ZH), zh);
   });
 });
 

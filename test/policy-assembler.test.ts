@@ -345,8 +345,11 @@ describe("policy assembler", () => {
         "Chunk down tasks as much as you can",
       ),
     );
-    // Defaults stay chief of staff — the pre-175 bytes.
-    assert.equal(assembleTurnReminder([]), assembleTurnReminder([], null, "en", "user"));
+    // Defaults stay chief of staff — the pre-175 bytes. The peer argument's
+    // default is `undefined` (no roster question asked) and it is NOT the same
+    // as the wake composer's explicit `null` (freshness-only line), so the
+    // omitted-argument form is pinned against `undefined`, not `null`.
+    assert.equal(assembleTurnReminder([]), assembleTurnReminder([], undefined, "en", "user"));
 
     assert.ok(
       assembleWakeTurn([notice()], "en", "spawned").includes("Re-chunk what is left"),

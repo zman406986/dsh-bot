@@ -267,9 +267,14 @@ export const PEER_ROSTER_FRESHNESS_LINE_ZH =
  * The case that made this necessary: after a restart the root session's fresh
  * reminder had no roster at all (no visible peers), while a 7-row block from
  * an earlier turn was still above it in the replayed log. A reminder that
- * renders nothing supersedes nothing, so the empty case now emits a fresh
- * "Other agents" section with zero rows plus the same supersede instruction.
- * Fixed text: the section must not move for unchanged state.
+ * renders nothing supersedes nothing, so a COMPUTED roster that lists nobody
+ * now emits a fresh "Other agents" section with zero rows plus the same
+ * supersede instruction.
+ *
+ * Emitted only for a supplied snapshot (`{peers: []}`): a null/undefined peer
+ * argument means the caller did not look, and the two "did not look" cases
+ * have their own treatment (see {@link PEER_ROSTER_SUPERSEDE_LINE} and the
+ * assembler). Fixed text: the section must not move for unchanged state.
  */
 export const PEER_ROSTER_EMPTY_LINE =
   'No other agents are visible to this session right now. This section is current as of this turn; ignore every earlier "Other agents" section.';
@@ -277,6 +282,24 @@ export const PEER_ROSTER_EMPTY_LINE =
 /** ZH counterpart of {@link PEER_ROSTER_EMPTY_LINE}. */
 export const PEER_ROSTER_EMPTY_LINE_ZH =
   "本会话现在看不到其他代理。本小节以本回合为准；请忽略此前任何“其他代理”小节。";
+
+/**
+ * Freshness-only marker for a turn whose caller did NOT compute a roster.
+ *
+ * The wake composer (`plugin.ts`) deliberately passes `null` peers because it
+ * never builds a roster on a wake turn. The first turn after a restart is
+ * exactly that shape, and the replayed log still carries an old "Other agents"
+ * block above it — so the turn must still say which one wins. It says ONLY
+ * that: no heading, no rows, and above all no "no other agents are visible"
+ * claim, because nobody looked. "The most recent roster is authoritative"
+ * keeps the replayed latest block usable instead of denying it exists.
+ */
+export const PEER_ROSTER_SUPERSEDE_LINE =
+  'Ignore every earlier "Other agents" section; the most recent roster is authoritative.';
+
+/** ZH counterpart of {@link PEER_ROSTER_SUPERSEDE_LINE}. */
+export const PEER_ROSTER_SUPERSEDE_LINE_ZH =
+  "请忽略此前任何“其他代理”小节；以最近一次的名册为准。";
 
 /** Empty-ledger marker in the per-turn reminder. */
 export const EMPTY_LEDGER_LINE = "(empty)";
