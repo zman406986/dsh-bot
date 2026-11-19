@@ -3,32 +3,78 @@
  * registered stock tool, Runtime authority, manager setup and descriptor.
  * In-memory services stop after agents.create/setup; no inference can run.
  * Only the private manager export is exposed in memory; no stock logic changes.
+ *
+ * Portable host discovery: set DSH_HOST_DIR to the installed `@deepseek-ai/dsh`
+ * package directory to override. Otherwise the host is found by module
+ * resolution: repo-local first, then the global npm root (`npm root -g`).
+ * No install layout is hardcoded. When no usable host is found, every test
+ * skips with a reason and the process exits 0.
  */
 import assert from "node:assert/strict";
-import { registerHooks } from "node:module";
-import { resolve } from "node:path";
+import { execSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { createRequire, registerHooks } from "node:module";
+import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
-import { apply as pluginApply } from "../src/plugin.js";
 import { registerStockWorkerModelDefaultBridge, type StockWorkerToolDefinition } from "../src/adapter/stock-worker-model-default.js";
 
-registerHooks({
-  load(url, context, nextLoad) {
-    const result = nextLoad(url, context);
-    if (!url.replaceAll("\\", "/").endsWith("/dsh-subagent/lib/index.js")) return result;
-    const source = typeof result.source === "string"
-      ? result.source : new TextDecoder().decode(result.source);
-    if (!source.includes("var SubagentManager = class")) {
-      throw new Error("installed stock manager signature changed");
-    }
-    return { ...result, source: source + "\nexport { SubagentManager as RegressionSubagentManager };\n" };
-  },
-});
-const installed = resolve(process.env.APPDATA!, "npm/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai");
-const load = (name: string) => import(pathToFileURL(resolve(installed, name, "lib/index.js")).href);
-const stock = await load("dsh-subagent");
-const stockTool = await load("dsh-tool-subagent");
-const stockProvider = await load("dsh-subagent-spawn-in-process");
+const requireFromTest = createRequire(import.meta.url);
+
+/** The installed `@deepseek-ai/dsh` package directory, or undefined. */
+function findHostDir(): string | undefined {
+  const override = process.env.DSH_HOST_DIR;
+  if (override !== undefined && override !== "") {
+    const dir = resolve(override);
+    return existsSync(join(dir, "package.json")) ? dir : undefined;
+  }
+  try {
+    return dirname(requireFromTest.resolve("@deepseek-ai/dsh/package.json"));
+  } catch { /* not installed repo-locally; fall through to the global npm root */ }
+  try {
+    const globalRoot = execSync("npm root -g", { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    if (globalRoot === "") return undefined;
+    const requireFromGlobal = createRequire(join(globalRoot, "dsh-host-probe.js"));
+    return dirname(requireFromGlobal.resolve("@deepseek-ai/dsh/package.json"));
+  } catch { return undefined; }
+}
+
+const hostDir = findHostDir();
+let skip: string | false = hostDir !== undefined ? false
+  : process.env.DSH_HOST_DIR
+    ? `DSH_HOST_DIR (${process.env.DSH_HOST_DIR}) does not point at an installed dsh host`
+    : "no installed dsh host found (repo-local module resolution or global npm root); set DSH_HOST_DIR to the @deepseek-ai/dsh package directory";
+
+let stock: any;
+let stockTool: any;
+let stockProvider: any;
+let pluginApply: typeof import("../src/plugin.js").apply;
+if (hostDir !== undefined) {
+  try {
+    const hostRequire = createRequire(join(hostDir, "package.json"));
+    const scopeUrl = pathToFileURL(hostRequire.resolve("@deepseek-ai/dsh-scope")).href;
+    registerHooks({
+      resolve(specifier, context, nextResolve) {
+        if (specifier !== "@deepseek-ai/dsh-scope") return nextResolve(specifier, context);
+        return { url: scopeUrl, shortCircuit: true };
+      },
+      load(url, context, nextLoad) {
+        const result = nextLoad(url, context);
+        if (!url.replaceAll("\\", "/").endsWith("/dsh-subagent/lib/index.js")) return result;
+        const source = typeof result.source === "string"
+          ? result.source : new TextDecoder().decode(result.source);
+        return { ...result, source: source + "\nexport { SubagentManager as RegressionSubagentManager };\n" };
+      },
+    });
+    const load = (name: string) => import(pathToFileURL(hostRequire.resolve(name)).href);
+    stock = await load("@deepseek-ai/dsh-subagent");
+    stockTool = await load("@deepseek-ai/dsh-tool-subagent");
+    stockProvider = await load("@deepseek-ai/dsh-subagent-spawn-in-process");
+    ({ apply: pluginApply } = await import("../src/plugin.js"));
+  } catch (error) {
+    skip = `dsh host at ${hostDir} is not usable: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
 const A = { provider: "deepseek-official", model: "deepseek-flash" };
 const B = { provider: "qwen", model: "qwen4-max-preview" };
 const STOP = new Error("STOP_AFTER_REAL_SETUP_AND_PRODUCT_ADOPTION");
@@ -243,7 +289,7 @@ function childBoundaryCounts(rig: Awaited<ReturnType<typeof fixture>>) {
   };
 }
 
-test("composed stock policy rejects unauthorized stored default before any child starts", async () => {
+test("composed stock policy rejects unauthorized stored default before any child starts", { skip }, async () => {
   const rig = await fixture({ allowed: [A] });
   try {
     const leader = await summonLeader(rig);
@@ -257,7 +303,7 @@ test("composed stock policy rejects unauthorized stored default before any child
   } finally { rig.dispose(); }
 });
 
-test("composed stock policy rejects explicit forbidden route before child creation", async () => {
+test("composed stock policy rejects explicit forbidden route before child creation", { skip }, async () => {
   const rig = await fixture({ allowed: [A] });
   try {
     const leader = await summonLeader(rig);
@@ -270,7 +316,7 @@ test("composed stock policy rejects explicit forbidden route before child creati
   } finally { rig.dispose(); }
 });
 
-test("composed stock preflight rejects unavailable allowed default without a child", async () => {
+test("composed stock preflight rejects unavailable allowed default without a child", { skip }, async () => {
   const rig = await fixture({ unavailable: true });
   try {
     const leader = await summonLeader(rig);
@@ -287,7 +333,7 @@ for (const control of [
   { label: "no recorded policy", options: { allowed: null }, error: /not allowed for this Session/ },
   { label: "selection disabled", options: { modelSelection: false }, error: /selection is disabled/ },
 ]) {
-  test("composed stock rejects off-parent default with " + control.label, async () => {
+  test("composed stock rejects off-parent default with " + control.label, { skip }, async () => {
     const rig = await fixture(control.options);
     try {
       const leader = await summonLeader(rig);
@@ -306,7 +352,7 @@ for (const control of [
   { label: "explicit B stays B", selection: B, expected: B, effort: undefined },
   { label: "effort-only selection applies to stored B", selection: { reasoning_effort: "high" }, expected: B, effort: "high" },
 ]) {
-  test("composed stock route precedence: " + control.label, async () => {
+  test("composed stock route precedence: " + control.label, { skip }, async () => {
     const rig = await fixture();
     try {
       const leader = await summonLeader(rig);
@@ -327,7 +373,7 @@ for (const control of [
   });
 }
 
-test("bridge keeps two agents stable on unrelated global registry changes", async () => {
+test("bridge keeps two agents stable on unrelated global registry changes", { skip }, async () => {
   const listeners = new Set<() => void>();
   const local = new Map<object, StockWorkerToolDefinition>();
   const source: StockWorkerToolDefinition = { name: "subagent", async execute() { return "stock result"; } };
@@ -362,7 +408,7 @@ test("bridge keeps two agents stable on unrelated global registry changes", asyn
 });
 
 for (const disposed of [false, true]) {
-  test("composed missing default mirror awaits durable mark" + (disposed ? " and rejects disposed Agent" : " before selecting B"), async () => {
+  test("composed missing default mirror awaits durable mark" + (disposed ? " and rejects disposed Agent" : " before selecting B"), { skip }, async () => {
     const rig = await fixture();
     try {
       // Let activation's empty-table warmup settle first. The selected row is
@@ -426,7 +472,7 @@ function bridgeFixture() {
     replace(definition: StockWorkerToolDefinition | undefined, hasCondition = false) { inherited = definition; conditional = hasCondition; fire(); } };
 }
 
-test("bridge preserves metadata and exact execution while only defaulting omitted route", async () => {
+test("bridge preserves metadata and exact execution while only defaulting omitted route", { skip }, async () => {
   const rig = bridgeFixture();
   try {
     const wrapper = rig.tools.get("subagent", rig.agent)!;
@@ -451,7 +497,7 @@ test("bridge preserves metadata and exact execution while only defaulting omitte
   } finally { rig.dispose(); }
 });
 
-test("bridge follows stock replacement and rejects retained stale definitions", async () => {
+test("bridge follows stock replacement and rejects retained stale definitions", { skip }, async () => {
   const rig = bridgeFixture();
   const oldWrapper = rig.tools.get("subagent", rig.agent)!;
   const replacement: StockWorkerToolDefinition = {
@@ -470,7 +516,7 @@ test("bridge follows stock replacement and rejects retained stale definitions", 
   rig.dispose(); rig.dispose();
 });
 
-test("bridge rejects disposal during asynchronous default restoration", async () => {
+test("bridge rejects disposal during asynchronous default restoration", { skip }, async () => {
   const agent = {};
   let resolveDefault!: (route: typeof B) => void;
   const ready = new Promise<typeof B>(resolve => { resolveDefault = resolve; });
@@ -496,7 +542,7 @@ test("bridge rejects disposal during asynchronous default restoration", async ()
   assert.equal(calls, 0);
 });
 
-test("bridge leaves conditional stock replacements unshadowed", async () => {
+test("bridge leaves conditional stock replacements unshadowed", { skip }, async () => {
   const rig = bridgeFixture();
   try {
     const oldWrapper = rig.tools.get("subagent", rig.agent)!;
@@ -511,7 +557,7 @@ test("bridge leaves conditional stock replacements unshadowed", async () => {
   } finally { rig.dispose(); }
 });
 
-test("stored worker_model B reaches registered stock omitted-route creation", { timeout: 5000 }, async () => {
+test("stored worker_model B reaches registered stock omitted-route creation", { timeout: 5000, skip }, async () => {
   const rig = await fixture();
   try {
     const spawn = rig.root.ctx.tools.get("spawn_dispatcher", rig.root);

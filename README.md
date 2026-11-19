@@ -14,9 +14,10 @@ Status: version 0.1.0. It is not published to npm. Install it from a checkout.
 
 ## What you need
 
-- Node.js 22.15 or newer. This is the `engines` floor in `package.json`; the e2e harness needs 22.15 for `zstdDecompressSync`.
-- A local dsh install that can load plugins. The plugin targets the dsh 0.2.x plugin API and was last run against dsh 0.2.2-rc.1.
-- npm. This repo uses npm workspaces, not pnpm.
+- Node.js 22.15 or newer. This is the `engines` floor in `package.json`; the e2e harness needs 22.15 for `zstdDecompressSync`. The fresh-install path was verified with Node 24 and npm 11.
+- A local dsh install that can load plugins. It must be exactly dsh 0.2.2-rc.1: the plugin pins its dsh peer dependency to that version, and dsh enforces exact peer matches, so other 0.2.x versions will not do.
+- npm, for building this repo. The build uses npm workspaces.
+- pnpm, on PATH. `dsh plugin add` forwards to pnpm, and dsh does not bundle it; without pnpm the add fails (exit 127).
 - The cordis framework is a peer dependency. `npm install` fetches it.
 
 ## Install
@@ -34,7 +35,9 @@ npm run build:client
 dsh plugin --profile <profile> add file:<path-to-this-checkout>
 ```
 
-Select the bundle `dsh-multitask-dispatcher` in that profile's bundle list. Do not also add an insert row by hand: two rows with the same id make the plugin's settings form disappear.
+A CLI add activates the bundle for you: `dsh plugin add` registers and activates bundles that declare `dsh.bundle*`, so after the command above there is nothing to select. Installing through the web UI is different: that path sets `activateNewBundles: false`, so there you must activate the bundle `dsh-multitask-dispatcher` in the profile's bundle list yourself. Do not also add an insert row by hand: two rows with the same id make the plugin's settings form disappear.
+
+The add hardlinks the checkout into the profile (`pnpm file:`). After you rebuild the checkout, replaced output files can leave the installed view stale; re-run the `dsh plugin add` command above to refresh it.
 
 ## Build
 
@@ -51,7 +54,7 @@ Select the bundle `dsh-multitask-dispatcher` in that profile's bundle list. Do n
 npm test
 ```
 
-This runs the offline suite. It needs no network and no model. `pretest` compiles the vendored libraries first.
+This runs the offline suite. It needs no network and no model. `pretest` compiles the vendored libraries first. One test, `test/stock-worker-model-default.test.ts`, resolves the installed dsh host dynamically (a `DSH_HOST_DIR` environment override, then module resolution) and skips gracefully when no host is present; the rest of the suite stays offline.
 
 The offline suite is the default lane. A second harness, `npm run e2e`, drives a real local dsh process against a scripted model. It needs a dsh install, so it is optional.
 
