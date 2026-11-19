@@ -92,11 +92,11 @@ import { createWorkerAgentDef } from "./worker/agent-def.js";
 import { resolveHostPolicyLanguage } from "./adapter/locale-preference.js";
 
 /**
- * Plugin config (ADR-0005 / ticket 12).
- * Conceptual feature name `multitask_dispatcher`; on-disk key is `enabled`
- * inside the `multitask-dispatcher` plugin namespace. Default true because
- * stock isolation is the installation gate, not the flag default — the
- * multitask profile's insert row sets `enabled: true` explicitly.
+ * Plugin config (ADR-0005, superseded by ADR-0018: the dispatcher is always-on — no mode,
+ * feature flag, or kill switch). Conceptual feature name `multitask_dispatcher`; the residual
+ * on-disk `enabled` row in the `multitask-dispatcher` namespace is an installation/profile
+ * gate, not a user-facing toggle. Default true; the multitask profile's insert row sets it
+ * explicitly.
  *
  * Every field is `.volatile()`: 0.2.1 derives the settings form from this
  * schema and rejects any field that is not volatile, so an unmarked field is
@@ -104,8 +104,7 @@ import { resolveHostPolicyLanguage } from "./adapter/locale-preference.js";
  * references; `apply` reads each one ONCE and freezes it for the session.
  */
 export const Config = z.object({
-  /**
-   * Feature flag `multitask_dispatcher` (ADR-0005).
+  /** Installation gate `multitask_dispatcher` (ADR-0018: always-on; not a mode toggle).
    * Read once at dispatcher-session start and fixed for that session's lifetime.
    * A settings change persists for the *next* session; it is not live-applied.
    */
@@ -1757,13 +1756,19 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
   };
 
   // Passive status wiring (wake bounds, worker FSM, steer delivery) plus the
-  // activate/deactivate hooks. Policy flag is session-scoped (ADR-0005); the
-  // frozen `enabled` is the authority — policy is ON whenever we are here.
+  // activate/deactivate hooks. Always-on per ADR-0018: the frozen `enabled`
+  // row is an installation/profile gate, not a mode toggle — policy is ON
+  // whenever we are here.
   // Ticket 31 (design-17 §4.7): restart honesty. The rebuild is async, so
   // activation completes immediately; the chain below lands the one-time
-  // restart notice and the delivery redrive once markers have been read.
+  // restart NOTICE only once markers have been read. Activation no longer
+  // lands a delivery-redrive wake (de-waked 2026-11-19): undelivered items
+  // surface on the next REAL user turn (per-turn ledger reminder + bounded
+  // turn-end redrive), not on activation.
   // Ordering is the acceptance rule: `rebuildFromDurability` runs first, and
-  // landed-undelivered items flush on the first wake (S4 across restart).
+  // landed-undelivered items flush on the first REAL user message/turn (S4
+  // across restart) — the notice rides that message; no auto-turn on
+  // open/resume.
   // Core rebuild semantics are frozen (ADR-0006); this is adapter ordering
   // only.
   const rebuildAndNotice = async (sessionId: string): Promise<void> => {
@@ -1847,13 +1852,12 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       // opt-in). It also keeps exactly one restart notice per activation.
       lifecycle.queueNotice(sessionId, notice);
     }
-    // Ticket 58 (register D-5): activation is also a delivery opportunity.
-    // A restored result that settled before the restart and was never
-    // delivered gets a redrive turn — bounded, so it cannot become the
-    // unbounded persistence this ticket exists to remove. Called
-    // unconditionally: it is a cheap no-op when nothing is owed, and it is
-    // also the pass that escalates an already-exhausted obligation to `lost`.
-    multitask.redriveUndelivered(sessionId);
+    // Activation rebuilds obligations but NEVER opens a turn (owner ruling 2026-11-19, extending
+    // the 2026-11-13 restart-notice ruling): mere open/resume must not fire a model turn with no
+    // user message. Undelivered results surface on the next REAL turn — the per-turn ledger
+    // reminder shows them, and the bounded turn-end redrive (parent-agent.ts) retries them after
+    // that turn; genuinely-new settles still get the host's one notice. Revocable deviation from
+    // ADR-0012 §3 (draft; ticket 58 D-5), reason recorded here.
     // Ticket 113: activation is also the inbox re-presentation opportunity.
     // Claimed-but-unpresented jobs (no dispatcher was live) and crash
     // orphans route to the earliest live session — idempotent (core
@@ -1913,12 +1917,13 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
           throw error;
         }
         // A refused (unscoped) surface registered nothing and already logged
-        // once. Activation still stands, and the ledger rebuild / delivery
-        // redrive / inbox rescan are not tool-surface work — run them anyway.
-        // Ticket 31: the restart notice and redrive ride the durability
-        // rebuild, so activation itself returns immediately. Every step after
-        // the rebuild is outside its internal try/catch, so the rejection is
-        // observed here instead of becoming unhandled.
+        // once. Activation still stands, and the ledger rebuild / inbox rescan
+        // are not tool-surface work — run them anyway.
+        // Ticket 31: the restart NOTICE rides the durability rebuild (activation
+        // no longer lands a delivery-redrive wake — de-waked 2026-11-19), so
+        // activation itself returns immediately. Every step after the rebuild is
+        // outside its internal try/catch, so the rejection is observed here
+        // instead of becoming unhandled.
         void rebuildAndNotice(sessionId).catch((error) =>
           logWarning(`restart rebuild for ${sessionId} failed`, error),
         );

@@ -152,13 +152,17 @@ describe("durable roster marker — write path", () => {
     assert.ok(marker.startedAtMs > 0);
     assert.ok(marker.updatedAtMs > 0);
     // No second transcript DB: the marker carries no result/report body.
-    // Ticket 58 added ONE field — `redriveAttempts`, the delivery budget.
-    // It is a counter, not content: the "minimum to reconstruct" rule holds,
-    // because a restart that forgets the spent budget would hand the same
-    // obligation a fresh set of retries on every boot.
+    // Ticket 58 added `redriveAttempts`, the delivery budget — a counter,
+    // not content: a restart that forgets the spent budget would hand the
+    // same obligation a fresh set of retries on every boot. The auto-continue
+    // fix (Decision 1) added `delivered`, the durable delivery-ack flag —
+    // state, not content: a fresh todo owes delivery, so spawn writes false.
+    // Field ABSENCE stays the legacy (pre-fix) discriminator at rebuild.
     assert.equal(marker.redriveAttempts, 0);
+    assert.equal(marker.delivered, false);
     const keys = Object.keys(marker).sort();
     assert.deepEqual(keys, [
+      "delivered",
       "parentSessionId",
       "redriveAttempts",
       "startedAtMs",
@@ -197,6 +201,9 @@ describe("durable roster marker — write path", () => {
     assert.ok(marker);
     assert.equal(marker.status, "completed");
     assert.equal(marker.transcriptRef, "child-session-9");
+    // Decision 1: every post-fix settle writes delivered:false — a settled
+    // result is a full delivery obligation until deliver_result acks it.
+    assert.equal(marker.delivered, false);
   });
 
   it("abort deletes the marker — nothing left to reconstruct or deliver", async () => {

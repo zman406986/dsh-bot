@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
+import { execSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { createRequire, registerHooks } from "node:module";
+import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
+import { pathToFileURL } from "node:url";
 import {
   createInMemoryDurability,
   type InMemoryDurability,
@@ -8,13 +13,60 @@ import { FakeDshHost } from "../src/core/fake-host.js";
 import { createMultitask, type Multitask } from "../src/core/multitask.js";
 import { formatLedgerLine } from "../src/core/policy/assembler.js";
 import { emptyReportPlaceholder } from "../src/core/report-clamp.js";
-import { composeWakeText } from "../src/plugin.js";
 import {
   MAX_DELIVERY_REDRIVES,
   reconcileTodos,
   type TodoItem,
 } from "../src/core/todo-reconciler.js";
 import type { WakeEvent } from "../src/core/wake-bus.js";
+
+// Portable host discovery (copied from test/stock-worker-model-default.test.ts:22-77):
+// src/plugin.ts statically imports @deepseek-ai/dsh-scope, which is not a repo
+// dependency — resolve it from the installed host. DSH_HOST_DIR overrides;
+// otherwise repo-local module resolution, then the global npm root. When no
+// usable host is found every suite skips with a reason and the process exits 0.
+const requireFromTest = createRequire(import.meta.url);
+
+/** The installed @deepseek-ai/dsh package directory, or undefined. */
+function findHostDir(): string | undefined {
+  const override = process.env.DSH_HOST_DIR;
+  if (override !== undefined && override !== "") {
+    const dir = resolve(override);
+    return existsSync(join(dir, "package.json")) ? dir : undefined;
+  }
+  try {
+    return dirname(requireFromTest.resolve("@deepseek-ai/dsh/package.json"));
+  } catch { /* not installed repo-locally; fall through to the global npm root */ }
+  try {
+    const globalRoot = execSync("npm root -g", { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    if (globalRoot === "") return undefined;
+    const requireFromGlobal = createRequire(join(globalRoot, "dsh-host-probe.js"));
+    return dirname(requireFromGlobal.resolve("@deepseek-ai/dsh/package.json"));
+  } catch { return undefined; }
+}
+
+const hostDir = findHostDir();
+let skip: string | false = hostDir !== undefined ? false
+  : process.env.DSH_HOST_DIR
+    ? `DSH_HOST_DIR (${process.env.DSH_HOST_DIR}) does not point at an installed dsh host`
+    : "no installed dsh host found (repo-local module resolution or global npm root); set DSH_HOST_DIR to the @deepseek-ai/dsh package directory";
+
+let composeWakeText: typeof import("../src/plugin.js").composeWakeText;
+if (hostDir !== undefined) {
+  try {
+    const hostRequire = createRequire(join(hostDir, "package.json"));
+    const scopeUrl = pathToFileURL(hostRequire.resolve("@deepseek-ai/dsh-scope")).href;
+    registerHooks({
+      resolve(specifier, context, nextResolve) {
+        if (specifier !== "@deepseek-ai/dsh-scope") return nextResolve(specifier, context);
+        return { url: scopeUrl, shortCircuit: true };
+      },
+    });
+    ({ composeWakeText } = await import("../src/plugin.js"));
+  } catch (error) {
+    skip = `dsh host at ${hostDir} is not usable: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
 
 /**
  * Ticket 58 — the delivery-obligation layer (register deviations D-5, D-6).
@@ -73,7 +125,7 @@ function todoOf(multitask: Multitask, todoId = "todo-1"): TodoItem {
   return todo;
 }
 
-describe("delivery obligation — no plugin settle wake; the first turn end is the first chance (D-5)", () => {
+describe("delivery obligation — no plugin settle wake; the first turn end is the first chance (D-5)", { skip }, () => {
   it("a settle opens no plugin wake and spends no attempt until the first turn end", async () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
@@ -103,7 +155,7 @@ describe("delivery obligation — no plugin settle wake; the first turn end is t
   });
 });
 
-describe("delivery obligation — bounded redrive opens a turn (D-5)", () => {
+describe("delivery obligation — bounded redrive opens a turn (D-5)", { skip }, () => {
   it("a missed delivery costs one attempt and wakes the dispatcher", async () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
@@ -150,7 +202,7 @@ describe("delivery obligation — bounded redrive opens a turn (D-5)", () => {
   });
 });
 
-describe("delivery obligation — the bound is terminal (D-5)", () => {
+describe("delivery obligation — the bound is terminal (D-5)", { skip }, () => {
   it("exhausting the budget escalates to `lost`, which is NOT `completed`", async () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
@@ -248,7 +300,7 @@ describe("delivery obligation — the bound is terminal (D-5)", () => {
   });
 });
 
-describe("delivery obligation — the budget is a lifetime one (D-5)", () => {
+describe("delivery obligation — the budget is a lifetime one (D-5)", { skip }, () => {
   it("attempts persist on the marker and survive a restart", async () => {
     const durability: InMemoryDurability = createInMemoryDurability();
 
@@ -279,7 +331,7 @@ describe("delivery obligation — the budget is a lifetime one (D-5)", () => {
     assert.equal(todoOf(coreB).redriveAttempts, 2);
   });
 
-  it("activation redrives a restored undelivered result by opening a turn", async () => {
+  it("activation rebuilds a restored undelivered result WITHOUT opening a turn; the next turn-end redrive charges it", async () => {
     const durability = createInMemoryDurability();
 
     // A result that settled before the crash and was never delivered.
@@ -288,25 +340,29 @@ describe("delivery obligation — the budget is a lifetime one (D-5)", () => {
     const workerId = await spawnForTodo(coreA, hostA);
     settleUndelivered(hostA, workerId);
 
-    // Activation: rebuild from markers only, then redrive — the two calls the
-    // plugin makes, in order.
+    // Activation (auto-continue fix Decision 3, owner ruling 2026-11-19):
+    // rebuild from markers ONLY — the plugin no longer follows it with
+    // redriveUndelivered. Mere open/resume must not fire a model turn with no
+    // user message; the owed obligation waits for the next real turn.
     const hostB = new FakeDshHost();
     const coreB = createMultitask(hostB, { durability });
     await coreB.rebuildFromDurability(SESSION);
 
-    const wakesBefore = hostB.wakeCalls.length;
-    const report = coreB.redriveUndelivered(SESSION);
+    assert.equal(hostB.wakeCalls.length, 0, "rebuild alone opens no turn");
+    assert.equal(todoOf(coreB).status, "in_progress");
+    assert.equal(todoOf(coreB).delivered, false, "the owed obligation survives");
+    assert.equal(todoOf(coreB).redriveAttempts, 0);
 
+    // The next REAL turn's end-of-turn redrive pass (parent-agent's isBusy
+    // gate) is the first charge: one attempt, one wake — bounded continuation
+    // of an active conversation, never a turn conjured by open/resume.
+    const report = coreB.redriveUndelivered(SESSION);
     assert.equal(report.redriven.length, 1);
-    assert.equal(
-      hostB.wakeCalls.length,
-      wakesBefore + 1,
-      "recovery does not wait for the user to speak",
-    );
+    assert.equal(hostB.wakeCalls.length, 1, "the turn-end redrive opens the turn");
     assert.equal(todoOf(coreB).redriveAttempts, 1);
   });
 
-  it("a marker written before this ticket reads as zero attempts", async () => {
+  it("a pre-fix legacy marker reads as zero attempts and is grandfathered as delivered (Decision 2 amnesty)", async () => {
     const durability = createInMemoryDurability();
     durability.markers.set("w-legacy", {
       workerId: "w-legacy",
@@ -318,10 +374,11 @@ describe("delivery obligation — the budget is a lifetime one (D-5)", () => {
       todoId: "todo-legacy",
       startedAtMs: 1_000,
       updatedAtMs: 2_000,
-      // no redriveAttempts — pre-ticket-58 shape
+      // no redriveAttempts — pre-ticket-58 shape; no delivered — pre-fix shape
     });
 
-    const core = createMultitask(new FakeDshHost(), { durability });
+    const host = new FakeDshHost();
+    const core = createMultitask(host, { durability });
     await core.rebuildFromDurability(SESSION);
 
     assert.equal(
@@ -329,10 +386,20 @@ describe("delivery obligation — the budget is a lifetime one (D-5)", () => {
       0,
       "an absent field is not an error and not an unlimited budget",
     );
+    // Legacy amnesty (auto-continue fix Decision 2): a pre-fix terminal row
+    // has no `delivered` field; rebuild grandfathers it as presented —
+    // completed/delivered, no obligation, no redrive, no wake. Deliberate:
+    // the unbounded re-presentation of ~1933 legacy rows IS the defect.
+    assert.equal(todoOf(core, "todo-legacy").status, "completed");
+    assert.equal(todoOf(core, "todo-legacy").delivered, true);
+    const report = core.redriveUndelivered(SESSION);
+    assert.deepEqual(report.redriven, [], "a grandfathered row is never redriven");
+    assert.deepEqual(report.lost, []);
+    assert.equal(host.wakeCalls.length, 0, "legacy amnesty opens no turn");
   });
 });
 
-describe("delivery obligation — telemetry (D-6)", () => {
+describe("delivery obligation — telemetry (D-6)", { skip }, () => {
   it("records `delivered` with its reason", async () => {
     const host = new FakeDshHost();
     const multitask = createMultitask(host);
@@ -440,7 +507,7 @@ describe("delivery obligation — telemetry (D-6)", () => {
   });
 });
 
-describe("delivery obligation — one redrive turn costs one attempt (ticket 197)", () => {
+describe("delivery obligation — one redrive turn costs one attempt (ticket 197)", { skip }, () => {
   it("draining the paid redrive wake does not spend a second attempt", async () => {
     const durability = createInMemoryDurability();
     const host = new FakeDshHost();
@@ -540,21 +607,29 @@ describe("delivery obligation — one redrive turn costs one attempt (ticket 197
       );
     }
 
-    // The spent lifetime budget survives a restart: the rebuilt core must
-    // escalate rather than hand the obligation a fresh allowance.
-    const recovered = createMultitask(new FakeDshHost(), { durability });
+    // The spent lifetime budget survives a restart: rebuild itself derives
+    // `lost` from the durable attempts (auto-continue fix Decision 2) instead
+    // of handing the obligation a fresh allowance — the escalation no longer
+    // waits for a post-restart redrive pass.
+    const hostB = new FakeDshHost();
+    const recovered = createMultitask(hostB, { durability });
     await recovered.rebuildFromDurability(SESSION);
     assert.equal(todoOf(recovered).redriveAttempts, MAX_DELIVERY_REDRIVES);
+    assert.equal(todoOf(recovered).status, "lost", "exhaustion rebuilds as lost");
+    assert.equal(todoOf(recovered).dispositionReason, "max-redrives");
 
+    // lost stays lost: the next pass neither retries nor silently re-escalates,
+    // and opens no wake.
+    const wakesBefore = hostB.wakeCalls.length;
     const final = recovered.redriveUndelivered(SESSION);
     assert.equal(final.redriven.length, 0);
-    assert.equal(final.lost.length, 1);
+    assert.equal(final.lost.length, 0, "no silent re-escalation after restart");
     assert.equal(todoOf(recovered).status, "lost");
-    assert.equal(todoOf(recovered).dispositionReason, "max-redrives");
+    assert.equal(hostB.wakeCalls.length, wakesBefore, "a lost item opens no turn");
   });
 });
 
-describe("delivery obligation — a queued settle is the first opportunity (duplicate-wake repair)", () => {
+describe("delivery obligation — a queued settle is the first opportunity (duplicate-wake repair)", { skip }, () => {
   const REAL_REPORT =
     "Migration finished: 42 handlers audited, 7 fixes landed, and the smoke suite is green.";
 

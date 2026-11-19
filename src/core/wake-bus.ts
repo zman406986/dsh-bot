@@ -2,9 +2,11 @@ import type { AgentMessageWakeOrigin, PeerNotice } from "./peer-types.js";
 import type { TerminalWorkerStatus } from "./types.js";
 
 /**
- * Where a wake came from. Only `user`, `worker-settled`, and `peer` produce
- * wakes at this stage; the remaining sources are accepted so later tickets can
- * enqueue them without changing the vocabulary.
+ * Where a wake came from. Since the stock-subagent refactor (92e12e8) the bus carries peer,
+ * timer (delivery-redrive), and external-event (inbox) wakes; user turns and worker settle
+ * notices are opened by the HOST (stock completion notice / user message), not enqueued here.
+ * `enqueueWorkerSettled`/`enqueueUserWake` remain in the vocabulary with zero shipped callers
+ * — do not revive them (that would double-emit the host's notice).
  */
 export type WakeSource =
   | "user"

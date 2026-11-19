@@ -26,6 +26,9 @@ export interface DurableWorkerMarker {
    * lifetime budget rather than a per-boot one.
    */
   readonly redriveAttempts?: number;
+  /** Delivery ack. Absent = legacy row (pre-fix) → grandfathered as presented at rebuild.
+   *  false = settled, delivery still owed. true = durably acked tombstone. */
+  readonly delivered?: boolean;
   /**
    * External intake provenance (ticket 113). Optional because markers
    * written before the inbox exist; a restored marker re-creates the ledger
@@ -382,10 +385,15 @@ export interface RebuildReport {
  * `external` stamps the linked todo's intake provenance when the caller
  * knows it (ticket 113) — the core passes the ledger item's origin so a
  * rebuild can re-create the inbox link.
+ * `delivered` (auto-continue fix, Decision 1) is ALWAYS emitted: false = a
+ * settled result still owed, true = the durably acked tombstone. Absence of
+ * the field is reserved for legacy (pre-fix) rows, so it stays a reliable
+ * grandfather discriminator at rebuild.
  */
 export function toDurableMarker(
   record: WorkerRecord,
   external?: TodoExternalOrigin | null,
+  delivered = false,
 ): DurableWorkerMarker {
   return {
     workerId: record.workerId,
@@ -397,6 +405,7 @@ export function toDurableMarker(
     transcriptRef: record.transcriptRef,
     todoId: record.todoId,
     redriveAttempts: record.redriveAttempts,
+    delivered,
     ...(external ? { external } : {}),
     startedAtMs: record.startedAtMs,
     updatedAtMs: Date.now(),

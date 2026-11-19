@@ -22,8 +22,12 @@
  * `lib/types/index.d.ts:228`).
  */
 import assert from "node:assert/strict";
+import { execSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { createRequire, registerHooks } from "node:module";
+import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
-import { apply as pluginApply } from "../src/plugin.js";
+import { pathToFileURL } from "node:url";
 import { volatileConfig } from "./support/plugin-config.js";
 import {
   DISPATCHER_START_COMMAND,
@@ -50,6 +54,54 @@ import {
   emptyReportPlaceholder,
   formatWakeReportBody,
 } from "../src/core/report-clamp.js";
+
+// Portable host discovery (copied from test/stock-worker-model-default.test.ts:22-77):
+// src/plugin.ts statically imports @deepseek-ai/dsh-scope, which is not a repo
+// dependency — resolve it from the installed host. DSH_HOST_DIR overrides;
+// otherwise repo-local module resolution, then the global npm root. When no
+// usable host is found every suite skips with a reason and the process exits 0.
+const requireFromTest = createRequire(import.meta.url);
+
+/** The installed @deepseek-ai/dsh package directory, or undefined. */
+function findHostDir(): string | undefined {
+  const override = process.env.DSH_HOST_DIR;
+  if (override !== undefined && override !== "") {
+    const dir = resolve(override);
+    return existsSync(join(dir, "package.json")) ? dir : undefined;
+  }
+  try {
+    return dirname(requireFromTest.resolve("@deepseek-ai/dsh/package.json"));
+  } catch { /* not installed repo-locally; fall through to the global npm root */ }
+  try {
+    const globalRoot = execSync("npm root -g", { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    if (globalRoot === "") return undefined;
+    const requireFromGlobal = createRequire(join(globalRoot, "dsh-host-probe.js"));
+    return dirname(requireFromGlobal.resolve("@deepseek-ai/dsh/package.json"));
+  } catch { return undefined; }
+}
+
+const hostDir = findHostDir();
+let skip: string | false = hostDir !== undefined ? false
+  : process.env.DSH_HOST_DIR
+    ? `DSH_HOST_DIR (${process.env.DSH_HOST_DIR}) does not point at an installed dsh host`
+    : "no installed dsh host found (repo-local module resolution or global npm root); set DSH_HOST_DIR to the @deepseek-ai/dsh package directory";
+
+let pluginApply: typeof import("../src/plugin.js").apply;
+if (hostDir !== undefined) {
+  try {
+    const hostRequire = createRequire(join(hostDir, "package.json"));
+    const scopeUrl = pathToFileURL(hostRequire.resolve("@deepseek-ai/dsh-scope")).href;
+    registerHooks({
+      resolve(specifier, context, nextResolve) {
+        if (specifier !== "@deepseek-ai/dsh-scope") return nextResolve(specifier, context);
+        return { url: scopeUrl, shortCircuit: true };
+      },
+    });
+    ({ apply: pluginApply } = await import("../src/plugin.js"));
+  } catch (error) {
+    skip = `dsh host at ${hostDir} is not usable: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
 
 /** Drain the async rebuild chain queued by activation (ticket 31). */
 async function flushActivation(): Promise<void> {
@@ -509,7 +561,7 @@ const LIVE_MARKER: DurableWorkerMarker = {
   updatedAtMs: 2_000,
 };
 
-describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
+describe("restart honesty — rebuild on activation (design-17 §4.7)", { skip }, () => {
   it("activation rebuilds durable markers BEFORE the first publish; one notice; unknown rows stay off the roster", async () => {
     const ctx = createRestartCtx();
     await seedMarkers(ctx, [DONE_MARKER, LIVE_MARKER]);
@@ -1051,16 +1103,25 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
     const racedId = await ctx.spawnStockWorker(agent, "Raced task");
     assert.equal(racedId, "child-1", "the stock child was adopted mid-rebuild");
 
-    // The live chain resumes: one redrive pass, and the raced transition is
-    // not lost.
+    // The live chain resumes: rebuild lands and the raced transition is not
+    // lost — but activation is DE-WAKED (auto-continue fix Decision 3, owner
+    // ruling 2026-11-19): rebuildAndNotice no longer calls redriveUndelivered,
+    // so the live chain spends no redrive attempt and opens no followup. The
+    // stale-chain guard above still holds; the live chain is now bounded by
+    // the same de-wake rather than by a one-pass budget spend.
     ctx.releaseMarkerTableHold();
     await flushActivation();
 
     const markers = await readMarkers(ctx);
     assert.equal(
       markers.get("w-done")?.redriveAttempts ?? 0,
-      1,
-      "the persisted D-5 budget was spent once, not twice",
+      0,
+      "de-waked activation: the live chain spends no redrive of the persisted budget",
+    );
+    assert.equal(
+      agent.woken.length,
+      0,
+      "de-waked activation: no followup turn fires on open/resume",
     );
     assert.equal(
       await ctx.workerOnRoster(agent, "w-done"),
@@ -1072,10 +1133,49 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
       true,
       "the raced transition is present",
     );
+
+    // The notice gate is preserved (ticket 31/57 + the 2026-11-13 ruling;
+    // #300 fixed wording only) — and in THIS scenario it stays silent by the
+    // existing empty-report rule: the stale chain's rebuild already landed
+    // the restored rows in the shared core (the generation guard stops
+    // notice/sweep/redrive, not the rebuild's own idempotent mutations), so
+    // the live chain's report is empty and queues no restart notice. The
+    // full gate — a queued notice riding the first real user turn exactly
+    // once, never a wake — is pinned by the first test of this suite. Here
+    // the first real user turn must open no plugin turn and surface no
+    // restart notice.
+    const restartAppended = () =>
+      agent.appended.filter((entry) =>
+        textOf(entry.data).includes(RESTART_NOTICE_HEADING),
+      );
+    assert.equal(
+      restartAppended().length,
+      0,
+      "nothing is visible before the first real user turn",
+    );
+    ctx.fire("session/event", { id: "s-1" }, {
+      type: "user/message",
+      data: {
+        role: "user",
+        content: [{ type: "text", text: "hello" }],
+        source: { kind: "user" },
+      },
+    });
+    await flushActivation();
+    assert.equal(
+      agent.woken.length,
+      0,
+      "the first real user turn opens no plugin turn (de-waked activation)",
+    );
+    assert.equal(
+      restartAppended().length,
+      0,
+      "the live chain's empty report queues no restart notice",
+    );
   });
 });
 
-describe("restart honesty — no-stop guard (design-17 §4.6)", () => {
+describe("restart honesty — no-stop guard (design-17 §4.6)", { skip }, () => {
   /** Recursively collect every object key in a view model tree. */
   function collectKeys(value: unknown, visit: (key: string) => void): void {
     if (Array.isArray(value)) {
@@ -1137,7 +1237,7 @@ describe("restart honesty — no-stop guard (design-17 §4.6)", () => {
   });
 });
 
-describe("restart honesty — policy copy (new, clean-room)", () => {
+describe("restart honesty — policy copy (new, clean-room)", { skip }, () => {
   it("the policy is the owner's chief-of-staff copy and rides the flag gate", () => {
     // Owner-directed rewrite 2026-11-02 cut the per-session section to four
     // chief-of-staff bullets. The conversational-stop and no-task-board rules
@@ -1155,7 +1255,7 @@ describe("restart honesty — policy copy (new, clean-room)", () => {
   });
 });
 
-describe("restart honesty — aborted workers settle with an honest report (no revival)", () => {
+describe("restart honesty — aborted workers settle with an honest report (no revival)", { skip }, () => {
   it("abortedReportBody is the exact no-report body; real partial findings are kept and labelled", () => {
     assert.equal(
       abortedReportBody(),

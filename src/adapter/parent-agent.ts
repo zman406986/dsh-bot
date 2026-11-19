@@ -1260,7 +1260,17 @@ export function bindDispatcherLifecycle(
           // (so a turn that delivered costs nothing), and while the bus is
           // still busy the redrive becomes a pending flag, so the turn-end
           // flush delivers it exactly once alongside anything else waiting.
-          if (policyEnabled) {
+          //
+          // The isBusy gate means "a turn actually ran", NOT "a real user
+          // turn": noteTurnStarted fires on EVERY agent/status running edge
+          // above — user, host-notice and auto-redrive turns alike — so it
+          // is origin-blind. It skips only the initial idle at activation
+          // (no running edge fired) and a cancelled turn (cancelTurn cleared
+          // busy): no redrive wake on mere open/resume, and no extra pass
+          // for a cancelled turn (its drain charge is already durable, core
+          // lane). The bound on the live auto-redrive loop is the DURABLE
+          // redrive budget (core lane), not this gate.
+          if (policyEnabled && multitask.wakeBus.isBusy(agentSessionId)) {
             multitask.redriveUndelivered(agentSessionId);
           }
           // Ticket 296: a closed turn settles any boundary queued during it;

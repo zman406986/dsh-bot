@@ -924,6 +924,16 @@ export function createMultitask(
   }
 
   /**
+   * Whether a record's linked todo is durably acked (auto-continue fix,
+   * Decision 1). Every post-fix marker write carries this flag so a rebuild
+   * can tell an owed result from an acked one; a fresh/unlinked todo reads
+   * false. Absence on the marker (not here) is the legacy discriminator.
+   */
+  function deliveredOf(todoId: string | null): boolean {
+    return todoId !== null && todoLedger.get(todoId)?.delivered === true;
+  }
+
+  /**
    * Best-effort drop of a worker's durable obligation marker after delivery.
    * Dropping a marker that is already absent is a no-op, so this is safe to
    * repeat — which is what lets `markDelivered` retry a transient store
@@ -936,6 +946,46 @@ export function createMultitask(
       `worker marker for ${workerId} could not be dropped`,
       () => durability.deleteWorkerMarker(workerId),
     );
+  }
+
+  /**
+   * Auto-continue fix, Decision 1: upsert the delivered:true tombstone BEFORE
+   * the obligation delete. Deletion alone acks durably only when it succeeds;
+   * a failed delete used to leave an owed marker that resurrected on the next
+   * activation. The tombstone is the failed-delete backstop: even if the delete
+   * fails (or lands first), a lingering row reads delivered:true → no
+   * obligation at rebuild. Best-effort like the delete; if BOTH fail the owed
+   * marker resurrects once more, bounded by the durable redrive budget
+   * (Decision 4). Callers hold the #301 current-run guard, so a prior-run ack
+   * never writes the latest run's row.
+   */
+  function upsertDeliveredTombstone(workerId: string | null): void {
+    if (durability === undefined || workerId === null) return;
+    const record = workers.get(workerId);
+    if (record === undefined) return;
+    durabilityBestEffort(
+      `worker marker for ${workerId} could not be acked`,
+      () =>
+        durability.writeWorkerMarker(
+          toDurableMarker(record, todoExternalOf(record.todoId), true),
+        ),
+    );
+  }
+
+  /**
+   * Auto-continue fix, Decision 6a: the completed-before-abort refusal keeps
+   * the obligation owed, so name the owed todo and its deliver_result close
+   * path — the refusal becomes actionable instead of a dead end. Only when the
+   * linked todo is genuinely owed (not already acked); an acked item owes
+   * nothing and keeps the generic detail.
+   */
+  function alreadySettledDetail(record: WorkerRecord): string {
+    const base = `worker ${record.workerId} is not running; it may already be done`;
+    const todoId = record.todoId;
+    if (todoId === null) return base;
+    const todo = todoLedger.get(todoId);
+    if (todo === undefined || todo.delivered) return base;
+    return `${base}; todo ${todoId} still owes delivery; close it with deliver_result(todo_id="${todoId}")`;
   }
 
   /**
@@ -1091,6 +1141,15 @@ export function createMultitask(
      */
     readonly status: "pending" | "in_progress";
     readonly redriveAttempts: number;
+    /**
+     * Auto-continue fix, Decision 2: restore the durable delivery state.
+     * delivered → flip the recreated item to completed/delivered (acked
+     * tombstone or grandfathered legacy row); lost → flip to lost
+     * ("max-redrives") when the durable budget is exhausted. Both default
+     * false (owed). Flips use the EXISTING ledger methods — no reconciler edit.
+     */
+    readonly delivered?: boolean;
+    readonly lost?: boolean;
     readonly external?: TodoExternalOrigin;
     readonly nowMs?: number;
   }): void {
@@ -1116,6 +1175,14 @@ export function createMultitask(
       ...(args.nowMs !== undefined ? { nowMs: args.nowMs } : {}),
     });
     todoLedger.linkWorker(todo.id, args.workerId, args.streamKey);
+    // Decision 2: flip the recreated item to its durable delivery state via the
+    // existing ledger methods (no todo-reconciler edit). The same-session early
+    // return above already skipped; this is the fresh-create path.
+    if (args.delivered === true) {
+      todoLedger.markDelivered(todo.id, args.nowMs);
+    } else if (args.lost === true) {
+      todoLedger.markLost(todo.id, "max-redrives", args.nowMs);
+    }
     if (todo.id === args.todoId) return;
     // The re-link changed the id this worker owns. The roster record is the
     // live truth; write the corrected marker too (best-effort) so the next
@@ -1128,7 +1195,7 @@ export function createMultitask(
         `worker marker for ${args.workerId} could not be re-linked to ${todo.id}`,
         () =>
           durability.writeWorkerMarker(
-            toDurableMarker(record, args.external ?? null),
+            toDurableMarker(record, args.external ?? null, args.delivered === true),
           ),
       );
     }
@@ -1183,6 +1250,37 @@ export function createMultitask(
           todoId: worker.todoId,
         })),
     });
+  }
+
+  /**
+   * Auto-continue fix, Decision 4 (verdict item c): mirror spent redrive
+   * attempts onto the roster records and persist them, so EVERY apply site
+   * (reconcileTodos / drainWake / redriveUndelivered) makes its charges durable.
+   * A drain-path charge that evaporated at restart was the 694-stuck-at-1 leak;
+   * persisting it means exhaustion survives restart (rebuild restores
+   * attempts>=max as lost). The charge is written BEFORE any wake fires, so a
+   * crash cannot reset the budget — the durable budget, not an origin gate, is
+   * the live-loop bound (isBusy is origin-blind). The record===current guard is
+   * #301: a prior-run record mirrors in memory only; its marker row belongs to
+   * the latest run. Best-effort writes (a store failure never breaks the pass).
+   */
+  function persistRedriveCharges(toRedrive: readonly TodoItem[]): void {
+    for (const todo of toRedrive) {
+      const current = todo.workerId !== null ? workers.get(todo.workerId) : undefined;
+      const record = current?.todoId === todo.id ? current :
+        todo.workerId !== null ? [...(priorWorkerRuns.get(todo.workerId)?.values() ?? [])].find((run) => run.todoId === todo.id) : undefined;
+      if (record === undefined) continue;
+      record.redriveAttempts = todo.redriveAttempts;
+      if (durability !== undefined && record === current) {
+        durabilityBestEffort(
+          `worker marker for ${record.workerId} could not be written`,
+          () =>
+            durability.writeWorkerMarker(
+              toDurableMarker(record, todoExternalOf(record.todoId), deliveredOf(record.todoId)),
+            ),
+        );
+      }
+    }
   }
 
   /**
@@ -1275,7 +1373,7 @@ export function createMultitask(
           `worker marker for ${record.workerId} could not be written`,
           () =>
             durability.writeWorkerMarker(
-              toDurableMarker(record, todoExternalOf(record.todoId)),
+              toDurableMarker(record, todoExternalOf(record.todoId), deliveredOf(record.todoId)),
             ),
         );
       }
@@ -1781,7 +1879,7 @@ export function createMultitask(
             try {
               await Promise.resolve(
                 durability.writeWorkerMarker(
-                  toDurableMarker(record, todoExternalOf(record.todoId)),
+                  toDurableMarker(record, todoExternalOf(record.todoId), deliveredOf(record.todoId)),
                 ),
               );
             } catch (error) {
@@ -1850,11 +1948,12 @@ export function createMultitask(
       if (isTerminalStatus(record.status)) {
         // Already settled (or previously stopped) — refuse without interrupting.
         // The completion that already arrived was delivered through the normal
-        // settle path; this refusal does not undo it.
+        // settle path; this refusal does not undo it. Decision 6a: the owed
+        // obligation is named so the refusal is actionable (deliver_result).
         return {
           ok: false,
           reason: "already-settled",
-          detail: `worker ${workerId} is not running; it may already be done`,
+          detail: alreadySettledDetail(record),
         };
       }
       const next = transition(workerId, { type: "aborted" });
@@ -1863,7 +1962,7 @@ export function createMultitask(
         return {
           ok: false,
           reason: "already-settled",
-          detail: `worker ${workerId} is not running; it may already be done`,
+          detail: alreadySettledDetail(record),
         };
       }
       // Drop any parked steer — nothing is kept for a later revival.
@@ -2071,7 +2170,7 @@ export function createMultitask(
           if (durability !== undefined) {
             durabilityBestEffort(
               `worker marker for ${workerId} could not be tagged`,
-              () => durability.writeWorkerMarker(toDurableMarker(previous, todoExternalOf(previous.todoId))),
+              () => durability.writeWorkerMarker(toDurableMarker(previous, todoExternalOf(previous.todoId), deliveredOf(previous.todoId))),
             );
             durabilityBestEffort(
               `worker session row for ${workerId} could not be tagged`,
@@ -2137,7 +2236,7 @@ export function createMultitask(
         }
         durabilityBestEffort(
           `worker marker for ${workerId} could not be written`,
-          () => durability.writeWorkerMarker(toDurableMarker(record, null)),
+          () => durability.writeWorkerMarker(toDurableMarker(record, null, deliveredOf(record.todoId))),
         );
         durabilityBestEffort(
           `worker session row for ${workerId} could not be written`,
@@ -2260,6 +2359,8 @@ export function createMultitask(
         // `replied` resolution — those answer the close, not the cleanup.
         if (before.workerId === null || workers.get(before.workerId)?.todoId === before.id) {
           dropQueuedWakesForDelivered(before);
+          // Decision 1: tombstone BEFORE the delete — the failed-delete backstop.
+          upsertDeliveredTombstone(before.workerId);
           dropObligationMarker(before.workerId);
         }
         return true;
@@ -2276,8 +2377,11 @@ export function createMultitask(
         }
         notifyRosterChanged(todo.sessionId);
       }
-      // Delivery obligation closed — drop the durable marker for its worker.
+      // Delivery obligation closed — ack durably (tombstone) then drop the
+      // marker for its worker. Decision 1: the tombstone precedes the delete so
+      // a failed delete still leaves a delivered:true row, not an owed one.
       if (todo?.workerId == null || workers.get(todo.workerId)?.todoId === todo.id) {
+        upsertDeliveredTombstone(todo?.workerId ?? null);
         dropObligationMarker(todo?.workerId ?? null);
       }
       // Ticket 113: an inbox-origin item's delivered completion is the
@@ -2306,6 +2410,8 @@ export function createMultitask(
         };
       const report = runReconcile(sessionId, effectiveWake);
       todoLedger.apply(report.mutations);
+      // Decision 4: reconcile charges are durable too (verdict item c).
+      persistRedriveCharges(report.toRedrive);
       // Ledger shape feeds the panel's todo links (ticket 21): reconcile is
       // a roster-affecting transition per the ticket, so observe it too.
       notifyRosterChanged(sessionId);
@@ -2317,6 +2423,8 @@ export function createMultitask(
       if (wake === undefined) return undefined;
       const reconcile = runReconcile(sessionId, wake);
       todoLedger.apply(reconcile.mutations);
+      // Decision 4: the drain-path charge is durable BEFORE any cancel/restart.
+      persistRedriveCharges(reconcile.toRedrive);
       notifyRosterChanged(sessionId);
       return { wake, reconcile };
     },
@@ -2335,6 +2443,8 @@ export function createMultitask(
       };
       const report = runReconcile(sessionId, effectiveWake);
       todoLedger.apply(report.mutations);
+      // Decision 4: persist the charge BEFORE the wake fires (durable budget).
+      persistRedriveCharges(report.toRedrive);
       // Notify only when something actually moved. This pass runs on every
       // dispatcher turn end, and an unconditional notify would publish an
       // identical snapshot every time — visible churn in the panel for no
@@ -2355,26 +2465,6 @@ export function createMultitask(
       }
 
       if (changed) notifyRosterChanged(sessionId);
-
-      // Mirror the spent attempts onto the roster records and persist them,
-      // so a restart continues the same budget rather than restarting it
-      // (D-5: a lifetime bound, like the reference's).
-      for (const todo of report.toRedrive) {
-        const current = todo.workerId !== null ? workers.get(todo.workerId) : undefined;
-        const record = current?.todoId === todo.id ? current :
-          todo.workerId !== null ? [...(priorWorkerRuns.get(todo.workerId)?.values() ?? [])].find((run) => run.todoId === todo.id) : undefined;
-        if (record === undefined) continue;
-        record.redriveAttempts = todo.redriveAttempts;
-        if (durability !== undefined && record === current) {
-          durabilityBestEffort(
-            `worker marker for ${record.workerId} could not be written`,
-            () =>
-              durability.writeWorkerMarker(
-                toDurableMarker(record, todoExternalOf(record.todoId)),
-              ),
-          );
-        }
-      }
 
       if (report.toRedrive.length > 0) {
         // Opening the turn is the delivery mechanism — queueing context would
@@ -2539,6 +2629,29 @@ export function createMultitask(
         // undelivered result and finish delivery (S4). Aborted workers
         // owe nothing — skip.
         if (marker.status !== "aborted") {
+          // Decision 2 (auto-continue fix): restore what the marker durably says
+          // about delivery instead of resurrecting every settled row as owed.
+          const attempts = marker.redriveAttempts ?? 0;
+          const max = options?.maxRedrives ?? MAX_DELIVERY_REDRIVES;
+          let delivered = false;
+          let lost = false;
+          if (marker.delivered === true) {
+            // Durably acked tombstone (Decision 1) — no obligation, no redrive.
+            delivered = true;
+          } else if (marker.delivered === undefined) {
+            // LEGACY AMNESTY — pending owner ratification; flip here if rejected
+            // (alternative: treat legacy as owed subject to the same durable
+            // budget). A pre-fix row has no delivered field; grandfathering it
+            // as presented stops the unbounded re-presentation loop with zero
+            // store writes. Single adjustable branch — no config flag (ADR-0018).
+            delivered = true;
+          } else if (attempts >= max) {
+            // delivered:false + budget exhausted → lost. Exhaustion is durable
+            // THROUGH attempts; no new lost field on the marker.
+            lost = true;
+          }
+          // else: delivered:false + under budget → owed (in_progress /
+          // delivered:false), NOT auto-woken by rebuild (Decision 3 core half).
           restoreLedgerLink({
             workerId: marker.workerId,
             sessionId: marker.parentSessionId,
@@ -2548,7 +2661,9 @@ export function createMultitask(
             status: "in_progress",
             // Restore the spent budget too — otherwise every restart would
             // hand the obligation a fresh set of redrives (D-5).
-            redriveAttempts: marker.redriveAttempts ?? 0,
+            redriveAttempts: attempts,
+            ...(delivered ? { delivered: true } : {}),
+            ...(lost ? { lost: true } : {}),
             // Ticket 113: the inbox origin rides the marker so the rebuilt
             // item keeps its delivery routing (and re-present dedupe works).
             ...(marker.external !== undefined
