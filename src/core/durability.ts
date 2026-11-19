@@ -9,6 +9,8 @@ import type { TodoExternalOrigin } from "./todo-reconciler.js";
  */
 export interface DurableWorkerMarker {
   readonly workerId: string;
+  /** Native stock execution identity; absent on legacy rows. */
+  readonly runId?: string;
   readonly parentSessionId: string;
   readonly streamKey: string;
   readonly title: string;
@@ -187,6 +189,8 @@ export type DurableDispatcherMarkAnswer =
  */
 export interface DurableWorkerSession {
   readonly sessionId: string;
+  /** Native stock execution identity; absent on legacy rows. */
+  readonly runId?: string;
   /**
    * The dispatcher session that spawned this worker — the sender a cold
    * resume needs. Unlike the dispatcher mark's optional field, this is
@@ -334,6 +338,8 @@ export interface DurabilityPort {
  */
 export interface UnknownStateWorker {
   readonly workerId: string;
+  /** Retained native execution identity, not evidence that the run is live. */
+  readonly runId?: string;
   readonly parentSessionId: string;
   readonly streamKey: string;
   readonly title: string;
@@ -383,6 +389,7 @@ export function toDurableMarker(
 ): DurableWorkerMarker {
   return {
     workerId: record.workerId,
+    ...(record.runId !== undefined ? { runId: record.runId } : {}),
     parentSessionId: record.parentSessionId,
     streamKey: record.streamKey,
     title: record.title,

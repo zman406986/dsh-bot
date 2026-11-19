@@ -48,6 +48,8 @@ export const AWAIT_INVALID_TIMEOUT_DETAIL =
 /** One remembered worker terminal result (ticket 115, exact fields). */
 export interface SettleRecord {
   readonly workerId: string;
+  /** Native stock execution identity, absent for legacy callers. */
+  readonly runId?: string;
   readonly status: TerminalWorkerStatus;
   /** The settled report, clamped by the settle path before it lands here. */
   readonly resultText: string;
@@ -153,7 +155,7 @@ export interface SettleRecords {
    */
   record(parentSessionId: string, settle: SettleRecord): void;
   /** The recorded result for one worker in one parent session, if still held. */
-  lookup(parentSessionId: string, workerId: string): SettleRecord | undefined;
+  lookup(parentSessionId: string, workerId: string, runId?: string): SettleRecord | undefined;
   /**
    * Await a settle record for one worker, bounded by `timeoutMs`
    * (`0` = non-blocking status read, no timer, no waiter registration).
@@ -170,6 +172,7 @@ export interface SettleRecords {
     workerId: string,
     timeoutMs: number,
     signal?: AbortSignal,
+    runId?: string,
   ): Promise<AwaitWorkerOutcome>;
   /**
    * Release every active waiter of one dispatcher session: each resolves
@@ -199,6 +202,7 @@ export interface SettleRecords {
 interface PendingWait {
   readonly parentSessionId: string;
   readonly workerId: string;
+  readonly runId?: string;
   readonly finish: (compose: (waitedMs: number) => AwaitWorkerOutcome) => void;
 }
 
@@ -239,8 +243,15 @@ export function createSettleRecords(
   function lookup(
     parentSessionId: string,
     workerId: string,
+    runId?: string,
   ): SettleRecord | undefined {
-    return rings.get(parentSessionId)?.get(workerId);
+    const ring = rings.get(parentSessionId);
+    if (runId !== undefined) return ring?.get(JSON.stringify([workerId, runId]));
+    let latest: SettleRecord | undefined;
+    for (const record of ring?.values() ?? []) {
+      if (record.workerId === workerId) latest = record;
+    }
+    return latest;
   }
 
   function elapsed(startedAtMs: number): number {
@@ -273,19 +284,22 @@ export function createSettleRecords(
         ring = new Map<string, SettleRecord>();
         rings.set(parentSessionId, ring);
       }
-      if (!ring.has(settle.workerId) && ring.size >= SETTLE_RING_SIZE) {
+      const key = settle.runId === undefined ? settle.workerId : JSON.stringify([settle.workerId, settle.runId]);
+      if (settle.runId !== undefined && ring.has(key)) return;
+      if (!ring.has(key) && ring.size >= SETTLE_RING_SIZE) {
         // Evict the oldest record: first key in insertion order.
         const oldest = ring.keys().next();
         if (oldest.done !== true) {
           ring.delete(oldest.value);
         }
       }
-      ring.set(settle.workerId, settle);
+      ring.set(key, settle);
       // Record arrival wins the race: release every waiter on this worker.
       const pending = waiters.get(parentSessionId);
       if (pending === undefined) return;
       for (const waiter of [...pending]) {
         if (waiter.workerId !== settle.workerId) continue;
+        if (waiter.runId !== undefined && waiter.runId !== settle.runId) continue;
         waiter.finish((waitedMs) => settledOutcome(settle, waitedMs));
       }
     },
@@ -297,12 +311,13 @@ export function createSettleRecords(
       workerId: string,
       timeoutMs: number,
       signal?: AbortSignal,
+      runId?: string,
     ): Promise<AwaitWorkerOutcome> {
       const startedAtMs = now();
       // Record first: a record present at call time settles the wait
       // immediately, whatever the timeout — this is what makes `timeoutMs: 0`
       // a settled-result read and what a wait racing the wake relies on.
-      const existing = lookup(parentSessionId, workerId);
+      const existing = lookup(parentSessionId, workerId, runId);
       if (existing !== undefined) {
         return Promise.resolve(settledOutcome(existing, 0));
       }
@@ -339,6 +354,7 @@ export function createSettleRecords(
         const waiter: PendingWait = {
           parentSessionId,
           workerId,
+          ...(runId !== undefined ? { runId } : {}),
           finish: (compose) => {
             if (finished) return;
             finished = true;

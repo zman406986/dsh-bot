@@ -29,6 +29,7 @@ import {
   DISPATCHER_START_COMMAND,
   DISPATCHER_STEER_COMMAND,
   MARKER_TABLE_NAME,
+  WORKER_SESSION_TABLE_NAME,
   markerDomainSpec,
   RESTART_DEGRADED_NOTICE,
   RESTART_NOTICE_HEADING,
@@ -37,9 +38,10 @@ import {
   type AgentLike,
   type CommandDefinitionLike,
   type CommandResultLike,
+  type KvTableLike,
   type ToolsLike,
 } from "../src/adapter/index.js";
-import type { DurableWorkerMarker } from "../src/core/durability.js";
+import type { DurableWorkerMarker, DurableWorkerSession } from "../src/core/durability.js";
 
 import { buildDispatcherPolicySection } from "../src/core/policy/prompts.js";
 import {assembleSessionPolicy} from "../src/core/policy/assembler.js";
@@ -522,6 +524,13 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
     assert.equal(result.kind, "success");
     await flushActivation();
 
+    // Ticket 300: this bare marker has no durable wake identity, so the
+    // completed restart sweep must remove it before the notice is delivered.
+    assert.equal((await readMarkers(ctx)).has("w-live"), false);
+    const domain = await ctx.storageDomain.open(markerDomainSpec());
+    const wakeTable = await domain.table(WORKER_SESSION_TABLE_NAME);
+    assert.equal(wakeTable.get("w-live"), undefined);
+
     // Exactly ONE restart notice, carrying the id, the transcript pointer,
     // the honest unknown wording, and the restored count (design-17 §7).
     //
@@ -659,6 +668,12 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
       "notice carries the restored-count line",
     );
 
+    assert.doesNotMatch(
+      notice,
+      /Stream\(s\) todo-live are held|onto those streams is refused/,
+      "a swept bare marker must not claim its stream is still held or refused",
+    );
+
     // A second user turn must not duplicate it: the queue drained once.
     ctx.fire(
       "session/event",
@@ -696,6 +711,72 @@ describe("restart honesty — rebuild on activation (design-17 §4.7)", () => {
       false,
       "unknown-state worker never appears on the roster",
     );
+  });
+
+  it("a wake-backed hold retains truthful current stream guidance after the sweep (ticket 300)", async () => {
+    const ctx = createRestartCtx();
+    await seedMarkers(ctx, [LIVE_MARKER]);
+    const domain = await ctx.storageDomain.open(markerDomainSpec());
+    const wakeTable = (await domain.table(
+      WORKER_SESSION_TABLE_NAME,
+    )) as unknown as KvTableLike<DurableWorkerSession>;
+    const wakeRow = {
+      sessionId: LIVE_MARKER.workerId,
+      parentSessionId: LIVE_MARKER.parentSessionId,
+    };
+    await wakeTable.put(LIVE_MARKER.workerId, wakeRow);
+
+    pluginApply(ctx, volatileConfig({ enabled: true }));
+    const agent = createAgent("s-1");
+    assert.equal(
+      ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent }).kind,
+      "success",
+    );
+    await flushActivation();
+    assert.equal((await readMarkers(ctx)).has("w-live"), true);
+    assert.deepEqual(wakeTable.get("w-live"), wakeRow);
+    const notices = () =>
+      agent.appended.filter((entry) =>
+        textOf(entry.data).includes(RESTART_NOTICE_HEADING),
+      );
+    assert.equal(notices().length, 0, "the control also waits for a real user");
+    assert.equal(agent.woken.length, 0, "the control never auto-wakes");
+
+    ctx.fire("session/event", { id: "s-1" }, {
+      type: "user/message",
+      data: {
+        role: "user",
+        content: [{ type: "text", text: "hello" }],
+        source: { kind: "user" },
+      },
+    });
+    await flushActivation();
+    assert.equal(notices().length, 1);
+    const notice = textOf(notices()[0]?.data ?? {});
+    assert.ok(
+      notice.includes("Before the last restart, 1 worker(s) were still running: w-live."),
+      "surviving holds retain their historical unknown worker count and id",
+    );
+    assert.ok(notice.includes("state is unknown — nothing was replayed"));
+    assert.ok(notice.includes("Transcripts: w-live"));
+    assert.ok(
+      notice.includes(
+        "Stream(s) todo-live are held by them, so re-dispatching onto those streams is refused.",
+      ),
+      "the durable wake-backed stream is still held after the sweep",
+    );
+
+    ctx.fire("session/event", { id: "s-1" }, {
+      type: "user/message",
+      data: {
+        role: "user",
+        content: [{ type: "text", text: "and again" }],
+        source: { kind: "user" },
+      },
+    });
+    await flushActivation();
+    assert.equal(notices().length, 1, "the control notice is delivered exactly once");
+    assert.equal(agent.woken.length, 0, "notice delivery never opens a turn");
   });
 
   it("rebuild failure: activation still succeeds with the degraded honest notice", async () => {

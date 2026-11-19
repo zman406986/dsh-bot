@@ -75,7 +75,8 @@
     "node": ">=22.15.0"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "*"
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-scope": "0.2.2-rc.1"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "*",

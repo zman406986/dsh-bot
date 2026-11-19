@@ -177,6 +177,9 @@ function parseWorkerMarker(value: unknown): DurableWorkerMarker {
     throw new Error("worker marker must be an object");
   }
   const m = value as Record<string, unknown>;
+  if (m.runId !== undefined && (typeof m.runId !== "string" || m.runId.length === 0)) {
+    throw new Error("worker marker.runId must be a non-empty string");
+  }
   if (typeof m.workerId !== "string" || m.workerId.length === 0) {
     throw new Error("worker marker.workerId must be a non-empty string");
   }
@@ -467,6 +470,9 @@ function parseWorkerSession(value: unknown): DurableWorkerSession {
     throw new Error("worker session must be an object");
   }
   const s = value as Record<string, unknown>;
+  if (s.runId !== undefined && (typeof s.runId !== "string" || s.runId.length === 0)) {
+    throw new Error("worker session.runId must be a non-empty string");
+  }
   if (typeof s.sessionId !== "string" || s.sessionId.length === 0) {
     throw new Error("worker session.sessionId must be a non-empty string");
   }

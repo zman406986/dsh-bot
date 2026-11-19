@@ -1,7 +1,7 @@
 import z from "@deepseek-ai/schemastery";
 import { randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   createMultitask,
   type InboxJobResolution,
@@ -12,6 +12,7 @@ import {
   type DispatcherVisibilityNode,
 } from "./core/dispatcher-visibility.js";
 import type { DshHost } from "./core/dsh-host.js";
+import type { RebuildReport } from "./core/durability.js";
 import {
   assemblePeerWakeTurn,
   assembleTurnReminder,
@@ -74,7 +75,9 @@ import {
   registerRacoonsMount,
   type RacoonsMountHandle,
 } from "./adapter/racoons-mount.js";
+import { scopeParentOf } from "@deepseek-ai/dsh-scope";
 import { registerListAgentsFence } from "./adapter/list-agents-fence.js";
+import { registerStockWorkerModelDefaultBridge, type StockWorkerToolDefinition } from "./adapter/stock-worker-model-default.js";
 import { clampActivity, emptyReportPlaceholder } from "./core/report-clamp.js";
 import {
   PEER_DIRECT_CONVERSATION_ID,
@@ -1321,7 +1324,7 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     // marker/wake row — through the one narrow adoption method. The title is
     // the same `subagent.label` read the peer roster uses; unreadable stays
     // null and the core falls back to `Worker <short id>`.
-    onStockWorkerAdopted: (workerId, parentSessionId, childSession) => {
+    onStockWorkerAdopted: (workerId, parentSessionId, childSession, runId) => {
       let label: string | null = null;
       try {
         label = subagentLabelOf(resolveSessionProjections(ctx), childSession);
@@ -1330,7 +1333,7 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
         // reason to skip the adoption.
         label = null;
       }
-      multitaskRef?.adoptSpawnedWorker({ workerId, parentSessionId, label });
+      multitaskRef?.adoptSpawnedWorker({ workerId, parentSessionId, label, ...(runId !== undefined ? { runId } : {}) });
       // Lane C3: a worker appearing under a leader clears any third-party peer
       // hold. The text dedupe itself stays: a repeat of the already-pushed
       // answer is still a no-op.
@@ -1662,6 +1665,30 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
         ctx: { tools: registrationSurface },
         ...toolDeps,
       });
+      // #299: supply this leader's default to the ORIGINAL stock executor,
+      // before its Session allowlist and live route preflight. Scoped only;
+      // the bridge's own disposer tracks provider registration changes.
+      const getStockTool = scopedSurface.get;
+      const executableStockTool = scopedSurface.executable;
+      if (agent !== undefined && getStockTool !== undefined && executableStockTool !== undefined) {
+        disposers.push(registerStockWorkerModelDefaultBridge({
+          agent,
+          tools: {
+            get: (name, scope) => getStockTool.call(scopedSurface, name, scope) as StockWorkerToolDefinition | undefined,
+            executable: (name, scope) => executableStockTool.call(scopedSurface, name, scope) as StockWorkerToolDefinition | undefined,
+            register: (definition) => registerTool.call(scopedSurface, definition),
+          },
+          inherited: () => {
+            const parentScope = scopeParentOf(agent);
+            return {
+              definition: getStockTool.call(scopedSurface, "subagent", parentScope) as StockWorkerToolDefinition | undefined,
+              executable: executableStockTool.call(scopedSurface, "subagent", parentScope) as StockWorkerToolDefinition | undefined,
+            };
+          },
+          onToolsChange: (listener) => ctx.on("tools/change", listener),
+          getDefault: () => host.workerModelDefaultFor(agent),
+        }));
+      }
       // Same-name `list_agents` fence: the host's stock tool is a GLOBAL
       // registration, and an own-layer tool on THIS agent's scope shadows it
       // (the disposer restores it, so nothing global is replaced). The wrapper
@@ -1744,14 +1771,14 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
     // Captured before the first await; `onActivated` guarantees a live one.
     const activation = lifecycle.activationGeneration(sessionId);
     let notice: string | null = null;
+    let report: RebuildReport | null = null;
     try {
-      const report = await multitask.rebuildFromDurability(sessionId);
+      report = await multitask.rebuildFromDurability(sessionId);
       // Only ids actually restored from durable markers may carry the
       // restored-specific error wording in a later wake.
       for (const restored of report.restored) {
         restoredWorkerIds.add(restored.workerId);
       }
-      notice = assembleRestartNotice(report);
     } catch {
       // Marker store unreadable: activation still succeeds; the honest
       // degraded notice says nothing was restored or replayed.
@@ -1784,6 +1811,17 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       await multitask.sweepUnknownStateHolds(sessionId);
     } catch (error) {
       logWarning(`unknown-state sweep for ${sessionId} failed`, error);
+    }
+    // The sweep also awaits storage. An ended or replaced activation must not
+    // publish a notice or spend a delivery redrive after that await.
+    if (lifecycle.activationGeneration(sessionId) !== activation) return;
+    if (report !== null) {
+      // Ticket 300: the report records history; only actual remaining holds
+      // describe current occupancy, including skipped or failed releases.
+      notice = assembleRestartNotice(
+        report,
+        multitask.listUnknownStateHolds(sessionId),
+      );
     }
     // Ticket 138: warm the durable mark mirror for this activation. It runs
     // HERE — after the rebuild's marker read and behind the generation guard
@@ -2170,13 +2208,28 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       ) {
         continue;
       }
-      // The recorded directory's own name is the external job id (containment
-      // enforces `<root>/<jobId>`); it is authoritative. The stored key is the
-      // fallback for a row whose directory name is not a valid id.
-      const dirName = basename(checkpoint.jobDir);
-      const jobId = isValidInboxJobId(dirName)
-        ? dirName
-        : inboxJobIdFromCheckpointKey(checkpoint.jobId);
+      // Prefer the recorded literal identity when its directory validates. A
+      // valid supplied id may itself look like an encoded historical key.
+      // Canonical path spelling proves containment, never a replacement id.
+      let jobId = checkpoint.jobId;
+      let resolvedDir = await resolveRecordedJobDir(
+        inboxRoot,
+        jobId,
+        checkpoint.jobDir,
+      );
+      const decodedJobId = inboxJobIdFromCheckpointKey(checkpoint.jobId);
+      if (
+        resolvedDir.dir === null &&
+        decodedJobId !== jobId &&
+        isValidInboxJobId(decodedJobId)
+      ) {
+        jobId = decodedJobId;
+        resolvedDir = await resolveRecordedJobDir(
+          inboxRoot,
+          jobId,
+          checkpoint.jobDir,
+        );
+      }
       if (!isValidInboxJobId(jobId)) {
         inboxError(
           new Error(
@@ -2186,11 +2239,6 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
         );
         continue;
       }
-      const resolvedDir = await resolveRecordedJobDir(
-        inboxRoot,
-        jobId,
-        checkpoint.jobDir,
-      );
       if (resolvedDir.dir === null) {
         inboxError(
           new Error(

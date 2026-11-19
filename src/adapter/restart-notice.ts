@@ -11,8 +11,8 @@ import type { RebuildReport } from "../core/durability.js";
  *
  * - unknown-state workers (live at crash time) are stated as UNKNOWN —
  *   never replayed, never resumed, never claimed done (ids + transcript
- *   pointers only), together with the fact that they still hold their stream
- *   keys and how to release one (ticket 59);
+ *   pointers only), together with any stream keys still held after the
+ *   restart sweep and how to release one (tickets 59, 300);
  * - restored terminal rows are stated plainly, with the expectation that
  *   anything landed-undelivered flushes on the next wake;
  * - an empty report emits nothing — silence when there is no story.
@@ -44,7 +44,7 @@ export const RESTART_DEGRADED_NOTICE =
 
 /**
  * One unknown-state line: count, ids, honest unknown wording, transcript refs,
- * and — since ticket 59 — the fact that their stream keys are **held**.
+ * and — since ticket 59 — current stream holds, if any remain after the sweep.
  *
  * The held-key half is not decoration. Without it the dispatcher knows a worker
  * is missing but not that re-dispatching its stream will be refused, so the
@@ -57,11 +57,14 @@ export function restartUnknownStateLine(
   refs: readonly string[],
   streamKeys: readonly string[],
 ): string {
-  return (
+  const history =
     `Before the last restart, ${count} worker(s) were still running: ` +
     `${ids.join(", ")}. Their state is unknown — nothing was replayed. ` +
-    `Transcripts: ${refs.join(", ")}. ` +
-    `Stream(s) ${streamKeys.join(", ")} are held by them, so re-dispatching ` +
+    `Transcripts: ${refs.join(", ")}.`;
+  if (streamKeys.length === 0) return history;
+  return (
+    history +
+    ` Stream(s) ${streamKeys.join(", ")} are held by them, so re-dispatching ` +
     `onto those streams is refused. If one is still a live child, stop it ` +
     `with interrupt_agent; when there is no live child, the plugin's restart ` +
     `sweep releases the stale hold. Otherwise dispatch under a new stream ` +
@@ -78,13 +81,15 @@ export function restartRestoredLine(count: number): string {
 }
 
 /**
- * Assemble the one-time restart notice from a rebuild report.
+ * Assemble the one-time restart notice from historical rebuild evidence and
+ * the actual session holds remaining after the awaited restart sweep.
  * Returns `null` when the report is empty — no notice, ever, for an
  * uneventful activation. Unknown-state rows never appear on the roster
  * (core rule); this notice is their ONLY surface.
  */
 export function assembleRestartNotice(
   report: RebuildReport,
+  remainingHolds: RebuildReport["unknownState"],
 ): string | null {
   const lines: string[] = [];
   if (report.unknownState.length > 0) {
@@ -98,7 +103,7 @@ export function assembleRestartNotice(
         report.unknownState.length,
         report.unknownState.map((worker) => worker.workerId),
         refs,
-        report.unknownState.map((worker) => worker.streamKey),
+        remainingHolds.map((worker) => worker.streamKey),
       ),
     );
   }

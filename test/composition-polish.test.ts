@@ -418,16 +418,16 @@ describe("composition polish — dormant registration matrix (design-17 §3.2/§
       agent.injected.filter((m) => textOf(m).includes("## Restart")).length,
       0,
     );
-    // Listener baseline: the passive plumbing is exactly seven listeners —
+    // Listener baseline: the passive plumbing is exactly eight listeners —
     // 3 lifecycle (`agent/disposed`, `agent/status`, and ticket 296's
-    // `session/event` compaction/end policy restore) + 4 host (`subagent/end`,
+    // `session/event` compaction/end policy restore) + 5 host (`subagent/start`, `subagent/end`,
     // `session/event`, `agent/created`, the last being the worker-composition
     // seam, passive while no spawn is in flight, and `agent/disposed`, which
     // releases a resumed-user-dispatcher record when its session goes away —
     // ticket 163 defect 3). Owner ruling 2026-11-05: the ticket-145 racoons
     // mount's four listeners are absent by default — racoons is off unless
     // `racoonsEnabled` turns it on.
-    const EXPECTED_DORMANT_LISTENERS = 7;
+    const EXPECTED_DORMANT_LISTENERS = 8;
     assert.equal(ctx.listenerCount(), EXPECTED_DORMANT_LISTENERS);
   });
 

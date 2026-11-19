@@ -1281,7 +1281,7 @@ export function bindDispatcherLifecycle(
       }
 
       // Worker paths — only our spawned children.
-      const workerId = host.workerIdOf(agentSessionId);
+      const workerId = host.workerIdOf(agentSessionId, agent);
       if (workerId === undefined) return;
       if (status === "running") {
         // First real activity: spawned → running on the core FSM.

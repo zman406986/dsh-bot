@@ -407,7 +407,7 @@ export interface Multitask {
    * Each entry carries elapsed time, tool-call count, and transcript reference.
    */
   listWorkers(parentSessionId: string): WorkerSummary[];
-  getWorker(workerId: string): WorkerRecord | undefined;
+  getWorker(workerId: string, runId?: string): WorkerRecord | undefined;
   /**
    * Ticket 142: the spawner recorded on a worker's durable wake row, or
    * undefined when the id carries no row (never spawned by us, already
@@ -669,6 +669,8 @@ export function createMultitask(
     }
   }
   const workers = new Map<string, WorkerRecord>();
+  // Completed native executions stay separate from the session's current run.
+  const priorWorkerRuns = new Map<string, Map<string, WorkerRecord>>();
   /**
    * Live (non-terminal) worker per stream, keyed `(parentSessionId, streamKey)`
    * (ADR-0019 keying table). The stream key is model-authored per dispatcher,
@@ -1166,7 +1168,7 @@ export function createMultitask(
       // Ticket 197: a delivery-redrive wake is the turn its already-spent
       // attempt paid for; its drain must not charge the same obligation again.
       redriveTurn: wake.deliveryRedrive === true,
-      workers: [...workers.values()]
+      workers: [...[...priorWorkerRuns.values()].flatMap((runs) => [...runs.values()]), ...workers.values()]
         .filter((worker) => worker.parentSessionId === sessionId)
         .map((worker) => ({
           workerId: worker.workerId,
@@ -1194,6 +1196,8 @@ export function createMultitask(
    * settle), which is also what makes a replay idempotent.
    */
   function applySettle(event: SettledEvent): boolean {
+    const current = workers.get(event.workerId);
+    if (current?.runId !== undefined && current.runId !== event.runId) return false;
     const next = transition(event.workerId, {
       type: "settled",
       status: event.status,
@@ -1287,6 +1291,7 @@ export function createMultitask(
     // are untouched.
     settleRecords.record(record.parentSessionId, {
       workerId: event.workerId,
+      ...(record.runId !== undefined ? { runId: record.runId } : {}),
       status: event.status,
       resultText: clampReport(event.report, {
         transcriptRef: record.transcriptRef,
@@ -2015,6 +2020,7 @@ export function createMultitask(
         // The durable marker's spent budget rides the hold (D-5): a reclaim
         // must not hand the same obligation a fresh set of redrives.
         redriveAttempts: hold.redriveAttempts ?? 0,
+        ...(hold.runId !== undefined ? { runId: hold.runId } : {}),
       });
       // The roster is back but the ledger is not: recreate the item the
       // marker links to, exactly like the terminal rebuild path. A worker
@@ -2053,8 +2059,30 @@ export function createMultitask(
       const workerId = request.workerId;
       const parentSessionId = request.parentSessionId;
       if (workerId === "" || parentSessionId === "") return false;
-      // Idempotent by identity: a record that already exists IS the adoption.
-      if (workers.has(workerId)) return false;
+      const previous = workers.get(workerId);
+      const runId = request.runId;
+      if (runId !== undefined && runId.length === 0) return false;
+      if (priorWorkerRuns.get(workerId)?.has(runId ?? "")) return false;
+      if (previous !== undefined) {
+        if (previous.parentSessionId !== parentSessionId) return false;
+        // agent/created adopts first; its first trusted native start binds identity.
+        if (previous.runId === undefined && runId !== undefined && !isTerminalStatus(previous.status)) {
+          previous.runId = runId;
+          if (durability !== undefined) {
+            durabilityBestEffort(
+              `worker marker for ${workerId} could not be tagged`,
+              () => durability.writeWorkerMarker(toDurableMarker(previous, todoExternalOf(previous.todoId))),
+            );
+            durabilityBestEffort(
+              `worker session row for ${workerId} could not be tagged`,
+              () => durability.writeWorkerSession?.({ sessionId: workerId, parentSessionId, runId }),
+            );
+          }
+          return false;
+        }
+        // Only a verified DIFFERENT execution may replace a terminal projection.
+        if (runId === undefined || previous.runId === runId || !isTerminalStatus(previous.status)) return false;
+      }
       const label = request.label?.trim();
       const title =
         label !== undefined && label.length > 0
@@ -2084,7 +2112,16 @@ export function createMultitask(
         transcriptRef: null,
         todoId: todo.id,
         redriveAttempts: 0,
+        ...(runId !== undefined ? { runId } : {}),
       };
+      if (previous?.runId !== undefined) {
+        let history = priorWorkerRuns.get(workerId);
+        if (history === undefined) {
+          history = new Map<string, WorkerRecord>();
+          priorWorkerRuns.set(workerId, history);
+        }
+        history.set(previous.runId, previous);
+      }
       workers.set(workerId, record);
       // The structural link a spawn establishes at registration (ADR-0007).
       todoLedger.linkWorker(todo.id, workerId, streamKey);
@@ -2108,6 +2145,7 @@ export function createMultitask(
             durability.writeWorkerSession?.({
               sessionId: workerId,
               parentSessionId,
+              ...(runId !== undefined ? { runId } : {}),
             }),
         );
       }
@@ -2147,8 +2185,10 @@ export function createMultitask(
         }));
     },
 
-    getWorker(workerId: string): WorkerRecord | undefined {
-      return workers.get(workerId);
+    getWorker(workerId: string, runId?: string): WorkerRecord | undefined {
+      const current = workers.get(workerId);
+      if (runId === undefined || current?.runId === runId) return current;
+      return priorWorkerRuns.get(workerId)?.get(runId);
     },
 
     durableWorkerParent(workerId: string): string | undefined {
@@ -2218,8 +2258,10 @@ export function createMultitask(
         // between a recoverable bookkeeping failure and an obligation that
         // resurrects on the next activation. No roster event and no second
         // `replied` resolution — those answer the close, not the cleanup.
-        dropQueuedWakesForDelivered(before);
-        dropObligationMarker(before.workerId);
+        if (before.workerId === null || workers.get(before.workerId)?.todoId === before.id) {
+          dropQueuedWakesForDelivered(before);
+          dropObligationMarker(before.workerId);
+        }
         return true;
       }
       const ok = todoLedger.markDelivered(todoId);
@@ -2229,11 +2271,15 @@ export function createMultitask(
       if (todo !== undefined) {
         // The obligation is delivered: any settle or redrive wake already
         // queued for it is now stale and must not open another turn.
-        dropQueuedWakesForDelivered(todo);
+        if (todo.workerId === null || workers.get(todo.workerId)?.todoId === todo.id) {
+          dropQueuedWakesForDelivered(todo);
+        }
         notifyRosterChanged(todo.sessionId);
       }
       // Delivery obligation closed — drop the durable marker for its worker.
-      dropObligationMarker(todo?.workerId ?? null);
+      if (todo?.workerId == null || workers.get(todo.workerId)?.todoId === todo.id) {
+        dropObligationMarker(todo?.workerId ?? null);
+      }
       // Ticket 113: an inbox-origin item's delivered completion is the
       // `replied` resolution — the settle AND delivery conditions are both
       // met exactly here.
@@ -2314,11 +2360,12 @@ export function createMultitask(
       // so a restart continues the same budget rather than restarting it
       // (D-5: a lifetime bound, like the reference's).
       for (const todo of report.toRedrive) {
-        const record =
-          todo.workerId !== null ? workers.get(todo.workerId) : undefined;
+        const current = todo.workerId !== null ? workers.get(todo.workerId) : undefined;
+        const record = current?.todoId === todo.id ? current :
+          todo.workerId !== null ? [...(priorWorkerRuns.get(todo.workerId)?.values() ?? [])].find((run) => run.todoId === todo.id) : undefined;
         if (record === undefined) continue;
         record.redriveAttempts = todo.redriveAttempts;
-        if (durability !== undefined) {
+        if (durability !== undefined && record === current) {
           durabilityBestEffort(
             `worker marker for ${record.workerId} could not be written`,
             () =>
@@ -2384,6 +2431,7 @@ export function createMultitask(
           const observedRunning = pendingTurnStarts.delete(marker.workerId);
           const recovered: WorkerRecord = {
             workerId: marker.workerId,
+            ...(marker.runId !== undefined ? { runId: marker.runId } : {}),
             parentSessionId: marker.parentSessionId,
             streamKey: marker.streamKey,
             title: marker.title,
@@ -2448,6 +2496,7 @@ export function createMultitask(
           // worker may still be alive, and we threw away the only handle.
           const hold: UnknownStateWorker = {
             workerId: marker.workerId,
+            ...(marker.runId !== undefined ? { runId: marker.runId } : {}),
             parentSessionId: marker.parentSessionId,
             streamKey: marker.streamKey,
             title: marker.title,
@@ -2472,6 +2521,7 @@ export function createMultitask(
         // and deliberately not durable. Stream key stays free (terminal).
         const record: WorkerRecord = {
           workerId: marker.workerId,
+          ...(marker.runId !== undefined ? { runId: marker.runId } : {}),
           parentSessionId: marker.parentSessionId,
           streamKey: marker.streamKey,
           title: marker.title,
@@ -2724,7 +2774,7 @@ export function createMultitask(
       if (
         record !== undefined &&
         isTerminalStatus(record.status) &&
-        settleRecords.lookup(parentSessionId, workerId) === undefined
+        settleRecords.lookup(parentSessionId, workerId, record.runId) === undefined
       ) {
         return {
           ok: true,
@@ -2742,6 +2792,7 @@ export function createMultitask(
         workerId,
         timeout.timeoutMs,
         signal,
+        record?.runId,
       );
     },
   };

@@ -231,6 +231,12 @@ export function reconcileTodos(input: ReconcileInput): ReconcileReport {
   const mutations: TodoMutation[] = [];
 
   const workersById = new Map(input.workers.map((w) => [w.workerId, w]));
+  const workersByTodoId = new Map(input.workers.filter((w) => w.todoId !== null).map((w) => [w.todoId, w]));
+  // Reusable sessions can own several completed obligations; todo identity wins.
+  function workerForTodo(todo: TodoItem): WorkerSummary | undefined {
+    return workersByTodoId.get(todo.id) ??
+      (todo.workerId !== null ? workersById.get(todo.workerId) : undefined);
+  }
 
   /** Working copy so we can build buckets after applying logical mutations. */
   const working = new Map<string, TodoItem>();
@@ -312,7 +318,7 @@ export function reconcileTodos(input: ReconcileInput): ReconcileReport {
   // 2. pending + started worker → in_progress (several allowed).
   for (const todo of [...working.values()]) {
     if (todo.status !== "pending" || todo.workerId === null) continue;
-    const worker = workersById.get(todo.workerId);
+    const worker = workerForTodo(todo);
     if (worker !== undefined && hasStarted(worker.status)) {
       setStatus(todo, "in_progress", "worker-started");
     }
@@ -332,8 +338,7 @@ export function reconcileTodos(input: ReconcileInput): ReconcileReport {
 
   for (const todo of [...working.values()]) {
     if (todo.status !== "in_progress" || todo.delivered) continue;
-    const worker =
-      todo.workerId !== null ? workersById.get(todo.workerId) : undefined;
+    const worker = workerForTodo(todo);
     if (worker === undefined || !isTerminalStatus(worker.status)) continue;
     // This wake carries the item's own settle → first delivery opportunity.
     // Counting it as a redrive would spend part of the budget on the happy
@@ -419,8 +424,7 @@ export function reconcileTodos(input: ReconcileInput): ReconcileReport {
 
   for (const todo of working.values()) {
     if (todo.status === "in_progress" && !todo.delivered) {
-      const worker =
-        todo.workerId !== null ? workersById.get(todo.workerId) : undefined;
+      const worker = workerForTodo(todo);
       if (worker !== undefined && isTerminalStatus(worker.status)) {
         // Settled (this wake or an earlier one) and not yet delivered.
         landedUndelivered.push(todo);
@@ -435,7 +439,7 @@ export function reconcileTodos(input: ReconcileInput): ReconcileReport {
         nextToDispatch.push(todo);
         continue;
       }
-      const worker = workersById.get(todo.workerId);
+      const worker = workerForTodo(todo);
       if (worker === undefined) {
         nextToDispatch.push(todo);
       } else {

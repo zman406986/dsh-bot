@@ -321,6 +321,9 @@ export interface JobSnapshotLike {
  * surface it actually inherits. `listGlobalToolNames` requires that scope.
  */
 export interface ToolsLike {
+  /** Public registry readers; dynamic stock definitions vary by deployment. */
+  get?(name: string, scope?: unknown): any;
+  executable?(name: string, scope?: unknown): any;
   schemas(scope?: unknown): ReadonlyArray<{ readonly name: string }>;
   /** Register a tool; returns the exact disposer. Optional for stub contexts. */
   register?(definition: unknown): () => void;
@@ -686,6 +689,7 @@ export interface CordisDshHostOptions {
     workerId: string,
     parentSessionId: string,
     childSession: unknown,
+    runId?: string,
   ) => void;
 }
 /**
@@ -710,6 +714,8 @@ export interface CordisDshHost extends DshHost {
    * access prompts resolve their agent from the session they serve).
    */
   parentAgentOf(sessionId: string): AgentLike | undefined;
+  /** Resolve this exact live leader's default after durable mark readiness. */
+  workerModelDefaultFor(agent: AgentLike): Promise<ModelRoute | undefined>;
   /**
    * Ticket 118 (ADR-0025 mitosis): spawn ANOTHER DISPATCHER from a bound
    * dispatcher session, returning the host-assigned child session id.
@@ -854,7 +860,7 @@ export interface CordisDshHost extends DshHost {
    */
   refreshWorkerSessionMarks(): Promise<void>;
   /** Map agent session id → workerId for owned workers. */
-  workerIdOf(agentSessionId: string): string | undefined;
+  workerIdOf(agentSessionId: string, agent?: AgentLike): string | undefined;
   /** Whether this host spawned the worker id. */
   owns(workerId: string): boolean;
   /**
@@ -2111,6 +2117,18 @@ export function createCordisDshHost(
   // orphan `worker_sessions` row whose async delete was lost must never make
   // "stop is for good" false.
   const settledWorkerIds = new Set<string>();
+  // #301: session ids are reusable addresses; native run ids identify executions.
+  // Keep the old session tombstone, but a verified new activation has its own
+  // terminal guard. Announcements alone never clear either guard.
+  const workerRuns = new Map<string, { runId: string; agent: AgentLike }>();
+  const settledWorkerRuns = new Set<string>();
+  const composedWorkerAgents = new WeakSet<object>();
+  function isWorkerSettled(workerId: string): boolean {
+    const run = workerRuns.get(workerId);
+    return run === undefined
+      ? settledWorkerIds.has(workerId)
+      : settledWorkerRuns.has(run.runId);
+  }
   // Ticket 41: latest bounded settle-report excerpt per settled worker,
   // clamped once at observation. Same subscription discipline as
   // `workerActivity`: adapter-side projection of host-observed truth —
@@ -2762,14 +2780,45 @@ export function createCordisDshHost(
       });
   }
 
-  const offSubagentEnd = ctx.on("subagent/end", (info: never) => {    const end = info as {
+  const offSubagentStart = ctx.on("subagent/start", (info: never) => {
+    const start = info as { id?: unknown; runId?: unknown; local?: unknown };
+    if (start.local !== true || typeof start.id !== "string" ||
+        typeof start.runId !== "string" || start.runId.length === 0) return;
+    const workerId = start.id;
+    const child = liveAgentOf(workerId);
+    if (child === undefined || !composedWorkerAgents.has(child)) return;
+    const parentSessionId = String(child.session?.header?.parentSession ?? "");
+    if (!parents.has(parentSessionId)) return;
+    if (child.session?.header?.origin !== "subagent") return;
+    if (dispatcherMarks.has(workerId) || reservedDispatcherIds.has(workerId)) return;
+    const previous = workerRuns.get(workerId);
+    if (previous?.runId === start.runId || settledWorkerRuns.has(start.runId)) return;
+    // One native activation per live Agent; another id on that object is not
+    // evidence of a new execution. Nor can an active run be silently replaced.
+    if (previous !== undefined &&
+        (previous.agent === child || !settledWorkerRuns.has(previous.runId))) return;
+    workerRuns.set(workerId, { runId: start.runId, agent: child });
+    if (previous !== undefined) {
+      activityRing.clear(workerId);
+      workerResults.delete(workerId);
+    }
+    registerStockWorker(child.session, workerId, parentSessionId, start.runId);
+  });
+
+  const offSubagentEnd = ctx.on("subagent/end", (info: never) => {
+    const end = info as {
       id: unknown;
+      runId?: unknown;
       stopReason: string;
       lastAssistantMessage?: ContentBlock[];
     };
     const workerId = String(end.id);
+    const run = workerRuns.get(workerId);
+    // Once native identity exists, an identity-less or stale terminal event
+    // cannot settle whichever execution currently occupies the same address.
+    if (run !== undefined && end.runId !== run.runId) return;
     // A late duplicate after the first terminal event is not a new settle.
-    if (settledWorkerIds.has(workerId)) return;
+    if (isWorkerSettled(workerId)) return;
     // A settled worker is still OURS even after its live registry entry was
     // pruned (`agent/disposed` does that): the durable wake identity — or,
     // when the deployment has no durable store at all, the in-process spawn
@@ -2790,9 +2839,11 @@ export function createCordisDshHost(
     // settle honesty is enforced here by marking the worker settled, which
     // gates `recentActivity`/`lastActivityAtMs` to null.
     settledWorkerIds.add(workerId);
+    if (run !== undefined) settledWorkerRuns.add(run.runId);
     const status = mapStopReason(end.stopReason);
     const event: SettledEvent = {
       workerId,
+      ...(run !== undefined ? { runId: run.runId } : {}),
       status,
       report: normalizeSettleReport(status, end.lastAssistantMessage),
       transcriptRef: workerId,
@@ -2881,6 +2932,10 @@ export function createCordisDshHost(
     }
     if (event.type !== "tool/call") return;
     if (!workers.has(workerId)) return;
+    // #301: a prior Agent can still emit for the same reusable session id.
+    // Native accounting belongs only to the current execution's exact Session.
+    const currentRun = workerRuns.get(workerId);
+    if (currentRun !== undefined && currentRun.agent.session !== sessionRef) return;
     // Ticket 75: an observed `tool/call` is a tool call whether or not the
     // payload was readable — the count advances unconditionally, while the
     // phrase stays null (never invented) for unreadable payloads.
@@ -3621,6 +3676,7 @@ export function createCordisDshHost(
     header:
       | { origin?: unknown; delegationDepth?: unknown }
       | undefined,
+    compositionOnly = false,
   ): boolean {
     if (childSessionId === "" || parentSessionId === "") return false;
     if (!parents.has(parentSessionId)) return false;
@@ -3634,7 +3690,7 @@ export function createCordisDshHost(
     if (workers.has(childSessionId)) return false;
     if (workerSessions.has(childSessionId)) return false;
     if (spawnedWorkerIds.has(childSessionId)) return false;
-    if (settledWorkerIds.has(childSessionId)) return false;
+    if (!compositionOnly && settledWorkerIds.has(childSessionId)) return false;
     return true;
   }
 
@@ -3659,6 +3715,7 @@ export function createCordisDshHost(
     childSession: unknown,
     childSessionId: string,
     parentSessionId: string,
+    runId?: string,
   ): void {
     workers.set(childSessionId, {
       parentSessionId,
@@ -3667,7 +3724,7 @@ export function createCordisDshHost(
     spawnedWorkerIds.add(childSessionId);
     if (onStockWorkerAdoptedRaw === undefined) return;
     try {
-      onStockWorkerAdoptedRaw(childSessionId, parentSessionId, childSession);
+      onStockWorkerAdoptedRaw(childSessionId, parentSessionId, childSession, runId);
     } catch (error) {
       try {
         console.warn(
@@ -3794,10 +3851,12 @@ export function createCordisDshHost(
     const stockWorker =
       childSessionId !== "" &&
       isStockWorkerChild(childSessionId, parentSessionId, child.session?.header);
+    const continuationCandidate = settledWorkerIds.has(childSessionId) &&
+      isStockWorkerChild(childSessionId, parentSessionId, child.session?.header, true);
     if (workerAgentDef === undefined) return;
     // The legacy path stays exactly as it was for the ids OUR spawn reserved;
     // the stock child is the only new admission.
-    if (!stockWorker && (pendingSpawns.get(parentSessionId) ?? 0) === 0) return;
+    if (!stockWorker && !continuationCandidate && (pendingSpawns.get(parentSessionId) ?? 0) === 0) return;
     if (typeof child.ctx !== "object" || child.ctx === null) return;
     // Ticket 200: this listener is SYNCHRONOUS and runs inside the host's
     // create call, so a composition throw rejects the announcement. The host's
@@ -3817,6 +3876,7 @@ export function createCordisDshHost(
     } catch (error) {
       refuseWorkerComposition(child as AgentLike, childSessionId, error);
     }
+    composedWorkerAgents.add(child);
     // Lane A2a: compose FIRST, publish AFTER (the ticket-200 discipline) — a
     // failed barrier throws above, so no worker the host would keep and settle
     // is registered. Everything here is synchronous, so the entry exists
@@ -3936,6 +3996,28 @@ export function createCordisDshHost(
 
     parentAgentOf(sessionId: string): AgentLike | undefined {
       return parents.get(sessionId);
+    },
+
+    async workerModelDefaultFor(agent: AgentLike): Promise<ModelRoute | undefined> {
+      const sessionId = String(agent.session.id);
+      const assertLive = (): void => {
+        if (parents.get(sessionId) !== agent || liveAgentOf(sessionId) !== agent) {
+          throw new Error("worker model default requires the exact live dispatcher agent");
+        }
+      };
+      assertLive();
+      const mirrored = workerModelDefaults.get(sessionId);
+      if (mirrored !== undefined) return { ...mirrored };
+      // A cold-resumed leader can activate before refreshDispatcherMarks has
+      // finished. Read the actual row before treating the default as absent.
+      const mark = await markers?.readDispatcherMark?.(sessionId);
+      assertLive();
+      // An in-process mark write may have completed while the read awaited.
+      const current = workerModelDefaults.get(sessionId);
+      if (current !== undefined) return { ...current };
+      const route = usableRoute(mark?.workerModel);
+      if (route !== undefined) workerModelDefaults.set(sessionId, route);
+      return route === undefined ? undefined : { ...route };
     },
 
     get markers(): DurabilityPort | undefined {
@@ -4138,6 +4220,8 @@ export function createCordisDshHost(
       // never re-arm the mirror — `refreshWorkerSessionMarks` and
       // `reattachMarkedWorker` both consult this set.
       settledWorkerIds.add(workerId);
+      const run = workerRuns.get(workerId);
+      if (run !== undefined) settledWorkerRuns.add(run.runId);
       spawnedWorkerIds.delete(workerId);
       workerSessions.delete(workerId);
       // A worker that is terminal or abandoned gets nothing delivered: the
@@ -4189,7 +4273,9 @@ export function createCordisDshHost(
       }
     },
 
-    workerIdOf(agentSessionId: string): string | undefined {
+    workerIdOf(agentSessionId: string, agent?: AgentLike): string | undefined {
+      const run = workerRuns.get(agentSessionId);
+      if (agent !== undefined && run !== undefined && run.agent !== agent) return undefined;
       return ownsSession(agentSessionId);
     },
 
@@ -4204,7 +4290,7 @@ export function createCordisDshHost(
     recentActivity(workerId: string): string | null {
       // Ticket 29: a settled worker has no live activity — null, never the
       // stale last phrase (the ring keeps it only for the wake digest).
-      if (settledWorkerIds.has(workerId)) return null;
+      if (isWorkerSettled(workerId)) return null;
       return activityRing.latest(workerId)?.phrase ?? null;
     },
 
@@ -4217,7 +4303,7 @@ export function createCordisDshHost(
      */
     lastActivityAtMs(workerId: string): number | null {
       // Same settle gate as `recentActivity` — null once settled.
-      if (settledWorkerIds.has(workerId)) return null;
+      if (isWorkerSettled(workerId)) return null;
       return activityRing.latest(workerId)?.atMs ?? null;
     },
 
@@ -5178,6 +5264,7 @@ export function createCordisDshHost(
       // for a pre-publication spawn is in `spawnControllers` from before its
       // await, so the loop below aborts its startup signal.
       disposed = true;
+      offSubagentStart();
       offSubagentEnd();
       offSessionEvent();
       offAgentCreated();
@@ -5207,6 +5294,8 @@ export function createCordisDshHost(
       spawnedWorkerIds.clear();
       activityRing.clearAll();
       settledWorkerIds.clear();
+      workerRuns.clear();
+      settledWorkerRuns.clear();
       workerResults.clear();
       peerToolCalls.clear();
       settledCallbacks.length = 0;

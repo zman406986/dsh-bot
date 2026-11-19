@@ -572,6 +572,17 @@ export async function readInboxQueue(
       continue;
     }
 
+    try {
+      await lstat(join(dir, "claim.lock"));
+      skipped += 1;
+      continue;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        skipped += 1;
+        continue;
+      }
+    }
+
     const replyRead = await readFileCapped(join(dir, "reply.md"), INBOX_REPLY_MAX_BYTES);
     if (replyRead.kind === "oversized") {
       skipped += 1;

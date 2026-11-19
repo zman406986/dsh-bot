@@ -33,6 +33,8 @@ export interface WorkerRecord {
    * restart continues the same budget instead of restarting it.
    */
   redriveAttempts: number;
+  /** Native stock execution identity; absent on legacy/untagged records. */
+  runId?: string;
 }
 
 /**
@@ -114,6 +116,8 @@ export interface AdoptSpawnedWorkerRequest {
    * `Worker <short id>`; it never invents a label.
    */
   readonly label?: string | null;
+  /** Trusted native stock execution identity, when the host has observed it. */
+  readonly runId?: string;
 }
 
 /**
@@ -205,6 +209,8 @@ export interface SettledEvent {
   report: string;
   /** Transcript pointer the host knows at settle time, when available. */
   transcriptRef?: string;
+  /** Native execution identity; used to reject stale same-session events. */
+  runId?: string;
 }
 
 /** Public spawn request on the multitask core surface. */
