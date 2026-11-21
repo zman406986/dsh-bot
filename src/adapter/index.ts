@@ -21,10 +21,13 @@ export {
   type RegisterableTool,
 } from "./dispatcher-tools.js";
 export {
+  ACTIVATION_COMMAND_CARD_NO_TURN_TEXT,
   ACTIVATION_COMMAND_CARD_TEXT,
   ACTIVATION_PRESENCE_HINT,
   activationResultCopy,
   createDispatcherStartCommand,
+  DISPATCHER_ALREADY_HERE_MESSAGE_SENT,
+  DISPATCHER_MESSAGE_NOT_SENT,
   DISPATCHER_START_ALREADY_HERE,
   DISPATCHER_START_COMMAND,
   DISPATCHER_START_DESCRIPTION,
@@ -33,6 +36,7 @@ export {
   DISPATCHER_START_SUCCESS,
   DISPATCHER_START_UNRESOLVED,
   registerDispatcherStartCommand,
+  type ActivationCardFacts,
   type RegisterDispatcherStartCommandOptions,
 } from "./activation-command.js";
 export {

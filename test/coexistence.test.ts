@@ -30,7 +30,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { apply as applyDispatcherHost } from "../src/plugin.js";
 import { volatileConfig } from "./support/plugin-config.js";
-import {ACTIVATION_COMMAND_CARD_TEXT, DISPATCHER_START_COMMAND, type AdapterContext, type AgentLike, type CommandDefinitionLike, type CommandResultLike, type SessionProjectionChildLike, type ToolsLike} from "../src/adapter/index.js";
+import {ACTIVATION_COMMAND_CARD_NO_TURN_TEXT, DISPATCHER_START_COMMAND, type AdapterContext, type AgentLike, type CommandDefinitionLike, type CommandResultLike, type SessionProjectionChildLike, type ToolsLike} from "../src/adapter/index.js";
 import {
   apply as applyDispatcherClient,
   inject as clientInject,
@@ -861,7 +861,7 @@ describe("coexistence — host face: fail-loud claims (Findings 1 and 2)", () =>
     const agent = createAgent("s-1");
     assert.deepEqual(
       ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent }),
-      { kind: "success", text: ACTIVATION_COMMAND_CARD_TEXT },
+      { kind: "success", text: ACTIVATION_COMMAND_CARD_NO_TURN_TEXT },
     );
 
     // …and the foreign command still routes to the foreign handler.
@@ -923,7 +923,7 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
     const agent = createAgent("s-1");
     assert.deepEqual(
       ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent }),
-      { kind: "success", text: ACTIVATION_COMMAND_CARD_TEXT },
+      { kind: "success", text: ACTIVATION_COMMAND_CARD_NO_TURN_TEXT },
     );
 
     // Ticket 31: the on-activation publish lands after the async durability

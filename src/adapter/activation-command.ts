@@ -96,9 +96,45 @@ export const ACTIVATION_NOTICE_SUMMARY = "Dispatcher active in this chat.";
 export const ACTIVATION_COMMAND_CARD_TEXT =
   "Dispatcher active. Results arrive here; /dispatcher-steer to nudge.";
 
+/**
+ * The /dsh-bot card for a BARE command: activation stood and, by design, no
+ * turn opened.
+ *
+ * Activation is model-free and turn-free (tickets 295/298): the confirmation
+ * notice is a surface write, never a wake. That is right for cost, but on its
+ * own it made a bare submission look dead — the plugin is invisible until its
+ * first turn, so a user who produced a bare submission (the web client picks
+ * a claimed command with Enter instead of submitting the line, so "/dsh-bot "
+ * with no argument is easy to reach) saw a clipped "active" line and no way to
+ * tell that the next message is theirs to send. This line says it outright.
+ *
+ * The alternative — opening a turn that contains only the activation notice —
+ * was rejected: it spends a model call printing one sentence, which ticket 298
+ * (and the turn-free assertions that guard it) refused.
+ */
+export const ACTIVATION_COMMAND_CARD_NO_TURN_TEXT =
+  "Dispatcher active. No turn started; send a message to begin.";
+
 /** Same chat is already the dispatcher. */
 export const DISPATCHER_START_ALREADY_HERE =
   "The dispatcher is already active in this chat.";
+
+/**
+ * The already-active card when the invocation carried a message. Such a
+ * message is no longer dropped — it opens a turn — so the bare
+ * already-active line would misdescribe what happened.
+ */
+export const DISPATCHER_ALREADY_HERE_MESSAGE_SENT =
+  "Dispatcher already active. Your message opened a turn in this chat.";
+
+/**
+ * The message argument never reached the turn driver (a synchronous refusal
+ * from followup). A visible error, never a silent drop: the activation itself
+ * stands, but the text did not become a turn, so saying so is the only honest
+ * answer.
+ */
+export const DISPATCHER_MESSAGE_NOT_SENT =
+  "The message did not send. Send it again as an ordinary chat message.";
 
 /**
  * Retired with the single-activation slot (ADR-0019): multiple dispatchers
@@ -140,20 +176,121 @@ function dispatcherStartMessage(rawInput: string | undefined): string {
   return rawInput === undefined ? "" : rawInput.trim();
 }
 
+/**
+ * Turn the activation outcome plus the argument into the command result.
+ *
+ * THE RULE (each arm is regression-guarded in test/activation-lifecycle.test.ts):
+ * - a refusal (child chat, torn-down lifecycle) sends nothing; its refusal copy
+ *   is the visible answer, as before;
+ * - a bare command opens NO turn, and the card says so;
+ * - a non-empty argument ALWAYS opens one turn carrying exactly that text,
+ *   whether this invocation activated the chat or it already was the
+ *   dispatcher.
+ */
+function messageResultCopy(
+  outcome: ActivationOutcome,
+  agent: AgentLike,
+  message: string,
+): CommandResultLike {
+  if (!outcome.ok && outcome.reason !== "already-active-here") {
+    return activationResultCopy(outcome);
+  }
+  if (message.length === 0) {
+    return activationResultCopy(outcome);
+  }
+  if (!openUserTurn(agent, message)) {
+    // Never a silent drop: the text did not become a turn, and the user is told.
+    return { kind: "error", text: DISPATCHER_MESSAGE_NOT_SENT };
+  }
+  return activationResultCopy(outcome, { turnOpened: true });
+}
+
+/**
+ * Open ONE user turn carrying `text`.
+ *
+ * `followup` is the host's "next-turn" send with a wake
+ * (`dsh-agent-loop/lib/index.js:570-572`): the message enters the session as one
+ * user turn and starts it. `userTurnMessage` stamps `source.kind: "user"`, which
+ * the chat renders as the user's own message and which opens the deferred
+ * restart-notice gate.
+ *
+ * Returns false only when the driver refused synchronously. A driver that
+ * returns a REJECTED promise cannot be observed before the card is returned, so
+ * that failure is logged (never swallowed) and the result stands — the text is
+ * in the chat log either way.
+ */
+function openUserTurn(agent: AgentLike, text: string): boolean {
+  try {
+    void Promise.resolve(agent.followup(userTurnMessage(text))).catch(
+      (error: unknown) => logFollowupFailure(error),
+    );
+    return true;
+  } catch (error) {
+    logFollowupFailure(error);
+    return false;
+  }
+}
+
+/**
+ * The failure path this ticket repaired: the two catches around the followup
+ * were empty, so a message argument could vanish without a trace in the log.
+ * The plugin has no logger seam — `console.warn` with the producer prefix is the
+ * shipped channel (same idiom as `logWarning` in src/plugin.ts and the host's
+ * resume-followup failure). The error itself is always included.
+ */
+function logFollowupFailure(error: unknown): void {
+  try {
+    console.warn(
+      "[multitask-dispatcher] /dsh-bot could not open a turn for its " +
+        "message argument:",
+      error,
+    );
+  } catch {
+    // A broken console must not turn a successful activation into a failure.
+  }
+}
+
+/**
+ * What the handler knows about the message argument that the outcome cannot.
+ * Absent means "no turn was opened" — the safe reading, because the card then
+ * never claims a turn the user will not see.
+ */
+export interface ActivationCardFacts {
+  /**
+   * True when exactly one user turn carrying the argument was handed to the
+   * turn driver. False for a bare command and for a message whose hand-off was
+   * refused synchronously.
+   */
+  readonly turnOpened: boolean;
+}
+
 /** Map an activation outcome to user-visible command copy. */
 export function activationResultCopy(
   outcome: ActivationOutcome,
+  facts?: ActivationCardFacts,
 ): CommandResultLike {
+  const turnOpened = facts?.turnOpened === true;
   if (outcome.ok) {
     // The immediate card is one readable line; DISPATCHER_START_SUCCESS stays
-    // the deferred notice body (tickets 295/298).
-    return { kind: "success", text: ACTIVATION_COMMAND_CARD_TEXT };
+    // the deferred notice body (tickets 295/298). A bare activation says that
+    // no turn started, so the chat is never silently dead.
+    return {
+      kind: "success",
+      text: turnOpened
+        ? ACTIVATION_COMMAND_CARD_TEXT
+        : ACTIVATION_COMMAND_CARD_NO_TURN_TEXT,
+    };
   }
   switch (outcome.reason) {
     case "not-top-level":
       return { kind: "error", text: DISPATCHER_START_NOT_TOP_LEVEL };
     case "already-active-here":
-      return { kind: "success", text: DISPATCHER_START_ALREADY_HERE };
+      return {
+        kind: "success",
+        text: turnOpened
+          ? DISPATCHER_ALREADY_HERE_MESSAGE_SENT
+          : DISPATCHER_START_ALREADY_HERE,
+      };
     case "unbound":
       // Unreachable through the wired plugin (the command unregisters with
       // the lifecycle); refuse rather than guess.
@@ -166,9 +303,10 @@ export function createDispatcherStartCommand(options: RegisterDispatcherStartCom
   return {
     name: DISPATCHER_START_COMMAND,
     description: DISPATCHER_START_DESCRIPTION,
-    // The claim is args-tolerant (see DISPATCHER_START_INPUT_HINT): bare
-    // Enter still activates immediately with no turn; a non-empty argument
-    // opens the first turn below.
+    // The claim is args-tolerant (see DISPATCHER_START_INPUT_HINT): a bare
+    // Enter still activates with NO turn, and the card says so; a non-empty
+    // argument always opens one turn carrying it, on a fresh AND on an
+    // already-active chat (messageResultCopy holds that rule).
     input: { hint: DISPATCHER_START_INPUT_HINT },
     handler(invocation) {
       const agent: AgentLike | undefined = invocation?.agent;
@@ -176,35 +314,21 @@ export function createDispatcherStartCommand(options: RegisterDispatcherStartCom
         // Design-16 §4.1 fallback: refuse with an error rather than guess.
         return { kind: "error", text: DISPATCHER_START_UNRESOLVED };
       }
+      const message = dispatcherStartMessage(invocation.rawInput);
       const sessionId = String(agent.session.id);
       const current = options.activeSessionId();
       if (current !== null && current === sessionId) {
-        return { kind: "success", text: DISPATCHER_START_ALREADY_HERE };
+        // This chat is already the dispatcher: nothing to activate, nothing to
+        // announce. The argument is still the user's message, so it opens a
+        // turn instead of dying here — an already-active chat used to swallow
+        // it with no turn at all, which read as "the command did nothing".
+        return messageResultCopy(
+          { ok: false, reason: "already-active-here" },
+          agent,
+          message,
+        );
       }
-      const outcome = options.activate(agent);
-      // Never on failure, never when the activation was already live. The
-      // message opens the first turn only after activation stands, so a
-      // refused command leaves the chat exactly as turn-free as before.
-      const message = dispatcherStartMessage(invocation.rawInput);
-      if (outcome.ok && message.length > 0) {
-        try {
-          // `followup` is the host's "next-turn" send with a wake
-          // (`dsh-agent-loop/lib/index.js:570-572`): the message enters the
-          // session as one user turn and starts it. `userTurnMessage` stamps
-          // `source.kind: "user"`, which is what the chat renders as the
-          // user's own message and what opens the deferred restart-notice
-          // gate. Best-effort: activation already stands if this fails.
-          void Promise.resolve(agent.followup(userTurnMessage(message))).catch(
-            () => {
-              // Opening the first turn never rewrites the command result.
-            },
-          );
-        } catch {
-          // Same: a broken followup must not turn a successful activation
-          // into a command failure.
-        }
-      }
-      return activationResultCopy(outcome);
+      return messageResultCopy(options.activate(agent), agent, message);
     },
   };
 }
