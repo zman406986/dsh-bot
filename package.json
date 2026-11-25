@@ -6,7 +6,6 @@
   "author": "TZ",
   "private": true,
   "type": "module",
-  "workspaces": ["vendor/racoons/core", "vendor/racoons/adapter"],
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "dsh": {
@@ -43,20 +42,16 @@
     "client",
     "locale/*.json",
     "cordis.patch.yml",
-    "README.md",
-    "vendor/racoons"
+    "README.md"
   ],
-  "bundledDependencies": ["@racoons/core", "racoons-dsh"],
   "scripts": {
-    "build:vendor": "tsc -p vendor/racoons/core/tsconfig.json && tsc -p vendor/racoons/adapter/tsconfig.json",
-    "build": "npm run build:vendor && tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json",
     "build:client": "node --import tsx scripts/build-client.ts",
     "check:client": "node --import tsx scripts/build-client.ts --check",
     "check:build": "node dev/build-freshness.mjs",
     "e2e": "npm run check:build && npm run check:client && node dev/e2e-mock.mjs",
-    "typecheck": "npm run build:vendor && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit && npm run typecheck:test",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit && npm run typecheck:test",
     "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
-    "pretest": "npm run build:vendor",
     "test": "tsx --tsconfig tsconfig.client.json --test test/**/*.test.ts",
     "lint:docs": "node tools/doc-lint.mjs --self-test && node tools/doc-lint.mjs && node tools/issue-index.mjs --check && node tools/adr-index.mjs --check",
     "prepare": "npm run build",
@@ -79,9 +74,7 @@
     "@deepseek-ai/dsh-scope": "0.2.2-rc.1"
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "*",
-    "@racoons/core": "0.1.0",
-    "racoons-dsh": "0.1.0"
+    "@deepseek-ai/schemastery": "*"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

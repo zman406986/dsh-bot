@@ -51,10 +51,6 @@ set "PORTGIVEN="
 if "%~1"=="" goto args_done
 set "ARG=%~1"
 if /i "!ARG!"=="web" goto arg_web
-if /i "!ARG!"=="racoons" (
-  echo [dsh-bot] the racoons route was removed; this launcher has no racoons switch.
-  exit /b 1
-)
 if /i "!ARG!"=="multitask" goto arg_multitask
 if /i "!ARG!"=="-NoBuild" goto arg_nobuild
 if /i "!ARG!"=="-SkipCheck" goto arg_skipcheck

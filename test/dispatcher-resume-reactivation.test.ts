@@ -384,8 +384,8 @@ function createCtx(options?: {
 }
 
 /**
- * The CUSTOM tools registered on the dispatcher's OWN scope (racoons off by
- * default), derived from the one const. The stock agent verbs (`subagent`,
+ * The CUSTOM tools registered on the dispatcher's OWN scope, derived from the
+ * one const. The stock agent verbs (`subagent`,
  * `list_agents`, `send_message`, `interrupt_agent`) are mounted by the
  * preset, and this harness mounts no preset — so the scoped set is exactly the
  * custom three, and that is also the full surface (ticket 174 / ADR-0033

@@ -227,9 +227,7 @@ describe("feature flag — enabled path boots dormant (ticket 19)", () => {
     assert.equal(ctx.listeners.has("agent/session-start"), false);
     assert.ok(ctx.listeners.has("agent/status"));
     assert.ok(ctx.listeners.has("subagent/end"));
-    // Command disposers + lifecycle cleanup. Owner ruling 2026-11-05: the
-    // ticket-145 racoons mount is NOT registered unless `racoonsEnabled` is
-    // on, so the default product has no fifth disposer.
+    // Command disposers + lifecycle cleanup.
     assert.equal(ctx.disposers.length, 3);
   });
 });
@@ -282,10 +280,6 @@ describe("feature flag — volatile settings form (0.2.1)", () => {
       "inboxEnabled",
       "inboxRescanIntervalMs",
       "microcompactEnabled",
-      "racoonsContextWindowTokens",
-      "racoonsEnabled",
-      "racoonsRecordOnly",
-      "racoonsStorageRoot",
       "wakeCoalesceWindowMs",
     ]);
     for (const [field, schema] of Object.entries(dict)) {

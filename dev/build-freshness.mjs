@@ -63,8 +63,8 @@ function checkOutput(root, problems, { output, source, buildCommand, sourceLabel
 
 /**
  * Compare every build output with its own newest relevant source.
- * `lib/index.js` is emitted by `npm run build` over src/ minus src/client plus
- * vendor/racoons. `client/index.js` is emitted by `npm run build:client`; its
+ * `lib/index.js` is emitted by `npm run build` over src/ minus src/client.
+ * `client/index.js` is emitted by `npm run build:client`; its
  * bundle imports modules outside src/client (core types, policy prompts, the
  * roster channel) and its external list comes from package.json, so the whole
  * source tree, the builder, and the manifest are relevant to it. The client
@@ -74,29 +74,28 @@ function checkOutput(root, problems, { output, source, buildCommand, sourceLabel
 export function checkBuildFreshness(root = REPO_ROOT) {
   const srcRoot = join(root, 'src');
   const clientSrc = join(srcRoot, 'client');
-  const vendorRoot = join(root, 'vendor', 'racoons');
   const scriptsRoot = join(root, 'scripts');
   const manifestPath = join(root, 'package.json');
   const problems = [];
 
   let libSource;
   try {
-    libSource = newestSource(root, [srcRoot, vendorRoot], ['.ts'], (full) => full === clientSrc);
+    libSource = newestSource(root, [srcRoot], ['.ts'], (full) => full === clientSrc);
     // A null scan means the source roots produced nothing. The PowerShell twin
     // throws on that; returning null here would make every output look fresh,
     // so it is a problem, not a pass. (The scan throwing is reported below.)
     if (libSource === null) {
-      problems.push('no lib sources found under src/ and vendor/racoons — cannot verify lib/index.js freshness');
+      problems.push('no lib sources found under src/ — cannot verify lib/index.js freshness');
     }
   } catch (error) {
-    problems.push(`could not scan lib sources under src/ and vendor/racoons: ${error.message}`);
+    problems.push(`could not scan lib sources under src/: ${error.message}`);
   }
 
   let clientSource;
   try {
-    clientSource = newestSource(root, [srcRoot, vendorRoot, scriptsRoot], ['.ts', '.tsx']);
+    clientSource = newestSource(root, [srcRoot, scriptsRoot], ['.ts', '.tsx']);
     if (clientSource === null) {
-      problems.push('no client sources found under src/, vendor/racoons, and scripts/ — cannot verify client/index.js freshness');
+      problems.push('no client sources found under src/ and scripts/ — cannot verify client/index.js freshness');
     }
     // Only fold in the manifest when a source scan found something: otherwise
     // the manifest would mask the empty scan and read as fresh.
@@ -107,7 +106,7 @@ export function checkBuildFreshness(root = REPO_ROOT) {
       }
     }
   } catch (error) {
-    problems.push(`could not scan client sources under src/, vendor/racoons, and scripts/: ${error.message}`);
+    problems.push(`could not scan client sources under src/ and scripts/: ${error.message}`);
   }
 
   checkOutput(root, problems, {

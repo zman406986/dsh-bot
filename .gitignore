@@ -24,10 +24,8 @@ opencode.json
 # Release-prep report and its activation run logs — raw run output carries local
 # home paths and dsh session ids; NEVER commit.
 .scratch/release-prep/
-# Runtime racoons ledger store (dev/cordis.racoons.patch.yml pins this root for
-# isolated testing; the plugin default is <DSH_HOME>/storages/racoons, outside
-# the repo). Holds live session ledgers and blobs — private dsh session content;
-# NEVER commit (ticket 156).
+# Retained owner-local RACOONS test ledgers (owner asked to keep them, 2026-11-21).
+# Holds private dsh session content; NEVER commit.
 .scratch/racoons-storage/
 # Team-leader dispatch ledger (the skill says delete it when the job ends).
 .team-leader-ledger.md

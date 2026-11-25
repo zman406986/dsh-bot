@@ -226,8 +226,7 @@ function stringFieldSpec(
 /**
  * The schema fields this card edits — EXACTLY the fields of the host half's
  * `Config` (`src/plugin.ts`: `enabled`,
- * `wakeCoalesceWindowMs`, `inboxEnabled`, `racoonsEnabled`,
- * `racoonsRecordOnly`, `racoonsStorageRoot`, `racoonsContextWindowTokens`,
+ * `wakeCoalesceWindowMs`, `inboxEnabled`,
  * `inboxDir`, `inboxRescanIntervalMs`, `microcompactEnabled`), in schema
  * order. The pair
  * is pinned offline against `Config.dict`, so a field added to the schema
@@ -252,26 +251,6 @@ export const SETTINGS_CARD_FIELDS: readonly SettingsCardFieldSpec[] = [
     "inboxEnabled",
     "settings.card.field.inboxEnabled.label",
     "settings.card.field.inboxEnabled.hint",
-  ),
-  booleanFieldSpec(
-    "racoonsEnabled",
-    "settings.card.field.racoonsEnabled.label",
-    "settings.card.field.racoonsEnabled.hint",
-  ),
-  booleanFieldSpec(
-    "racoonsRecordOnly",
-    "settings.card.field.racoonsRecordOnly.label",
-    "settings.card.field.racoonsRecordOnly.hint",
-  ),
-  stringFieldSpec(
-    "racoonsStorageRoot",
-    "settings.card.field.racoonsStorageRoot.label",
-    "settings.card.field.racoonsStorageRoot.hint",
-  ),
-  numberFieldSpec(
-    "racoonsContextWindowTokens",
-    "settings.card.field.racoonsContextWindowTokens.label",
-    "settings.card.field.racoonsContextWindowTokens.hint",
   ),
   stringFieldSpec(
     "inboxDir",

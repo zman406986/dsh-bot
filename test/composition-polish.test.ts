@@ -424,9 +424,7 @@ describe("composition polish — dormant registration matrix (design-17 §3.2/§
     // `session/event`, `agent/created`, the last being the worker-composition
     // seam, passive while no spawn is in flight, and `agent/disposed`, which
     // releases a resumed-user-dispatcher record when its session goes away —
-    // ticket 163 defect 3). Owner ruling 2026-11-05: the ticket-145 racoons
-    // mount's four listeners are absent by default — racoons is off unless
-    // `racoonsEnabled` turns it on.
+    // ticket 163 defect 3).
     const EXPECTED_DORMANT_LISTENERS = 8;
     assert.equal(ctx.listenerCount(), EXPECTED_DORMANT_LISTENERS);
   });
@@ -443,8 +441,7 @@ describe("composition polish — dormant registration matrix (design-17 §3.2/§
     // (`subagent`, `list_agents`, `send_message`, `interrupt_agent`) are
     // mounted by the preset, and this fake mounts no preset, so the set is
     // exactly the custom three. Ticket 174 / ADR-0033 removed
-    // `request_access`; owner ruling 2026-11-05 keeps racoons off by default,
-    // so no `recall`.
+    // `request_access`.
     assert.deepEqual(
       agent.scopedTools.registeredNames().sort(),
       [...DISPATCHER_TOOL_NAMES].sort(),

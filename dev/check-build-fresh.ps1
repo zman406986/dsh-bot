@@ -61,12 +61,11 @@ try {
   $root = (Resolve-Path -LiteralPath $Repo -ErrorAction Stop).Path
   $src = Join-Path $root 'src'
   $clientSrc = Join-Path $src 'client'
-  $vendor = Join-Path $root 'vendor\racoons'
   $separator = [System.IO.Path]::DirectorySeparatorChar
 
   # lib/index.js is emitted by `tsc -p tsconfig.json` over src/ (minus the
-  # browser client) plus the vendored racoons packages.
-  $libSource = Get-NewestSource -Roots @($src, $vendor) -Include @('*.ts') -Skip {
+  # browser client).
+  $libSource = Get-NewestSource -Roots @($src) -Include @('*.ts') -Skip {
     param([string]$full)
     $full.StartsWith($clientSrc + $separator, [System.StringComparison]::OrdinalIgnoreCase) -or
       $full -like '*\node_modules\*'
@@ -78,7 +77,7 @@ try {
   # the builder and manifest are relevant. Conservative on purpose: a false
   # "stale" only asks for one cheap rebuild; a false "fresh" serves wrong bytes.
   $scriptsRoot = Join-Path $root 'scripts'
-  $clientSource = Get-NewestSource -Roots @($src, $vendor, $scriptsRoot) -Include @('*.ts', '*.tsx') -Skip {
+  $clientSource = Get-NewestSource -Roots @($src, $scriptsRoot) -Include @('*.ts', '*.tsx') -Skip {
     param([string]$full)
     $full -like '*\node_modules\*'
   }

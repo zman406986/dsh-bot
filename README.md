@@ -41,10 +41,9 @@ The add hardlinks the checkout into the profile (`pnpm file:`). After you rebuil
 
 ## Build
 
-- `npm run build` compiles the vendored libraries and then the plugin, into `lib/`. It runs `build:vendor` first.
-- `npm run build:vendor` compiles only `vendor/racoons/core` and `vendor/racoons/adapter`.
+- `npm run build` compiles the plugin into `lib/`.
 - `npm run build:client` bundles the browser module into the `client/` folder with esbuild. dsh serves that bundle to its web UI.
-- `npm run typecheck` runs `build:vendor`, which emits the vendored libraries, then three no-emit passes: the plugin, the browser module, and the test tree.
+- `npm run typecheck` runs three no-emit passes: the plugin, the browser module, and the test tree.
 
 `lib/` and `client/` are build output. They are git-ignored.
 
@@ -54,7 +53,7 @@ The add hardlinks the checkout into the profile (`pnpm file:`). After you rebuil
 npm test
 ```
 
-This runs the offline suite. It needs no network and no model. `pretest` compiles the vendored libraries first. One test, `test/stock-worker-model-default.test.ts`, resolves the installed dsh host dynamically (a `DSH_HOST_DIR` environment override, then module resolution) and skips gracefully when no host is present; the rest of the suite stays offline.
+This runs the offline suite. It needs no network and no model. One test, `test/stock-worker-model-default.test.ts`, resolves the installed dsh host dynamically (a `DSH_HOST_DIR` environment override, then module resolution) and skips gracefully when no host is present; the rest of the suite stays offline.
 
 The offline suite is the default lane. A second harness, `npm run e2e`, drives a real local dsh process against a scripted model. It needs a dsh install, so it is optional.
 
@@ -109,13 +108,7 @@ Every field is a setting on the plugin's card on dsh's Plugins page. A saved cha
 | `inboxEnabled` | `false` | Optional file inbox. Off starts nothing. |
 | `inboxDir` | `""` | Inbox folder. Empty disables intake even when enabled. |
 | `inboxRescanIntervalMs` | `5000` | Fallback rescan interval. Clamped to a 1000 ms floor. |
-| `racoonsEnabled` | `false` | Optional test feature. Off means racoons is not mounted at all. |
-| `racoonsRecordOnly` | `false` | Only used while racoons is enabled. Records context cleanup without applying the bulk prune. |
-| `racoonsStorageRoot` | `""` | Only used while racoons is enabled. Where the cleanup ledger is stored. Empty uses `<DSH_HOME>/storages/racoons`. |
-| `racoonsContextWindowTokens` | `0` | Only used while racoons is enabled. Context window for the automatic prune. `0` leaves it off. |
 | `microcompactEnabled` | `false` | Clears old tool results on dispatcher sessions. Off, and not yet checked live. |
-
-The context-cleanup library (racoons) is an optional test feature, **off by default and not exposed by the launcher**. The current vendored version is not production-ready. For isolated testing only, configure it directly with `racoonsEnabled: true` and `dev/cordis.racoons.patch.yml`.
 
 ## Project layout
 
@@ -123,7 +116,6 @@ The context-cleanup library (racoons) is an optional test feature, **off by defa
 |---|---|
 | `src/` | Plugin source: the policy core, the dsh adapter, worker prompts, and the browser module. |
 | `test/` | Offline tests. |
-| `vendor/racoons/` | A vendored context-cleanup library. Apache License 2.0; see `vendor/racoons/LICENSE` and `vendor/racoons/PROVENANCE.md`. |
 | `dev/` | The scripted model and the end-to-end harness. |
 | `docs/` | Decisions, research notes, and notes on what the UI shows. |
 | `Issue-tracker/` | Tickets, sorted by status. |
@@ -139,8 +131,6 @@ The context-cleanup library (racoons) is an optional test feature, **off by defa
 ## Licence
 
 MIT. See [LICENSE](LICENSE).
-
-The vendored library under `vendor/racoons/` is under the Apache License 2.0. See `vendor/racoons/LICENSE`.
 
 ## Problems
 

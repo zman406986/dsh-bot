@@ -424,8 +424,7 @@ describe("multi-dispatcher — scoped surfaces (ADR-0019)", () => {
     // Three CUSTOM dispatcher tools. Workers are spawned, listed, messaged and
     // interrupted through the host's stock `subagent` / `list_agents` /
     // `send_message` / `interrupt_agent` verbs, mounted on the agent plane by
-    // the host — this plugin never registers them. Owner ruling 2026-11-05:
-    // the ticket-145 per-session `recall` is absent by default — racoons off.
+    // the host — this plugin never registers them.
     const customTools = ["deliver_result", "message_agent", "spawn_dispatcher"];
     assert.deepEqual(a.scopedToolNames().sort(), customTools);
     assert.deepEqual(b.scopedToolNames().sort(), customTools);

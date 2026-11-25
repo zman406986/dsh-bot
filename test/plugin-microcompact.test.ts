@@ -323,12 +323,11 @@ describe("microcompact plugin wiring (ticket 124)", () => {
     assert.equal(dict.microcompactEnabled?.meta?.default, false);
   });
 
-  it("adds NO pre-step listener when the field is off (racoons off adds none either)", () => {
+  it("adds NO pre-step listener when the field is off", () => {
     const ctx = createStubCtx({ tokenMeter: createMeter(999_999_999) });
     apply(ctx as never, volatileConfig({ enabled: true }));
-    // Owner ruling 2026-11-05: racoons is off by default, so its `agent/pre-step`
-    // boundary listener is absent too. Microcompact contributes nothing while
-    // off, so the default product registers no pre-step listener at all.
+    // Microcompact contributes nothing while off, so the default product
+    // registers no pre-step listener at all.
     assert.equal((ctx.listeners.get("agent/pre-step") ?? []).length, 0);
     assert.doesNotThrow(() => {
       for (const dispose of ctx.disposers) dispose();
@@ -341,7 +340,7 @@ describe("microcompact plugin wiring (ticket 124)", () => {
       ctx as never,
       volatileConfig({ enabled: true, microcompactEnabled: true }),
     );
-    // This pass's own listener; racoons is off by default.
+    // This pass's own listener.
     assert.equal((ctx.listeners.get("agent/pre-step") ?? []).length, 1);
     for (const dispose of ctx.disposers) dispose();
     assert.equal((ctx.listeners.get("agent/pre-step") ?? []).length, 0);

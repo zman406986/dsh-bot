@@ -12,9 +12,7 @@ Desktop shortcut.
 It builds `lib` and `client` when they are stale (the same freshness probe
 `-NoBuild` uses decides that), then boots the `multitask` profile by
 default. The `web` route, `-NoBuild`, `-SkipCheck`, `-Restart`, `-Port`,
-`-DryRun` and `-NoOpen` are documented in the file header. There is no
-racoons switch: that feature is off by default and is not production-ready;
-use its patch file only for isolated testing.
+`-DryRun` and `-NoOpen` are documented in the file header.
 
 `-SkipCheck` is the quick relaunch: it runs no TypeScript build and no
 freshness probe, so it serves whatever is already in `lib/` and `client/`.

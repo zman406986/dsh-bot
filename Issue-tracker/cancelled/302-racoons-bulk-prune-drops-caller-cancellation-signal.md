@@ -1,6 +1,6 @@
 # 302 — RACOONS bulk prune drops the caller cancellation signal
 
-**Status:** open
+**Status:** cancelled
 **Labels:** ready-for-agent
 **Priority:** P2
 **Severity:** medium
@@ -88,3 +88,7 @@ Only this local issue is created in this filing. No test rerun, fix, configurati
 
 - 2026-11-18 — Filed after independent review as P2/medium, optional/nonblocking. Caller-signal omission and late bulk cut reproduced; ordinary microcompact abort policy and accepted marker-put posture excluded.
 - 2026-11-18 — Final review arbitration: count **one confirmed compaction finding**, the bulk-prune gap in this issue. The author's five-check run (three controls pass, two assertions red) and the reviewer's filtered four-check run (two controls pass, two assertions red) use different selections and are both recorded evidence; a red assertion does not itself establish a mandatory phase-abort rule. No accepted requirement was found that ordinary microcompact must stop rather than finish a consistent maintenance pass on caller phase abort. That behavior remains a policy risk only, not a second confirmed defect. No additional test was run for this arbitration note.
+
+## Comments
+
+- 2026-11-21: Cancelled with ticket 305. The vendored RACOONS tree is removed from this repo, so the bulk-prune branch this ticket describes no longer ships here. The defect record stays for the RACOONS/CREMATOR repo line.

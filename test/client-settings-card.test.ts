@@ -378,12 +378,6 @@ describe("settings card — render model (ticket 47)", () => {
         ["wakeCoalesceWindowMs", "number", "", null],
         // Ticket 113: the inbox trio — boolean, string (text input), number.
         ["inboxEnabled", "boolean", "", null],
-        // Owner ruling 2026-11-05: racoons is an optional test feature, so
-        // the switch comes first; ticket 145's tuning trio follows it.
-        ["racoonsEnabled", "boolean", "", null],
-        ["racoonsRecordOnly", "boolean", "", null],
-        ["racoonsStorageRoot", "string", "", null],
-        ["racoonsContextWindowTokens", "number", "", null],
         ["inboxDir", "string", "", null],
         ["inboxRescanIntervalMs", "number", "", null],
         // Ticket 124: microcompact is off by default and absent from the
@@ -394,7 +388,7 @@ describe("settings card — render model (ticket 47)", () => {
     assert.deepEqual(
       view.fields.map((field) => field.overridden),
       [
-        false, false, false, false, false, false, false, false, false, false,
+        false, false, false, false, false, false,
       ],
     );
   });
@@ -418,10 +412,6 @@ describe("settings card — render model (ticket 47)", () => {
         ["enabled", true],
         ["wakeCoalesceWindowMs", false],
         ["inboxEnabled", false],
-        ["racoonsEnabled", false],
-        ["racoonsRecordOnly", false],
-        ["racoonsStorageRoot", false],
-        ["racoonsContextWindowTokens", false],
         ["inboxDir", false],
         ["inboxRescanIntervalMs", false],
         ["microcompactEnabled", false],
@@ -568,11 +558,9 @@ describe("settings card — store: staging, saving, and the honest failure path 
     assert.deepEqual(
       store.getBox().view.fields.map((field) => field.text),
       // Ticket 113: the three inbox fields seed empty from the read-back.
-      // Ticket 145: the three racoons tuning fields likewise.
-      // Owner ruling 2026-11-05: the racoons switch is the tenth field.
       // Ticket 124: the microcompact switch, also empty.
       // Ticket 174 / ADR-0033 removed the access-timeout field.
-      ["false", "500", "", "", "", "", "", "", "", ""],
+      ["false", "500", "", "", "", ""],
     );
   });
 

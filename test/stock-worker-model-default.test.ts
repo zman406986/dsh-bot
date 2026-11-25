@@ -248,7 +248,6 @@ async function fixture(options: { allowed?: readonly typeof A[] | null; unavaila
   pluginApply(ctx, {
     enabled: { get: () => true },
     inboxEnabled: { get: () => false },
-    racoonsEnabled: { get: () => false },
     microcompactEnabled: { get: () => false },
   } as never);
   const root = makeAgent(makeSession("default-route-root", { cwd: process.cwd() }, A), A);

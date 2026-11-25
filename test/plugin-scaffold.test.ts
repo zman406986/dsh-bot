@@ -503,8 +503,7 @@ function createStubCtx(options?: {
 }
 
 /**
- * The tools THIS PLUGIN registers on the dispatcher's OWN scope (racoons off
- * by default). Workers, status, steering and stopping are the preset's stock
+ * The tools THIS PLUGIN registers on the dispatcher's OWN scope. Workers, status, steering and stopping are the preset's stock
  * `subagent` / `list_agents` / `send_message` / `interrupt_agent`, which no
  * fixture in this file mounts — so every count below is the custom set only.
  */
@@ -579,8 +578,7 @@ describe("plugin scaffold", () => {
       DISPATCHER_STEER_COMMAND,
     ]);
     // Two command registrations + the teardown. Ticket 174 / ADR-0033 removed
-    // the `/dispatcher-resolve` command; owner ruling 2026-11-05 keeps the
-    // racoons mount off by default, so it contributes no disposer.
+    // the `/dispatcher-resolve` command.
     assert.equal(ctx.disposers.length, 3);
     for (const dispose of [...ctx.disposers]) dispose();
     assert.equal(ctx.registeredCommands.length, 0);
@@ -597,8 +595,7 @@ describe("plugin scaffold", () => {
     // The custom three (deliver_result, message_agent, spawn_dispatcher). The
     // stock agent verbs are mounted by the preset — this fixture mounts none,
     // so the whole surface here is exactly the custom set. Ticket 174 /
-    // ADR-0033 removed the worker access tool; owner ruling 2026-11-05 keeps
-    // racoons off by default, so no per-session `recall`. The surface is the
+    // ADR-0033 removed the worker access tool. The surface is the
     // agent's own scope — never the process-global one.
     assert.deepEqual(
       agent.tools.registeredNames().sort(),
@@ -788,8 +785,7 @@ describe("plugin scaffold", () => {
     const agent = createAgent("session-1");
     ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
     await new Promise((resolve) => setImmediate(resolve));
-    // The custom dispatcher tools on the agent's own scope (racoons off by
-    // default, so no `recall`).
+    // The custom dispatcher tools on the agent's own scope.
     assert.equal(agent.tools.registeredNames().length, DISPATCHER_TOOL_COUNT);
 
     for (const dispose of ctx.disposers) dispose();
@@ -1050,44 +1046,6 @@ describe("plugin scaffold", () => {
     assert.equal(agent.tools.restrictCalls.length, 2);
     assert.ok(!agent.tools.visibleNames().includes("subagent_fork"));
     assert.ok(agent.tools.visibleNames().includes("subagent"));
-  });
-
-  it("removes every custom tool when recall registration throws after the dispatcher surface landed", () => {
-    const ctx = createStubCtx();
-    // racoons on: `recallTools` runs AFTER the custom dispatcher tools and is
-    // the last step inside the activation's try block.
-    apply(ctx, volatileConfig({ enabled: true, racoonsEnabled: true }));
-    const hostTools = [
-      "subagent",
-      "subagent_fork",
-      "list_subagent_models",
-    ];
-    const agent = createAgent("session-1", { hostTools });
-    // A foreign plugin owns `recall`; racoons' registration throws the host's
-    // duplicate-tool error, i.e. a throw after the whole dispatcher surface.
-    const foreignRecall = agent.tools.register({
-      name: "recall",
-      execute: async () => ({ ok: false }),
-    });
-
-    assert.throws(
-      () => ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent }),
-      /tool "recall" is already registered/,
-    );
-
-    // Every one of the custom tools is gone, and the restriction that ran
-    // before them is lifted; only the preset's tools and the foreign claimant
-    // remain.
-    assert.deepEqual(
-      agent.tools.registeredNames().sort(),
-      [...hostTools, "recall"].sort(),
-    );
-    assert.deepEqual(
-      agent.tools.visibleNames().sort(),
-      [...hostTools, "recall"].sort(),
-    );
-    assert.equal(agent.tools.restrictCalls.length, 1);
-    foreignRecall();
   });
 
   it("keeps a durable spawned class on the /dsh-bot path (no spawn_dispatcher)", () => {

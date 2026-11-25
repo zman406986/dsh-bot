@@ -830,8 +830,7 @@ const STOCK_PRESET_TOOL_SET: readonly string[] = [
 /**
  * The USER-STARTED (chief of staff) surface: the three verbs stock DSH does
  * not cover (`DISPATCHER_TOOL_NAMES`), on top of the preset's visible stock
- * tools. Owner ruling 2026-11-05: the ticket-145 per-session `recall` is
- * absent — racoons is off unless a manual overlay turns it on.
+ * tools.
  */
 const DISPATCHER_TOOL_SET: readonly string[] = [
   ...DISPATCHER_TOOL_NAMES,
@@ -1215,8 +1214,8 @@ describe("ticket 118 — spawned dispatcher activation (ADR-0025, ADR-0019)", ()
     // fallback also looked at `ctx.agents` — two candidate call sites, ONE
     // activation. A second one would throw on the scoped registry's duplicate
     // name rule (and would double-inject the policy). Ticket 176: the spawned
-    // class withholds `spawn_dispatcher`, racoons is off by default, and the
-    // preset's four visible stock verbs stay — six tools in all.
+    // class withholds `spawn_dispatcher`, and the preset's four visible stock
+    // verbs stay — six tools in all.
     assert.deepEqual(
       child.agent.scopedTools.names().sort(),
       SPAWNED_DISPATCHER_TOOL_SET,

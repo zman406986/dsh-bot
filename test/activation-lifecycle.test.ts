@@ -293,9 +293,7 @@ describe("activation lifecycle — flag matrix (design-16 §3.7)", () => {
     // listeners (subagent/start and subagent/end native run identity,
     // session/event, agent/created — the worker
     // composition seam, passive until a spawn is in flight — and agent/disposed,
-    // the resumed-user-dispatcher release from ticket 163 defect 3). Owner
-    // ruling 2026-11-05: the ticket-145 racoons mount adds four more, but only
-    // when `racoonsEnabled` is on — the default product is racoons-free.
+    // the resumed-user-dispatcher release from ticket 163 defect 3).
     const EXPECTED_DORMANT_LISTENERS = 8;
     assert.equal(ctx.listenerCount(), EXPECTED_DORMANT_LISTENERS);
     // No dispatcher tool claims a dormant key: a stock caller sees stock.
@@ -331,9 +329,7 @@ describe("activation lifecycle — command behavior", () => {
     // Full CUSTOM dispatcher surface in the agent's OWN scope: the three
     // verbs stock DSH does not cover (workers/status/steering/stopping are the
     // preset's stock `subagent` / `list_agents` / `send_message` /
-    // `interrupt_agent`, so this fixture mounts none of them). Owner ruling
-    // 2026-11-05: the ticket-145 per-session `recall` is absent by default —
-    // racoons is off unless `racoonsEnabled` turns it on. Ticket 174 /
+    // `interrupt_agent`, so this fixture mounts none of them). Ticket 174 /
     // ADR-0033 removed the global `request_access`.
     assert.deepEqual(
       agent.ctx?.tools.registeredNames().sort(),
@@ -546,9 +542,7 @@ describe("activation lifecycle — dispatcher tool surface (ADR-0019)", () => {
 
     // The three CUSTOM dispatcher tools live in THIS agent's scope only; the
     // stock agent verbs are the preset's (not mounted in this fixture, so the
-    // exact set here is the custom three). Owner ruling 2026-11-05: the
-    // ticket-145 per-session `recall` is absent by default — racoons is off
-    // unless `racoonsEnabled` turns it on.
+    // exact set here is the custom three).
     assert.deepEqual(
       agent.ctx?.tools.registeredNames().sort(),
       [...DISPATCHER_TOOL_NAMES].sort(),

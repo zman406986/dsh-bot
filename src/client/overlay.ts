@@ -274,7 +274,7 @@ export const localeDictionary: LocaleDictionary = {
     // flag it started with) so the control is never read as a live toggle.
     "settings.card.title": "Multitask Dispatcher",
     "settings.card.description":
-      "The dispatcher's feature flag and its wake coalescing, inbox, RACOONS, and microcompaction settings.",
+      "The dispatcher's feature flag and its wake coalescing, inbox, and microcompaction settings.",
     "settings.card.expand": "Expand",
     "settings.card.collapse": "Collapse",
     "settings.card.unsaved": "Unsaved",
@@ -312,24 +312,6 @@ export const localeDictionary: LocaleDictionary = {
       "Microcompact old tool results",
     "settings.card.field.microcompactEnabled.hint":
       "When on, older tool output is emptied once a chat fills past a fixed share of the model window, keeping the newest few. This rewrites history, so the provider's prompt cache restarts from the oldest cleared entry.",
-    // Owner ruling 2026-11-05: racoons is an optional test feature, off by
-    // default. The card's first racoons control is the switch; the three
-    // tuning fields below only matter while it is on.
-    "settings.card.field.racoonsEnabled.label": "Enable Racoons",
-    "settings.card.field.racoonsEnabled.hint":
-      "Off by default. When on, racoons records every chat in this process to a per-chat ledger on disk and may prune old context; removed content stays restorable by recall id. Meant for manual test launches only.",
-    "settings.card.field.racoonsRecordOnly.label":
-      "Racoons record-only mode (entry checkpoint can still apply)",
-    "settings.card.field.racoonsRecordOnly.hint":
-      "Only used while Racoons is enabled. Off = racoons applies context cleanup to every chat in this process; on = everything is still recorded, the automatic prune and manual forget are held back, but a result's entry checkpoint answer can still rewrite that result turn. Removed content stays restorable by recall id, originals stored per session on disk.",
-    "settings.card.field.racoonsStorageRoot.label":
-      "Racoons storage root (empty = default <DSH_HOME>/storages/racoons)",
-    "settings.card.field.racoonsStorageRoot.hint":
-      "Folder that holds one ledger per chat. Leave empty to use the default location.",
-    "settings.card.field.racoonsContextWindowTokens.label":
-      "Racoons context window tokens (0 = auto half-window prune off)",
-    "settings.card.field.racoonsContextWindowTokens.hint":
-      "When set, a chat that reaches half this many tokens runs a prune pass. 0 leaves the automatic pass off.",
     // Ticket 77 (ADR-0020 slice 1): the wrapper shell's chrome copy. The
     // main-surface line survives as the no-seat fallback: since ticket 80
     // the pane is a host seat, and this copy shows only when a composition
@@ -585,7 +567,7 @@ export const localeDictionary: LocaleDictionary = {
     // 以免这个控件被读成实时开关。
     "settings.card.title": "Multitask Dispatcher",
     "settings.card.description":
-      "调度器的功能开关，以及唤醒合并、收件箱、RACOONS 与微压缩设置。",
+      "调度器的功能开关，以及唤醒合并、收件箱与微压缩设置。",
     "settings.card.expand": "展开",
     "settings.card.collapse": "收起",
     "settings.card.unsaved": "未保存",
@@ -609,26 +591,6 @@ export const localeDictionary: LocaleDictionary = {
     "settings.card.field.inboxEnabled.label": "启用文件收件箱",
     "settings.card.field.inboxEnabled.hint":
       "保存为调度器的设置：对新会话生效。开启后，调度器还会从下方目录接收任务。",
-    // Ticket 145：只要调度器插件启用，RACOONS 就一直运行；此处只调节它——
-    // 仅记录模式、存储根目录、半窗口清理的窗口大小。Ticket 150：标签说明
-    // 当前真实行为——一切照常记录，但结果回合的入口检查点答案仍可落到上下文；
-    // 只有自动清理和手动遗忘会被拦下。
-    // 所有者决定（2026-11-05）：RACOONS 是可选测试功能，默认关闭。
-    "settings.card.field.racoonsEnabled.label": "启用 RACOONS",
-    "settings.card.field.racoonsEnabled.hint":
-      "默认关闭。开启后，RACOONS 会把本进程内的每个会话记录到磁盘上的独立账本，并可能清理旧上下文；被移除的内容仍可通过 recall id 按原样取回。仅用于手动发起的测试。",
-    "settings.card.field.racoonsRecordOnly.label":
-      "RACOONS 仅记录模式（入口检查点仍可生效）",
-    "settings.card.field.racoonsRecordOnly.hint":
-      "仅在 RACOONS 启用时生效。关闭时，RACOONS 会对本进程内的所有会话执行上下文清理；开启时一切照常记录，自动清理和手动遗忘不再执行，但结果回合的入口检查点答案仍可改写该结果。被移除的内容仍可通过 recall id 按原样取回，原始内容按会话保存在磁盘上。",
-    "settings.card.field.racoonsStorageRoot.label":
-      "RACOONS 存储根目录（留空使用默认 <DSH_HOME>/storages/racoons）",
-    "settings.card.field.racoonsStorageRoot.hint":
-      "每个会话一份账本，都放在这个目录下。留空则使用默认位置。",
-    "settings.card.field.racoonsContextWindowTokens.label":
-      "RACOONS 上下文窗口 token 数（0 表示关闭半窗口自动清理）",
-    "settings.card.field.racoonsContextWindowTokens.hint":
-      "设置后，会话占用达到该数值的一半时会执行一次清理。0 表示不自动执行。",
     "settings.card.field.inboxDir.label": "收件箱目录",
     "settings.card.field.inboxDir.hint":
       "外部系统写入队列任务的文件夹。留空则保持收件箱关闭。",

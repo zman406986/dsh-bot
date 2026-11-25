@@ -937,8 +937,7 @@ describe("coexistence — dormant state at the plugin boundary (design-16 §3.7)
     // `list_agents` / `send_message` / `interrupt_agent` verbs, which this
     // plugin never registers. The surface lives in the agent's own scope; the
     // foreign tool stays global — no clobbering. Ticket 174 / ADR-0033 removed
-    // `request_access`; owner ruling 2026-11-05 keeps racoons off by default,
-    // so no per-session `recall`.
+    // `request_access`.
     assert.deepEqual(agent.scopedTools.registeredNames().sort(), [
       "deliver_result",
       "message_agent",
