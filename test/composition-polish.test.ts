@@ -40,6 +40,7 @@ import { readFileSync } from "node:fs";
 import { apply as pluginApply } from "../src/plugin.js";
 import { volatileConfig } from "./support/plugin-config.js";
 import {
+  ACTIVATION_COMMAND_CARD_NO_TURN_TEXT,
   ACTIVATION_COMMAND_CARD_TEXT,
   ACTIVATION_PRESENCE_HINT,
   DISPATCHER_START_COMMAND,
@@ -489,7 +490,7 @@ describe("composition polish — deactivation honesty (design-17 §3.2)", () => 
     });
     assert.deepEqual(again, {
       kind: "success",
-      text: ACTIVATION_COMMAND_CARD_TEXT,
+      text: ACTIVATION_COMMAND_CARD_NO_TURN_TEXT,
     });
     await flushActivation();
     assert.deepEqual(

@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import {createCordisDshHost, listGlobalToolNames, mapStopReason, SPAWN_PROVIDER, type ActivationLike, type ActivationSpecLike, type AdapterContext, type AgentLike} from "../src/adapter/cordis-dsh-host.js";
 import { RESUME_WAKE_CUE } from "../src/adapter/wake-copy.js";
 import {
+  ACTIVATION_COMMAND_CARD_NO_TURN_TEXT,
   ACTIVATION_COMMAND_CARD_TEXT,
   createDispatcherStartCommand,
   DISPATCHER_START_SUCCESS,
@@ -3632,7 +3633,7 @@ describe("ticket 295: activation confirmation is visible and turn-free", () => {
     const parent = withRecordedAppend(createAgent("disp-1"), ctx.appendCalls);
     assert.deepEqual(command.handler({ commandId: "c1", agent: parent }), {
       kind: "success",
-      text: ACTIVATION_COMMAND_CARD_TEXT,
+      text: ACTIVATION_COMMAND_CARD_NO_TURN_TEXT,
     });
     assert.equal(ctx.appendCalls.length, 1);
     assert.equal(ctx.followupCalls.length, 0);

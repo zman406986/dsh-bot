@@ -13,11 +13,11 @@
  * aborts the fake's apply/activation instead of silently overwriting.
  */
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 import { apply } from "../src/plugin.js";
 import { volatileConfig } from "./support/plugin-config.js";
 import { DISPATCHER_TOOL_NAMES } from "../src/core/policy/prompts.js";
-import {ACTIVATION_COMMAND_CARD_TEXT, DISPATCHER_START_ALREADY_HERE, DISPATCHER_START_COMMAND, DISPATCHER_START_INPUT_HINT, DISPATCHER_START_NOT_TOP_LEVEL, DISPATCHER_START_UNRESOLVED, DISPATCHER_STEER_COMMAND, type AdapterContext, type AgentLike, type CommandDefinitionLike, type CommandResultLike, type ToolsLike} from "../src/adapter/index.js";
+import {ACTIVATION_COMMAND_CARD_NO_TURN_TEXT, ACTIVATION_COMMAND_CARD_TEXT, DISPATCHER_ALREADY_HERE_MESSAGE_SENT, DISPATCHER_MESSAGE_NOT_SENT, DISPATCHER_START_ALREADY_HERE, DISPATCHER_START_COMMAND, DISPATCHER_START_INPUT_HINT, DISPATCHER_START_NOT_TOP_LEVEL, DISPATCHER_START_UNRESOLVED, DISPATCHER_STEER_COMMAND, type AdapterContext, type AgentLike, type CommandDefinitionLike, type CommandResultLike, type ToolsLike} from "../src/adapter/index.js";
 
 interface TestAgent extends AgentLike {
   readonly injected: unknown[];
@@ -323,7 +323,10 @@ describe("activation lifecycle — command behavior", () => {
       agent,
     });
 
-    assert.deepEqual(result, { kind: "success", text: ACTIVATION_COMMAND_CARD_TEXT });
+    assert.deepEqual(result, {
+      kind: "success",
+      text: ACTIVATION_COMMAND_CARD_NO_TURN_TEXT,
+    });
     assert.equal(agent.injected.length, 1);
     assert.ok(textOf(agent.injected[0]).includes("# Multitask dispatcher"));
     // Full CUSTOM dispatcher surface in the agent's OWN scope: the three
@@ -374,18 +377,27 @@ describe("activation lifecycle — command behavior", () => {
       "the human source kind renders it as the user's message, not a notice",
     );
 
-    // Already active: the same command with another argument must not open a
-    // second turn or send a second message.
+    // Already active: a second argument is the user's message again, not
+    // something to drop. It opens exactly one more turn carrying exactly that
+    // text, and the card says so instead of printing the bare already-active
+    // line. (It used to return DISPATCHER_START_ALREADY_HERE and discard the
+    // text with no turn at all — the silent-drop defect this guards.)
     const again = ctx.runCommand({
       commandId: DISPATCHER_START_COMMAND,
       agent,
-      rawInput: "a second message",
+      rawInput: "  a second message  ",
     });
     assert.deepEqual(again, {
       kind: "success",
-      text: DISPATCHER_START_ALREADY_HERE,
+      text: DISPATCHER_ALREADY_HERE_MESSAGE_SENT,
     });
-    assert.equal(agent.followups.length, 1, "no duplicate user message");
+    assert.equal(agent.followups.length, 2, "the second argument opened a turn");
+    assert.equal(
+      textOf(agent.followups[1]),
+      "a second message",
+      "the turn carries the argument, trimmed",
+    );
+    assert.equal(agent.injected.length, 1, "no second policy inject");
   });
 
   it("plain /dsh-bot and a whitespace-only argument stay turn-free", () => {
@@ -399,7 +411,7 @@ describe("activation lifecycle — command behavior", () => {
     });
     assert.deepEqual(bareResult, {
       kind: "success",
-      text: ACTIVATION_COMMAND_CARD_TEXT,
+      text: ACTIVATION_COMMAND_CARD_NO_TURN_TEXT,
     });
     assert.equal(bare.followups.length, 0, "no argument means no turn");
     assert.equal(bare.injected.length, 1, "activation itself still happened");
@@ -413,7 +425,7 @@ describe("activation lifecycle — command behavior", () => {
     });
     assert.deepEqual(blankResult, {
       kind: "success",
-      text: ACTIVATION_COMMAND_CARD_TEXT,
+      text: ACTIVATION_COMMAND_CARD_NO_TURN_TEXT,
     });
     assert.equal(blank.followups.length, 0, "whitespace is not a message");
   });
@@ -476,6 +488,176 @@ describe("activation lifecycle — command behavior", () => {
 
 });
 
+/**
+ * Ticket 3xx — the "/dsh-bot <question>, nothing happened" report.
+ *
+ * Two defects sat behind it. (a) On an already-active chat the command returned
+ * the already-active line and DROPPED the argument with no turn (the early
+ * return in the handler). (b) A bare activation is deliberately turn-free
+ * (tickets 295/298, kept), but its card said nothing about that, so a bare
+ * submission — easy to produce because the web client PICKS a claimed command
+ * on Enter instead of submitting the line — left a chat that looked dead until
+ * the user happened to type again.
+ *
+ * These are the regression guards for both, plus the failure path that used to
+ * be two empty catch blocks.
+ */
+describe("activation lifecycle — the message argument is never dropped", () => {
+  it("a bare /dsh-bot opens no turn AND the card says no turn started", () => {
+    const ctx = createFullCtx();
+    apply(ctx, volatileConfig({ enabled: true }));
+    const agent = createAgent("s-bare-card");
+
+    const result = ctx.runCommand({
+      commandId: DISPATCHER_START_COMMAND,
+      agent,
+    });
+
+    assert.deepEqual(result, {
+      kind: "success",
+      text: ACTIVATION_COMMAND_CARD_NO_TURN_TEXT,
+    });
+    // The card must NAME the fact, not merely differ from the other card: the
+    // user's only evidence that the chat is alive is this one clipped line.
+    assert.match(String(result.text), /no turn started/i);
+    assert.match(String(result.text), /send a message/i);
+    assert.notEqual(
+      result.text,
+      ACTIVATION_COMMAND_CARD_TEXT,
+      "the with-message card would claim a turn that never opened",
+    );
+    assert.equal(agent.followups.length, 0, "still turn-free: no model call");
+  });
+
+  it("a non-empty argument on an inactive chat opens exactly one turn with it", () => {
+    const ctx = createFullCtx();
+    apply(ctx, volatileConfig({ enabled: true }));
+    const agent = createAgent("s-message");
+
+    const result = ctx.runCommand({
+      commandId: DISPATCHER_START_COMMAND,
+      agent,
+      rawInput: "  Find the flaky test.  ",
+    });
+
+    assert.deepEqual(result, {
+      kind: "success",
+      text: ACTIVATION_COMMAND_CARD_TEXT,
+    });
+    assert.equal(agent.followups.length, 1, "exactly one turn");
+    assert.equal(textOf(agent.followups[0]), "Find the flaky test.");
+    assert.deepEqual(
+      (agent.followups[0] as { source?: unknown }).source,
+      { kind: "user" },
+      "an ordinary human turn, not a plugin notice",
+    );
+  });
+
+  it("a non-empty argument on an already-active chat opens a turn, never vanishes", () => {
+    const ctx = createFullCtx();
+    apply(ctx, volatileConfig({ enabled: true }));
+    const agent = createAgent("s-active");
+
+    // First activation: bare, so the chat is live with zero followups.
+    ctx.runCommand({ commandId: DISPATCHER_START_COMMAND, agent });
+    assert.equal(agent.followups.length, 0);
+
+    const second = ctx.runCommand({
+      commandId: DISPATCHER_START_COMMAND,
+      agent,
+      rawInput: "And summarize what you find.",
+    });
+    assert.deepEqual(second, {
+      kind: "success",
+      text: DISPATCHER_ALREADY_HERE_MESSAGE_SENT,
+    });
+    assert.equal(agent.followups.length, 1, "the argument opened a turn");
+    assert.equal(textOf(agent.followups[0]), "And summarize what you find.");
+    assert.equal(agent.injected.length, 1, "activation is not repeated");
+
+    // A bare re-invocation still opens nothing, and says exactly that.
+    const third = ctx.runCommand({
+      commandId: DISPATCHER_START_COMMAND,
+      agent,
+    });
+    assert.deepEqual(third, {
+      kind: "success",
+      text: DISPATCHER_START_ALREADY_HERE,
+    });
+    assert.equal(agent.followups.length, 1, "no turn without an argument");
+  });
+
+  it("a synchronously refused followup is logged with its error and reported", () => {
+    const ctx = createFullCtx();
+    apply(ctx, volatileConfig({ enabled: true }));
+    const agent = createAgent("s-refused");
+    const failure = new Error("turn driver refused the hand-off");
+    agent.followup = () => {
+      throw failure;
+    };
+
+    const warn = mock.method(console, "warn", () => {});
+    let result: CommandResultLike;
+    try {
+      result = ctx.runCommand({
+        commandId: DISPATCHER_START_COMMAND,
+        agent,
+        rawInput: "This must not disappear.",
+      });
+    } finally {
+      mock.restoreAll();
+    }
+
+    // Visible, not swallowed: the user is told the message did not become a
+    // turn, and the activation itself still stands.
+    assert.deepEqual(result!, {
+      kind: "error",
+      text: DISPATCHER_MESSAGE_NOT_SENT,
+    });
+    assert.equal(agent.injected.length, 1, "activation still happened");
+    assert.equal(warn.mock.callCount(), 1, "the failure is logged exactly once");
+    const [line, logged] = warn.mock.calls[0]?.arguments ?? [];
+    assert.ok(
+      String(line).startsWith("[multitask-dispatcher]"),
+      "the producer prefix is what makes the line findable in the log",
+    );
+    assert.ok(String(line).includes("message argument"));
+    assert.equal(logged, failure, "the error itself rides the log line");
+  });
+
+  it("a rejecting followup is logged with its error instead of vanishing", async () => {
+    const ctx = createFullCtx();
+    apply(ctx, volatileConfig({ enabled: true }));
+    const agent = createAgent("s-rejected");
+    const failure = new Error("inbox closed");
+    agent.followup = () => Promise.reject(failure);
+
+    const warn = mock.method(console, "warn", () => {});
+    let result: CommandResultLike;
+    try {
+      result = ctx.runCommand({
+        commandId: DISPATCHER_START_COMMAND,
+        agent,
+        rawInput: "Queued into a closed inbox.",
+      });
+      // The rejection settles after the handler returns; the warning must be
+      // observed rather than surfacing as an unhandled rejection.
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      mock.restoreAll();
+    }
+
+    assert.deepEqual(result!, {
+      kind: "success",
+      text: ACTIVATION_COMMAND_CARD_TEXT,
+    });
+    assert.equal(warn.mock.callCount(), 1, "the async failure is logged");
+    const [line, logged] = warn.mock.calls[0]?.arguments ?? [];
+    assert.ok(String(line).startsWith("[multitask-dispatcher]"));
+    assert.equal(logged, failure, "the error itself rides the log line");
+  });
+});
+
 describe("activation lifecycle — deactivation and HMR", () => {
   it("agent/disposed unbinds; a later command re-activates fresh", () => {
     const ctx = createFullCtx();
@@ -495,7 +677,7 @@ describe("activation lifecycle — deactivation and HMR", () => {
     });
     assert.deepEqual(again, {
       kind: "success",
-      text: ACTIVATION_COMMAND_CARD_TEXT,
+      text: ACTIVATION_COMMAND_CARD_NO_TURN_TEXT,
     });
     assert.equal(agent.injected.length, 2);
     assert.equal(agent.ctx?.tools.registeredNames().length, DISPATCHER_TOOL_NAMES.length);
@@ -538,7 +720,10 @@ describe("activation lifecycle — dispatcher tool surface (ADR-0019)", () => {
       commandId: DISPATCHER_START_COMMAND,
       agent,
     });
-    assert.deepEqual(result, { kind: "success", text: ACTIVATION_COMMAND_CARD_TEXT });
+    assert.deepEqual(result, {
+      kind: "success",
+      text: ACTIVATION_COMMAND_CARD_NO_TURN_TEXT,
+    });
 
     // The three CUSTOM dispatcher tools live in THIS agent's scope only; the
     // stock agent verbs are the preset's (not mounted in this fixture, so the

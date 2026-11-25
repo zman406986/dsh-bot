@@ -1,6 +1,7 @@
 export { Config, apply, inject, name } from "./plugin.js";
 export type { PluginConfig } from "./plugin.js";
 export {
+  ACTIVATION_COMMAND_CARD_NO_TURN_TEXT,
   ACTIVATION_COMMAND_CARD_TEXT,
   activationResultCopy,
   bindDispatcherLifecycle,
@@ -8,6 +9,8 @@ export {
   createCordisDshHost,
   createDispatcherStartCommand,
   createStorageDomainDurability,
+  DISPATCHER_ALREADY_HERE_MESSAGE_SENT,
+  DISPATCHER_MESSAGE_NOT_SENT,
   DISPATCHER_START_ALREADY_HERE,
   DISPATCHER_START_COMMAND,
   DISPATCHER_START_DESCRIPTION,
@@ -34,6 +37,7 @@ export {
   WAKE_CUE,
 } from "./adapter/index.js";
 export type {
+  ActivationCardFacts,
   ActivationOutcome,
   AdapterContext,
   AgentLike,
