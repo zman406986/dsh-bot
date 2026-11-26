@@ -48,12 +48,9 @@
     "build": "tsc -p tsconfig.json",
     "build:client": "node --import tsx scripts/build-client.ts",
     "check:client": "node --import tsx scripts/build-client.ts --check",
-    "check:build": "node dev/build-freshness.mjs",
-    "e2e": "npm run check:build && npm run check:client && node dev/e2e-mock.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit && npm run typecheck:test",
     "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
     "test": "tsx --tsconfig tsconfig.client.json --test test/**/*.test.ts",
-    "lint:docs": "node tools/doc-lint.mjs --self-test && node tools/doc-lint.mjs && node tools/issue-index.mjs --check && node tools/adr-index.mjs --check",
     "prepare": "npm run build",
     "prepack": "npm run build:client"
   },

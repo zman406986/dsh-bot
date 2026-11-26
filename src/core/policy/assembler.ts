@@ -40,6 +40,13 @@ import {
   type DispatcherOrigin,
   type PolicyLanguage,
 } from "./prompts.js";
+import {
+  ledgerRowSignature,
+  rememberReminderSignatures,
+  reminderSignaturesForSession,
+  sharedReminderDeltaStore,
+  type ReminderDeltaStore,
+} from "./reminder-delta.js";
 
 /**
  * One settled worker carried into a wake turn.
@@ -66,6 +73,21 @@ export interface RePresentedNotice {
   readonly status: TerminalWorkerStatus;
   readonly report: string;
   readonly transcriptRef: string | null;
+  /**
+   * Redrive attempts spent on the todo when this wake was composed. The
+   * first re-presentation (attempt 1) still renders the full report; an
+   * attempt count of 2 or more renders the compact stub instead, because
+   * the report was already shown in the earlier attempt. Absent means
+   * "unknown" and keeps the pre-stub full rendering.
+   */
+  readonly redriveAttempts?: number;
+  /**
+   * Force the compact stub regardless of {@link redriveAttempts}. Set by the
+   * composer's identical-wake backstop: a payload byte-identical to the last
+   * composed wake for this session would only repeat text already on the
+   * transcript, so its report is replaced by the one-line stub.
+   */
+  readonly stub?: boolean;
 }
 
 /**
@@ -103,14 +125,119 @@ export function formatLedgerLine(todo: TodoItem): string {
 }
 
 /**
+ * Canonical status order for collapsed delta summaries. Fixed rather than
+ * first-seen so the same ledger produces the same bytes regardless of row
+ * order; every status a todo row can carry is listed.
+ */
+const LEDGER_SUMMARY_STATUS_ORDER = [
+  "pending",
+  "in_progress",
+  "completed",
+  "cancelled",
+  "lost",
+] as const;
+
+/**
+ * Render the ledger section lines.
+ *
+ * No session key -> the legacy full ledger on every call (unit tests and
+ * keyless callers keep the old bytes). With a session key, the first reminder
+ * in that session is the full ledger; later reminders show only new/changed
+ * rows at full fidelity and fold unchanged rows into one
+ * `status (unchanged): ids` line per status, so every id is still named.
+ */
+function renderReminderLedger(
+  todos: readonly TodoItem[],
+  language: PolicyLanguage,
+  sessionKey: string | undefined,
+  store: ReminderDeltaStore,
+): string[] {
+  if (sessionKey === undefined) {
+    return todos.length === 0
+      ? [`- ${EMPTY_LEDGER_LINE}`]
+      : todos.map(formatLedgerLine);
+  }
+
+  const previous = reminderSignaturesForSession(sessionKey, store);
+  if (previous === undefined) {
+    rememberReminderSignatures(todos, sessionKey, store);
+    return todos.length === 0
+      ? [`- ${EMPTY_LEDGER_LINE}`]
+      : todos.map(formatLedgerLine);
+  }
+
+  if (todos.length === 0) {
+    rememberReminderSignatures(todos, sessionKey, store);
+    return [`- ${EMPTY_LEDGER_LINE}`];
+  }
+
+  const changed: TodoItem[] = [];
+  const unchanged: TodoItem[] = [];
+  for (const todo of todos) {
+    if (previous.get(todo.id) === ledgerRowSignature(todo)) {
+      unchanged.push(todo);
+    } else {
+      changed.push(todo);
+    }
+  }
+  rememberReminderSignatures(todos, sessionKey, store);
+  return [
+    ...changed.map(formatLedgerLine),
+    ...renderUnchangedLedgerSummary(unchanged, language),
+  ];
+}
+
+/** One summary line per distinct status, naming every collapsed id. */
+function renderUnchangedLedgerSummary(
+  todos: readonly TodoItem[],
+  language: PolicyLanguage,
+): string[] {
+  const lines: string[] = [];
+  for (const status of LEDGER_SUMMARY_STATUS_ORDER) {
+    const entries = todos
+      .filter((todo) => todo.status === status)
+      .map(formatLedgerSummaryEntry);
+    if (entries.length === 0) continue;
+    lines.push(
+      language === "zh"
+        ? `- ${status}（未变）：${entries.join("、")}`
+        : `- ${status} (unchanged): ${entries.join(", ")}`,
+    );
+  }
+  return lines;
+}
+
+/**
+ * One collapsed row: the id plus the same reason annotation the full row
+ * would carry. A lost row always keeps a token so a collapsed lost obligation
+ * never reads like an ordinary id in a list.
+ */
+function formatLedgerSummaryEntry(todo: TodoItem): string {
+  if (todo.status === "lost") {
+    const reason = todo.dispositionReason ?? todo.disposition ?? "lost";
+    return `${todo.id} (${reason})`;
+  }
+  if (todo.disposition !== null && todo.disposition !== "delivered") {
+    return `${todo.id} (${todo.dispositionReason ?? todo.disposition})`;
+  }
+  return todo.id;
+}
+
+/**
  * Per-turn reminder: ledger + standing rules, then the peer roster as the
  * LAST section (ticket 121 / ADR-0027 decision 2).
  *
  * Empty ledger still injects the rules; ledger line becomes `(empty)`.
  *
  * `origin` (ticket 175 / ADR-0034) selects which class's standing rules the
- * session reads. It is trailing and defaults to `"user"`, so every existing
- * caller and test keeps producing the chief-of-staff bytes.
+ * session reads. It defaults to `"user"`, so every existing caller and test
+ * keeps producing the chief-of-staff bytes.
+ *
+ * `sessionKey` turns the ledger into a per-session delta: the first reminder
+ * renders every row, later ones render new/changed rows and a compact summary
+ * of the rest. Omitting it keeps the legacy full-ledger bytes on every call.
+ * `deltaStore` exists for isolated tests; production call sites share the
+ * process-wide store so all three reminder paths agree on the baseline.
  *
  * Tail placement is load-bearing: the roster is appended after every stable
  * rule, and the bytes before it are produced by the same array join whether
@@ -135,13 +262,17 @@ export function assembleTurnReminder(
   peers?: PeerRosterSnapshot | null,
   language: PolicyLanguage = "en",
   origin: DispatcherOrigin = "user",
+  sessionKey?: string,
+  deltaStore: ReminderDeltaStore = sharedReminderDeltaStore,
 ): string {
   const headings =
     language === "zh" ? REMINDER_SECTION_HEADINGS_ZH : REMINDER_SECTION_HEADINGS;
-  const ledgerLines =
-    todos.length === 0
-      ? [`- ${EMPTY_LEDGER_LINE}`]
-      : todos.map(formatLedgerLine);
+  const ledgerLines = renderReminderLedger(
+    todos,
+    language,
+    sessionKey,
+    deltaStore,
+  );
   const sections: string[] = [
     headings[0],
     ...ledgerLines,
@@ -498,11 +629,35 @@ function appendRePresentedSection(
     sections.push(`### ${item.title} — ${item.status}`);
     sections.push(`${zh ? "待办" : "Todo"}: ${item.todoId}`);
     sections.push(`${zh ? "工作者" : "Worker"}: ${item.workerId}`);
+    // Reuse the notice's pointer exactly as the full form does; a missing one
+    // renders the same explicit "(none)" rather than inventing a reference.
     sections.push(
       item.transcriptRef !== null
         ? `${zh ? "记录" : "Transcript"}: ${item.transcriptRef}`
         : `${zh ? "记录" : "Transcript"}: ${zh ? "（无）" : "(none)"}`,
     );
+    const attempts = item.redriveAttempts;
+    const stub = item.stub === true || (attempts !== undefined && attempts >= 2);
+    if (stub) {
+      // Repeated result: keep the identity/address lines so the dispatcher
+      // can still close the right ledger entry, but not one byte of the
+      // report body — it is already on the transcript from the first
+      // re-presentation (or superseded by this wake's own instruction). The
+      // honest "no longer held in this process" fallback belongs only to the
+      // full form, which is the one that shows a body.
+      const retry = attempts === undefined
+        ? ""
+        : zh
+          ? `（第 ${attempts} 次重试）`
+          : ` (redrive attempt ${attempts})`;
+      sections.push("");
+      sections.push(
+        zh
+          ? `报告已在更早的唤醒中展示过，此处不再重复${retry}。`
+          : `The report was already shown in an earlier wake and is not repeated here${retry}.`,
+      );
+      continue;
+    }
     sections.push("");
     // A completed report from the settle record is already clamped, with its
     // truncation marker carrying the ORIGINAL shown/total counts. Re-clamping

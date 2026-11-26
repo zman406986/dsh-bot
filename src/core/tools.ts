@@ -1087,11 +1087,19 @@ export function createDispatcherTools(
 
 /**
  * Per-turn reminder text for this session's ledger.
- * Convenience for adapter middleware — pure.
+ * Convenience for adapter middleware. Shares the process-wide per-session
+ * delta store, so the first call in a session renders the full ledger and
+ * later calls render the compact delta.
  */
 export function buildTurnReminderForSession(
   multitask: Multitask,
   sessionId: string,
 ): string {
-  return assembleTurnReminder(multitask.listTodos(sessionId));
+  return assembleTurnReminder(
+    multitask.listTodos(sessionId),
+    undefined,
+    "en",
+    "user",
+    sessionId,
+  );
 }

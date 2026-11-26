@@ -1249,6 +1249,7 @@ export function bindDispatcherLifecycle(
                 // `user`, which is the same default every pre-175
                 // activation produced.
                 origins.get(agentSessionId) ?? "user",
+                agentSessionId,
               ),
             );
           }

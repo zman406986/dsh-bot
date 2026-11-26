@@ -119,11 +119,11 @@ const TEAM_LEADER_STANDING_RULES_EN = [
 const TEAM_LEADER_WAKE_EN = [
   "## What to do now",
   "",
-  "1. Match each settled worker to its ledger entry (`todo_id` on the worker record). A settle closes one part, not the job.",
+  "1. Match each settled worker to its ledger entry (`todo_id` on the worker record). A settle closes one part, not the job. If a result is stale, duplicate, or not worth telling the user, close its ledger entry in the same turn with `deliver_result(todo_id=..., text=\"<one-line reason>\")` and do not state it to the user; an entry left open is re-presented on the next wake.",
   "2. Re-chunk what is left. A finished part usually changes the split: decide what can run in parallel now, and dispatch it before you answer anyone.",
   "3. Report back to whoever gave the task order: your final answer is pushed to the dispatcher that summoned you automatically when you go idle, so do not resend it with `message_agent`. Use `message_agent` (to the session id on the \"Summoning dispatcher session id\" line of your handoff prompt) only for interim upward notes that the summoner needs before you are done; if the user directly ordered something from you, state the result in your reply to the user — that reply is the channel they read — and close its ledger entry with `deliver_result(todo_id=...)`.",
   "4. Report failures early instead of exhausting save attempts. If the approach looks like a dead end, report at the first sign.",
-  "5. Silence is a valid outcome only when nothing changed for anyone above you.",
+  "5. Silence is a valid outcome only when nothing changed for anyone above you — provided the entry is closed.",
 ].join("\n");
 
 const TEAM_LEADER_PEER_WAKE_EN = [
@@ -267,9 +267,13 @@ describe("policy assembler", () => {
       // Re-pinned for the stock-subagent re-authoring: the standing rules now
       // name the stock `subagent` / `send_message` verbs and end the turn
       // instead of waiting, and wake step 5 retries with a stock `subagent`.
-      // Peer step 4 gained the worker-vs-peer split. No other drift allowed.
+      // Peer step 4 gained the worker-vs-peer split. Re-pinned again for the
+      // close-on-silence copy: chief wake step 2 now closes a stale/duplicate
+      // entry instead of merely staying silent, and step 6 says that closure is
+      // what makes silence valid. The standing rules stayed byte-identical
+      // (same sha). No other drift allowed.
       standing: "eaed5fc7001a1d202772fa4d240206c223f62dc5491efbb9acd01fb6eaa30f58",
-      wake: "cb236393fcaa7c650fbdb227b68f7b59a299eb626218980c2cb45d6a080f0ff8",
+      wake: "8bb95963d709e14303c9060f45d272e0fb4ce4d18b3abbb527fe74c0ad97f65f",
       peer: "5a32dbbd241feeae78c7c930791d4ea421b5c0ada31bb7e81b27e532d28cfa2e",
     } as const;
     const sha = (text: string) =>

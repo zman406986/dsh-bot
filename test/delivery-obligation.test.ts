@@ -52,6 +52,7 @@ let skip: string | false = hostDir !== undefined ? false
     : "no installed dsh host found (repo-local module resolution or global npm root); set DSH_HOST_DIR to the @deepseek-ai/dsh package directory";
 
 let composeWakeText: typeof import("../src/plugin.js").composeWakeText;
+let composeWakeIdentity: typeof import("../src/plugin.js").composeWakeIdentity;
 if (hostDir !== undefined) {
   try {
     const hostRequire = createRequire(join(hostDir, "package.json"));
@@ -62,7 +63,7 @@ if (hostDir !== undefined) {
         return { url: scopeUrl, shortCircuit: true };
       },
     });
-    ({ composeWakeText } = await import("../src/plugin.js"));
+    ({ composeWakeText, composeWakeIdentity } = await import("../src/plugin.js"));
   } catch (error) {
     skip = `dsh host at ${hostDir} is not usable: ${error instanceof Error ? error.message : String(error)}`;
   }
@@ -93,10 +94,11 @@ async function spawnForTodo(
   host: FakeDshHost,
   todoId = "todo-1",
   streamKey = "stream-1",
+  sessionId = SESSION,
 ): Promise<string> {
-  multitask.createTodo({ sessionId: SESSION, id: todoId, title: "Research" });
+  multitask.createTodo({ sessionId, id: todoId, title: "Research" });
   const result = await multitask.spawnWorker({
-    parentSessionId: SESSION,
+    parentSessionId: sessionId,
     streamKey,
     title: "Research",
     prompt: "go",
@@ -115,8 +117,14 @@ function settleUndelivered(
   host: FakeDshHost,
   workerId: string,
   report = "done",
+  transcriptRef?: string,
 ): void {
-  host.fireSettled({ workerId, status: "completed", report });
+  host.fireSettled({
+    workerId,
+    status: "completed",
+    report,
+    ...(transcriptRef === undefined ? {} : { transcriptRef }),
+  });
 }
 
 function todoOf(multitask: Multitask, todoId = "todo-1"): TodoItem {
@@ -834,6 +842,253 @@ describe("delivery obligation — a queued settle is the first opportunity (dupl
       "a delivered result is never recorded as dropped",
     );
     assert.equal(multitask.redriveUndelivered(SESSION).redriven.length, 0);
+  });
+});
+
+// ── wake repeat: stub on later attempts + identical-wake backstop ─────────
+
+describe("wake repeat — stub on later attempts and identical-wake backstop", { skip }, () => {
+  /**
+   * Build an undelivered obligation whose first re-presentation is already
+   * pending, spending `attempts` redrive attempts. The last redrive wake is
+   * left ready for the test to compose. Each test uses its own session id so
+   * the in-memory last-identity entry cannot leak across tests.
+   */
+  async function setUpUndeliveredWake(
+    sessionId: string,
+    report: string,
+    attempts: 1 | 2,
+    transcriptRef: string,
+  ): Promise<{ host: FakeDshHost; multitask: Multitask; workerId: string }> {
+    const host = new FakeDshHost();
+    const multitask = createMultitask(host);
+    const workerId = await spawnForTodo(
+      multitask,
+      host,
+      "todo-1",
+      "stream-1",
+      sessionId,
+    );
+    settleUndelivered(host, workerId, report, transcriptRef);
+    multitask.wakeBus.enqueueWorkerSettled({
+      parentSessionId: sessionId,
+      workerId,
+      status: "completed",
+      title: "Research",
+      resultText: report,
+    });
+    assert.ok(multitask.drainWake(sessionId), "the first settle wake drains");
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const redrive = multitask.redriveUndelivered(sessionId);
+      assert.equal(redrive.redriven.length, 1, "attempt " + attempt + " is owed");
+      if (attempt < attempts) {
+        assert.ok(
+          multitask.drainWake(sessionId),
+          "the earlier paid redrive turn drains",
+        );
+      }
+    }
+    return { host, multitask, workerId };
+  }
+
+  it("attempt 1 keeps the full report exactly as before", async () => {
+    const session = "s-wake-stub-full-1";
+    const report = "First re-presentation report: 42 handlers audited.";
+    const { multitask } = await setUpUndeliveredWake(
+      session,
+      report,
+      1,
+      "transcript-first",
+    );
+
+    const text = composeWakeText(multitask, session);
+    assert.ok(text, "the first re-presentation composes");
+    assert.ok(
+      text.includes("## Re-presented — already shown, not yet delivered"),
+      "the distinct re-presented block is present",
+    );
+    assert.ok(text.includes(report), "attempt 1 still carries the real report");
+    assert.ok(
+      !text.includes("not repeated here"),
+      "the stub replaces the report only on a later repeat",
+    );
+    assert.equal(todoOf(multitask).redriveAttempts, 1);
+  });
+
+  it("attempt 2 renders a compact stub with no report body", async () => {
+    const session = "s-wake-stub-attempt-2";
+    const report = "Second-attempt report body: the smoke suite is green.";
+    const { multitask, workerId } = await setUpUndeliveredWake(
+      session,
+      report,
+      2,
+      "transcript-stub",
+    );
+
+    const text = composeWakeText(multitask, session);
+    assert.ok(text, "the repeated re-presentation composes");
+    assert.ok(
+      text.includes("## Re-presented — already shown, not yet delivered"),
+    );
+    assert.ok(
+      text.includes("### Research — completed"),
+      "title and status ride the stub",
+    );
+    assert.ok(text.includes("Todo: todo-1"));
+    assert.ok(text.includes("Worker: " + workerId));
+    assert.ok(text.includes("Transcript: transcript-stub"));
+    assert.ok(
+      text.includes("The report was already shown in an earlier wake"),
+      "one sentence says why the body is absent",
+    );
+    assert.ok(text.includes("redrive attempt 2"), "the attempt count is named");
+    assert.ok(!text.includes(report), "the stub contains no report body");
+    assert.ok(
+      !text.includes(emptyReportPlaceholder()),
+      "the empty-report placeholder never appears",
+    );
+    assert.ok(
+      !text.includes("no longer held in this process"),
+      "the honest full-form fallback is not used by the stub",
+    );
+  });
+
+  it("the stub renders in ZH with literal ids and status", async () => {
+    const session = "s-wake-stub-zh";
+    const report = "中文测试报告正文：不应出现在简短占位里。";
+    const { multitask, workerId } = await setUpUndeliveredWake(
+      session,
+      report,
+      2,
+      "transcript-zh",
+    );
+
+    const text = composeWakeText(multitask, session, undefined, "zh");
+    assert.ok(text, "the ZH repeated re-presentation composes");
+    assert.ok(text.includes("## 再次呈现——已经展示过，尚未送达"));
+    assert.ok(text.includes("待办: todo-1"));
+    assert.ok(text.includes("工作者: " + workerId));
+    assert.ok(text.includes("记录: transcript-zh"));
+    assert.ok(text.includes("completed"), "the status stays literal");
+    assert.ok(
+      text.includes("报告已在更早的唤醒中展示过，此处不再重复"),
+      "ZH stub prose is Chinese",
+    );
+    assert.ok(text.includes("（第 2 次重试）"), "the attempt count is named");
+    assert.ok(!text.includes(report), "the ZH stub contains no report body");
+  });
+
+  it("an empty stored report stubs without the full-form fallback", async () => {
+    const session = "s-wake-stub-empty";
+    const { multitask } = await setUpUndeliveredWake(
+      session,
+      "",
+      2,
+      "transcript-empty",
+    );
+
+    const text = composeWakeText(multitask, session);
+    assert.ok(text, "the stub still composes for an empty stored report");
+    assert.ok(!text.includes(emptyReportPlaceholder()));
+    assert.ok(!text.includes("no longer held in this process"));
+    assert.ok(text.includes("not repeated here"));
+  });
+
+  it("an identical payload at attempt 1 forces the stub (backstop)", async () => {
+    const session = "s-wake-stub-backstop";
+    const report = "Backstop report: shown in full only once.";
+    const { multitask } = await setUpUndeliveredWake(
+      session,
+      report,
+      1,
+      "transcript-backstop",
+    );
+
+    const first = composeWakeText(multitask, session);
+    assert.ok(first, "the first composition succeeds");
+    assert.ok(first.includes(report), "the first composition is full");
+
+    // A second paid redrive turn with the same payload: same todo, worker,
+    // status, report, and attempt count.
+    multitask.wakeBus.enqueueDeliveryRedrive(session);
+    const second = composeWakeText(multitask, session);
+    assert.ok(second, "the identical wake still opens a turn (never null)");
+    assert.equal(
+      todoOf(multitask).redriveAttempts,
+      1,
+      "the paid turn spends no extra attempt",
+    );
+    assert.ok(!second.includes(report), "the repeated payload shows no body");
+    assert.ok(second.includes("not repeated here"));
+    assert.ok(second.includes("redrive attempt 1"));
+  });
+
+  it("a changed payload at attempt 1 keeps the full report", async () => {
+    const session = "s-wake-stub-changed";
+    const report = "Changed-payload report: still printed in full.";
+    const { multitask } = await setUpUndeliveredWake(
+      session,
+      report,
+      1,
+      "transcript-changed",
+    );
+
+    const first = composeWakeText(multitask, session);
+    assert.ok(first, "the first composition succeeds");
+    assert.ok(first.includes(report), "the first composition is full");
+
+    // Same re-presented fields; a new external job changes the payload. The
+    // redrive flag keeps the wake paid, so attempts stay at 1 and the
+    // attempts>=2 guard alone could not produce a stub.
+    multitask.wakeBus.enqueueExternalJob({
+      sessionId: session,
+      job: {
+        jobId: "job-changed-payload",
+        promptText: "A different payload class joined the wake.",
+        jobDir: "/inbox/job-changed-payload",
+      },
+    });
+    multitask.wakeBus.enqueueDeliveryRedrive(session);
+
+    const second = composeWakeText(multitask, session);
+    assert.ok(second, "the changed wake composes");
+    assert.equal(todoOf(multitask).redriveAttempts, 1);
+    assert.ok(second.includes(report), "a changed payload keeps the report");
+    assert.ok(!second.includes("not repeated here"));
+    assert.ok(second.includes("job-changed-payload"), "the new payload is present");
+  });
+
+  it("attempt numbers alone do not change the wake identity", () => {
+    const base = {
+      todoId: "todo-1",
+      workerId: "fake-worker-1",
+      title: "Research",
+      status: "completed" as const,
+      report: "same report text",
+      transcriptRef: "transcript-1",
+    };
+    const atOne = composeWakeIdentity({
+      settledWorkers: [],
+      rePresented: [{ ...base, redriveAttempts: 1 }],
+    });
+    const atTwo = composeWakeIdentity({
+      settledWorkers: [],
+      rePresented: [{ ...base, redriveAttempts: 2, stub: true }],
+    });
+    assert.equal(
+      atOne,
+      atTwo,
+      "attempts and the derived stub flag stay out of the identity",
+    );
+    const changedReport = composeWakeIdentity({
+      settledWorkers: [],
+      rePresented: [{ ...base, report: "different report text" }],
+    });
+    assert.notEqual(
+      atOne,
+      changedReport,
+      "the report-text fingerprint is part of the identity",
+    );
   });
 });
 

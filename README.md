@@ -14,9 +14,9 @@ Status: version 0.1.0. It is not published to npm. Install it from a checkout.
 
 ## What you need
 
-- Node.js 22.15 or newer. This is the `engines` floor in `package.json`; the e2e harness needs 22.15 for `zstdDecompressSync`. The fresh-install path was verified with Node 24 and npm 11.
+- Node.js 22.15 or newer. This is the `engines` floor in `package.json`. The fresh-install path was verified with Node 24 and npm 11.
 - A local dsh install that can load plugins. It must be exactly dsh 0.2.2-rc.1: the plugin pins its dsh peer dependency to that version, and dsh enforces exact peer matches, so other 0.2.x versions will not do.
-- npm, for building this repo. The build uses npm workspaces.
+- npm, for building this repo.
 - pnpm, on PATH. `dsh plugin add` forwards to pnpm, and dsh does not bundle it; without pnpm the add fails (exit 127).
 - The cordis framework is a peer dependency. `npm install` fetches it.
 
@@ -54,8 +54,6 @@ npm test
 ```
 
 This runs the offline suite. It needs no network and no model. One test, `test/stock-worker-model-default.test.ts`, resolves the installed dsh host dynamically (a `DSH_HOST_DIR` environment override, then module resolution) and skips gracefully when no host is present; the rest of the suite stays offline.
-
-The offline suite is the default lane. A second harness, `npm run e2e`, drives a real local dsh process against a scripted model. It needs a dsh install, so it is optional.
 
 ## Use it
 
@@ -116,17 +114,7 @@ Every field is a setting on the plugin's card on dsh's Plugins page. A saved cha
 |---|---|
 | `src/` | Plugin source: the policy core, the dsh adapter, worker prompts, and the browser module. |
 | `test/` | Offline tests. |
-| `dev/` | The scripted model and the end-to-end harness. |
-| `docs/` | Decisions, research notes, and notes on what the UI shows. |
-| `Issue-tracker/` | Tickets, sorted by status. |
 | `scripts/` | The browser bundle build. |
-| `tools/` | Documentation checks and index generators. |
-
-## Docs
-
-- `docs/adr/README.md` — the decision index.
-- `docs/surfaces.md` — what the plugin adds to dsh's screen, and what it does not.
-- `docs/agents-rulebook.md` — working rules for this repo.
 
 ## Licence
 

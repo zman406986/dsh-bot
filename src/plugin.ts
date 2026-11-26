@@ -1,5 +1,5 @@
 import z from "@deepseek-ai/schemastery";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import {
@@ -21,6 +21,7 @@ import {
   type RePresentedNotice,
   type WakeNotice,
 } from "./core/policy/assembler.js";
+import { clearReminderDeltaSession } from "./core/policy/reminder-delta.js";
 import type {
   DispatcherOrigin,
   PolicyLanguage,
@@ -545,6 +546,74 @@ export interface ComposeWakeTextOptions {
 }
 
 /**
+ * Payload-only inputs to the identical-wake backstop.
+ *
+ * Only what the wake actually carries is included: settled worker ids and
+ * statuses, re-presented (todo, worker, status, report-text fingerprint)
+ * tuples, peer message ids, and external job ids. The reminder/ledger,
+ * activity digest, clocks, titles, transcript pointers, and redrive attempt
+ * numbers are deliberately absent — none of them changes whether the wake
+ * would repeat already-shown report text.
+ *
+ * `peerMessageIds` / `externalJobIds` are optional so a caller (including an
+ * offline test) can omit a payload class entirely; an omitted class
+ * contributes nothing to the identity.
+ */
+export interface WakeIdentityInput {
+  readonly settledWorkers: readonly Pick<WakeNotice, "workerId" | "status">[];
+  readonly rePresented: readonly RePresentedNotice[];
+  readonly peerMessageIds?: readonly string[];
+  readonly externalJobIds?: readonly string[];
+}
+
+/**
+ * Deterministic fingerprint of one stored report body. Used only to tell
+ * "the re-presented text changed" from "the same text is being shown again";
+ * the text itself is never stored in the identity.
+ */
+function reportFingerprint(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+/**
+ * Build a stable, payload-only wake identity for the backstop. Sorting makes
+ * the identity insensitive to notice order; each field is JSON-encoded as a
+ * tuple so ids cannot collide across fields.
+ *
+ * Exported for offline tests: the shipped consumer is {@link composeWakeText}.
+ */
+export function composeWakeIdentity(input: WakeIdentityInput): string {
+  const settled = input.settledWorkers
+    .map((notice) => JSON.stringify([notice.workerId, notice.status]))
+    .sort();
+  const rePresented = input.rePresented
+    .map((item) =>
+      JSON.stringify([
+        item.todoId,
+        item.workerId,
+        item.status,
+        reportFingerprint(item.report),
+      ]),
+    )
+    .sort();
+  return JSON.stringify({
+    settled,
+    rePresented,
+    peerMessageIds: [...(input.peerMessageIds ?? [])].sort(),
+    externalJobIds: [...(input.externalJobIds ?? [])].sort(),
+  });
+}
+
+/**
+ * Last composed wake identity per dispatcher session. In memory only: no
+ * persistence, no clocks, no ids minted by the backstop. The map is keyed by
+ * the session id that {@link composeWakeText} already receives; it replaces
+ * the entry on every non-null composition. Entries are not evicted — a
+ * session that is never composed again leaves one short string behind.
+ */
+const lastWakeIdentityBySession = new Map<string, string>();
+
+/**
  * Compose the wake follow-up body: drain the ready wake (reconcile runs),
  * map settle notices, and include undelivered landed items whose report
  * text is only in the child transcript (T10 follow-up).
@@ -583,11 +652,19 @@ export function composeWakeText(
     drained.wake.source === "peer" &&
     (drained.wake.peerMessages ?? []).length > 0
   ) {
-    return assemblePeerWakeTurn(
-      drained.wake.peerMessages ?? [],
-      language,
-      origin,
+    const peerMessages = drained.wake.peerMessages ?? [];
+    // A peer composition is non-null, so it replaces the session's stored
+    // identity too. It shares no payload class with a re-presentation wake,
+    // so it can never itself trip the re-presented backstop.
+    lastWakeIdentityBySession.set(
+      sessionId,
+      composeWakeIdentity({
+        settledWorkers: [],
+        rePresented: [],
+        peerMessageIds: peerMessages.map((notice) => notice.messageId),
+      }),
     );
+    return assemblePeerWakeTurn(peerMessages, language, origin);
   }
 
   const roster = multitask.listWorkers(sessionId);
@@ -628,6 +705,7 @@ export function composeWakeText(
         options?.restoredWorkerOf?.(todo.workerId) === true,
       ),
       transcriptRef,
+      redriveAttempts: todo.redriveAttempts,
     });
     seen.add(todo.workerId);
   }
@@ -648,13 +726,42 @@ export function composeWakeText(
     return null;
   }
 
+  // Identical-wake backstop (payload only). Attempt numbers are deliberately
+  // excluded: the same undelivered payload must not look different just
+  // because another redrive attempt was spent. Anything outside the wake
+  // payload (the ledger reminder, the activity digest, a clock) is excluded
+  // as well.
+  const identity = composeWakeIdentity({
+    settledWorkers: notices,
+    rePresented,
+    peerMessageIds: (drained.wake.peerMessages ?? []).map(
+      (notice) => notice.messageId,
+    ),
+    externalJobIds: externalJobs.map((job) => job.jobId),
+  });
+  const repeated = lastWakeIdentityBySession.get(sessionId) === identity;
+  // Store on every non-null composition, repeated or not. No persistence.
+  lastWakeIdentityBySession.set(sessionId, identity);
+  // A byte-identical payload is already on the transcript. Do NOT suppress
+  // the turn: a null composition makes the host fall back to its short cue
+  // and open a turn anyway. The stub is the dedupe.
+  const renderedRePresented: readonly RePresentedNotice[] = repeated
+    ? rePresented.map((item) => ({ ...item, stub: true }))
+    : rePresented;
+
   const reminder = assembleTurnReminder(
     multitask.listTodos(sessionId),
     null,
     language,
     origin,
+    sessionId,
   );
-  const wake = assembleWakeTurn(notices, language, origin, rePresented);
+  const wake = assembleWakeTurn(
+    notices,
+    language,
+    origin,
+    renderedRePresented,
+  );
   const inboxSection = assembleInboxJobsSection(
     externalJobs,
     options?.inboxSourceOf,
@@ -1831,6 +1938,10 @@ export function apply(ctx: CordisContext, config: PluginConfig): void {
       // here — a sibling dispatcher keeps its own.
       onDeactivated: (sessionId) => {
         deactivateToolSurface(sessionId);
+        // Delta-ledger baseline dies with the activation: a later session with
+        // the same id must render its first reminder as the full ledger, not
+        // inherit a previous activation's diff baseline.
+        clearReminderDeltaSession(sessionId);
         // Ticket 176: the class belongs to the activation (ADR-0034 decision 1),
         // so it ends with it — a later activation of the same session id must not
         // inherit a stale class. The HOST's own record is deliberately not

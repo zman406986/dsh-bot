@@ -194,11 +194,11 @@ export const WAKE_RE_PRESENTED_HEADING_ZH =
 
 /** One-line orientation under the re-presentation heading. */
 export const WAKE_RE_PRESENTED_INTRO =
-  "These results were already shown in an earlier wake and are still not delivered. Treat them as re-presented, not as new settles; use each report below to decide whether to deliver it or stay silent.";
+  "These results were already shown in an earlier wake and are still not delivered. Treat them as re-presented, not as new settles; use each report below to decide whether to deliver it now, or close it silently now; do not leave it open.";
 
 /** ZH counterpart of {@link WAKE_RE_PRESENTED_INTRO}. */
 export const WAKE_RE_PRESENTED_INTRO_ZH =
-  "这些结果在之前的唤醒里已经展示过，目前仍未送达。把它们当作再次呈现，而不是新的结束；根据下面的报告决定是送达还是保持沉默。";
+  "这些结果在之前的唤醒里已经展示过，目前仍未送达。把它们当作再次呈现，而不是新的结束；根据下面的报告决定是现在送达，还是现在静默关闭；不要让它一直开着。";
 
 /**
  * Stable cue tokens for a peer hidden turn (ticket 14).
@@ -596,11 +596,11 @@ function buildChiefOfStaffWakeInstructionsBlockEn(): string {
     "1. Match settled workers to entries (`todo_id` on the worker record). A settle does not complete anything.",
     "2. Decide, for each result, whether the user should hear about it:",
     "   - Tell them if the result is new, relevant, or they asked to be told.",
-    "   - Stay silent and end the turn if it is stale or duplicate info for the user.",
+    "   - Stay silent and end the turn if it is stale, duplicate, or not worth telling the user: close its ledger entry in the same turn with `deliver_result(todo_id=..., text=\"<one-line reason>\")` and do not state it to the user; an entry left open is re-presented on the next wake.",
     "3. If you speak, state the specific outcome. A vague claim that work finished tells the user nothing.",
     "4. State the result in your reply to the user — that reply is the channel they read. Then close the matching ledger entry with `deliver_result(todo_id=...)`.",
     "5. If a result is an error, report the honest state and decide: continue that worker with `send_message`, start the retry as a new `subagent`, or drop it and say so.",
-    "6. Silence is a valid outcome.",
+    "6. Silence is a valid outcome — provided the entry is closed.",
   ].join("\n");
 }
 
@@ -618,11 +618,11 @@ function buildTeamLeaderWakeInstructionsBlockEn(): string {
   return [
     "## What to do now",
     "",
-    "1. Match each settled worker to its ledger entry (`todo_id` on the worker record). A settle closes one part, not the job.",
+    "1. Match each settled worker to its ledger entry (`todo_id` on the worker record). A settle closes one part, not the job. If a result is stale, duplicate, or not worth telling the user, close its ledger entry in the same turn with `deliver_result(todo_id=..., text=\"<one-line reason>\")` and do not state it to the user; an entry left open is re-presented on the next wake.",
     "2. Re-chunk what is left. A finished part usually changes the split: decide what can run in parallel now, and dispatch it before you answer anyone.",
     "3. Report back to whoever gave the task order: your final answer is pushed to the dispatcher that summoned you automatically when you go idle, so do not resend it with `message_agent`. Use `message_agent` (to the session id on the \"Summoning dispatcher session id\" line of your handoff prompt) only for interim upward notes that the summoner needs before you are done; if the user directly ordered something from you, state the result in your reply to the user — that reply is the channel they read — and close its ledger entry with `deliver_result(todo_id=...)`.",
     "4. Report failures early instead of exhausting save attempts. If the approach looks like a dead end, report at the first sign.",
-    "5. Silence is a valid outcome only when nothing changed for anyone above you.",
+    "5. Silence is a valid outcome only when nothing changed for anyone above you — provided the entry is closed.",
   ].join("\n");
 }
 
@@ -634,11 +634,11 @@ function buildChiefOfStaffWakeInstructionsBlockZh(): string {
     "1. 把每个已结束的工作者对应到它的条目（工作者记录上的 `todo_id`）。结束本身不算完成。",
     "2. 对每个结果分别判断用户是否该听到：",
     "   - 如果结果是新的、相关的，或用户要求被告知，就告诉他们。",
-    "   - 如果对用户来说已经过时或属于重复信息，就保持沉默并结束回合。",
+    "   - 如果对用户来说已经过时、重复，或者不值得告诉用户，就保持沉默并结束回合：在同一个回合里用 `deliver_result(todo_id=..., text=\"<one-line reason>\")` 关闭它的账本条目，并且不要对用户提起；没有关闭的条目会在下一次唤醒时再次呈现。",
     "3. 如果要说话，开头先说清具体完成的是什么——不要说“已完成”，也不要说“它跑通了”。",
     "4. 在给用户的回复里说明结果——用户读到的就是这条回复。然后用 `deliver_result(todo_id=...)` 关闭对应的账本条目。",
     "5. 如果结果是错误，如实报告状态并做决定：用 `send_message` 让那个工作者继续、用 `subagent` 重新启动重试，还是丢弃并说明。",
-    "6. 沉默是有效的结果。",
+    "6. 沉默是有效的结果——前提是条目已经关闭。",
   ].join("\n");
 }
 
@@ -647,11 +647,11 @@ function buildTeamLeaderWakeInstructionsBlockZh(): string {
   return [
     "## 现在该做什么",
     "",
-    "1. 把每个已结束的工作者对应到它的账本条目（工作者记录上的 `todo_id`）。结束只是关掉其中一块，不是整个任务。",
+    "1. 把每个已结束的工作者对应到它的账本条目（工作者记录上的 `todo_id`）。结束只是关掉其中一块，不是整个任务。如果结果已经过时、重复，或者不值得告诉用户，就在同一个回合里用 `deliver_result(todo_id=..., text=\"<one-line reason>\")` 关闭它的账本条目，并且不要对用户提起；没有关闭的条目会在下一次唤醒时再次呈现。",
     "2. 把剩下的重新切分。一块做完通常会改变切法：现在定下哪些可以并行，并在答复任何人之前把它们派发出去。",
     "3. 向交给你这项任务的人回报：你空闲时，最终答复会自动推送给召唤你的那个调度器，所以不要再用 `message_agent` 重发一遍。`message_agent` 只用于在你做完之前、上层中途就需要知道的笔记（地址用你交接提示里标着“Summoning dispatcher session id”的那一行给出的会话 id）；如果是用户直接向你下的令，就在给用户的回复里说明结果——用户读到的就是这条回复——并用 `deliver_result(todo_id=...)` 关闭对应的账本条目。",
     "4. 失败要尽早报告，不要耗尽挽回的尝试。如果这条路看起来是死路，一有迹象就报告。",
-    "5. 只有在上层没有任何人因此发生变化时，沉默才是有效的结果。",
+    "5. 只有在上层没有任何人因此发生变化时，沉默才是有效的结果——前提是条目已经关闭。",
   ].join("\n");
 }
 

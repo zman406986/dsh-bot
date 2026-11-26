@@ -1,35 +1,3 @@
-# Local-only: agent notes, unsafe reference, and tool runtime
-reference material-NOT LICENSE SAFE DONT COPY-grok bot/
-AGENTS.md
-.opencode/node_modules/
-.opencode/goals/
-.opencode/package-lock.json
-.opencode/package.json
-opencode.json
-
-# Local launch logs and ad-hoc skill seeds
-.scratch/*.log
-.scratch/matt-skills-seed/
-
-# Testing/process artifacts — live-test evidence, boot/teardown logs, probes,
-# kill-timer records, driver scripts and their outputs. May contain private dsh
-# session content; NEVER commit (operator rule 2026-09-20). Evidence lives in the
-# repo from now on, never in new Desktop folders.
-.scratch/testing/
-# Ad-hoc research/process material: overnight notes, ADR drafts, repo analysis.
-# Working files, never deliverables — the rulings live in docs/adr and tickets.
-.scratch/_overnight-*/
-.scratch/adr-drafts/
-.scratch/repo-analysis/
-# Release-prep report and its activation run logs — raw run output carries local
-# home paths and dsh session ids; NEVER commit.
-.scratch/release-prep/
-# Retained owner-local RACOONS test ledgers (owner asked to keep them, 2026-11-21).
-# Holds private dsh session content; NEVER commit.
-.scratch/racoons-storage/
-# Team-leader dispatch ledger (the skill says delete it when the job ends).
-.team-leader-ledger.md
-
 # Build and dependencies
 node_modules/
 lib/
@@ -37,26 +5,10 @@ lib/
 # Client bundle build output (npm run build:client)
 /client/
 
-# Stray worktrees / scratch clones a lane leaves behind while testing a fix.
-# Each carries its own .git and would otherwise be committed as an embedded repo.
-/cur/
-/fixA/
-/regress/
-
-# Throwaway live-check homes (contain credentials and session data) - NEVER commit.
-.scratch/night/live/
-
-# Quarantine for stray artifacts swept out of the tree (e.g. badly expanded env paths).
-# Junk binaries, never deliverables - NEVER commit.
-.scratch/quarantine/
-
-# Secret material is never committed: a credentials file leaked this way before.
+# Local environment and secrets
 .env
 .env.*
 credentials.json
 credentials*.yml
 *.pem
 *.key
-
-# Throwaway probe/test homes hold credentials and session data - NEVER commit.
-.scratch/**/home
